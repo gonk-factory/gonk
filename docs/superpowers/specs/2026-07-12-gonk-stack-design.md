@@ -194,6 +194,7 @@ budget: { monthly_cost_usd: 0, monthly_tokens: "50M", per_task_tokens: "2M" }
 ladder: [qwen-local]        # allowed rungs, in order; cloud rungs must be listed
 continuity: resume          # resume | fresh
 triage: { label_prefix: "gonk::", respond_to_mentions: true }
+provenance: { commit_trailers: true, include_usage: false }
 ```
 
 Token quantities are strings with a defined suffix grammar (`K`/`M`/`G`), decided
@@ -217,6 +218,14 @@ Agent pods talk only to LiteLLM, using a per-project virtual key, with per-reque
 metadata tags: `project`, `rig`, `bead_id`, `session_key`, `rung`, `attempt`,
 `trigger`. LiteLLM spend logs are the raw ledger (tokens + computed cost per call,
 keyed by all tags).
+
+**Commit provenance trailers (default on):** every bot-authored commit carries
+git trailers identifying the generator, e.g.
+`Generated-By: gonk/<version> (opencode <version>; <model> via litellm)`.
+With `provenance.include_usage: true` (default off — cost in public history is a
+per-project choice), trailers also carry `Gonk-Tokens:` and `Gonk-Cost-USD:`
+for the producing session, sourced from gonk-meter at commit time. Controlled by
+`provenance` in `.gonk.yml`.
 
 ### 6.2 gonk-meter responsibilities
 
