@@ -157,10 +157,14 @@ commit. pack/, images/, chart/, test/ keep their spec names (not Go code).
 
 - [ ] **Step 8: Verify and commit**
 
-Run: `go build ./... && go vet ./...`
-Expected: exits 0. A "matched no packages" warning is fine (no Go files exist yet).
-Note: do not push to CI until after Task 2 — golangci-lint fails on a repo
-with zero Go files.
+Run: `go build ./...`
+Expected: exits 0 with a "matched no packages" warning (no Go files exist yet).
+Correction (found in execution): `go vet ./...` exits **1** ("no packages to
+vet") on a module containing zero .go files — this is toolchain behavior, not a
+defect, and it resolves the moment Task 2 adds a real package. Do not run `go
+vet` as a gate at this step, and do not add a placeholder .go file to appease it.
+Note: do not push to CI until after Task 2 — both `go vet` and golangci-lint
+fail on a repo with zero Go files.
 
 ```bash
 git add -A && git commit -m "chore: scaffold monorepo, CI, plan index (ADR-001)"
