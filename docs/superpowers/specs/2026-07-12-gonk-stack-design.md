@@ -29,7 +29,9 @@ Navigator-style project onboarding contract, and a Helm chart that assembles it 
 2. Per-project opt-in ("tagging in") with Renovate-style onboarding: inviting the bot
    yields a deterministic onboarding MR; merging it enables gonk for that project.
 3. v1 capability: **issue triage** (labels, analysis comments, clarifying questions,
-   conversational follow-up in-thread) plus the deterministic onboarding MR flow.
+   conversational follow-up in-thread) plus the deterministic onboarding MR flow
+   and the post-merge `.agent/` scaffold MR (the first metered work; triage cannot
+   run while a project is `pending`, so the scaffold MR is in v1 scope).
 4. Token usage and cost attributable at every granularity: per turn, per
    comment-or-commit, per work item (bead), per branch, per project, per group,
    per instance. Budgets settable at project/group/instance; hard-enforced.
@@ -184,14 +186,18 @@ except the scaffold MR itself).
 ### 5.4 `.gonk.yml` (policy contract; JSON Schema published and versioned)
 
 ```yaml
+version: 1                  # schema version; contract tests gate breaking changes
 enabled: true
 actions: { triage: true, pipelines: false, features: false }
 schedule: { quiet_hours: "22:00-07:00", timezone: "America/New_York" }
-budget: { monthly_cost_usd: 0, monthly_tokens: 50M, per_task_tokens: 2M }
+budget: { monthly_cost_usd: 0, monthly_tokens: "50M", per_task_tokens: "2M" }
 ladder: [qwen-local]        # allowed rungs, in order; cloud rungs must be listed
 continuity: resume          # resume | fresh
 triage: { label_prefix: "gonk::", respond_to_mentions: true }
 ```
+
+Token quantities are strings with a defined suffix grammar (`K`/`M`/`G`), decided
+deliberately in the schema so YAML numeric parsing ambiguity cannot bite.
 
 Precedence: instance defaults (chart values) -> group overrides (gonk-city) ->
 project `.gonk.yml`; most specific wins, except budget ceilings only tighten
@@ -216,7 +222,8 @@ keyed by all tags).
 
 1. **Ledger joins:** tail LiteLLM spend logs + gc event bus (SSE); join spend ->
    bead -> GitLab artifact. Export Prometheus metrics and a query API
-   (`/cost/bead/{id}`, `/cost/project/{id}`, ...). Optional per-comment cost footer.
+   (`/cost/bead/{id}`, `/cost/project/{id}`, ...). (Per-comment cost footers are
+   v1.5, per the roadmap; the API fields they need exist from v1.)
 2. **Enforcement delegation:** meter provisions per-project virtual keys via the
    LiteLLM admin API at onboarding and sets budgets/rate limits from resolved
    config. Hard refusal happens in LiteLLM, at the only door. Meter is never in
