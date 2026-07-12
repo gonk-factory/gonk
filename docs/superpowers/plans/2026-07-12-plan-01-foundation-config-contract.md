@@ -61,6 +61,7 @@ go 1.24
 - [ ] **Step 3: Create `.golangci.yml`**
 
 ```yaml
+version: "2"
 run:
   timeout: 5m
 linters:
@@ -73,6 +74,8 @@ linters:
     - misspell
 ```
 
+(`version: "2"` is required by golangci-lint v2.x; omitting it makes v2 refuse the config.)
+
 - [ ] **Step 4: Create `.gitlab-ci.yml`**
 
 ```yaml
@@ -80,7 +83,7 @@ stages: [lint, test]
 
 lint:
   stage: lint
-  image: golangci/golangci-lint:v2.1
+  image: golangci/golangci-lint:v2.1.6   # pin full tag; must be a v2.x to match .golangci.yml
   script:
     - golangci-lint run ./...
 
@@ -932,10 +935,19 @@ func intersect(base, allowed []string) []string {
 Run: `go test ./pkg/gonkcfg/ -race -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Record the resolver semantics as the published contract**
+
+Create `docs/adr/ADR-002-config-precedence-semantics.md` containing the
+semantics block from the top of this task verbatim (enabled kill switch,
+action opt-in + veto, tighten-only budget min-fold, ladder base+allow-list
+intersection, most-specific-wins scalars, defaults). Spec 5.4 states the
+one-line rule; this ADR is the precise contract the resolver implements,
+so published docs and code cannot drift apart in later plans.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add -A && git commit -m "feat(gonkcfg): precedence resolver with vetoes and tighten-only budgets"
+git add -A && git commit -m "feat(gonkcfg): precedence resolver with vetoes and tighten-only budgets (ADR-002)"
 ```
 
 ---
@@ -1054,6 +1066,32 @@ func TestValidate(t *testing.T) {
 		mut(&tags)
 		if err := tags.Validate(); err == nil {
 			t.Errorf("case %d: invalid tags accepted: %+v", i, tags)
+		}
+	}
+}
+
+// The literal key and trigger strings ARE the ledger contract (spec 10.1):
+// a rename must fail CI even though the round-trip test, which uses the
+// constants symmetrically, would still pass.
+func TestContractLiterals(t *testing.T) {
+	wantKeys := map[string]string{
+		KeyProject: "gonk_project", KeyRig: "gonk_rig",
+		KeyBeadID: "gonk_bead_id", KeySessionKey: "gonk_session_key",
+		KeyRung: "gonk_rung", KeyAttempt: "gonk_attempt",
+		KeyTrigger: "gonk_trigger",
+	}
+	for got, want := range wantKeys {
+		if got != want {
+			t.Errorf("metadata key changed: %q != %q (breaking ledger change; see spec 10.1)", got, want)
+		}
+	}
+	wantTriggers := map[string]string{
+		TriggerIssueTriage: "issue-triage", TriggerOnboarding: "onboarding",
+		TriggerScaffold: "scaffold", TriggerMentionReply: "mention-reply",
+	}
+	for got, want := range wantTriggers {
+		if got != want {
+			t.Errorf("trigger changed: %q != %q (breaking ledger change)", got, want)
 		}
 	}
 }
