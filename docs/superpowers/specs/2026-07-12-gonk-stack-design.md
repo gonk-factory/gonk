@@ -384,7 +384,9 @@ secret pointers only. The line between product and deployment.
 - v3: feature-decomposition (design doc -> epic bead -> task beads -> execution);
   cluster-event ingestion; wasteland federation experiments.
 
-## Appendix A: Bot name candidates
+## Appendix A: Bot name
 
-gonk, plugbot, dinky, blackthumb, organic-mechanic, sprocket, vulcan, cogsworth,
+**Decided: `gonk`** (GitLab username `gonk`, mentions `@gonk`, label prefix
+`gonk::`, onboarding branch `gonk/onboard`). Other candidates considered:
+plugbot, dinky, blackthumb, organic-mechanic, sprocket, vulcan, cogsworth,
 stakhanov, magrat.
