@@ -1,6 +1,10 @@
 package gonkcfg
 
-import "testing"
+import (
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
 
 func TestParseTokenQuantity(t *testing.T) {
 	cases := []struct {
@@ -30,5 +34,41 @@ func TestParseTokenQuantity(t *testing.T) {
 		if !c.wantErr && got != c.want {
 			t.Errorf("ParseTokenQuantity(%q) = %d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+func TestUnmarshalYAML(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		want    TokenQuantity
+		wantErr bool
+	}{
+		{"bare int", "q: 50000", 50_000, false},
+		{"quoted suffixed string", `q: "50M"`, 50_000_000, false},
+		{"unquoted suffixed scalar", "q: 50M", 50_000_000, false},
+		{"zero", "q: 0", 0, false},
+		{"null is unset", "q: null", 0, false},
+		{"negative int", "q: -5", 0, true},
+		{"float", "q: 1.5", 0, true},
+		{"exponent float", "q: 1e3", 0, true},
+		{"integral float", "q: 2.0", 0, true},
+		{"bool", "q: true", 0, true},
+		{"sequence", "q: [1, 2]", 0, true},
+		{"bad string", `q: "50m"`, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var got struct {
+				Q TokenQuantity `yaml:"q"`
+			}
+			err := yaml.Unmarshal([]byte(c.yaml), &got)
+			if c.wantErr != (err != nil) {
+				t.Fatalf("Unmarshal(%q) err = %v, wantErr %v", c.yaml, err, c.wantErr)
+			}
+			if !c.wantErr && got.Q != c.want {
+				t.Fatalf("Unmarshal(%q) = %d, want %d", c.yaml, got.Q, c.want)
+			}
+		})
 	}
 }
