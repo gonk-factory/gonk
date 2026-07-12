@@ -158,7 +158,9 @@ commit. pack/, images/, chart/, test/ keep their spec names (not Go code).
 - [ ] **Step 8: Verify and commit**
 
 Run: `go build ./... && go vet ./...`
-Expected: exits 0, no output (no Go files yet is fine).
+Expected: exits 0. A "matched no packages" warning is fine (no Go files exist yet).
+Note: do not push to CI until after Task 2 — golangci-lint fails on a repo
+with zero Go files.
 
 ```bash
 git add -A && git commit -m "chore: scaffold monorepo, CI, plan index (ADR-001)"
@@ -1055,6 +1057,7 @@ func TestValidate(t *testing.T) {
 	}
 	bad := []func(*Tags){
 		func(x *Tags) { x.Project = "" },
+		func(x *Tags) { x.Rig = "" },
 		func(x *Tags) { x.BeadID = "" },
 		func(x *Tags) { x.SessionKey = "" },
 		func(x *Tags) { x.Rung = "" },
@@ -1230,4 +1233,4 @@ Expected: PASS. Then, if golangci-lint is available locally: `golangci-lint run 
 git add -A && git commit -m "chore: complete plan 01 (foundation and config contract)"
 ```
 
-**Definition of done for Plan 01:** CI green on GitLab; `gonkcfg.Load` + `Resolve` and `atags` usable by Plans 02/03; schema published and drift-gated; module path assumption confirmed or corrected by owner.
+**Definition of done for Plan 01:** local `go vet` + tests + lint green (Task 8 Step 1 runs exactly what CI runs); `gonkcfg.Load` + `Resolve` and `atags` usable by Plans 02/03; schema published and drift-gated. **Owner input needed to finish:** confirm module path (`github.com/leftathome/gonk`) and configure the GitLab remote + push so the CI leg ("green on GitLab") can be verified — the repo currently has no remote.
