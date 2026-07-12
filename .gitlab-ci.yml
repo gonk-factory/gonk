@@ -1,0 +1,14 @@
+stages: [lint, test]
+
+lint:
+  stage: lint
+  image: golangci/golangci-lint:v2.1.6   # pin full tag; must be a v2.x to match .golangci.yml
+  script:
+    - golangci-lint run ./...
+
+test:
+  stage: test
+  image: golang:1.24
+  script:
+    - go vet ./...
+    - go test ./... -race -count=1
