@@ -176,6 +176,22 @@ git add -A && git commit -m "chore: scaffold monorepo, CI, plan index (ADR-001)"
 
 **Files:** Create: `pkg/gonkcfg/tokens.go`, `pkg/gonkcfg/tokens_test.go`
 
+**Amendment (found in execution, 2026-07-12):** the `UnmarshalYAML` below is
+buggy as written and was corrected during Task 2. It decides "this node is an
+integer" by testing whether `node.Decode(&int64)` succeeds — but yaml.v3
+*succeeds* on a `!!float` node by truncating it. Verified: `1.5` -> `1`,
+`1e3` -> `1000`, both with a nil error. For a tool enforcing hard token
+budgets, `monthly_tokens: 1.5` silently becoming a 1-token budget is
+unacceptable. The corrected implementation dispatches on `node.ShortTag()`
+(`!!int` -> int path, `!!str` -> `ParseTokenQuantity`, `!!null` -> unset, all
+else -> error naming the tag). The root cause of the miss: the plan's test
+table only covers `ParseTokenQuantity` (the string API) and never exercised
+`UnmarshalYAML` at all, so Task 2 also adds a `TestUnmarshalYAML` covering
+int/string/unquoted-scalar/negative/float/exponent/integral-float/null/bool/
+non-scalar. Note `Load` (Task 4) schema-validates before decoding, so this is
+defense-in-depth — but the type must be sound on its own, since the schema is
+the only other thing between a typo and a wrong budget.
+
 - [ ] **Step 1: Write the failing test**
 
 `pkg/gonkcfg/tokens_test.go`:
