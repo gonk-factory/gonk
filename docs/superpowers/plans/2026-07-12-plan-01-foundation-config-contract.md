@@ -10,14 +10,14 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-12-gonk-stack-design.md` (sections 5.4, 6.1, 10.1). Layout note: the spec's 7.1 sketch shows `intake/` and `meter/` roots; this plan locks the Go-conventional equivalent — one module, `cmd/gonk-intake` + `cmd/gonk-meter` (added in Plans 02/03), shared `pkg/`. Recorded as ADR-001.
 
-**Assumption to confirm with owner:** Go module path `github.com/leftathome/gonk` (open-source home; the private GitLab remote is just a remote). If wrong, it is a single find-replace at Task 1.
+**Settled with owner (2026-07-12):** Go module path is `gitlab.orac.local/agentic/gonk-project` — development happens in-cluster on the self-hosted GitLab. Open-sourcing is a deliberate future action; the module path gets rewritten to a public home (e.g. `github.com/leftathome/gonk`) at that time, as a single find-replace. Origin remote: `https://gitlab.orac.local/agentic/gonk-project`.
 
 ---
 
 ## File Structure
 
 ```
-go.mod                                     module github.com/leftathome/gonk
+go.mod                                     module gitlab.orac.local/agentic/gonk-project
 .gitignore, .golangci.yml, .gitlab-ci.yml  repo hygiene + CI
 README.md                                  what gonk is, naming note, repo map
 PLAN.md                                    plan index + live progress (house rule)
@@ -44,7 +44,7 @@ pkg/atags/
 - [ ] **Step 1: Create `go.mod`**
 
 ```
-module github.com/leftathome/gonk
+module gitlab.orac.local/agentic/gonk-project
 
 go 1.24
 ```
@@ -313,7 +313,7 @@ git add -A && git commit -m "feat(gonkcfg): TokenQuantity with K/M/G suffix gram
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/leftathome/gonk/main/docs/schemas/gonk-config.v1.schema.json",
+  "$id": "https://gitlab.orac.local/agentic/gonk-project/-/raw/main/docs/schemas/gonk-config.v1.schema.json",
   "title": "gonk project configuration (.gonk.yml), schema version 1",
   "type": "object",
   "additionalProperties": false,
@@ -1233,4 +1233,4 @@ Expected: PASS. Then, if golangci-lint is available locally: `golangci-lint run 
 git add -A && git commit -m "chore: complete plan 01 (foundation and config contract)"
 ```
 
-**Definition of done for Plan 01:** local `go vet` + tests + lint green (Task 8 Step 1 runs exactly what CI runs); `gonkcfg.Load` + `Resolve` and `atags` usable by Plans 02/03; schema published and drift-gated. **Owner input needed to finish:** confirm module path (`github.com/leftathome/gonk`) and configure the GitLab remote + push so the CI leg ("green on GitLab") can be verified — the repo currently has no remote.
+**Definition of done for Plan 01:** local `go vet` + tests + lint green (Task 8 Step 1 runs exactly what CI runs); `gonkcfg.Load` + `Resolve` and `atags` usable by Plans 02/03; schema published and drift-gated; pushed to `https://gitlab.orac.local/agentic/gonk-project` with the `lint` and `test` CI jobs green. If no GitLab runner is available on the instance, CI-green is recorded as deferred with the local equivalents (`go vet`, `go test -race`, `golangci-lint run`) as the standing gate.
