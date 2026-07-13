@@ -1,19 +1,27 @@
 package gonkcfg
 
-import "math"
+import (
+	"fmt"
+	"math"
+	"strings"
+)
 
 // Effective is the fully-resolved configuration for one project: defaults
 // applied, precedence folded, budgets tightened. This is the only type the
 // rest of gonk consumes.
 type Effective struct {
-	Enabled    bool
-	Actions    Actions
-	Schedule   *Schedule
-	Budget     EffectiveBudget
-	Ladder     []string
-	Continuity string
-	Triage     EffectiveTriage
-	Provenance EffectiveProvenance
+	Enabled bool
+	// DisabledReason explains why Enabled is false. Invariant: it is
+	// non-empty if and only if Enabled is false; it is always "" when the
+	// project is enabled.
+	DisabledReason string
+	Actions        Actions
+	Schedule       *Schedule
+	Budget         EffectiveBudget
+	Ladder         []string
+	Continuity     string
+	Triage         EffectiveTriage
+	Provenance     EffectiveProvenance
 }
 
 type Actions struct{ Triage, Pipelines, Features bool }
@@ -38,6 +46,12 @@ type EffectiveProvenance struct {
 // into an Effective. Precedence: most specific wins, except (a) enabled and
 // actions are vetoable by coarser layers, and (b) budget ceilings are the
 // minimum across layers (spec 5.4: ceilings only tighten downward).
+//
+// Resolve fails closed: a project whose effective ladder is empty -- because
+// no layer configured one, or because the layers' allow-lists do not overlap
+// -- cannot run any rung, so it is reported as disabled with a
+// DisabledReason rather than handed back enabled with a zero-rung ladder.
+// See ADR-002.
 func Resolve(instance, group Policy, project ProjectConfig) Effective {
 	layers := []Policy{instance, group, project.Policy} // coarse -> specific
 
@@ -114,7 +128,47 @@ func Resolve(instance, group Policy, project ProjectConfig) Effective {
 			eff.Provenance.IncludeUsage = *l.Provenance.IncludeUsage
 		}
 	}
+
+	// Fail closed on an empty ladder, and explain why the project is off.
+	// Precedence: a project killed by a coarser layer says so rather than
+	// blaming its ladder.
+	if len(eff.Ladder) == 0 {
+		eff.Enabled = false
+	}
+	switch {
+	case instance.Enabled != nil && !*instance.Enabled:
+		eff.DisabledReason = "disabled by instance policy"
+	case group.Enabled != nil && !*group.Enabled:
+		eff.DisabledReason = "disabled by group policy"
+	case project.Enabled == nil || !*project.Enabled:
+		eff.DisabledReason = "disabled by project .gonk.yml"
+	case len(eff.Ladder) == 0:
+		eff.DisabledReason = ladderEmptyReason(instance, group, project)
+	}
 	return eff
+}
+
+// ladderEmptyReason explains an empty effective ladder, naming each layer
+// that constrained it (most specific first) and omitting silent layers.
+func ladderEmptyReason(instance, group Policy, project ProjectConfig) string {
+	var parts []string
+	for _, l := range []struct {
+		name  string
+		rungs []string
+	}{
+		{"project", project.Ladder},
+		{"group", group.Ladder},
+		{"instance", instance.Ladder},
+	} {
+		if l.rungs != nil {
+			parts = append(parts, fmt.Sprintf("%s %v", l.name, l.rungs))
+		}
+	}
+	if len(parts) == 0 {
+		return "ladder empty: no ladder configured at any layer"
+	}
+	return fmt.Sprintf("ladder empty: no rung allowed by all layers (%s)",
+		strings.Join(parts, ", "))
 }
 
 // andAction: project must opt in (nil -> false); coarser layers veto
