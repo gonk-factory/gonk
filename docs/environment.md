@@ -10,8 +10,9 @@ any of it** — it is a snapshot, not a contract.
 - CE matters: multiple MR assignees is an EE feature, so anything assigning an MR
   must pick exactly one assignee deterministically.
 - Runs **in-cluster**, namespace `gitlab`.
-- Repo: `agentic/gonk-project` (project id 69). Container registry available at
-  the GitLab registry — the chosen home for gonk's images.
+- Repo: `agentic/gonk-project` (project id 69). Images go to the in-cluster
+  GitLab container registry at **`registry.orac.local`** (owner decision
+  2026-07-13), path `registry.orac.local/agentic/gonk-project/<image>:<tag>`.
 - **Every CI runner is currently OFFLINE** (stale registrations from cycled
   `gitlab-gitlab-runner-*` pods). CI has never executed for this repo. The
   standing gate is local; first images must be built and pushed by hand.
@@ -64,6 +65,94 @@ any of it** — it is a snapshot, not a contract.
   from values with a render guard against an empty selector, and Plan 06's
   egress-denial test is the gate — a *wrong* selector renders fine and enforces
   nothing, so the test, not the template, is what proves it.
+
+## KNOWN LIMITATION: the network-layer budget bypass is real and NOT closed
+
+**Spec §9's claim that "budgets cannot be bypassed" is NOT MET at the network
+layer today.** Owner decision (2026-07-13): ship anyway, document the gap, do
+not gate on it. So it is documented here, loudly, and it must not be quietly
+downgraded to a footnote.
+
+- NetworkPolicies **are not enforced on this cluster**. Flannel does not
+  implement them, and the Cilium HelmRelease that would is **suspended**
+  (`gitops:clusters/orac/foundation/kustomization.yaml`). Every existing policy
+  in the gitops repo carries a comment saying exactly this. There is no
+  cluster-wide default-deny and no enforced egress anywhere.
+- The concrete bypass: LiteLLM routes local models to **Ollama at
+  `http://192.168.1.142:11434`, which requires no credential.** An agent pod
+  that can reach the network can call Ollama directly, skip LiteLLM entirely,
+  and burn local GPU with **zero metering and no ceiling**. The LiteLLM
+  virtual-key hard door only binds traffic that actually goes through LiteLLM;
+  the NetworkPolicy is the only thing that forces it to.
+- What gonk does about it: the chart **ships the correct egress NetworkPolicy
+  anyway** (documentation-as-code; it becomes real the day Cilium is
+  unsuspended), and Plan 06 **writes the egress-denial test but skips it**, with
+  a skip message naming Cilium. When Cilium lands, un-skip the test — if it
+  fails, the selector was wrong, which is the failure mode that renders fine and
+  enforces nothing.
+- Until then: **local-model budgets are advisory, not hard.** Cloud-rung budgets
+  ARE hard (a cloud call needs a key the pod only has via LiteLLM). Do not claim
+  otherwise in a README, a dashboard, or a demo.
+- Closing this is infra work outside gonk's repo: unsuspend Cilium, or put a
+  credential in front of Ollama so a direct call fails on auth.
+
+## gitops conventions gonk must follow
+
+The cluster is deployed from `/mnt/c/Users/steve/Code/gitops` (Flux). Its
+`CLAUDE.md` + `docs/superpowers/specs/2026-04-28-gitops-conventions-design.md`
+are authoritative, and `scripts/verify-conventions.sh` enforces them in a
+pre-commit hook. Conform; do not invent.
+
+- **Layout:** `clusters/orac/apps/gonk/`, one K8s object per file, named
+  `<kind>-<name>.yaml`, `metadata.name` matching. The dir's `kustomization.yaml`
+  must list every tracked yaml (a check fails the commit otherwise). Register in
+  `clusters/orac/apps/kustomization.yaml`. Needs `namespace-gonk.yaml`, pod
+  label `app: <name>`, and the `homelab.orac.local/service-tier` +
+  `data-tier` labels.
+- **Charts are never vendored.** `charts/` at the repo root is gitignored.
+  Charts are referenced remotely via a `HelmRepository`/`OCIRepository` in
+  `clusters/orac/sources/`. Gonk's chart is pushed as OCI to
+  `registry.orac.local/agentic/gonk-project/charts`.
+- **Copy `clusters/orac/apps/renovate/`** — it is nearly gonk's twin (GitLab bot
+  PAT + webhook secret + CA trust). `apps/nagus/` is the model for a
+  first-party image + shared CNPG.
+- **Secrets:** ClusterSecretStore `vault-backend`, Vault KV path
+  `eso/gonk/<concern>` (hierarchical — newer convention; older entries are flat).
+  Rotation is opt-in via `homelab.orac.local/rotation: enabled` + annotations,
+  as renovate's PAT does. **Gotcha, from a real incident: write the Vault value
+  BEFORE merging the ExternalSecret** — a missing key leaves the ExternalSecret
+  NotReady and can wedge the whole reconcile.
+  *Deviation:* house style consumes secrets as **env** (`secretKeyRef`); gonk
+  uses **file mounts** (owner decision 2026-07-13) because env leaks into
+  process listings, crash dumps, and child processes. ESO delivery is identical;
+  only consumption differs. Note the deviation in the chart.
+- **Images:** `registry.orac.local/agentic/gonk-project/<image>:<tag>` (the
+  in-cluster GitLab registry — Harbor is NOT deployed; zot is a pull-through
+  cache only). Per-namespace `externalsecret-gitlab-registry-pull-creds.yaml`,
+  then `imagePullSecrets: [{name: gitlab-registry-pull-creds}]`. **Pin exact
+  tags — never `latest`;** Renovate autodiscovers and bumps them.
+- **TLS / private CA:** trust-manager publishes ConfigMap **`trust-bundle`** (key
+  `tls-ca-bundle.pem`) into every namespace. Go services mount it and set
+  `SSL_CERT_FILE=/etc/ssl/orac/ca.crt`. **Never disable TLS verification.** This
+  is the correct fix for reaching `https://gitlab.orac.local`.
+- **Ingress:** Traefik; annotate `external-dns.alpha.kubernetes.io/hostname` and
+  `cert-manager.io/cluster-issuer: orac-services-ca-issuer`; host
+  `gonk.orac.local`. **Also add the hostname to the CoreDNS hosts block**
+  (`clusters/orac/foundation/coredns/configmap-coredns.yaml`) or in-cluster
+  resolution fails silently. Do NOT combine an issuer annotation with an
+  explicit `Certificate` — that flip-flop once reissued 863 certs.
+- **CNPG tenancy** needs four objects (managed role on the shared `postgres`
+  cluster, an ExternalSecret for the role, a `Database` CR, and a second
+  ExternalSecret in gonk's namespace — ESO cannot replicate cross-namespace).
+- **Monitoring:** `servicemonitor-<name>.yaml` in the workload namespace with
+  `labels: {release: kube-prometheus-stack}`; Grafana dashboards as a ConfigMap
+  in ns `monitoring` labelled `grafana_dashboard: "1"`.
+- **LiteLLM's model list and pricing live in one file:**
+  `clusters/orac/apps/litellm/litellm.yaml`, under
+  `spec.values.proxy_config.model_list` and
+  `litellm_settings.model_cost_map`. **Local models are currently priced at
+  zero there** — that map is exactly where synthetic pricing goes.
+- **Issue tracking is `bd` (beads), not markdown TODOs**, in that repo.
 
 ## Dev box
 
