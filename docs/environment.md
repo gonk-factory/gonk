@@ -60,6 +60,45 @@ any of it** — it is a snapshot, not a contract.
   On this cluster the mapping happens to be `qwen-local` -> `qwen3-14b`; that is
   an example, not a default.
 
+## VERIFIED: the attribution chain works (smoke-tested 2026-07-13)
+
+Tested against the live LiteLLM (`ghcr.io/berriai/litellm-database:v1.92.0`) with
+one real completion to `qwen3-14b`. **Do not re-litigate this; it is measured,
+not assumed.**
+
+- **Mechanism (confirmed):** set the request header
+  `x-litellm-spend-logs-metadata: <JSON>`. LiteLLM parses it into
+  `data["metadata"]["spend_logs_metadata"]` and persists it to
+  `LiteLLM_SpendLogs.metadata.spend_logs_metadata`. **All 7 `pkg/atags` keys
+  round-tripped intact** (`gonk_project`, `gonk_rig`, `gonk_bead_id`,
+  `gonk_session_key`, `gonk_rung`, `gonk_attempt`, `gonk_trigger`).
+- **opencode delivers it:** opencode supports static custom headers per provider
+  (`provider.<id>.options.headers`, spread into the AI-SDK factory). Attribution
+  is per-session and **one session == one pod**, so the session's tags are baked
+  into that pod's opencode config at spawn. No per-request plumbing needed, and
+  no per-session virtual keys.
+- **Per-key metadata merges with per-request** (request wins, key fills gaps), so
+  one virtual key per project composes with per-session headers.
+- **LiteLLM's docs claim per-k/v `spend_logs_metadata` is an "enterprise
+  feature". It is NOT enforced in v1.92.0** — the smoke test wrote and read it
+  back on this instance. Fallback if a future upgrade starts enforcing it:
+  `x-litellm-tags` -> the `request_tags` column (also verified populated).
+- **`spend: 0.0` for the local model, on a real 25-token call.** This is the
+  synthetic-pricing problem demonstrated rather than argued: real GPU work that
+  LiteLLM records as costing nothing, so a USD ceiling never closes on it.
+
+### OPERATIONAL HAZARD: `/spend/logs` must always be bounded
+
+**An unbounded `GET /spend/logs` (no `start_date`) OOM-killed the LiteLLM pod**
+(2Gi limit, exit 137, 2 restarts, ~90s outage) during this smoke test. It tries
+to load the whole spend table into memory.
+
+**gonk-meter polls this endpoint.** It MUST always pass a bounded window, must
+paginate, and must never issue a naked query — a poll bug here takes down the
+inference gateway for the entire cluster, not just gonk. Treat a missing date
+bound as a code-review blocker in Plan 03. Prefer `request_id=` lookups when
+resolving a single row.
+
 ## Ledger backend
 
 - Primary: **Dolt** (already used for the beads store). Plan 03 Task 0b is a
