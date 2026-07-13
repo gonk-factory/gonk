@@ -6,7 +6,18 @@
 
 **Architecture:** Single Go module at the repo root; services are `cmd/` binaries added by later plans; shared contracts live in `pkg/`. The JSON Schema embedded in `pkg/gonkcfg` is the single source of truth for `.gonk.yml`; the copy in `docs/schemas/` is a published artifact gated by a drift test. Budget precedence is a pure function (instance -> group -> project, ceilings tighten-only), fully table-tested with no infrastructure.
 
-**Tech Stack:** Go 1.24, `gopkg.in/yaml.v3`, `github.com/santhosh-tekuri/jsonschema/v6`, golangci-lint, GitLab CI.
+**Tech Stack:** Go 1.26 (owner: 1.26 minimum), `gopkg.in/yaml.v3`, `github.com/santhosh-tekuri/jsonschema/v6`, golangci-lint v2, GitLab CI.
+
+**Amendment (owner decision, 2026-07-13): Go 1.26 minimum, and the lint image
+must be bumped with it.** The plan originally specified `go 1.24`. Bumping
+`go.mod` to `go 1.26` breaks the pinned lint image: `golangci-lint:v2.1.6` is
+built with go1.24.2 and refuses to run at all against a newer module —
+`can't load config: the Go language version (go1.24) used to build golangci-lint
+is lower than the targeted Go version (1.26)` (exit 3, reproduced in the actual
+container). The lint image must therefore be built with a Go >= the `go`
+directive. Pinned to `golangci-lint:v2.12.2` (built with go1.26.2) and
+`golang:1.26`. Bonus: v2.12.2 is also the local gate's version, so the
+local/CI lint skew noted during execution is closed rather than merely recorded.
 
 **Spec:** `docs/superpowers/specs/2026-07-12-gonk-stack-design.md` (sections 5.4, 6.1, 10.1). Layout note: the spec's 7.1 sketch shows `intake/` and `meter/` roots; this plan locks the Go-conventional equivalent — one module, `cmd/gonk-intake` + `cmd/gonk-meter` (added in Plans 02/03), shared `pkg/`. Recorded as ADR-001.
 
@@ -46,7 +57,7 @@ pkg/atags/
 ```
 module gitlab.orac.local/agentic/gonk-project
 
-go 1.24
+go 1.26
 ```
 
 - [ ] **Step 2: Create `.gitignore`**
@@ -97,13 +108,13 @@ stages: [lint, test]
 
 lint:
   stage: lint
-  image: golangci/golangci-lint:v2.1.6   # pin full tag; must be a v2.x to match .golangci.yml
+  image: golangci/golangci-lint:v2.12.2  # pin full tag; must be v2.x to match .golangci.yml AND built with Go >= go.mod's directive
   script:
     - golangci-lint run ./...
 
 test:
   stage: test
-  image: golang:1.24
+  image: golang:1.26
   script:
     - go vet ./...
     - go test ./... -race -count=1
