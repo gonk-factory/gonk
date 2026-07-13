@@ -37,10 +37,53 @@ func TestValidateRejects(t *testing.T) {
 		"uppercase rung":   "version: 1\nenabled: true\nladder: [Qwen]",
 		"not yaml":         "{{{{",
 		"float tokens":     "version: 1\nenabled: true\nbudget: { monthly_tokens: 1.5 }",
+		"duplicate rung":   "version: 1\nenabled: true\nladder: [glm, glm]",
 	}
 	for name, doc := range cases {
 		if err := Validate([]byte(doc)); err == nil {
 			t.Errorf("%s: Validate accepted %q, want error", name, strings.TrimSpace(doc))
 		}
+	}
+}
+
+// Non-finite floats crash jsonschema/v6 (v6.0.2 validator.go:515-524 builds a
+// big.Rat from the value, gets nil back for NaN/Inf, discards the ok, and
+// dereferences it). .gonk.yml is untrusted project-authored content, so
+// Validate must reject non-finite floats itself, cleanly, before the document
+// reaches the validator. A panic here would let any project crash the process
+// that enforces every project's budget.
+func TestValidateRejectsNonFiniteFloats(t *testing.T) {
+	cases := map[string]string{
+		"nan cost":        "version: 1\nenabled: true\nbudget: { monthly_cost_usd: .nan }",
+		"inf cost":        "version: 1\nenabled: true\nbudget: { monthly_cost_usd: .inf }",
+		"neg inf cost":    "version: 1\nenabled: true\nbudget: { monthly_cost_usd: -.inf }",
+		"nan nested":      "version: 1\nenabled: true\nschedule: { timezone: .nan }",
+		"nan in ladder":   "version: 1\nenabled: true\nladder: [.nan]",
+		"nan at root":     "version: 1\nenabled: true\nbanana: .nan",
+		"nan uppercase":   "version: 1\nenabled: true\nbudget: { monthly_cost_usd: .NaN }",
+		"inf capitalized": "version: 1\nenabled: true\nbudget: { monthly_cost_usd: .Inf }",
+	}
+	for name, doc := range cases {
+		t.Run(name, func(t *testing.T) {
+			// Must return an error, not panic. A panic fails the test.
+			err := Validate([]byte(doc))
+			if err == nil {
+				t.Fatalf("Validate accepted %q, want error", strings.TrimSpace(doc))
+			}
+			if !strings.Contains(err.Error(), "finite") {
+				t.Fatalf("error %q should explain the non-finite number", err)
+			}
+		})
+	}
+}
+
+// Load must surface the same clean error rather than panicking.
+func TestLoadRejectsNonFiniteFloats(t *testing.T) {
+	_, err := Load([]byte("version: 1\nenabled: true\nbudget: { monthly_cost_usd: .nan }"))
+	if err == nil {
+		t.Fatal("Load accepted a NaN budget, want error")
+	}
+	if !strings.Contains(err.Error(), "finite") {
+		t.Fatalf("error %q should explain the non-finite number", err)
 	}
 }

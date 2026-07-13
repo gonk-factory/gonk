@@ -267,4 +267,216 @@ func TestResolveDisabledReasonInvariant(t *testing.T) {
 	if eff.DisabledReason != "disabled by project .gonk.yml" {
 		t.Fatalf("reason = %q", eff.DisabledReason)
 	}
+
+	// Reason precedence, pairwise: instance outranks group.
+	eff = Resolve(Policy{Enabled: b(false)}, Policy{Enabled: b(false)}, project(nil))
+	if eff.DisabledReason != "disabled by instance policy" {
+		t.Fatalf("reason = %q, want instance to outrank group", eff.DisabledReason)
+	}
+	// Group outranks the project's own non-opt-in.
+	eff = Resolve(Policy{}, Policy{Enabled: b(false)}, project(func(pc *ProjectConfig) { pc.Enabled = nil }))
+	if eff.DisabledReason != "disabled by group policy" {
+		t.Fatalf("reason = %q, want group to outrank project", eff.DisabledReason)
+	}
+	// The project's non-opt-in outranks the ladder reason.
+	eff = Resolve(Policy{}, Policy{}, project(func(pc *ProjectConfig) {
+		pc.Enabled = nil
+		pc.Ladder = nil
+	}))
+	if eff.DisabledReason != "disabled by project .gonk.yml" {
+		t.Fatalf("reason = %q, want project to outrank the ladder reason", eff.DisabledReason)
+	}
+}
+
+// A non-finite cost ceiling must fail closed, never silently become
+// "unlimited". NaN loses every comparison, so a naive min-fold skips it and
+// leaves the +Inf unlimited sentinel standing -- a silent budget escape.
+func TestResolveNonFiniteBudgetFailsClosed(t *testing.T) {
+	nan := math.NaN()
+	posInf := math.Inf(1)
+	negInf := math.Inf(-1)
+
+	for _, tc := range []struct {
+		name  string
+		bad   float64
+		layer string
+	}{
+		{"instance NaN", nan, "instance"},
+		{"instance +Inf", posInf, "instance"},
+		{"instance -Inf", negInf, "instance"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := Policy{Budget: BudgetPolicy{MonthlyCostUSD: &tc.bad}}
+			eff := Resolve(inst, Policy{}, project(nil))
+			if eff.Enabled {
+				t.Fatal("a non-finite cost ceiling must disable the project")
+			}
+			if math.IsInf(eff.Budget.MonthlyCostUSD, 1) {
+				t.Fatal("non-finite ceiling silently resolved to unlimited")
+			}
+			for _, want := range []string{"invalid budget", "monthly_cost_usd", tc.layer} {
+				if !strings.Contains(eff.DisabledReason, want) {
+					t.Fatalf("reason %q missing %q", eff.DisabledReason, want)
+				}
+			}
+		})
+	}
+
+	// Every layer is checked, and the layer is named correctly.
+	grp := Policy{Budget: BudgetPolicy{MonthlyCostUSD: &nan}}
+	eff := Resolve(Policy{}, grp, project(nil))
+	if eff.Enabled || !strings.Contains(eff.DisabledReason, "group") {
+		t.Fatalf("group NaN not caught: enabled=%v reason=%q", eff.Enabled, eff.DisabledReason)
+	}
+	proj := project(func(pc *ProjectConfig) {
+		pc.Budget = BudgetPolicy{MonthlyCostUSD: &nan}
+	})
+	eff = Resolve(Policy{}, Policy{}, proj)
+	if eff.Enabled || !strings.Contains(eff.DisabledReason, "project") {
+		t.Fatalf("project NaN not caught: enabled=%v reason=%q", eff.Enabled, eff.DisabledReason)
+	}
+
+	// An invalid budget outranks the ladder reason but not a coarser veto.
+	eff = Resolve(Policy{Enabled: b(false), Budget: BudgetPolicy{MonthlyCostUSD: &nan}}, Policy{}, project(nil))
+	if eff.DisabledReason != "disabled by instance policy" {
+		t.Fatalf("reason = %q, want the instance veto to outrank the budget reason", eff.DisabledReason)
+	}
+	eff = Resolve(Policy{Budget: BudgetPolicy{MonthlyCostUSD: &nan}}, Policy{},
+		project(func(pc *ProjectConfig) { pc.Ladder = nil }))
+	if !strings.Contains(eff.DisabledReason, "invalid budget") {
+		t.Fatalf("reason = %q, want the budget reason to outrank the ladder reason", eff.DisabledReason)
+	}
+}
+
+// Each action's veto must be wired to both coarser layers. andAction is
+// shared, but per-action wiring is where copy-paste bugs land -- and
+// pipelines is the action that spends money.
+func TestResolveActionVetoWiringAllThree(t *testing.T) {
+	allOn := func(pc *ProjectConfig) {
+		pc.Actions = ActionsPolicy{Triage: b(true), Pipelines: b(true), Features: b(true)}
+	}
+	// Baseline: project opts into all three, no vetoes -> all on.
+	eff := Resolve(Policy{}, Policy{}, project(allOn))
+	if !eff.Actions.Triage || !eff.Actions.Pipelines || !eff.Actions.Features {
+		t.Fatalf("baseline actions should all be on: %+v", eff.Actions)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		veto   ActionsPolicy
+		got    func(Actions) bool
+		others func(Actions) bool
+	}{
+		{"triage", ActionsPolicy{Triage: b(false)},
+			func(a Actions) bool { return a.Triage },
+			func(a Actions) bool { return a.Pipelines && a.Features }},
+		{"pipelines", ActionsPolicy{Pipelines: b(false)},
+			func(a Actions) bool { return a.Pipelines },
+			func(a Actions) bool { return a.Triage && a.Features }},
+		{"features", ActionsPolicy{Features: b(false)},
+			func(a Actions) bool { return a.Features },
+			func(a Actions) bool { return a.Triage && a.Pipelines }},
+	} {
+		// Instance vetoes this action.
+		eff := Resolve(Policy{Actions: tc.veto}, Policy{}, project(allOn))
+		if tc.got(eff.Actions) {
+			t.Errorf("%s: instance veto ignored", tc.name)
+		}
+		if !tc.others(eff.Actions) {
+			t.Errorf("%s: instance veto leaked into other actions: %+v", tc.name, eff.Actions)
+		}
+		// Group vetoes this action.
+		eff = Resolve(Policy{}, Policy{Actions: tc.veto}, project(allOn))
+		if tc.got(eff.Actions) {
+			t.Errorf("%s: group veto ignored", tc.name)
+		}
+		if !tc.others(eff.Actions) {
+			t.Errorf("%s: group veto leaked into other actions: %+v", tc.name, eff.Actions)
+		}
+	}
+}
+
+// Every most-specific-wins fold, asserted with a NON-default value. With
+// default-valued expectations a resolver that ignored all three layers and
+// returned only its hardcoded defaults would still pass.
+func TestResolveInheritsNonDefaultValues(t *testing.T) {
+	// Inherit each field from the instance when finer layers are silent.
+	inst := Policy{
+		Continuity: s("fresh"),
+		Triage:     TriagePolicy{LabelPrefix: s("bot::"), RespondToMentions: b(false)},
+		Provenance: ProvenancePolicy{CommitTrailers: b(false), IncludeUsage: b(true)},
+		Schedule:   &Schedule{QuietHours: "22:00-07:00", Timezone: "America/New_York"},
+	}
+	eff := Resolve(inst, Policy{}, project(nil))
+	if eff.Continuity != "fresh" {
+		t.Errorf("continuity = %q, want inherited %q", eff.Continuity, "fresh")
+	}
+	if eff.Triage.LabelPrefix != "bot::" {
+		t.Errorf("label_prefix = %q, want inherited %q", eff.Triage.LabelPrefix, "bot::")
+	}
+	if eff.Triage.RespondToMentions {
+		t.Error("respond_to_mentions = true, want inherited false")
+	}
+	if eff.Provenance.CommitTrailers {
+		t.Error("commit_trailers = true, want inherited false")
+	}
+	if !eff.Provenance.IncludeUsage {
+		t.Error("include_usage = false, want inherited true")
+	}
+	if eff.Schedule == nil || eff.Schedule.Timezone != "America/New_York" {
+		t.Errorf("schedule not inherited: %+v", eff.Schedule)
+	}
+
+	// Most specific wins across all three layers: project's value survives.
+	grp := Policy{
+		Continuity: s("resume"),
+		Triage:     TriagePolicy{LabelPrefix: s("group::"), RespondToMentions: b(true)},
+		Provenance: ProvenancePolicy{CommitTrailers: b(true), IncludeUsage: b(false)},
+		Schedule:   &Schedule{QuietHours: "01:00-02:00", Timezone: "UTC"},
+	}
+	proj := project(func(pc *ProjectConfig) {
+		pc.Continuity = s("fresh")
+		pc.Triage = TriagePolicy{LabelPrefix: s("proj::"), RespondToMentions: b(false)}
+		pc.Provenance = ProvenancePolicy{CommitTrailers: b(false), IncludeUsage: b(true)}
+		pc.Schedule = &Schedule{QuietHours: "03:00-04:00", Timezone: "Asia/Tokyo"}
+	})
+	eff = Resolve(inst, grp, proj)
+	if eff.Continuity != "fresh" {
+		t.Errorf("continuity = %q, want project's %q", eff.Continuity, "fresh")
+	}
+	if eff.Triage.LabelPrefix != "proj::" {
+		t.Errorf("label_prefix = %q, want project's %q", eff.Triage.LabelPrefix, "proj::")
+	}
+	if eff.Triage.RespondToMentions {
+		t.Error("respond_to_mentions should be the project's false")
+	}
+	if eff.Provenance.CommitTrailers {
+		t.Error("commit_trailers should be the project's false")
+	}
+	if !eff.Provenance.IncludeUsage {
+		t.Error("include_usage should be the project's true")
+	}
+	if eff.Schedule == nil || eff.Schedule.Timezone != "Asia/Tokyo" {
+		t.Errorf("schedule = %+v, want the project's", eff.Schedule)
+	}
+
+	// Group beats instance when the project is silent.
+	eff = Resolve(inst, grp, project(nil))
+	if eff.Continuity != "resume" {
+		t.Errorf("continuity = %q, want group's %q", eff.Continuity, "resume")
+	}
+	if eff.Triage.LabelPrefix != "group::" {
+		t.Errorf("label_prefix = %q, want group's %q", eff.Triage.LabelPrefix, "group::")
+	}
+	if eff.Schedule == nil || eff.Schedule.Timezone != "UTC" {
+		t.Errorf("schedule = %+v, want the group's", eff.Schedule)
+	}
+}
+
+// schedule has no default: silence at every layer means no schedule at all.
+func TestResolveScheduleDefaultsToNone(t *testing.T) {
+	eff := Resolve(Policy{}, Policy{}, project(nil))
+	if eff.Schedule != nil {
+		t.Fatalf("schedule = %+v, want nil when no layer sets one", eff.Schedule)
+	}
 }

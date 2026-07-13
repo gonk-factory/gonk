@@ -129,11 +129,25 @@ func Resolve(instance, group Policy, project ProjectConfig) Effective {
 		}
 	}
 
+	// Fail closed on a non-finite cost ceiling. NaN loses every comparison
+	// (NaN < x is false), so the min-fold above silently skips it and leaves
+	// the +Inf "unlimited" sentinel standing -- a budget escape. An
+	// unvalidated operator-supplied Policy can still carry one (see ADR-002,
+	// "Known gap"), so treat it as a config error rather than trusting it to
+	// be unreachable.
+	badBudget := nonFiniteBudgetLayer(instance, group, project)
+
 	// Fail closed on an empty ladder, and explain why the project is off.
 	// Precedence: a project killed by a coarser layer says so rather than
-	// blaming its ladder.
-	if len(eff.Ladder) == 0 {
+	// blaming its budget or its ladder.
+	if badBudget != "" || len(eff.Ladder) == 0 {
 		eff.Enabled = false
+	}
+	if badBudget != "" {
+		// Never hand back the "unlimited" sentinel for a ceiling we could not
+		// make sense of: a NaN or +Inf layer would otherwise leave +Inf
+		// standing. 0 is the fail-closed ceiling -- nothing is affordable.
+		eff.Budget.MonthlyCostUSD = 0
 	}
 	switch {
 	case instance.Enabled != nil && !*instance.Enabled:
@@ -142,10 +156,32 @@ func Resolve(instance, group Policy, project ProjectConfig) Effective {
 		eff.DisabledReason = "disabled by group policy"
 	case project.Enabled == nil || !*project.Enabled:
 		eff.DisabledReason = "disabled by project .gonk.yml"
+	case badBudget != "":
+		eff.DisabledReason = fmt.Sprintf(
+			"invalid budget: monthly_cost_usd is not a finite number (%s)", badBudget)
 	case len(eff.Ladder) == 0:
 		eff.DisabledReason = ladderEmptyReason(instance, group, project)
 	}
 	return eff
+}
+
+// nonFiniteBudgetLayer names the coarsest layer whose cost ceiling is NaN or
+// +/-Inf, or "" if every layer's ceiling is finite (or unset).
+func nonFiniteBudgetLayer(instance, group Policy, project ProjectConfig) string {
+	for _, l := range []struct {
+		name   string
+		policy Policy
+	}{
+		{"instance", instance},
+		{"group", group},
+		{"project", project.Policy},
+	} {
+		v := l.policy.Budget.MonthlyCostUSD
+		if v != nil && (math.IsNaN(*v) || math.IsInf(*v, 0)) {
+			return l.name
+		}
+	}
+	return ""
 }
 
 // ladderEmptyReason explains an empty effective ladder, naming each layer
