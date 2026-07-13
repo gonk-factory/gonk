@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gitlab.orac.local/agentic/gonk-project/-/raw/main/docs/schemas/gonk-config.v1.schema.json",
+  "title": "gonk project configuration (.gonk.yml), schema version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "enabled"],
+  "properties": {
+    "version": { "const": 1 },
+    "enabled": { "type": "boolean" },
+    "actions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "triage": { "type": "boolean" },
+        "pipelines": { "type": "boolean" },
+        "features": { "type": "boolean" }
+      }
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "quiet_hours": {
+          "type": "string",
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$"
+        },
+        "timezone": { "type": "string", "minLength": 1 }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "monthly_cost_usd": { "type": "number", "minimum": 0 },
+        "monthly_tokens": { "$ref": "#/$defs/tokenQuantity" },
+        "per_task_tokens": { "$ref": "#/$defs/tokenQuantity" }
+      }
+    },
+    "ladder": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" }
+    },
+    "continuity": { "enum": ["resume", "fresh"] },
+    "triage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label_prefix": { "type": "string", "minLength": 1 },
+        "respond_to_mentions": { "type": "boolean" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "commit_trailers": { "type": "boolean" },
+        "include_usage": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "tokenQuantity": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "string", "pattern": "^[0-9]+[KMG]?$" }
+      ]
+    }
+  }
+}

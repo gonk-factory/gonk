@@ -580,11 +580,11 @@ git add -A && git commit -m "feat(gonkcfg): embedded v1 JSON Schema and Validate
 
 ---
 
-### Task 4: Typed config + Load
+### Task 4: Typed config + Load [done]
 
 **Files:** Create: `pkg/gonkcfg/config.go`, `pkg/gonkcfg/config_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `pkg/gonkcfg/config_test.go`:
 
@@ -619,12 +619,12 @@ func TestLoadRejectsInvalid(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./pkg/gonkcfg/ -run 'TestLoad' -v`
 Expected: FAIL (undefined: Load)
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `pkg/gonkcfg/config.go`:
 
@@ -694,16 +694,22 @@ func Load(raw []byte) (*ProjectConfig, error) {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `go test ./pkg/gonkcfg/ -v`
 Expected: PASS (all tests so far)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(gonkcfg): typed Policy/ProjectConfig and Load"
 ```
+
+Also added an authorized third test, `TestLoadRejectsFractionalTokens`
+(Task 3 re-review carry-forward), proving `Load` rejects `monthly_tokens`/
+`per_task_tokens` given as `2.0` or `1.5` even though the JSON Schema alone
+accepts `2.0` as a zero-fraction integer — `TokenQuantity.UnmarshalYAML`'s
+tag dispatch is the second layer of defense, and `Load` must run both.
 
 ---
 

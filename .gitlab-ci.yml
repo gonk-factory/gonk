@@ -1,0 +1,17 @@
+stages: [lint, test]
+
+lint:
+  stage: lint
+  # Pin the full tag. Must be v2.x to match .golangci.yml, and must be built
+  # with a Go >= go.mod's directive or it cannot compile the module at all.
+  # v2.12.2 is built with go1.26.2, and is the same version as the local gate.
+  image: golangci/golangci-lint:v2.12.2
+  script:
+    - golangci-lint run ./...
+
+test:
+  stage: test
+  image: golang:1.26
+  script:
+    - go vet ./...
+    - go test ./... -race -count=1
