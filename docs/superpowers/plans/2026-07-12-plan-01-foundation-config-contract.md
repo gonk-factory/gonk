@@ -76,6 +76,20 @@ linters:
 
 (`version: "2"` is required by golangci-lint v2.x; omitting it makes v2 refuse the config.)
 
+**Amendment (found in execution, 2026-07-12):** this config is blind to
+formatting. golangci-lint v2 moved formatters out of the `linters` block, so
+`golangci-lint run` reported `0 issues` on a file `gofmt` flags — and
+unformatted code (from this plan's own code blocks) duly reached the branch.
+Add a `formatters` block, which makes the lint gate load-bearing for
+formatting; verified by watching it go red on the drifted file and green once
+formatted:
+
+```yaml
+formatters:
+  enable:
+    - gofmt
+```
+
 - [ ] **Step 4: Create `.gitlab-ci.yml`**
 
 ```yaml
