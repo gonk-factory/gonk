@@ -3,6 +3,7 @@ package gonkcfg
 import (
 	"bytes"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"math"
 
@@ -23,15 +24,37 @@ func mustCompile() *jsonschema.Schema {
 	if err != nil {
 		panic(fmt.Sprintf("gonkcfg: embedded schema unreadable: %v", err))
 	}
+	id := schemaID()
 	c := jsonschema.NewCompiler()
-	if err := c.AddResource("gonk-config.v1.schema.json", doc); err != nil {
+	if err := c.AddResource(id, doc); err != nil {
 		panic(err)
 	}
-	s, err := c.Compile("gonk-config.v1.schema.json")
+	s, err := c.Compile(id)
 	if err != nil {
 		panic(fmt.Sprintf("gonkcfg: embedded schema invalid: %v", err))
 	}
 	return s
+}
+
+// schemaID reads the schema's own "$id" and uses it as the resource name for
+// AddResource/Compile. Without this, jsonschema/v6 resolves a bare filename
+// against the process's working directory, and every validation error ends
+// up citing a local, CWD-dependent filesystem path
+// (file:///.../pkg/gonkcfg/gonk-config.v1.schema.json#) instead of the
+// schema's published identity. Plan 02 echoes these errors into GitLab
+// MR/issue comments, where a local path is both meaningless to the reader
+// and a filesystem-layout leak.
+func schemaID() string {
+	var meta struct {
+		ID string `json:"$id"`
+	}
+	if err := json.Unmarshal(schemaJSON, &meta); err != nil {
+		panic(fmt.Sprintf("gonkcfg: embedded schema unreadable: %v", err))
+	}
+	if meta.ID == "" {
+		panic("gonkcfg: embedded schema has no $id")
+	}
+	return meta.ID
 }
 
 // Validate checks raw .gonk.yml bytes against the v1 JSON Schema.
@@ -57,9 +80,20 @@ func Validate(raw []byte) error {
 }
 
 // rejectNonFinite walks a decoded YAML document and rejects any non-finite
-// float. JSON has no NaN or Infinity, so a non-finite float is never a valid
-// document at any path -- reject generically rather than special-casing the
-// one field whose "minimum" keyword we know reaches the crash today.
+// float found as a scalar or as a map/slice VALUE. JSON has no NaN or
+// Infinity, so a non-finite float is never a valid document -- reject
+// generically rather than special-casing the one field whose "minimum"
+// keyword we know reaches the crash today.
+//
+// This does not descend into map KEYS. That is not a gap in practice: a
+// non-string key (which is what a non-finite float key would be, since
+// yaml.v3 only produces map[any]any for those) makes the whole enclosing
+// map non-JSON, and jsonschema/v6 rejects it wholesale ("invalid jsonType")
+// at the top of every recursive validate() call -- before any keyword,
+// including the crashing "minimum" comparison, runs on it or anything
+// nested under it. Verified against jsonschema/v6 v6.0.2: typeOf falls
+// through map[any]any to invalidType, and validator.validate() checks
+// typeOf(v) == invalidType before evaluating any keyword.
 func rejectNonFinite(v any, path string) error {
 	switch t := v.(type) {
 	case float64:

@@ -77,6 +77,24 @@ func TestValidateRejectsNonFiniteFloats(t *testing.T) {
 	}
 }
 
+// Validation errors must cite the schema's published $id, not a bare
+// filename resolved against the process's working directory -- that would
+// leak the container's local filesystem layout (and a path that varies by
+// CWD) into MR/issue comments Plan 02 echoes back to project authors.
+func TestValidateErrorsCiteCanonicalSchemaID(t *testing.T) {
+	err := Validate([]byte("version: 1\nenabled: true\nladder: [Qwen-Local]\n"))
+	if err == nil {
+		t.Fatal("Validate accepted an uppercase rung, want error")
+	}
+	const wantID = "https://gitlab.orac.local/agentic/gonk-project/-/raw/main/docs/schemas/gonk-config.v1.schema.json"
+	if !strings.Contains(err.Error(), wantID) {
+		t.Fatalf("error %q does not cite canonical schema $id %q", err, wantID)
+	}
+	if strings.Contains(err.Error(), "file://") {
+		t.Fatalf("error %q leaks a local filesystem path", err)
+	}
+}
+
 // Load must surface the same clean error rather than panicking.
 func TestLoadRejectsNonFiniteFloats(t *testing.T) {
 	_, err := Load([]byte("version: 1\nenabled: true\nbudget: { monthly_cost_usd: .nan }"))
