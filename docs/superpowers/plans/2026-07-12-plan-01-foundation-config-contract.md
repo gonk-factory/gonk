@@ -340,6 +340,25 @@ git add -A && git commit -m "feat(gonkcfg): TokenQuantity with K/M/G suffix gram
 
 **Files:** Create: `pkg/gonkcfg/gonk-config.v1.schema.json`, `pkg/gonkcfg/schema.go`, `pkg/gonkcfg/schema_test.go`
 
+**Amendment (found in execution, 2026-07-12) — `Validate` must reject non-finite
+floats before calling the validator.** `Load` as originally written **panics**
+(nil-pointer dereference) on `budget: { monthly_cost_usd: .nan }`, `.inf`, or
+`-.inf`. Root cause is upstream: `jsonschema/v6@v6.0.2` (`validator.go:515-524`)
+builds a `big.Rat` via `new(big.Rat).SetString(fmt.Sprintf("%v", v))`, which
+returns **nil** for a non-finite float, discards the `ok`, and then calls `.Cmp`
+on the nil. Our `"minimum": 0` on `monthly_cost_usd` is the trigger; the token
+fields are not exposed because their `oneOf[integer,string]` rejects the float
+before `minimum` runs. **`.gonk.yml` is untrusted, project-authored repo
+content**, so this is a one-line remote crash of the process that enforces every
+project's budget and kill switch. Fix: `Validate` walks the decoded document and
+rejects any non-finite float64 at any path (JSON has no NaN/Inf, so such a
+document is never valid) before handing it to the validator. Related, in Task 5:
+a NaN ceiling that reaches the min-fold resolves to `+Inf` = **unlimited**,
+because every NaN comparison is false and the fold silently skips it — the
+resolver now fails closed on a non-finite ceiling instead. Also add
+`"uniqueItems": true` to `ladder`: `[glm, glm]` validated and produced a
+duplicated rung, which would make escalation retry the same rung.
+
 - [ ] **Step 1: Write the schema**
 
 `pkg/gonkcfg/gonk-config.v1.schema.json`:
