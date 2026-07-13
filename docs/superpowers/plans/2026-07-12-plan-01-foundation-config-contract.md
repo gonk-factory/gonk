@@ -679,6 +679,21 @@ Semantics (spec 5.4, settled in design review):
   Defaults: continuity=resume, label_prefix="gonk::", respond_to_mentions=true,
   commit_trailers=true, include_usage=false, schedule=none.
 
+**Amendment (owner decision, 2026-07-12): an empty effective ladder fails
+closed.** Execution surfaced a hole the plan's semantics did not cover: the fold
+can produce a zero-rung ladder two ways — layers set ladders whose intersection
+is empty (project wants `opus`, instance allows only `qwen-local`), or no layer
+sets a ladder at all. As originally written, `Resolve` returned `Enabled: true`
+with zero rungs, leaving every downstream consumer to remember a `len(Ladder)==0`
+check (and a naive `Ladder == nil` check misses it, because an empty intersection
+is a non-nil zero-length slice). Owner's call: a project that cannot run any rung
+is definitionally not runnable, so `Resolve` says so once. `Effective` gains a
+`DisabledReason string` with the invariant *non-empty iff `Enabled == false`*,
+and an empty ladder (either cause) sets `Enabled = false`. Reason precedence:
+instance veto -> group veto -> project not enabled -> ladder empty, so a project
+killed by its instance is not told to blame its ladder. Spec 5.4 keeps the
+one-line rule; ADR-002 is the precise contract, and it records this.
+
 - [ ] **Step 1: Write the failing test**
 
 `pkg/gonkcfg/resolve_test.go`:
