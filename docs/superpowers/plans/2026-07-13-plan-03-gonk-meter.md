@@ -11,6 +11,14 @@
 **Spec:** `docs/superpowers/specs/2026-07-12-gonk-stack-design.md` sections 6 (budgets, attribution, ladder), 5.4 (config precedence), 8 (observability), 10.1 (contract change rules).
 **Contract inputs:** `docs/adr/ADR-002-config-precedence-semantics.md` (precedence is **published and settled** — this plan *consumes* `gonkcfg.Resolve`; it must not redefine precedence, budget folding, or `DisabledReason`).
 
+**Environment:** `docs/environment.md` — read off the live cluster, and **authoritative** for every fact about the deployment target. What binds this plan:
+
+- **LiteLLM is bring-your-own and ALREADY DEPLOYED**: namespace `litellm`, Service `litellm:4000`, i.e. `http://litellm.litellm.svc.cluster.local:4000` (plain HTTP, in-cluster — no CA involved on that hop). The chart does **not** bundle it. `LITELLM_URL` points here.
+- **LiteLLM's model list *and* its prices live in ONE file in the gitops repo:** `clusters/orac/apps/litellm/litellm.yaml`, under `spec.values.proxy_config.model_list` and `spec.values.litellm_settings.model_cost_map`. **Local models are priced at ZERO there today.** That is exactly the hole Decision 9 exists to close, and that map is where the synthetic prices go. See "Synthetic pricing" below — including the one genuine ambiguity, which is flagged rather than assumed.
+- **The ledger fallback is real and pre-approved:** Postgres on the existing CNPG cluster (`databases-app/postgres`, healthy, 2 instances). Task 0b decides; **`cmd/gonk-meter` must be able to run against either backend**, which is why `GONK_METER_STORE_BACKEND` exists (Task 8).
+- **Every GitLab runner is offline; CI has never executed for this repo.** The standing gate below is the *only* gate. The first `gonk-meter` image is built and pushed **by hand** to `registry.orac.local/agentic/gonk-project/gonk-meter:<tag>`.
+- **NetworkPolicies are NOT enforced on this cluster** (Flannel does not implement them; the Cilium HelmRelease is suspended). This has a direct, load-bearing consequence for what this plan may claim — see "What the hard door actually covers" below. Read it before you write the word "cannot" anywhere near the word "budget".
+
 **Standing verification gate (from Plan 01, run before every commit):**
 
 ```bash
@@ -75,6 +83,42 @@ Plan 02's `Classify` therefore takes an `Observation` (from GitLab) **and meter'
 
 ---
 
+## What the hard door actually covers (read before you claim a budget "cannot" be exceeded)
+
+Spec §9 says agent-pod egress is confined to GitLab and LiteLLM, "**so budgets
+cannot be bypassed**". **On the target cluster that sentence is false at the
+network layer, today.** `docs/environment.md` records why, and the owner's
+decision is **ship it, document the gap, do not gate on it.** This plan implements
+that decision faithfully — which means it must never let the gap be mistaken for
+a guarantee.
+
+The concrete bypass: **NetworkPolicies are not enforced** (Flannel does not
+implement them; the Cilium HelmRelease is suspended), and LiteLLM routes local
+models to an **Ollama at `http://192.168.1.142:11434` that requires no
+credential**. An agent pod can therefore skip LiteLLM entirely, call Ollama
+directly, and burn local GPU with **zero metering and no ceiling**. Every door in
+this plan — the reservation gate, the virtual key's `max_budget`, the synthetic
+price — binds only traffic that *actually goes through LiteLLM*. The
+NetworkPolicy is the only thing that forces it to, and it is not enforced.
+
+**Say it exactly this way, everywhere (ADR-004, the metrics help text, the
+dashboards, the README):**
+
+> **Cloud-rung budgets are hard.** A cloud call needs an API key, the pod's only
+> route to one is LiteLLM's virtual key, and LiteLLM refuses at the ceiling.
+> **Local-model budgets are advisory** until Cilium is unsuspended and the egress
+> policy is actually enforced. Decision 9's synthetic pricing gives the token
+> budget a hard door *through LiteLLM*; it does not give it one *around* LiteLLM.
+
+What this plan still does, and it is not nothing: it makes the door **correct**,
+so that the day Cilium lands, the guarantee is real without another line of Go.
+Plan 05 ships the egress NetworkPolicy anyway (documentation-as-code); Plan 06
+**writes the egress-denial test and skips it**, naming Cilium in the skip
+message. Un-skipping that test is the gate. Nothing in this plan may be written
+as though that day has already come.
+
+---
+
 ## Synthetic pricing: making the USD door a hard door for local rungs
 
 **The problem.** Spec 6.2 says "hard refusal happens in LiteLLM, at the only door." But a LiteLLM virtual key enforces a **USD** `max_budget` and nothing else. There is no token counter. And local models are priced at $0, so the dollar counter never moves for them and the door never closes. Result: `monthly_tokens` and `per_task_tokens` had **no hard enforcement anywhere**, and a local-only project (the onboarding default!) had no hard door at all.
@@ -91,7 +135,31 @@ Plan 02's `Classify` therefore takes an `Observation` (from GitLab) **and meter'
 
 **The mechanism.**
 
-1. `pkg/opercfg`'s rung catalog gains `synthetic_usd_per_1m_tokens`, **required on local rungs and forbidden on cloud rungs** (a cloud rung's price is real, and lives in LiteLLM's model config; declaring a synthetic price for it would be a lie). The operator must configure the *same* price in LiteLLM's model list for the corresponding local model — a drift Plan 06 verifies.
+1. `pkg/opercfg`'s rung catalog gains `synthetic_usd_per_1m_tokens`, **required on local rungs and forbidden on cloud rungs** (a cloud rung's price is real, and lives in LiteLLM's model config; declaring a synthetic price for it would be a lie). The operator must configure the *same* price in LiteLLM's model config for the corresponding local model — a drift Plan 06 verifies (P3-4).
+
+   **Where that price physically goes — it is one named file, not "LiteLLM's config somewhere":**
+
+   | | |
+   |---|---|
+   | Repo | the gitops repo (`/mnt/c/Users/steve/Code/gitops`), **not** this one |
+   | File | **`clusters/orac/apps/litellm/litellm.yaml`** |
+   | Models | `spec.values.proxy_config.model_list` |
+   | **Prices** | **`spec.values.litellm_settings.model_cost_map`** |
+   | Today | **local models are priced at ZERO there.** That is the hole. |
+
+   **A flagged ambiguity — do not silently assume it away.** LiteLLM accepts a
+   per-token price in *two* plausible places: the `litellm_settings.model_cost_map`
+   the repo actually uses, and a per-model `model_info: {input_cost_per_token, …}`
+   block inside `model_list`. **The repo only uses `model_cost_map`, so that is
+   what this plan targets** — conform to the house convention rather than
+   introducing a second one. But the two are not obviously equivalent for
+   *locally-routed* models, and **nobody has verified which one LiteLLM actually
+   consults when it writes a `/spend/logs` row for an Ollama-backed model.**
+   **Plan 06, Task 5 must answer that empirically** (it is a superset of P3-4: not
+   just "do the numbers agree" but "does the number we set actually move the
+   spend"). If `model_cost_map` turns out not to price local routes, the synthetic
+   dollar never lands in a spend row, the USD door never closes on tokens, and
+   Decision 9 buys nothing. **That is a finding for the owner, not a footnote.**
 2. Meter computes a per-token price for each rung uniformly:
 
    ```
@@ -179,7 +247,8 @@ Task 2's `TestGroupFor`, `TestGroupForCeilingsOnlyTighten`, and the nil-vs-empty
 | Meter restarts | Cold start: `/readyz` false until the first spend sync completes. **Reservations survive** — they are in the durable store (Dolt, Decision 10). This is exactly why the in-memory store is not the shipping backend: losing reservations on restart is fail-open on headroom for the length of the spend-log lag. | Metric `gonk_meter_cold_start_total`. |
 | **Dolt does not actually provide the isolation the reservation race needs** | **Task 0b proves or disproves this before anything depends on it.** If the racing test overspends, the fallback is (a) keep meter single-replica so the in-process per-project lock *is* the serialization and Dolt supplies durability only, or (b) move the ledger to **Postgres on the owner's existing CNPG cluster** (owner-approved 2026-07-13 — not a new dependency; take it without hesitation if the spike fails OR is inconclusive). The plan does not proceed on the assumption. | An unverified transactional guarantee under a budget ceiling is exactly the thing that must not be assumed. |
 | Two meter **replicas** race the same ceiling | The per-project `keyedMutex` is **in-process**: it serializes decisions inside one meter, and does nothing across pods. **Assumed default: meter runs single-replica** (`replicas: 1`, `strategy: Recreate` — Plan 05). With >1 replica, correctness depends entirely on the store's isolation, which is what Task 0b measures. | Stated, not hidden. A silent second replica is a silent budget escape. |
-| A local rung burns the whole token budget | LiteLLM's USD `max_budget` now covers it: local models carry a **synthetic** per-token price, and meter folds the token ceiling into the dollar ceiling it provisions (Decision 9). Meter's reservation gate refuses first; LiteLLM refuses if meter is wrong. | The token budget finally has a hard door. |
+| A local rung burns the whole token budget **through LiteLLM** | LiteLLM's USD `max_budget` now covers it: local models carry a **synthetic** per-token price, and meter folds the token ceiling into the dollar ceiling it provisions (Decision 9). Meter's reservation gate refuses first; LiteLLM refuses if meter is wrong. | The token budget has a hard door **on that path**. |
+| **An agent pod calls Ollama (`http://192.168.1.142:11434`) DIRECTLY, around LiteLLM** | **NOTHING IN THIS PLAN STOPS IT.** Ollama needs no credential, and the NetworkPolicy that would forbid the egress **is not enforced** (Flannel; Cilium suspended). Zero metering, no ceiling, no attribution. | **NOT CLOSED.** Owner decision: ship, document, do not gate. **Local-model budgets are advisory** until Cilium lands; cloud-rung budgets remain hard (a cloud call needs a key the pod only holds via LiteLLM). Plan 05 ships the policy; Plan 06 skip-tests it; un-skipping that test is the gate. |
 | Synthetic dollars get counted as real spend | `spend.Row.Synthetic` is set at ingest from the rung's `kind`; `budget.Spend` keeps `CostUSD` (real) and `SyntheticCostUSD` separate; `rung.Decide`'s cost gate reads **real only**. A rung missing from the catalog is treated as **real** (fail closed). | If synthetic dollars reached the cost gate, `monthly_cost_usd: 0` would make the onboarding default's own local rung unaffordable — the project would be dead on arrival. |
 | A spend row for last month lands after the window rolled | Rows are windowed by **the row's timestamp**, never by ingest time. A July row arriving on 1 August is charged to July. | Otherwise every project gets a free budget on the 1st. |
 | `.gonk.yml` invalid / project disabled / ladder exhausted / per-task tokens gone | **deny** with a machine reason. Never `run`, never an infinite `defer`. | Retrying cannot help. |
@@ -197,7 +266,11 @@ Task 2's `TestGroupFor`, `TestGroupForCeilingsOnlyTighten`, and the nil-vs-empty
 ## File structure
 
 ```
-cmd/gonk-meter/main.go                    wiring, flags, secret FILES, tzdata import
+cmd/gonk-meter/main.go                    wiring, flags, secret FILES, tzdata import,
+                                          STORE BACKEND SELECTION (Task 8 Step 5)
+cmd/gonk-meter/clock.go                   //go:build !testclock -- Now() = time.Now
+cmd/gonk-meter/clock_testclock.go         //go:build testclock  -- Now() reads GONK_TESTCLOCK_FILE
+                                          (Plan 06 HB-3. NEVER in a production image.)
 pkg/meterapi/meterapi.go                  * THE SHARED CONTRACT (Task 0). Plan 02 imports it.
 pkg/meterapi/meterapi_test.go             wire-literal golden tests
 pkg/meterapi/testdata/contract.sha256     drift gate: a field rename fails CI
@@ -211,13 +284,18 @@ pkg/rung/decide.go                        THE pure policy: Decide(Input) Decisio
 pkg/rung/outcome.go                       Outcome/Attempt/gate classification, QuietHours
 internal/meter/tagmint/tagmint.go         boundary-validated atags minting
 internal/meter/store/store.go             Store interface (registrations, attempts, reservations, spend)
-internal/meter/store/memory.go            in-memory Store (tests only)
-internal/meter/store/dolt.go              * the SHIPPING Store (Decision 10, gated on Task 0b)
-internal/meter/store/storetest/suite.go   ONE conformance suite, run against BOTH implementations
+internal/meter/store/memory.go            in-memory Store (tests only; NEVER selectable in production)
+internal/meter/store/dolt.go              the Decision-10 Store (gated on Task 0b)
+internal/meter/store/postgres.go          the OWNER-APPROVED FALLBACK Store (CNPG). Task 0b decides
+                                          which one ships; GONK_METER_STORE_BACKEND selects at runtime.
+internal/meter/store/storetest/suite.go   ONE conformance suite, run against ALL implementations
 internal/meter/litellm/admin.go           Admin interface + HTTP client (key provisioning/rotation)
 internal/meter/litellm/spendsource.go     SpendSource interface + HTTP client (/spend/logs)
 internal/meter/litellm/fake.go            fakes for both, used by every test
-internal/meter/keysink/keysink.go         KeySink interface + memory sink (k8s Secret sink = Plan 05)
+internal/meter/keysink/keysink.go         KeySink interface + memory sink
+internal/meter/keysink/k8s.go             * the KUBERNETES KeySink (Task 7 Step 4b).
+                                          THE GO CODE IS THIS PLAN'S. The Role/RoleBinding
+                                          that make it legal are PLAN 05's (Task 4).
 internal/meter/service/service.go         Service: registration, decide, outcome, reconcile loops
 internal/meter/service/http.go            HTTP handlers over pkg/meterapi's types
 internal/meter/metrics/metrics.go         Prometheus collectors
@@ -252,6 +330,7 @@ All endpoints are JSON over HTTP, cluster-internal, and require `Authorization: 
 | `GET /v1/cost/session/{session_key}` | agent (commit trailers) | Cost/tokens for one session. |
 | `GET /v1/cost/project/{project}` | intake, dashboards | Cost/tokens for the current budget window + remaining. |
 | `GET /v1/cost/instance` | dashboards | Instance rollup. |
+| **`POST /admin/spend/sync`** | operator, **test harness** | Force **one** spend-log poll, **block** until it completes, return `spend_as_of`. Bearer-authenticated. **Plan 06 hand-back HB-2** — without it every "assert the ledger says X" is a sleep, and a sleeping e2e is a flaky e2e (Task 9 Step 3b). |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | k8s, Prometheus | Unauthenticated. |
 
 `{project}` is the GitLab `path_with_namespace`, **URL-path-escaped** (`group%2Frepo`). Use `meterapi.ProjectPath(project)` — never hand-build it.
@@ -413,7 +492,28 @@ Four of the original thirteen are **settled** by the controller and are now Deci
 
 **AD-1 — Virtual-key delivery: meter writes a per-project Kubernetes Secret and returns only a `key_ref`.**
 The alternative — returning the raw token in the `/decide` response — puts a live credential into the Gas City event bus and into every log line that echoes a decision. That is not a close call.
-*Blast radius if wrong:* none to this plan. `keysink.KeySink` is the seam; Plan 03 ships the interface and a memory sink. **Plan 05 must implement the k8s Secret sink (+ RBAC) or meter cannot deliver keys to pods at all.**
+
+> **OWNERSHIP, SETTLED (this was a real gap; both plans pointed at each other).**
+> Earlier drafts of this plan said *"Plan 05 must implement the k8s Secret sink
+> (+ RBAC) or meter cannot deliver keys to pods at all"* — i.e. Plan 03 declared a
+> hard dependency on a component **no plan specified**, and Plan 05 then wrote the
+> Go code for a package Plan 03 owns. That is two plans owning one file. Split on
+> the natural seam:
+>
+> | Artifact | Owner |
+> |---|---|
+> | `internal/meter/keysink/keysink.go` — the `KeySink` interface, `Memory`, `Slug` | **Plan 03**, Task 7 Step 4 |
+> | **`internal/meter/keysink/k8s.go` + `k8s_test.go` — the Kubernetes sink** | **Plan 03**, Task 7 **Step 4b** (NEW). It is Go, it is `internal/meter/`, and it is tested against a fake clientset with no cluster. |
+> | `GONK_KEYSINK_NAMESPACE` / `GONK_KEYSINK_PREFIX` wiring in `cmd/gonk-meter` | **Plan 03**, Task 8 Step 5 |
+> | **`role-gonk-meter.yaml`, `rolebinding-gonk-meter.yaml`, `serviceaccount-gonk-meter.yaml`, and the chart values that set the env** | **Plan 05**, Task 4 |
+> | Proving the RBAC actually permits the writes on a real API server | **Plan 06** |
+>
+> **Neither half works alone.** Without Plan 03's `k8s.go`, meter has no sink;
+> without Plan 05's Role, the sink gets a `403` on every `Put` and every project
+> sits in `key-missing` forever — which is fail-*closed*, and loud, but it is
+> still gonk not working. Plan 05 **cites** this table; it does not restate it.
+
+*Blast radius if wrong:* small, and it is now a wiring question rather than a missing component. If `GONK_KEYSINK_NAMESPACE` is unset, meter falls back to `keysink.NewMemory()` **and logs a warning at `ERROR` level that keys are not being delivered to pods** — never silently.
 
 **AD-2 — Meter API auth: a bearer token from a file-mounted Secret (two rotation slots, constant-time compare) *and* a NetworkPolicy.** Both, not either.
 Anything that can call `/decide` can mint attribution tags and obtain a `key_ref`. A NetworkPolicy alone fails open the moment something else lands in the namespace; a token alone fails open if it leaks.
@@ -469,9 +569,11 @@ The *mechanism* is fixed by this plan. The *values* are yours: per-rung `est_cos
 The example configs in this plan carry **placeholders**, and `ADR-004` records that reservations are estimates: a session that consumes far more than its rung's estimate overshoots by the difference, and LiteLLM's hard USD ceiling is what stops it. Alert on `actual >> estimated`.
 
 **OD-C — The synthetic prices for local rungs.**
-Decision 9 requires every local rung to carry `synthetic_usd_per_1m_tokens > 0`, configured identically in the operator config *and* in LiteLLM's model list. What should they be? A price near a real cloud model's makes the synthetic dollars comparable and the dashboards intuitive; a price far below it makes the hard door very loose. There is no defensible default — it depends on how you want to read the Cost dashboard.
+Decision 9 requires every local rung to carry `synthetic_usd_per_1m_tokens > 0`, configured identically in the operator config *and* in LiteLLM's price map. What should they be? A price near a real cloud model's makes the synthetic dollars comparable and the dashboards intuitive; a price far below it makes the hard door very loose. There is no defensible default — it depends on how you want to read the Cost dashboard.
+*Where the number has to be typed, on the deployed instance:* the **gitops** repo, `clusters/orac/apps/litellm/litellm.yaml`, under `spec.values.litellm_settings.model_cost_map`. **Local models are priced at ZERO there today** — which is exactly why `monthly_tokens` currently has no hard door anywhere. Setting them is a gitops MR, not a gonk change.
 
-**OD-D — The canonical local rung name.** The onboarding template ships `ladder: [qwen-local]` (spec 5.4's example, Plan 02's default `.gonk.yml`). That string must **exactly** match a LiteLLM model name **and** appear in the instance ladder, or ADR-002's empty-ladder rule disables every freshly-onboarded project. Is `qwen-local` the real name? (Shared with Plan 02's OD-D — same question, one answer.)
+**OD-D — The canonical local rung name.** The onboarding template ships `ladder: [qwen-local]` (spec 5.4's example, Plan 02's default `.gonk.yml`). That string must **exactly** match a LiteLLM model name **and** appear in the instance ladder, or ADR-002's empty-ladder rule disables every freshly-onboarded project. Is `qwen-local` the real name?
+*Where the answer lives:* the **gitops** repo, `clusters/orac/apps/litellm/litellm.yaml`, under `spec.values.proxy_config.model_list` — read the `model_name` values. Do not guess. (Shared with Plan 02's OD-B — same question, one answer.)
 
 ---
 
@@ -5853,13 +5955,142 @@ Write a `keysink_test.go` covering:
 - The result is a legal DNS-1123 subdomain (lowercase alphanumeric and `-`, starts and ends alphanumeric, <= 63 chars) — it becomes a Kubernetes Secret name in Plan 05.
 - `Put` is idempotent and returns the same `KeyRef` for the same project.
 
+- [ ] **Step 4b: Implement `internal/meter/keysink/k8s.go` — THE KUBERNETES SINK**
+
+**This step exists because the plan previously did not have one, and said so:**
+*"`keysink.KeySink` has no Kubernetes implementation… gonk-meter cannot deliver
+virtual keys to agent pods at all."* A hard dependency on a component **no plan
+owned**. It is Go, it lives in `internal/meter/`, and it is fully testable against
+a fake clientset with **no cluster** — so it is this plan's. (The `Role` and
+`RoleBinding` that make the writes *legal* are **Plan 05's Task 4**; see AD-1.)
+
+Add client-go, pinned — nothing in this repo floats:
+
+```bash
+go get k8s.io/client-go@v0.32.0 k8s.io/api@v0.32.0 k8s.io/apimachinery@v0.32.0
+go mod tidy
+```
+
+```go
+package keysink
+
+import (
+	"context"
+	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+
+	"gitlab.orac.local/agentic/gonk-project/internal/meter/store"
+)
+
+// SecretKey is the key inside the per-project Secret. The agent image reads it as
+// its LiteLLM virtual key; the pack (Plan 04) finds it through the KeyRef meter
+// returns. *** CHANGING THIS STRING BREAKS THE AGENT IMAGE. *** It is also the
+// literal the chart hard-codes (Plan 05) and Plan 06 asserts.
+const SecretKey = "LITELLM_API_KEY"
+
+// K8s writes each project's LiteLLM virtual key into its own Kubernetes Secret.
+//
+// This is the delivery mechanism for the whole attribution chain: an agent pod
+// gets a key scoped to ONE project with ONE budget, so LiteLLM's hard refusal
+// lands on the right project. The key material NEVER travels through meter's HTTP
+// responses, the Gas City event bus, or a log line -- meter hands out only a
+// KeyRef, and this is what the ref points at.
+//
+// One Secret per project (not one Secret with N keys) so that RBAC can later
+// scope an agent pod to exactly its own key.
+type K8s struct {
+	cs        kubernetes.Interface
+	namespace string
+	prefix    string
+}
+
+func NewK8s(cs kubernetes.Interface, namespace, prefix string) *K8s {
+	return &K8s{cs: cs, namespace: namespace, prefix: prefix}
+}
+
+func (k *K8s) name(project string) string { return k.prefix + Slug(project) }
+
+// Put is idempotent: intake re-registers every project on every reconcile pass
+// (every 10 minutes), and a rotation must overwrite rather than duplicate.
+func (k *K8s) Put(ctx context.Context, project, token string) (store.KeyRef, error) {
+	name := k.name(project)
+	ref := store.KeyRef{SecretName: name, SecretKey: SecretKey}
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: k.namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "gonk-meter",
+				"app.kubernetes.io/part-of":    "gonk",
+				"gonk.orac.local/project":      Slug(project),
+			},
+			Annotations: map[string]string{
+				// Slug is lossy; keep the real path for a human and for meter's own
+				// reconcile. The PATH is not a secret; the token is.
+				"gonk.orac.local/project-path": project,
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{SecretKey: []byte(token)},
+	}
+
+	_, err := k.cs.CoreV1().Secrets(k.namespace).Create(ctx, sec, metav1.CreateOptions{})
+	if err == nil {
+		return ref, nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
+		// NEVER wrap the token into an error: errors get logged.
+		return store.KeyRef{}, fmt.Errorf("keysink: create secret %s/%s: %w", k.namespace, name, err)
+	}
+	if _, err := k.cs.CoreV1().Secrets(k.namespace).Update(ctx, sec, metav1.UpdateOptions{}); err != nil {
+		return store.KeyRef{}, fmt.Errorf("keysink: update secret %s/%s: %w", k.namespace, name, err)
+	}
+	return ref, nil
+}
+
+// Delete removes a project's key. De-onboarding must leave no live credential
+// behind. Deleting an absent key is a no-op.
+func (k *K8s) Delete(ctx context.Context, project string) error {
+	err := k.cs.CoreV1().Secrets(k.namespace).Delete(ctx, k.name(project), metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("keysink: delete secret %s/%s: %w", k.namespace, k.name(project), err)
+	}
+	return nil
+}
+
+var _ KeySink = (*K8s)(nil)
+```
+
+`k8s_test.go`, against `k8s.io/client-go/kubernetes/fake` (no cluster, runs in the
+standing gate):
+
+- `TestK8sPutCreatesASecret` — type `Opaque`, key `LITELLM_API_KEY`, a
+  `gonk.orac.local/project` label so a human can find it.
+- `TestK8sPutIsIdempotentAndUpdates` — a second `Put` with a **new** token yields
+  the **same** `SecretName` and **one** Secret, whose value is the new token.
+  (Intake re-registers every 10 minutes; a non-idempotent `Put` is a Secret storm.)
+- `TestK8sDeleteIsIdempotent` — deleting an absent key is not an error.
+- `TestK8sHandlesHostileProjectPaths` — `Group/Repo`, a 60-segment nested path,
+  `group/repo.with.dots`, `group/_leading-underscore`: every resulting name is a
+  legal DNS-1123 subdomain (≤ 63 chars, lowercase). `Slug` is what guarantees
+  this, and a project whose key cannot be *stored* is a project that cannot
+  *spend* — fail-closed, but baffling to debug.
+
+**What this does NOT prove:** a fake clientset **does not enforce RBAC**. That
+Plan 05's `Role` actually permits these writes on a real API server is **Plan 06's**
+(it is in Plan 05's "what `helm template` cannot prove" list, item 6).
+
 - [ ] **Step 5: Watch it pass, gate, commit**
 
 ```bash
 go test ./internal/meter/... -race -v
 gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run ./...
-git add internal/meter/litellm internal/meter/keysink
-git commit -m "feat(meter): LiteLLM admin + spend-source seams with fakes, key sink interface"
+git add internal/meter/litellm internal/meter/keysink go.mod go.sum
+git commit -m "feat(meter): LiteLLM admin + spend-source seams with fakes, key sink interface, Kubernetes key sink"
 ```
 
 ---
@@ -6262,13 +6493,25 @@ import (
 
 func main() {
 	// Flags/env:
-	//   --operator-config              path to the mounted operator YAML (required)
-	//   --listen                       :8080
-	//   LITELLM_URL                    LiteLLM base URL (required)
-	//   LITELLM_ADMIN_KEY_FILE         path to the admin credential      (required)
-	//   LITELLM_ADMIN_KEY_PREVIOUS_FILE  rotation slot 2                 (optional)
-	//   GONK_METER_TOKEN_FILE          path to this API's bearer token   (required)
-	//   GONK_METER_TOKEN_PREVIOUS_FILE   rotation slot 2                 (optional)
+	//   --operator-config                path to the mounted operator YAML (required)
+	//   --listen                         :8080
+	//   LITELLM_URL                      LiteLLM base URL (required).
+	//                                    In the real deployment this is
+	//                                    http://litellm.litellm.svc.cluster.local:4000
+	//                                    -- BYO, already running (docs/environment.md).
+	//   LITELLM_ADMIN_KEY_FILE           path to the admin credential      (required)
+	//   LITELLM_ADMIN_KEY_PREVIOUS_FILE  rotation slot 2                   (optional)
+	//   GONK_METER_TOKEN_FILE            path to this API's bearer token   (required)
+	//   GONK_METER_TOKEN_PREVIOUS_FILE   rotation slot 2                   (optional)
+	//
+	//   *** THE STORE. THIS IS THE ONE THE PLAN USED TO BE MISSING. ***
+	//   GONK_METER_STORE_BACKEND         dolt | postgres                   (REQUIRED)
+	//   GONK_METER_STORE_DSN_FILE        path to a file holding the DSN    (REQUIRED)
+	//
+	//   *** THE KEY SINK (AD-1). Without it, provisioned keys reach nobody. ***
+	//   GONK_KEYSINK_NAMESPACE           k8s namespace for per-project key Secrets
+	//                                    (unset -> memory sink + a LOUD error log)
+	//   GONK_KEYSINK_PREFIX              default "gonk-key-"
 	//
 	// *** SECRETS ARE READ FROM FILES. *** (Decision 12, and the same rule Plan 02
 	// follows for the GitLab bot token and the webhook secret.)
@@ -6285,18 +6528,133 @@ func main() {
 	// against both, ORing the results -- do not short-circuit, or the timing
 	// reveals which slot matched).
 	//
-	// NO SECRET MATERIAL IS EVER COMMITTED. House rule; not negotiable.
+	// NO SECRET MATERIAL IS EVER COMMITTED. House rule; not negotiable. The DSN
+	// carries a password, which is exactly why it is a FILE and not a value.
 	//
 	// Use the same readSecretFile helper Plan 02 specifies: trim exactly one
 	// trailing newline, and REFUSE AN EMPTY FILE (an empty bearer token would
-	// accept every request).
+	// accept every request; an empty DSN would silently fall back to nothing).
 	//
 	// opercfg.Load failing is FATAL: meter must not start on a config it cannot
 	// validate, because every budget decision flows from it.
 }
+
+// openStore selects the durable store. THERE IS NO DEFAULT, AND `memory` IS NOT
+// SELECTABLE.
+//
+// The in-memory store loses reservations on restart, which is FAIL-OPEN on
+// headroom for the length of the spend-log lag -- so a typo in an env var must
+// never be able to produce it. An unknown backend, an empty DSN file, or a store
+// that will not connect is a FATAL startup error. Meter refuses to run without a
+// durable store, and that refusal is the whole point.
+//
+// WHICH backend is in force is decided by Task 0b (Dolt, or the owner-approved
+// CNPG Postgres fallback -- docs/environment.md). BOTH are supported here, today,
+// so that flipping is one env var and one Secret, not a rewrite. Plan 05's chart
+// sets these two vars from `ledger.backend` and `secrets.ledger`.
+func openStore(ctx context.Context) (store.Store, error) {
+	backend := os.Getenv("GONK_METER_STORE_BACKEND")
+	dsn, err := readSecretFile(os.Getenv("GONK_METER_STORE_DSN_FILE"))
+	if err != nil {
+		return nil, fmt.Errorf("store DSN: %w", err)
+	}
+	switch backend {
+	case "dolt":
+		return store.OpenDolt(ctx, dsn)
+	case "postgres":
+		return store.OpenPostgres(ctx, dsn)
+	case "":
+		return nil, errors.New("GONK_METER_STORE_BACKEND is required (dolt|postgres); " +
+			"there is no default, because defaulting to the in-memory store would lose " +
+			"reservations on restart and fail OPEN on budget headroom")
+	default:
+		return nil, fmt.Errorf("GONK_METER_STORE_BACKEND=%q is not a store (want dolt|postgres); "+
+			"`memory` is deliberately not selectable", backend)
+	}
+}
 ```
 
 `_ "time/tzdata"` is load-bearing: `time.LoadLocation("America/New_York")` fails in a `scratch`/`distroless` image without it, which would turn every quiet-hours project into a `400` at registration.
+
+**Both store implementations must pass `storetest.Suite` unchanged.** That suite is what makes `GONK_METER_STORE_BACKEND` a *switch* rather than a *fork*: if `ReserveIfFits` means something different on Postgres than on Dolt, the switch is a lie and the budget ceiling depends on which env var somebody set.
+
+- [ ] **Step 5b: The `testclock` seam (Plan 06 hand-back HB-3)**
+
+**Why this exists.** Month rollover, quiet-hours windows and `reservation_ttl`
+expiry are the three most important behaviours in this service, and **none of them
+can be tested against the real binary by waiting** — the shortest wait is an hour
+and the longest is a month. Plan 06's L1 layer injects the clock directly (every
+pure function in `pkg/rung`, `pkg/spend` and `pkg/budget` already takes `now` as an
+input, deliberately), but at L2/L3 the thing under test is the **binary**, and the
+binary has a clock. Without this seam, `TestQuietHoursDeferAndResume`,
+`TestBudgetExhaustionBlocksCloudRungsAndProducesDefer` and the rollover tests are
+**never proven against the real service** — say so plainly if the seam is refused.
+
+Two files, one symbol:
+
+```go
+// cmd/gonk-meter/clock.go
+//go:build !testclock
+
+package main
+
+import "time"
+
+// Now is the service's only clock. Production: the wall clock, full stop.
+func Now() time.Time { return time.Now().UTC() }
+```
+
+```go
+// cmd/gonk-meter/clock_testclock.go
+//go:build testclock
+
+package main
+
+import (
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// *** THIS FILE MUST NEVER BE IN A PRODUCTION IMAGE. ***
+//
+// A gonk-meter that reads its clock from a file is a gonk-meter whose BUDGET
+// WINDOW CAN BE MOVED BY ANYONE WHO CAN WRITE THAT FILE. Moving the window
+// forward resets every project's spend to zero. That is not a test seam in
+// production; it is a budget bypass.
+//
+// It is therefore behind a build tag, shipped ONLY in the e2e image, and
+// Plan 06's Task 9 Step 2 asserts the production binary contains neither the
+// `testclock` symbol nor the GONK_TESTCLOCK_FILE literal.
+//
+// The file holds a signed offset in seconds, applied to the wall clock. An offset
+// (not an absolute time) keeps the clock MONOTONE, which spend.Advance requires:
+// a backwards jump must never reset a window.
+func Now() time.Time {
+	path := os.Getenv("GONK_TESTCLOCK_FILE")
+	if path == "" {
+		return time.Now().UTC()
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return time.Now().UTC()
+	}
+	secs, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return time.Now().UTC()
+	}
+	return time.Now().UTC().Add(time.Duration(secs) * time.Second)
+}
+```
+
+`Now` is passed into the service as a `func() time.Time` — it is **not** called
+from `pkg/`. The pure packages keep taking `now` as a parameter; this seam moves
+only the *binary's* idea of the present.
+
+Ship it as an owner decision (**Plan 06's OD-7**), not silently. If it is refused,
+the rollover and quiet-hours behaviours are **L1-only forever**, and Plan 06 must
+say so in `docs/adr/ADR-006`.
 
 - [ ] **Step 6: Watch everything pass**
 
@@ -6391,6 +6749,7 @@ func TestDecisionCounterUsesTheBoundedReasonSet(t *testing.T)
 | `gonk_meter_project_state` | Gauge | `project`, `state` |
 | `gonk_meter_virtual_keys` | Gauge | `state` |
 | `gonk_meter_spend_sync_age_seconds` | Gauge | — |
+| **`gonk_meter_spend_synced_at_seconds`** | Gauge | — |
 | `gonk_meter_spend_sync_failures_total` | Counter | — |
 | `gonk_meter_spend_rows_unattributed_total` | Counter | — |
 | `gonk_meter_reservations_open` | Gauge | `project` |
@@ -6403,6 +6762,43 @@ func TestDecisionCounterUsesTheBoundedReasonSet(t *testing.T)
 | `gonk_meter_catalog_drift_total` | Counter | — |
 
 The spend/token counters are updated from the sync loop as new rows land (never recomputed from scratch — a counter that goes backwards breaks `rate()`); the gauges are refreshed on a `refreshGauges` tick.
+
+`gonk_meter_spend_synced_at_seconds` is a **Unix timestamp**, not an age: it is the
+absolute `spend_as_of` of the last successful sync, and it is what a test (or a
+human) **waits on as a predicate**. `gonk_meter_spend_sync_age_seconds` (`now −
+spend_as_of`) stays as the *alerting* series; an age is right for "is this
+stale?", an absolute timestamp is right for "has my call landed yet?". Both, and
+they are cheap.
+
+- [ ] **Step 3b: `POST /admin/spend/sync` — the forced sync (Plan 06 hand-back HB-2)**
+
+**Why this exists.** Meter's view of spend is a **poll** of LiteLLM's
+`/spend/logs` (Decision 11). Every assertion of the form *"the ledger now says the
+project spent $X"* therefore needs **a predicate to wait on**, not a sleep — and
+without a way to force the poll, the harness's only options are to sleep for the
+poll interval (flaky) or to sleep for longer (slow **and** flaky). *A flaky budget
+test is worse than no budget test: it trains people to ignore red.*
+
+| Request | Behaviour | Response |
+|---|---|---|
+| `POST /admin/spend/sync` | Run **one** spend-log poll and **block** until it has completed and its rows are committed. Coalesces: concurrent callers wait on the same pass. | `200` `{"spend_as_of":"2026-07-13T09:58:00Z","rows_ingested":14,"unattributed":0,"synced":true}` |
+| — sync fails | Body reports the failure; the endpoint itself is not an error. | `200` `{"synced":false,"error":"…","spend_as_of":"<last good>"}` |
+| any other method | — | `405` |
+
+Rules, and they are the same rules as everything else here:
+
+- **It is on the same listener as everything else (`:8080`), and it is
+  `Authorization: Bearer`-authenticated** like every non-`/healthz` route. Meter
+  has one port; the *intake* service is the one with a public/private split,
+  because intake is the one behind an Ingress.
+- **It forces a poll; it does not fabricate one.** `spend_as_of` is still LiteLLM's
+  truth, and `complete: false` still means what it meant. This endpoint removes a
+  *timer*, not a *guarantee*.
+- The harness's wait predicate is `spend_as_of >= the timestamp of the call I
+  made`, with a deadline — never "sleep 5s and hope". (Plan 06, "Determinism",
+  row 6.)
+- `harness.forceSpendSync` calls it. Nothing else does, in production or otherwise
+  — but it is safe if it is, which is why it is not gated behind a build tag.
 
 - [ ] **Step 4: Implement the cost API handlers**
 
@@ -6449,7 +6845,9 @@ Plus the four folded-in owner decisions, each with its rationale and its consequ
 - **Secrets (Decision 12):** file mounts, two rotation slots, never env, never committed.
 
 Also record the **known limits**, so the next reader does not have to rediscover them:
+- **THE NETWORK-LAYER BYPASS IS OPEN, AND THIS ADR IS ONE OF THE THREE PLACES THAT MUST SAY SO.** NetworkPolicies are not enforced on the target cluster (Flannel does not implement them; the Cilium HelmRelease is suspended), and LiteLLM routes local models to an **unauthenticated Ollama at `http://192.168.1.142:11434`**. An agent pod can call it directly and burn local GPU with **zero metering**. Every door in this ADR binds only traffic that goes *through* LiteLLM. Therefore: **cloud-rung budgets are hard; local-model budgets are advisory** until Cilium lands. Owner decision 2026-07-13: ship, document, do not gate. `docs/environment.md` is the primary record; Plan 05 ships the policy anyway and Plan 06 skip-tests it. **Do not soften this paragraph.**
 - Token budgets now DO have a hard door, but a loose one: LiteLLM's USD ceiling, fed by synthetic local-model prices (Decision 9). The tight gate is still meter's reservation, and it is still session-start only -- meter can refuse to start a session, but cannot stop one mid-flight.
+- **The synthetic price has to land in a LiteLLM spend row to do anything at all.** It is configured in the gitops repo at `clusters/orac/apps/litellm/litellm.yaml` (`litellm_settings.model_cost_map`), where local models are priced at **zero** today. Whether `model_cost_map` (the map this repo uses) or a per-model `model_info` block is what LiteLLM actually consults for a **locally-routed** model is **not verified** — Plan 06 Task 5 must answer it. If it is the wrong one, Decision 9 buys nothing.
 - Synthetic dollars are an accounting unit, not spend. Every surface that shows them must label them (`cost_synthetic`, the `synthetic="true"` metric label). A dashboard that sums them with real spend is lying.
 - The in-memory store loses reservations on restart, which is why it is a TEST-ONLY implementation; the shipping store is Dolt (Decision 10), and Task 0b is what proves its isolation is good enough to be trusted with a ceiling.
 - `KeySink` has no Kubernetes implementation until Plan 05 (AD-1).
@@ -6472,8 +6870,9 @@ And add to "Carried into later plans":
 
 - **Plan 02 (intake) — already reconciled, but restate it:** intake pushes **raw** `.gonk.yml` to `PUT /v1/projects/{project}` and **never calls `gonkcfg.Resolve`**. Anything requiring an `Effective` (enabled? ladder? budget?) comes from meter's response. Intake has **no quiet-hours code** and **never calls `/policy/decide`**.
 - **Plan 04 (pack):** (a) the dispatch formula must call `POST /v1/policy/decide` before every session spawn and stamp the returned `metadata` **verbatim** onto every LiteLLM request; (b) it must **never** send an attempt count — meter owns ladder state; (c) a `defer` is a **normal answer**: park the bead in `waiting-for-capacity` and retry at `retry_after` (**this is where quiet hours land**, and it is the only place a deferral is handled); (d) a `deny`/`ladder-exhausted` labels the bead `gonk::needs-human` and stops (AD-6); (e) the gate step must call `POST /v1/policy/outcome` with a **strictly classified** outcome — if it reports an infra failure as `gate-failed`, it buys an escalation the project did not earn, and **that classification is the single most important thing the pack gets right**; (f) with `provenance.include_usage`, the session must **not write a cost trailer when the cost API returns `complete: false`** (AD-7) — it would publish a wrong number into permanent git history.
-- **Plan 05 (chart):** `keysink.KeySink` has **no Kubernetes implementation**. Until the chart provides one (a per-project Secret + RBAC), **meter cannot deliver virtual keys to agent pods at all** (AD-1). Also: **meter runs single-replica** (`replicas: 1`, `strategy: Recreate`) unless Task 0b proved the store's isolation is sufficient without it (AD-10). Secrets are **file mounts with two rotation slots** — `LITELLM_ADMIN_KEY_FILE`, `LITELLM_ADMIN_KEY_PREVIOUS_FILE`, `GONK_METER_TOKEN_FILE`, `GONK_METER_TOKEN_PREVIOUS_FILE` — from `existingSecret` refs, **never env values** (Decision 12). The operator config is a mounted ConfigMap, and **LiteLLM's model list must carry the same synthetic prices for local models as the rung catalog does** (Decision 9). The instance ladder must be non-empty (`opercfg.Load` refuses to start otherwise). The **Cost dashboard must default to `synthetic="false"`** and never present synthetic dollars as spend.
-- **Plan 06 (e2e):** none of the LiteLLM HTTP adapters have ever spoken to a real LiteLLM. Verify `/key/generate`, `/key/update`, `/key/delete`, and `/spend/logs` against the pinned version. Verify that a LiteLLM key's `budget_duration: "1mo"` resets on the **same boundary** as meter's UTC calendar month (AD-9) — if it is a rolling 30 days, the soft and hard doors reset on different days and that is a real defect. **Measure LiteLLM's actual spend-log lag** and confirm `max_spend_staleness` is set above it (Decision 11). **Verify a local model's synthetic price is configured identically in LiteLLM and in the rung catalog, and that the USD door actually closes on a local-only project that exhausts its token budget** — that is Decision 9's whole claim, and nothing before Plan 06 tests it against a real proxy. Confirm a dedicated (non-master) LiteLLM admin key can perform every admin call (OD-A). Also verify spec 11.5: budget exhaustion demonstrably blocks cloud rungs and produces `defer`.
+- **Plan 05 (chart):** `internal/meter/keysink.K8s` is **this plan's** (Task 7 Step 4b); **the chart owns the `Role`, `RoleBinding` and `ServiceAccount` that make its writes legal, and the values that set `GONK_KEYSINK_NAMESPACE` / `GONK_KEYSINK_PREFIX`** (AD-1's ownership table). Without the Role, every `Put` is a `403`, every project sits in `key-missing`, and `/decide` defers forever — fail-closed, loud, and still broken. The chart must also set **`GONK_METER_STORE_BACKEND`** (`dolt`|`postgres`, no default) and **`GONK_METER_STORE_DSN_FILE`** (a file, from a Secret — the DSN carries a password), from `ledger.backend` and `secrets.ledger`. **Meter runs single-replica** (`replicas: 1`, `strategy: Recreate`) unless Task 0b proved the store's isolation is sufficient without it (AD-10). Secrets are **file mounts with two rotation slots** — `LITELLM_ADMIN_KEY_FILE`, `LITELLM_ADMIN_KEY_PREVIOUS_FILE`, `GONK_METER_TOKEN_FILE`, `GONK_METER_TOKEN_PREVIOUS_FILE` — from `existingSecret` refs, **never env values** (Decision 12). The operator config is a mounted ConfigMap, and **LiteLLM's price map must carry the same synthetic prices for local models as the rung catalog does** (Decision 9) — in the deployed instance that map is `clusters/orac/apps/litellm/litellm.yaml` → `spec.values.litellm_settings.model_cost_map` in the **gitops** repo, where **local models are priced at zero today**. The instance ladder must be non-empty (`opercfg.Load` refuses to start otherwise). The **Cost dashboard must default to `synthetic="false"`** and never present synthetic dollars as spend. And the chart must ship the egress NetworkPolicy **with the honest caveat that it is not enforced on this cluster** — see "What the hard door actually covers".
+- **Plan 06 (e2e) — the hand-backs this plan now SATISFIES, so the harness never sleeps:** **HB-2** = `POST /admin/spend/sync` + the `gonk_meter_spend_synced_at_seconds` gauge (Task 9 Step 3b). **HB-3** = the `//go:build testclock` clock seam reading `GONK_TESTCLOCK_FILE` (Task 8 Step 5b) — and Plan 06 Task 9 Step 2 must assert the **production** image contains neither the symbol nor the literal, because a meter whose clock can be moved by a file is a meter whose budget window can be reset by anyone who can write that file.
+- **Plan 06 (e2e) — and it must ALSO verify:** none of the LiteLLM HTTP adapters have ever spoken to a real LiteLLM. Verify `/key/generate`, `/key/update`, `/key/delete`, and `/spend/logs` against the pinned version. Verify that a LiteLLM key's `budget_duration: "1mo"` resets on the **same boundary** as meter's UTC calendar month (AD-9) — if it is a rolling 30 days, the soft and hard doors reset on different days and that is a real defect. **Measure LiteLLM's actual spend-log lag** and confirm `max_spend_staleness` is set above it (Decision 11). **Verify a local model's synthetic price is configured identically in LiteLLM and in the rung catalog, and that the USD door actually closes on a local-only project that exhausts its token budget** — that is Decision 9's whole claim, and nothing before Plan 06 tests it against a real proxy. Confirm a dedicated (non-master) LiteLLM admin key can perform every admin call (OD-A). Also verify spec 11.5: budget exhaustion demonstrably blocks cloud rungs and produces `defer`.
 
 - [ ] **Step 5: Run everything CI runs, from a clean tree**
 
@@ -6514,7 +6913,11 @@ git commit -m "docs: publish gonk-meter v1 API, ADR-004, and complete plan 03"
 - **The Decision-9 invariant holds:** a project with `monthly_cost_usd: 0` and `ladder: [qwen-local]` **runs**, no matter how much synthetic spend it has accumulated. That is one named table row in `pkg/rung` and one in `pkg/budget`, and if either is missing the onboarding flow is dead on arrival.
 - All three Plan 01 carry-forwards are closed: `+Inf` serializes (Task 0/1), operator `Policy` is validated (Task 2), attribution tag values are charset-gated at the boundary (Task 5).
 - Every row of the failure-mode matrix has a test in `internal/meter/service`, including the concurrency race under `-race`.
-- **No secret is read from an env value, a flag, or the config file.** `grep -rn "os.Getenv" cmd/gonk-meter/` shows only *paths*, never material.
+- **No secret is read from an env value, a flag, or the config file.** `grep -rn "os.Getenv" cmd/gonk-meter/` shows only *paths* (including `GONK_METER_STORE_DSN_FILE` — the DSN carries a password and is therefore a file), never material.
+- **The store is selectable and `memory` is not.** `GONK_METER_STORE_BACKEND` (`dolt`|`postgres`, **no default**) and `GONK_METER_STORE_DSN_FILE` are both required; an unknown backend, an empty DSN file, or a store that will not connect is a **fatal startup error**. `store.OpenDolt` and `store.OpenPostgres` both pass `storetest.Suite` **unchanged** — otherwise the switch is a fork and the ceiling depends on an env var.
+- **`internal/meter/keysink.K8s` exists and is tested against a fake clientset** (Task 7 Step 4b). With `GONK_KEYSINK_NAMESPACE` unset, meter falls back to the memory sink **and logs at ERROR** that keys are reaching nobody. (The `Role` that makes the writes legal is Plan 05's; that it actually works is Plan 06's.)
+- **The two Plan 06 hand-backs this plan owns are shipped:** `POST /admin/spend/sync` (HB-2) blocks and returns `spend_as_of`; the `testclock` build (HB-3) exists **and the production build does not contain it**.
+- **Nothing in this plan claims a budget cannot be bypassed at the network layer.** ADR-004, the metric help strings, and the dashboards all say it the honest way: **cloud-rung budgets are hard; local-model budgets are advisory** until Cilium lands (`docs/environment.md`). Grep the diff for the phrase "cannot be bypassed" and make sure every occurrence is qualified.
 - `docs/api/gonk-meter-v1.md` is published and golden-tested; `ADR-004` is written; `docs/spikes/dolt-reservation-isolation.md` records what was measured; `PLAN.md` records the new contracts and the new carry-forwards.
 - Every remaining open question is either an **"Assumed default"** the code actually implements, or an **"Owner decision needed"** block that is still flagged in `PLAN.md`. Nothing has been silently decided.
 

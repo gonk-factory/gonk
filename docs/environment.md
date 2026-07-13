@@ -46,6 +46,19 @@ any of it** — it is a snapshot, not a contract.
 - Local rungs must be given a **synthetic** per-token price here so the USD
   virtual-key ceiling is a hard door for local models too. Synthetic dollars are
   firewalled from real spend — see plans 03/05.
+- **SITE-LOCAL, NOT DEFAULTS.** This instance's models are `qwen3-14b`
+  (`ollama_chat/qwen3:14b` on bailey) and `qwen3-8b-bailey`. There is no model
+  called `qwen-local`. **These names must never appear as defaults in gonk's
+  chart, pack, or onboarding template** — another operator's LiteLLM has
+  entirely different models, and hardcoding ours would be wrong for them and
+  silently wrong for us the day bailey's model list changes.
+  Gonk ships the *mechanism*: a rung name (operator-chosen, matching
+  `^[a-z0-9][a-z0-9-]*$`) mapped by the **rung catalog** (`pkg/opercfg`, Plan 03)
+  to a real LiteLLM model plus its synthetic price. The catalog and the instance
+  ladder are **site-local operator config**, supplied via HelmRelease values in
+  the gitops repo. **The chart must FAIL to render without them, never guess.**
+  On this cluster the mapping happens to be `qwen-local` -> `qwen3-14b`; that is
+  an example, not a default.
 
 ## Ledger backend
 

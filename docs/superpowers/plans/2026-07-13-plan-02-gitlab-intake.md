@@ -23,6 +23,23 @@ decision" below), `github.com/prometheus/client_golang` (new), existing
 **Spec:** `docs/superpowers/specs/2026-07-12-gonk-stack-design.md` sections 4.1,
 4.3, 4.4, 5.1–5.5, 6.2, 8, 9, 10.2. **The spec is authoritative.**
 
+**Environment:** `docs/environment.md` — read off the live cluster, and
+**authoritative for every fact about the deployment target.** The ones that bind
+this plan:
+
+- **GitLab is 18.10.1, Community Edition**, in-cluster (`https://gitlab.orac.local`).
+  **Nothing here may use an EE feature.** The one that bites: **multiple MR
+  assignees is EE**, so the onboarding MR sets exactly one `assignee_id`, chosen
+  deterministically (Task 8).
+- GitLab serves a **private CA** certificate. Intake **must trust it**, and must
+  **never disable TLS verification** — see "Trusting `https://gitlab.orac.local`"
+  below. The repo's git remote uses `http.sslVerify=false` as a local
+  convenience; **a service must not copy that.**
+- **Every GitLab runner is offline; CI has never executed for this repo.** The
+  standing gate is local (`gofmt`/`vet`/`test -race`/`golangci-lint`), and the
+  first `gonk-intake` image is built and pushed **by hand** to
+  `registry.orac.local/agentic/gonk-project/gonk-intake:<tag>`.
+
 **Contracts consumed (do not redefine them):**
 
 - `gonkcfg.Load(raw []byte) (*ProjectConfig, error)` — schema-validates, then decodes.
@@ -125,6 +142,21 @@ A closed-unmerged onboarding MR is a decline (spec 5.3). A re-invite is `bot mem
 `GONK_GITLAB_TOKEN_FILE` plus an optional `GONK_GITLAB_ADMIN_TOKEN_FILE` used **only** for `/hooks` calls (spec 5.1). Unset → the bot token does everything (the homelab default).
 *Blast radius if wrong:* none to the code — the seam is already there (`request.admin` in `pkg/glab`). If split-credential must be the *default*, it is a chart change (Plan 05), not a Go change.
 
+**AD-4b — Every credential has TWO ROTATION SLOTS, including the GitLab bot PAT — and the two slots mean different things depending on the direction.**
+This plan's prose used to promise "two rotation slots for every credential (the GitLab bot token, the webhook secret, the meter bearer token)" while the `Config` struct in Task 10 shipped **one** slot for the GitLab PAT. Plan 05 found the contradiction and wired the chart to the struct. **The struct was the wrong half.** It is fixed here, in the owning plan; Plan 05 now mounts both slots.
+
+| Credential | Direction | What the second slot buys |
+|---|---|---|
+| Webhook token — `GONK_WEBHOOK_SECRET_FILE` / `GONK_WEBHOOK_SECRET_PREVIOUS_FILE` | intake **verifies** it | `ghook.Verifier` accepts **either** slot (constant time, results OR'd, Task 3). GitLab keeps delivering with the old token while hooks are re-provisioned with the new one. |
+| Meter bearer — `GONK_METER_TOKEN_FILE` / `GONK_METER_TOKEN_PREVIOUS_FILE` | intake **presents** it; **meter verifies** it | Intake presents slot 1 only. **Meter** holds slot 2 and accepts either (Plan 03, Task 8 Step 4). Intake needs no fallback: the verifier already takes both. |
+| **GitLab bot PAT** — `GONK_GITLAB_TOKEN_FILE` / **`GONK_GITLAB_TOKEN_PREVIOUS_FILE` (NEW)** | intake **presents** it; **GitLab verifies** it | Nobody on gonk's side verifies it, so "accept either" is meaningless. For a *presented* credential the second slot buys a **fallback**: present slot 1; if GitLab answers `401`/`403`, retry the request **once** with slot 2, log loudly, and increment `gonk_intake_gitlab_auth_fallback_total`. That turns the mid-rotation window from an outage into a metric. Implemented in `pkg/glab` (Task 1) as `Client.SetPreviousToken` + `Client.AuthFallback`, and tested by `TestFallsBackToPreviousTokenOnce` / `TestNoFallbackWhenNoPreviousSlot`. |
+
+`GONK_GITLAB_ADMIN_TOKEN_FILE` (AD-4) is optional and has **no** previous slot: it is used only for `/hooks` calls, and a failed hook repair is simply repaired on the next reconcile pass.
+
+**Conform to the gitops repo's real rotation convention** (`docs/environment.md`): the ExternalSecret carries `homelab.orac.local/rotation: enabled` plus the rotation annotations, exactly as `clusters/orac/apps/renovate/`'s GitLab bot PAT does. Gonk's deviation is **consumption**, not delivery — renovate takes its PAT as an env var; gonk takes it as a **file mount** (owner decision 2026-07-13), because env leaks into `ps`, `/proc/<pid>/environ`, crash dumps, and every child process. **Write the Vault value at `eso/gonk/gitlab` BEFORE merging the ExternalSecret**: a missing key leaves the ExternalSecret NotReady and can wedge the whole Flux reconcile (a real past incident).
+
+*Blast radius if wrong:* if the owner would rather accept a restart than carry a fallback path, drop `GONK_GITLAB_TOKEN_PREVIOUS_FILE` and the retry — but then say so in `chart/gonk/README.md`, because Plan 05's rotation procedure documents zero-downtime rotation for all three credentials.
+
 **AD-5 — Intake's pre-dispatch gate uses meter's `Effective.Actions`, but is NOT the enforcement point.**
 Meter enforces the action veto at `/decide` (it is the only chokepoint before a session spawns). Intake checks `Actions.Triage` too — purely to **avoid firing an order that will certainly be denied**, which would churn a bead for nothing. `triage.respond_to_mentions` is different: **meter does not check it**, so intake is its only enforcement point.
 *Blast radius if wrong:* if intake's pre-filter is too strict, work is silently dropped that meter would have allowed — so the pre-filter must be a **subset** of meter's rules, never a superset. Task 9 asserts this. If it is too loose, the only cost is a denied bead.
@@ -136,6 +168,7 @@ Meter enforces the action veto at `/decide` (it is the only chokepoint before a 
 *Needed:* the real endpoint and payload. **Plan 04 must reconcile `HTTPDispatcher` with Gas City's actual contract.** Until then this is a placeholder and the plan says so.
 
 **OD-B — The canonical local rung name.** The onboarding template ships `ladder: [qwen-local]` (spec 5.4's example). That string must **exactly** match a LiteLLM model name **and** appear in the instance ladder, or ADR-002's empty-ladder rule disables **every freshly-onboarded project**. Is `qwen-local` the real name?
+*Where the answer lives — and it is a file, not a memory:* the deployed LiteLLM's model list is in the gitops repo at **`clusters/orac/apps/litellm/litellm.yaml`**, under **`spec.values.proxy_config.model_list`** (`docs/environment.md`). Read the `model_name` values there and pick one; do not guess.
 (Same question as Plan 03's OD-D — one answer serves both. Carry-forward to **Plan 05**: the chart's default instance ladder **must contain it**; `opercfg.Load` now refuses to start with an empty instance ladder, which closes the fail-open PLAN.md flagged.)
 
 ---
@@ -189,6 +222,58 @@ Collapsing 422 into 400 is the mistake to avoid: it makes intake unable to tell 
 - **Failure semantics — no unmetered work, ever.** If the PUT fails, or meter is unreachable, or the response is anything but `200 / state: active`, intake marks the project **not dispatchable** and **dispatches nothing for it**, retrying next pass.
 - **De-onboarding is a `DELETE`**, not a `PUT` with `enabled: false`. It is idempotent; deleting an unknown project is `204`.
 - **Auth:** `Authorization: Bearer <token>`, read from a **file** (`GONK_METER_TOKEN_FILE`, plus an optional previous-slot file). Never an env value.
+
+---
+
+## Trusting `https://gitlab.orac.local` (private CA — never disable verification)
+
+`gitlab.orac.local` serves a certificate from the cluster's **private CA**
+(`docs/environment.md`). A Go binary with the default `http.Client` will refuse
+it, and the tempting "fix" — `InsecureSkipVerify: true`, or
+`GONK_WEBHOOK_SSL_VERIFY=false` used as a blanket switch — turns the component
+that guards the money path into one that will talk to anything.
+
+**The fix is trust, not skipping.** `trust-manager` publishes a ConfigMap named
+**`trust-bundle`** (key `tls-ca-bundle.pem`) into **every** namespace. The chart
+(Plan 05, Task 5) mounts it and sets **`SSL_CERT_FILE=/etc/ssl/orac/ca.crt`**;
+Go's `crypto/x509` reads `SSL_CERT_FILE` with no code change at all. So:
+
+- **`pkg/glab` never sets `TLSClientConfig`.** `grep -rn "InsecureSkipVerify" pkg/ cmd/`
+  must return nothing — this is a Definition-of-done item.
+- `GONK_WEBHOOK_SSL_VERIFY` (default `true`) is **not** about intake trusting
+  GitLab. It is the value intake writes into the **hook it provisions**, i.e.
+  whether *GitLab* verifies *gonk's ingress* certificate. Both directions are
+  private-CA; both are fixed by trusting the CA, not by turning verification off.
+  Plan 06 (P2-5) proves the GitLab→gonk direction against the real instance.
+- Intake reaches meter over plain HTTP inside the cluster
+  (`http://gonk-meter:8080`), so no CA is involved on that hop.
+
+---
+
+## What "budgets cannot be bypassed" actually means today (read this before you quote spec §9)
+
+Spec §9 claims agent-pod egress is confined to GitLab and LiteLLM, "so budgets
+cannot be bypassed". On the target cluster **that is not true at the network
+layer**: NetworkPolicies are not enforced (Flannel does not implement them; the
+Cilium HelmRelease is suspended), and LiteLLM routes local models to an **Ollama
+at `http://192.168.1.142:11434` that requires no credential**. An agent pod can
+therefore call Ollama directly and burn local GPU with zero metering.
+`docs/environment.md` documents this at length. The owner's decision is **ship
+it, document the gap, do not gate on it.**
+
+Nothing in *this* plan closes it, and nothing in this plan may claim it is
+closed. The honest formulation, which every README, ADR, dashboard and demo in
+this repo must use:
+
+> **Cloud-rung budgets are hard** — a cloud call needs an API key the agent pod
+> only ever holds via LiteLLM's virtual key, and LiteLLM refuses at the ceiling.
+> **Local-model budgets are advisory** until Cilium lands and the egress
+> NetworkPolicy is actually enforced.
+
+Where intake's own text (AD-1's blast radius, ADR-003) says a forged webhook
+"cannot mint spend", that remains true — a forged webhook still has to pass
+meter's `/decide`, and the *credential* door still holds. It is the *network*
+door that does not.
 
 ---
 
@@ -349,6 +434,50 @@ func TestDoesNotRetry4xx(t *testing.T) {
 	}
 }
 
+// AD-4b: rotation slot 2 for a credential we PRESENT. Mid-rotation, GitLab still
+// only accepts the old PAT (or only the new one). One retry with the other slot
+// turns an outage into a metric. It must be exactly ONE retry, and it must never
+// happen when no previous slot is configured.
+func TestFallsBackToPreviousTokenOnce(t *testing.T) {
+	var seen []string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tok := r.Header.Get("PRIVATE-TOKEN")
+		seen = append(seen, tok)
+		if tok != "old" {
+			http.Error(w, `{"message":"401 Unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"id":7,"username":"gonk"}`)
+	}))
+	c.SetPreviousToken("old")
+	var fallbacks int
+	c.AuthFallback = func() { fallbacks++ }
+
+	if _, err := c.CurrentUser(context.Background()); err != nil {
+		t.Fatalf("CurrentUser = %v", err)
+	}
+	if len(seen) != 2 || seen[0] != "s3cret" || seen[1] != "old" {
+		t.Fatalf("tokens presented = %v, want [s3cret old]", seen)
+	}
+	if fallbacks != 1 {
+		t.Fatalf("AuthFallback fired %d times, want 1 (a silent half-rotation is the bug)", fallbacks)
+	}
+}
+
+func TestNoFallbackWhenNoPreviousSlot(t *testing.T) {
+	var calls int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	if _, err := c.CurrentUser(context.Background()); !IsForbidden(err) {
+		t.Fatalf("err = %v, want 401", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 (no previous slot means no retry)", calls)
+	}
+}
+
 func TestPaginatesMemberProjects(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("page") {
@@ -416,9 +545,14 @@ import (
 const DefaultMaxBytes int64 = 1 << 20
 
 type Client struct {
-	BaseURL string // e.g. https://gitlab.orac.local
+	BaseURL string // e.g. https://gitlab.orac.local  (PRIVATE CA -- see below)
 	token   string
-	HTTP    *http.Client
+	// prevToken is rotation slot 2 (AD-4b). The PAT is a credential we PRESENT,
+	// not one we verify, so the second slot is a FALLBACK: on a 401/403 with the
+	// current token we retry the request ONCE with this one, loudly. Empty means
+	// no fallback, which is the normal steady state.
+	prevToken string
+	HTTP      *http.Client
 	// AdminToken, when non-empty, is used ONLY for webhook management
 	// (split-credential mode, spec 5.1). Empty means bot-does-everything.
 	AdminToken   string
@@ -426,8 +560,27 @@ type Client struct {
 	MaxRetries   int
 	RetryBackoff func(attempt int) time.Duration
 	UserAgent    string
+	// AuthFallback is called when slot 1 was rejected and slot 2 was used
+	// instead. cmd/gonk-intake wires it to a Prometheus counter
+	// (gonk_intake_gitlab_auth_fallback_total): a rotation that quietly
+	// half-completed must be visible, not merely survivable.
+	AuthFallback func()
 }
 
+// SetPreviousToken installs rotation slot 2. It is a setter, not an exported
+// field, for the same reason `token` is unexported: nothing may read the
+// material back out, and nothing may print the struct.
+func (c *Client) SetPreviousToken(tok string) { c.prevToken = tok }
+
+// New builds a client for baseURL.
+//
+// *** THE http.Client HAS NO TLSClientConfig, AND MUST NEVER GET ONE. ***
+// gitlab.orac.local serves a PRIVATE CA certificate (docs/environment.md). The
+// fix is to TRUST the CA, not to skip verification: the chart mounts
+// trust-manager's `trust-bundle` ConfigMap and sets SSL_CERT_FILE, which
+// crypto/x509 honours with no code here at all. A single InsecureSkipVerify in
+// this package would let the component that guards the money path talk to
+// anything that answers on port 443.
 func New(baseURL, token string) *Client {
 	return &Client{
 		BaseURL:      strings.TrimSuffix(baseURL, "/"),
@@ -470,6 +623,7 @@ type request struct {
 	body     any    // JSON-encoded when non-nil
 	admin    bool   // use AdminToken when set (hook management)
 	maxBytes int64  // 0 -> Client.MaxBytes
+	usedPrev bool   // AD-4b: this attempt is the one-shot retry on rotation slot 2
 }
 
 // do sends one request with retries on 429 and 5xx. It returns the raw body and
@@ -501,6 +655,9 @@ func (c *Client) do(ctx context.Context, rq request) ([]byte, http.Header, error
 			req.URL.RawQuery = q.Encode()
 		}
 		tok := c.token
+		if rq.usedPrev {
+			tok = c.prevToken // AD-4b: the one-shot rotation fallback
+		}
 		if rq.admin && c.AdminToken != "" {
 			tok = c.AdminToken
 		}
@@ -523,6 +680,18 @@ func (c *Client) do(ctx context.Context, rq request) ([]byte, http.Header, error
 				return body, resp.Header, nil
 			case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
 				lastErr = &APIError{Status: resp.StatusCode, Method: rq.method, Path: rq.path, Body: truncate(body)}
+			case (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) &&
+				c.prevToken != "" && !rq.usedPrev && !rq.admin:
+				// AD-4b: rotation slot 2. Slot 1 was rejected -- we are mid-rotation
+				// and the pod still holds the old value, or holds the new one before
+				// GitLab activated it. Retry ONCE with the previous slot, count it,
+				// and let the next reconcile pass proceed. Never loop: usedPrev makes
+				// this exactly one extra attempt.
+				if c.AuthFallback != nil {
+					c.AuthFallback()
+				}
+				rq.usedPrev = true
+				continue
 			default:
 				// 4xx other than 429: retrying cannot help.
 				return nil, nil, &APIError{Status: resp.StatusCode, Method: rq.method, Path: rq.path, Body: truncate(body)}
@@ -852,7 +1021,16 @@ Each is `getJSON` (or `paginate`) over `request{...}` exactly like `CurrentUser`
 - [ ] **Step 6: Run the tests**
 
 Run: `go test ./pkg/glab/ -race -count=1 -v`
-Expected: PASS (7 tests).
+Expected: PASS (9 tests).
+
+Also assert, once, and keep it in the standing gate:
+
+```bash
+grep -rn "InsecureSkipVerify\|TLSClientConfig" pkg/ cmd/   # must print NOTHING
+```
+
+The private CA is trusted via `SSL_CERT_FILE` (see "Trusting
+`https://gitlab.orac.local`"), never by turning verification off.
 
 - [ ] **Step 7: Commit**
 
@@ -4699,6 +4877,7 @@ func TestRequiredSeriesExist(t *testing.T) {
 	m.MeterPush("ok")
 	m.OnboardingResult("mr_opened")
 	m.Dispatched("issue-triage")
+	m.GitLabAuthFallback()
 
 	got, err := testutil.CollectAndCount(reg)
 	if err != nil || got == 0 {
@@ -4716,6 +4895,7 @@ func TestRequiredSeriesExist(t *testing.T) {
 		"gonk_intake_onboarding_total",
 		"gonk_intake_dispatched_total",
 		"gonk_intake_dispatch_dropped_total",
+		"gonk_intake_gitlab_auth_fallback_total",
 	} {
 		if n, err := testutil.GatherAndCount(reg, want); err != nil || n == 0 {
 			t.Errorf("series %s is not exported (spec 8)", want)
@@ -4744,14 +4924,15 @@ import (
 // values are a contract with the shipped Grafana dashboards (spec 8): renaming
 // one silently blanks a panel.
 type Metrics struct {
-	webhook    *prometheus.CounterVec
-	reconcile  *prometheus.CounterVec
-	reconDur   prometheus.Histogram
-	projects   *prometheus.GaugeVec
-	meterPush  *prometheus.CounterVec
-	onboarding *prometheus.CounterVec
-	dispatched *prometheus.CounterVec
-	dropped    *prometheus.CounterVec
+	webhook      *prometheus.CounterVec
+	reconcile    *prometheus.CounterVec
+	reconDur     prometheus.Histogram
+	projects     *prometheus.GaugeVec
+	meterPush    *prometheus.CounterVec
+	onboarding   *prometheus.CounterVec
+	dispatched   *prometheus.CounterVec
+	dropped      *prometheus.CounterVec
+	authFallback prometheus.Counter
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -4789,8 +4970,12 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "gonk_intake_dispatch_dropped_total",
 			Help: "Events that did not become orders, by reason.",
 		}, []string{"reason"}),
+		authFallback: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "gonk_intake_gitlab_auth_fallback_total",
+			Help: "GitLab calls that were rejected on PAT rotation slot 1 and succeeded on slot 2 (AD-4b). Nonzero means a rotation is half-done: finish it.",
+		}),
 	}
-	reg.MustRegister(m.webhook, m.reconcile, m.reconDur, m.projects, m.meterPush, m.onboarding, m.dispatched, m.dropped)
+	reg.MustRegister(m.webhook, m.reconcile, m.reconDur, m.projects, m.meterPush, m.onboarding, m.dispatched, m.dropped, m.authFallback)
 	// Pre-create the state gauges so a dashboard shows 0 rather than nothing.
 	for _, s := range AllStates {
 		m.projects.WithLabelValues(string(s)).Set(0)
@@ -4817,6 +5002,7 @@ func (m *Metrics) MeterPush(result string)        { m.meterPush.WithLabelValues(
 func (m *Metrics) OnboardingResult(result string) { m.onboarding.WithLabelValues(result).Inc() }
 func (m *Metrics) Dispatched(trigger string)      { m.dispatched.WithLabelValues(trigger).Inc() }
 func (m *Metrics) DispatchDropped(reason string)  { m.dropped.WithLabelValues(reason).Inc() }
+func (m *Metrics) GitLabAuthFallback()            { m.authFallback.Inc() }
 ```
 
 - [ ] **Step 4: Write the failing server test** — `pkg/intake/server_test.go`
@@ -4840,6 +5026,31 @@ func TestPrivateListenerServesOpsEndpoints(t *testing.T) {
 	// /healthz, /readyz, /metrics -> 200; POST /admin/reconcile -> 202 and kicks
 	// a reconcile; GET /admin/reconcile -> 405.
 }
+
+// *** PLAN 06 HAND-BACK HB-1. THIS IS WHY THE E2E SUITE DOES NOT SLEEP. ***
+//
+// Intake's reconcile loop runs every ~10 minutes. A test that asserts on the
+// result of a reconciliation therefore has exactly three options: wait ten
+// minutes, sleep-and-hope, or ASK. `?wait=true` is "ask": it runs one full pass
+// and BLOCKS until that pass has completed, then returns a machine-readable
+// summary. A sleeping e2e test is a flaky e2e test, and a flaky budget test is
+// worse than no budget test -- it trains people to ignore red.
+//
+// [Plan 06, "Hand-backs", HB-1; used by test/harness.forceReconcile.]
+func TestAdminReconcileWaitBlocksAndSummarizes(t *testing.T) {
+	// POST /admin/reconcile            -> 202 {"kicked":true}, returns immediately.
+	// POST /admin/reconcile?wait=true  -> 200 with a ReconcileSummary, AFTER the
+	//                                     pass has finished. The pass it waits for
+	//                                     must be one that STARTED AT OR AFTER the
+	//                                     request -- returning the summary of a
+	//                                     pass already in flight when the request
+	//                                     arrived would observe a pre-request
+	//                                     world, which is precisely the race this
+	//                                     endpoint exists to remove.
+	// GET  /admin/reconcile            -> 405.
+	// Two concurrent ?wait=true calls  -> both get a summary; only ONE extra pass
+	//                                     runs beyond any in flight (coalescing).
+}
 ```
 
 - [ ] **Step 5: Implement `pkg/intake/server.go`**
@@ -4850,11 +5061,47 @@ Two `http.ServeMux`es on two ports:
   thing behind the Ingress (spec 9).
 - `Private()` — `GET /healthz` (process alive), `GET /readyz` (bot user resolved,
   first reconcile completed, meter `/healthz` OK), `GET /metrics`
-  (`promhttp.HandlerFor(reg, …)`), `POST /admin/reconcile` (on-demand pass, spec
-  5.2 — coalesced: a request while one is running just returns 202).
+  (`promhttp.HandlerFor(reg, …)`), and **`POST /admin/reconcile`** (on-demand
+  pass, spec 5.2).
 
-Both wrapped in `http.Server` with `ReadHeaderTimeout: 5 * time.Second` (an
-unauthenticated slowloris on the ingress port is otherwise free).
+**`POST /admin/reconcile` — two modes (HB-1):**
+
+| Request | Behaviour | Response |
+|---|---|---|
+| `POST /admin/reconcile` | Kick a coalesced pass and return at once. | `202` `{"kicked":true}` |
+| `POST /admin/reconcile?wait=true` | Kick a pass **that starts at or after this request**, block until it completes (bounded by the request context / a `30s` server-side cap), and return its summary. | `200` `intake.ReconcileSummary` |
+| any other method | — | `405` |
+
+```go
+// ReconcileSummary is what `?wait=true` returns. It is a TEST/OPERATOR surface,
+// so it says what happened, not merely that something happened.
+type ReconcileSummary struct {
+	StartedAt   time.Time      `json:"started_at"`
+	FinishedAt  time.Time      `json:"finished_at"`
+	Projects    int            `json:"projects"`              // memberships seen
+	States      map[string]int `json:"states"`                // state -> count, same vocabulary as gonk_intake_projects
+	MeterPushes int            `json:"meter_pushes"`
+	Dispatched  int            `json:"dispatched"`
+	Errors      []string       `json:"errors,omitempty"`      // never a token, never a secret
+	Result      string         `json:"result"`                // ok | partial | error
+}
+```
+
+Implementation shape: `Reconciler` keeps a monotonically increasing pass counter
+under a mutex, plus a `sync.Cond` (or a `chan struct{}` broadcast) fired at the
+end of every pass. `?wait=true` records the counter, kicks, and waits for the
+counter to exceed it. That is what makes "the pass that observed my change" a
+guarantee rather than a hope.
+
+**The endpoint is unauthenticated and lives ONLY on the private listener.** It is
+not a spend surface (it fires no order that `/decide` would not gate), but it is
+a free way to make intake do work, so the NetworkPolicy (Plan 05, Task 7) is what
+keeps it to Prometheus and the harness — *and see the NetworkPolicy caveat below:
+that policy is not enforced today.* Never ingress `:9090`.
+
+Both listeners are wrapped in `http.Server` with
+`ReadHeaderTimeout: 5 * time.Second` (an unauthenticated slowloris on the ingress
+port is otherwise free).
 
 - [ ] **Step 6: Implement `cmd/gonk-intake/main.go`**
 
@@ -4894,24 +5141,32 @@ import (
 // into every child process; a flag is visible in `ps` to anything on the node.
 // The env vars below therefore carry PATHS, never material.
 //
-// TWO ROTATION SLOTS for every credential (the GitLab bot token, the webhook
+// TWO ROTATION SLOTS for every credential (the GitLab bot PAT, the webhook
 // secret, the meter bearer token), so a rotation is not an outage: write the new
 // secret to slot 1, the old to slot 2, roll, then drop slot 2.
 //
+// The two slots mean DIFFERENT THINGS in the two directions (AD-4b):
+//   - a credential we VERIFY (the webhook token) -> accept EITHER slot;
+//   - a credential we PRESENT (the GitLab PAT)   -> present slot 1, and on a
+//     401/403 retry ONCE with slot 2 (glab.Client.SetPreviousToken).
+//   - the meter bearer is presented by intake and VERIFIED BY METER, so intake
+//     carries slot 1 only; meter (Plan 03 Task 8) holds slot 2 and accepts both.
+//     GONK_METER_TOKEN_PREVIOUS_FILE is therefore METER's env var, not intake's.
+//
 // NO SECRET IS EVER COMMITTED. House rule; not negotiable.
 type Config struct {
-	GitLabURL             string // GONK_GITLAB_URL
-	GitLabTokenFile       string // GONK_GITLAB_TOKEN_FILE      (bot PAT)
-	GitLabAdminTokenFile  string // GONK_GITLAB_ADMIN_TOKEN_FILE (optional; split-credential, AD-4)
+	GitLabURL             string // GONK_GITLAB_URL (https://gitlab.orac.local -- private CA, trusted via SSL_CERT_FILE)
+	GitLabTokenFile       string // GONK_GITLAB_TOKEN_FILE          (bot PAT, rotation slot 1)
+	GitLabTokenPrevFile   string // GONK_GITLAB_TOKEN_PREVIOUS_FILE (rotation slot 2, optional -- AD-4b)
+	GitLabAdminTokenFile  string // GONK_GITLAB_ADMIN_TOKEN_FILE (optional; split-credential, AD-4; no previous slot)
 	WebhookSecretFile     string // GONK_WEBHOOK_SECRET_FILE          (rotation slot 1)
 	WebhookPrevSecretFile string // GONK_WEBHOOK_SECRET_PREVIOUS_FILE (rotation slot 2, optional)
 	WebhookTokenGen       string // GONK_WEBHOOK_TOKEN_GEN            (bump on rotation)
 	WebhookPublicURL      string // GONK_WEBHOOK_PUBLIC_URL  e.g. https://gonk.orac.local/hook/gitlab
-	HookSSLVerify         bool   // GONK_WEBHOOK_SSL_VERIFY (default true)
+	HookSSLVerify         bool   // GONK_WEBHOOK_SSL_VERIFY (default true; this is what GITLAB does, not what we do)
 	BotUsername           string // GONK_BOT_USERNAME (default "gonk")
 	MeterURL              string // GONK_METER_URL
-	MeterTokenFile        string // GONK_METER_TOKEN_FILE          (bearer, rotation slot 1)
-	MeterTokenPrevFile    string // GONK_METER_TOKEN_PREVIOUS_FILE (rotation slot 2, optional)
+	MeterTokenFile        string // GONK_METER_TOKEN_FILE (bearer we PRESENT; meter verifies both slots)
 	SupervisorURL         string // GONK_SUPERVISOR_URL ("" -> LogDispatcher, OD-A)
 	ReconcileInterval     time.Duration // GONK_RECONCILE_INTERVAL (default 10m)
 	ListenAddr            string // GONK_LISTEN_ADDR  (default :8080, public: hook only)
@@ -4948,6 +5203,12 @@ func run(log *slog.Logger) error {
 	}
 
 	gl := glab.New(cfg.GitLabURL, botToken)
+	// AD-4b: rotation slot 2 for the PAT. Optional; absent in the steady state.
+	if prevPAT, err := readSecretFile(cfg.GitLabTokenPrevFile); err != nil {
+		return err
+	} else if prevPAT != "" {
+		gl.SetPreviousToken(prevPAT)
+	}
 	if cfg.GitLabAdminTokenFile != "" {
 		if adm, err := readSecretFile(cfg.GitLabAdminTokenFile); err == nil {
 			gl.AdminToken = adm
@@ -4955,6 +5216,9 @@ func run(log *slog.Logger) error {
 			return err
 		}
 	}
+	// NOTE: no TLS configuration anywhere. gitlab.orac.local's private CA is
+	// trusted via SSL_CERT_FILE (set by the chart from the `trust-bundle`
+	// ConfigMap). Disabling verification here is never the answer.
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -4974,6 +5238,7 @@ func run(log *slog.Logger) error {
 
 	reg := prometheus.NewRegistry()
 	metrics := intake.NewMetrics(reg)
+	gl.AuthFallback = metrics.GitLabAuthFallback // AD-4b: a half-done rotation must be visible
 	cache := intake.NewCache()
 
 	dispatcher := intake.Dispatcher(intake.NewLogDispatcher(log))
@@ -5158,17 +5423,29 @@ Add these to `PLAN.md`'s "Carried into later plans" in Task 10:
   onboarding template's rung (`qwen-local`, OD-B), or every newly-onboarded
   project resolves to `disabled` (ADR-002). (`opercfg.Load` now refuses to start
   with an empty instance ladder, which closes the fail-open PLAN.md flagged.)
-  Secrets are **file mounts from existingSecret refs, with two rotation slots**:
-  `GONK_GITLAB_TOKEN_FILE`, `GONK_GITLAB_ADMIN_TOKEN_FILE` (optional),
-  `GONK_WEBHOOK_SECRET_FILE`, `GONK_WEBHOOK_SECRET_PREVIOUS_FILE`,
-  `GONK_METER_TOKEN_FILE`, `GONK_METER_TOKEN_PREVIOUS_FILE` — **never env
-  values**. Ship an **alert rule on `gonk_intake_projects{state="invalid"} > 0`**
-  (AD-2: an invalid project otherwise goes dark silently). Two listeners: only
-  `:8080` (hook) goes behind the Ingress; `:9090` (metrics/health/admin) must not.
-  The image needs no system tzdata (intake no longer resolves timezones at all —
-  quiet hours moved to meter), but it *does* need the GitLab CA if
-  `GONK_WEBHOOK_SSL_VERIFY` is on.
-- **Plan 06 (e2e):** the list below.
+  Secrets are **file mounts from existingSecret refs** — **never env values**:
+  `GONK_GITLAB_TOKEN_FILE` + **`GONK_GITLAB_TOKEN_PREVIOUS_FILE`** (AD-4b — the
+  second slot the chart previously did not mount),
+  `GONK_GITLAB_ADMIN_TOKEN_FILE` (optional, no second slot),
+  `GONK_WEBHOOK_SECRET_FILE`, `GONK_WEBHOOK_SECRET_PREVIOUS_FILE`, and
+  `GONK_METER_TOKEN_FILE` (intake presents slot 1;
+  **`GONK_METER_TOKEN_PREVIOUS_FILE` is METER's env var, not intake's** — meter is
+  the verifier). Ship an **alert rule on
+  `gonk_intake_projects{state="invalid"} > 0`** (AD-2: an invalid project
+  otherwise goes dark silently), and one on
+  `gonk_intake_gitlab_auth_fallback_total > 0` (AD-4b: a half-finished PAT
+  rotation). Two listeners: only `:8080` (hook) goes behind the Ingress; `:9090`
+  (metrics/health/**`POST /admin/reconcile`**) must not. The image needs no
+  system tzdata (intake no longer resolves timezones at all — quiet hours moved
+  to meter), but it **does** need the private CA: mount trust-manager's
+  `trust-bundle` ConfigMap (key `tls-ca-bundle.pem`) and set
+  **`SSL_CERT_FILE=/etc/ssl/orac/ca.crt`**. Intake never disables TLS
+  verification, and there is no value that lets it.
+- **Plan 06 (e2e):** the list below, plus **HB-1: `POST /admin/reconcile?wait=true`
+  is shipped by Task 10 of this plan** — it exists so the harness never sleeps.
+- **Plan 06 also owns the honest accounting of the NetworkPolicy gap** (see "What
+  'budgets cannot be bypassed' actually means today"): the egress-denial test is
+  **written and skipped** until Cilium lands.
 
 ## Plan 06 e2e verification items (things a fake GitLab cannot prove)
 
@@ -5239,7 +5516,23 @@ Add these to `PLAN.md`'s "Carried into later plans" in Task 10:
 - **`pkg/meterapi` is byte-identical to Plan 03 Task 0's normative source**, and
   its sha256 drift gate is armed. Intake defines **no** meter wire types of its own.
 - **No secret is read from an env value or a flag.** `grep -rn "os.Getenv"
-  cmd/gonk-intake/` shows only *paths*, never material.
+  cmd/gonk-intake/` shows only *paths*, never material. Both PAT rotation slots
+  (`GONK_GITLAB_TOKEN_FILE`, `GONK_GITLAB_TOKEN_PREVIOUS_FILE`) are read from
+  files, and `GONK_GITLAB_TOKEN_PREVIOUS_FILE` is optional (AD-4b).
+- **TLS verification is never disabled.** This grep must be empty:
+  ```bash
+  grep -rn "InsecureSkipVerify\|TLSClientConfig" pkg/ cmd/
+  ```
+  The private CA behind `https://gitlab.orac.local` is trusted through
+  `SSL_CERT_FILE`, which the chart sets from the `trust-bundle` ConfigMap
+  (`docs/environment.md`).
+- **`POST /admin/reconcile?wait=true` exists, blocks, and returns a
+  `ReconcileSummary`** (Plan 06's HB-1). Without it every e2e assertion about
+  reconciliation is a `sleep`, and a sleeping e2e test is a flaky one.
+- **Nothing in this plan claims budgets are unbypassable at the network layer.**
+  Cloud-rung budgets are hard (a cloud call needs a key the pod only holds via
+  LiteLLM); **local-model budgets are advisory** until Cilium lands
+  (`docs/environment.md`, "KNOWN LIMITATION").
 - **No test in this plan requires a live GitLab, a live meter, a Kubernetes
   cluster, or a model.** If one does, it belongs in Plan 06.
 - **No code path in this plan calls a language model.** Grep the diff: any HTTP

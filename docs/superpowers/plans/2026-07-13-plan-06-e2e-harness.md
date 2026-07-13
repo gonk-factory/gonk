@@ -6,9 +6,54 @@
 
 **Architecture:** Three layers, each honest about what it proves and what it costs. **L1** (`test/integration`, plain `go test`) wires the *real* intake and *real* meter binaries' packages in one process against fakes — fast, runs in the standing gate. **L2** (`test/component`, `-tags component`) runs the *real* LiteLLM and the *real* ledger backend in containers with the stub model — this is where every "we have never spoken to a real LiteLLM" question from Plan 03 gets answered. **L3** (`test/e2e`, `-tags e2e`) installs the chart on a cluster with a real gitlab-ce and the stub model — the spec-11 walking-skeleton milestones. A **synthetic session** driver (`test/harness.SyntheticSession`) reproduces the pack's `/decide` → LLM calls → `/outcome` cycle without opencode or Kubernetes, so the entire money path is assertable at L1 and L2.
 
-**Tech Stack:** Go 1.26, `net/http` stdlib, `go test` (build tags for the heavy layers), podman/docker (`--network=host`), kind (or an existing k3s cluster), `gitlab/gitlab-ce`, LiteLLM, Dolt **or** CNPG Postgres, Helm.
+**Tech Stack:** Go 1.26, `net/http` stdlib, `go test` (build tags for the heavy layers), podman (`--network=host`), **the real 3-node orac cluster in a throwaway namespace** (kind is *not installed* and is *not* the default — see below), `gitlab/gitlab-ce:18.10.1`, LiteLLM, Dolt **or** CNPG Postgres, Helm.
 
 **Spec:** `docs/superpowers/specs/2026-07-12-gonk-stack-design.md` — goal 7, sections 6 (budgets/ladder), 9 (security), **10.4 and 10.6** (e2e + rebuild discipline), **11 (validation milestones, incl. 11.5 budget exhaustion and 11.6 kill tests)**.
+
+**Environment:** `docs/environment.md` — read off the live cluster, and **authoritative**. It answers four of this plan's owner decisions and **rewrites L3**:
+
+| Fact | What it changes here |
+|---|---|
+| **`kind` is NOT installed. A real 3-node cluster IS reachable** (`admin@orac`, k8s v1.34). | **L3's primary path is the real cluster, in a throwaway namespace `gonk-e2e-<runid>`.** kind is a fallback that may never be used. This also sidesteps podman's broken CNI bridge entirely — the problem the old plan spent a page working around. **OD-3 is answered.** |
+| **GitLab is 18.10.1, Community Edition.** | The e2e fixture pins **`gitlab/gitlab-ce:18.10.1`**. The golden payloads are only valid for that version. **Nothing may exercise an EE feature.** **OD-2 is answered.** |
+| **Images:** `registry.orac.local/agentic/gonk-project/<image>:<tag>`, pull secret `gitlab-registry-pull-creds`, **exact tags, never `latest`**. | The harness **pushes** its per-run images to that registry and the cluster **pulls** them. No `kind load`, no `ctr images import`, no `sudo`, no SSH. **OD-1 is answered — and this was flagged as "the most likely thing to block Task 7 on day one".** |
+| **Private CA.** trust-manager publishes a `trust-bundle` ConfigMap into **every** namespace (including the throwaway one). | Services get `SSL_CERT_FILE`; **no test may disable TLS verification.** |
+| **CI has never run — every GitLab runner is offline.** | Unchanged, and this plan was already honest about it. **The real gate is local, forever, until a runner exists.** |
+| **NetworkPolicies are NOT ENFORCED** (Flannel; Cilium suspended), and LiteLLM routes local models to an **unauthenticated Ollama at `192.168.1.142:11434`**. | **The egress-denial test is WRITTEN AND SKIPPED.** See "The NetworkPolicy gap" below. This is the single most important change in this plan, and it must not be softened into a TODO. |
+
+---
+
+## The NetworkPolicy gap: the one test in this plan that is written to be skipped
+
+Spec §9's *"budgets cannot be bypassed"* is **not met at the network layer** on the
+target cluster. `docs/environment.md` records it; the owner's decision is **ship
+it, document the gap, do not gate on it.**
+
+- **NetworkPolicies are not enforced.** Flannel does not implement them; the
+  **Cilium HelmRelease is suspended**.
+- **The bypass is concrete:** LiteLLM routes local models to **Ollama at
+  `http://192.168.1.142:11434`, which requires no credential.** An agent pod can
+  call it directly, skip LiteLLM, and burn local GPU with **zero metering and no
+  ceiling.**
+
+**What this plan does about it, exactly — and an executor must not do anything
+else:**
+
+1. **Write the egress-denial test.** In full, correctly, as if it ran.
+2. **`t.Skip` it**, with a message that names Cilium (Task 7, Step 3).
+3. **Do NOT delete it. Do NOT let it pass vacuously.** A test that "passes" because
+   the pod could not be created, or because `curl` was missing, is worse than no
+   test: it is a green light over an open door. Assert the *preconditions* before
+   skipping — if the agent pod is not there, that is a **failure**, not a skip.
+4. **When Cilium lands, un-skipping this test is the gate.** And note the trap:
+   **a wrong `agentPodSelector` (Plan 05's OD-5) renders fine and enforces
+   nothing.** So **the test, not the chart template, is what will actually prove
+   it** — which is precisely why deleting it now would cost more than it saves.
+
+Everywhere else in this plan, the claim is stated honestly: **cloud-rung budgets
+are hard** (a cloud call needs a key the pod only ever holds via LiteLLM's virtual
+key, and LiteLLM refuses at the ceiling — `TestVirtualKeyIsAHardDoorInTheRealDeployment`
+proves it); **local-model budgets are advisory** until Cilium is unsuspended.
 
 ---
 
@@ -72,15 +117,25 @@ Both plans were instructed to flag anything needing live infrastructure and hand
 
 ### Hand-**backs**: things Plans 02–05 must add, or the harness cannot be deterministic
 
-These are **small additions to plans that have not executed yet**. Raise them with the owner before executing 02/03; if 02/03 have already shipped without them, they become Task 2 amendments to those services.
+**Status: four of the five have been ACCEPTED INTO THE OWNING PLANS.** They are no longer requests; they are cited tasks. **Verify each one exists before you rely on it** (Task 9's re-validation checklist) — if a plan shipped without its hand-back, the harness's only alternative is `time.Sleep`, and *a sleeping e2e test is a flaky e2e test, and a flaky budget test is worse than no budget test: it trains people to ignore red.*
 
-| # | Needed from | What | Why the harness needs it |
-|---|---|---|---|
-| **HB-1** | **Plan 02, Task 10** (`cmd/gonk-intake` private listener, `:9090`) | `POST /admin/reconcile` — force one reconciliation pass, block until it completes, return a summary. | Intake's reconcile loop runs every ~10 minutes. Without this the harness either **sleeps ten minutes per assertion** or races the timer. Both are unacceptable; a sleep-based e2e is a flaky e2e. |
-| **HB-2** | **Plan 03, Task 9** (meter's private surface) | `POST /admin/spend/sync` — force one spend-log poll, block, return `spend_as_of`. Plus a `gonk_meter_spend_synced_at_seconds` gauge. | Same reason: meter's view of spend is a poll. Every "assert the ledger says X" needs a *predicate to wait on*, not a sleep. |
-| **HB-3** | **Plan 03, Task 8** | A **clock seam**: a `//go:build testclock` variant of `cmd/gonk-meter` whose `Now()` reads a monotonic offset from a file (`GONK_TESTCLOCK_FILE`). The production build has no such file. | Month rollover, quiet-hours windows and `reservation_ttl` expiry cannot be tested by waiting. See "Owner decision OD-7". |
-| **HB-4** | **Plan 04** (the pack) | The outcome gate must (a) publish its classification (`success` / `gate-failed` / `infra-failed` / `aborted`) to the event bus and (b) be drivable to a **deterministic gate failure** by a canned model response that produces no artifact. | Otherwise "infra never escalates" cannot be distinguished from "nothing escalates". |
-| **HB-5** | **Plan 05** (the chart) | `chart/values-e2e.yaml`: bundled LiteLLM pointed at the stub model, the `testclock` meter image, the e2e rung catalog, `litellm.enabled: true`, a fixed instance ladder. | The harness must not hand-assemble the deployment it is supposed to be testing. |
+| # | Owner | What | Status | Why the harness needs it |
+|---|---|---|---|---|
+| **HB-1** | **Plan 02, Task 10 Step 5** (`cmd/gonk-intake` private listener, `:9090`) | **`POST /admin/reconcile?wait=true`** — kick a pass **that starts at or after the request**, block until it completes, return an `intake.ReconcileSummary` (JSON: `states`, `meter_pushes`, `dispatched`, `errors`, `result`). Bare `POST /admin/reconcile` still returns `202` immediately. | **✅ ACCEPTED** — specified in Plan 02, Task 10 Step 5, with `TestAdminReconcileWaitBlocksAndSummarizes`. | Intake's reconcile loop runs every ~10 minutes. Without this the harness either **sleeps ten minutes per assertion** or races the timer. Note the subtlety Plan 02 encodes: waiting on a pass *already in flight* would observe a **pre-request** world, which is the exact race this endpoint exists to remove. |
+| **HB-2** | **Plan 03, Task 9 Step 3b** (meter, `:8080`, bearer-auth like every other route) | **`POST /admin/spend/sync`** — force one spend-log poll, **block**, return `{"spend_as_of":…,"rows_ingested":…,"synced":…}`. Plus the **`gonk_meter_spend_synced_at_seconds`** gauge (an absolute Unix timestamp — a *predicate to wait on*, distinct from the `…_age_seconds` gauge, which is for *alerting*). | **✅ ACCEPTED** — specified in Plan 03, Task 9 Step 3b; the endpoint is in Plan 03's endpoint table. | Meter's view of spend is a **poll**. Every "assert the ledger says X" needs a predicate: `spend_as_of >= the timestamp of the call I made`, with a deadline. |
+| **HB-3** | **Plan 03, Task 8 Step 5b** | A **clock seam**: `cmd/gonk-meter/clock_testclock.go` behind `//go:build testclock`, whose `Now()` applies a **signed second offset** read from `GONK_TESTCLOCK_FILE`. An *offset*, not an absolute time, so the clock stays **monotone** (`spend.Advance` requires it). The production build has no such file and no such symbol. | **✅ ACCEPTED** — specified in Plan 03, Task 8 Step 5b. **Task 9 Step 2 of THIS plan asserts the production binary contains neither the symbol nor the literal.** | Month rollover, quiet-hours windows and `reservation_ttl` expiry cannot be tested by waiting: the shortest wait is an hour and the longest is a month. See **OD-7**. |
+| **HB-4** | **Plan 04** (the pack) | The outcome gate must (a) publish its classification (`success` / `gate-failed` / `infra-failed` / `aborted`) to the event bus, and (b) be drivable to a **deterministic gate failure** by a canned model response that produces no artifact. | **⚠ NOT ACCEPTED — PLAN 04 IS NOT WRITTEN YET.** It is therefore **recorded here as a requirement Plan 04 must satisfy**, and it is repeated in the "Requirements for Plan 04" section below so that whoever writes Plan 04 cannot miss it. **Do not let it evaporate:** without (a) and (b), *"infra failures never escalate a rung"* — the single subtlest invariant in the system — **cannot be distinguished from "nothing escalates at all"**, and the ladder tests are vacuous. |
+| **HB-5** | **Plan 05, Task 9 Step 1b** | **`chart/values-e2e.yaml`** — the per-run image tags, the **`testclock`** meter image, the e2e rung catalog with **round** synthetic prices, a fixed instance ladder, and `litellm.externalURL` pointed at a **harness-deployed** LiteLLM whose only upstream is the stub. | **✅ ACCEPTED, with one correction.** The original ask said *"bundled LiteLLM… `litellm.enabled: true`"* — **there is no such value.** Plan 05's chart is **external-LiteLLM-only** (its OD-3), and adding a subchart to satisfy a test would be the tail wagging the dog. **The harness deploys its own LiteLLM into the run namespace and passes the URL.** | The harness must not hand-assemble the deployment it is supposed to be testing: the first time the two diverge, e2e goes green on something nobody deploys. |
+
+### Requirements for Plan 04 (which does not exist yet — carry these forward)
+
+**Plan 04 has not been written.** These are the things it must satisfy for this harness to mean anything. Whoever writes Plan 04: this list is a hand-back, not a suggestion.
+
+1. **HB-4a — publish the outcome classification.** The gate step emits `success` | `gate-failed` | `infra-failed` | `aborted` onto the Gas City event bus, and calls `POST /v1/policy/outcome` with the same value. Plan 03 is blunt about why this matters: *"if it reports an infra failure as `gate-failed`, it buys an escalation the project did not earn, and that classification is the single most important thing the pack gets right."*
+2. **HB-4b — a deterministic gate failure.** A canned stub-model response that produces **no artifact** must drive the gate to `gate-failed`, reliably, every run. Without it, `TestInterleavedFailuresCountOnlyGateFailures` cannot tell a working ladder from a dead one.
+3. **The agent-pod labels** (`networkPolicy.agentPodSelector`, Plan 05's **OD-5**). Gas City is **not deployed yet**, so nobody knows them. **A wrong selector renders fine and enforces nothing** — this test suite is the only thing that can catch that, and only once Cilium is unsuspended.
+4. **`OrderRequest.BeadAnchor` is an idempotency key** (Plan 02's carry-forward): intake can fire the same order twice across a restart, and a duplicate bead is duplicate spend. Kill tests **K13** and **K18** rest on this entirely.
+5. **The pack never sends an attempt count** to `/decide` (Plan 03, Decision 2 — a caller-supplied attempt is a forgery vector for climbing the ladder).
 
 ---
 
@@ -111,10 +166,45 @@ Real **LiteLLM** (pinned tag), real **ledger backend** (Dolt **or** CNPG Postgre
 
 ### L3 — Full stack (`test/e2e/`, `-tags e2e`)
 
-A cluster (**kind by default; an existing k3s cluster via `GONK_E2E_KUBECONFIG` is a first-class alternative**), the full Helm chart, a **real gitlab-ce**, the stub model, real opencode agent pods.
-**Proves:** spec 11's walking-skeleton exit criteria — helm install with zero idle agent pods; the onboarding MR flow against real GitLab; triage end to end; spend attribution at bead/project granularity; budget exhaustion blocking a cloud rung; and the **pod-level kill tests** (spec 11.6). Closes every Plan 02 hand-off (P2-1 … P2-10).
-**Cannot prove:** that a real model does useful work (that is the opt-in nightly against bailey, spec 10.5 — **out of scope for this plan**). Cannot prove cloud-provider behaviour; there is no real cloud spend anywhere in this harness, by design.
+**A throwaway namespace `gonk-e2e-<runid>` on the REAL orac cluster** (the default and the documented path), the full Helm chart, a **real `gitlab-ce:18.10.1`**, a **harness-deployed LiteLLM** whose only upstream is the stub, real opencode agent pods.
+**Proves:** spec 11's walking-skeleton exit criteria — helm install with zero idle agent pods; the onboarding MR flow against real GitLab; triage end to end; spend attribution at bead/project granularity; budget exhaustion blocking a cloud rung; **that the LiteLLM virtual key is a hard door even with meter bypassed**; and the **pod-level kill tests** (spec 11.6). Closes every Plan 02 hand-off (P2-1 … P2-10).
+**Cannot prove:** **that the agent-pod egress is actually denied — the cluster does not enforce NetworkPolicy at all** (Flannel; Cilium suspended). That test is written and **skipped**; see "The NetworkPolicy gap". Cannot prove that a real model does useful work (that is the opt-in nightly against bailey, spec 10.5 — **out of scope**). Cannot prove cloud-provider behaviour; there is no real cloud spend anywhere in this harness, by design.
 **Cost:** **this is the expensive one.** See below.
+
+> **Why the real cluster and not kind: `kind` is not installed, and the cluster is.**
+> The old plan made kind the default and spent a page working around podman's
+> broken CNI bridge — a bridge kind **requires** and that **no flag fixes**. On this
+> box the whole problem evaporates: run L3 against `admin@orac` in a namespace we
+> create and destroy. It is faster (no node containers to boot), it exercises the
+> **actual** CNI, the **actual** Traefik, the **actual** cert-manager and the
+> **actual** trust-manager `trust-bundle` — and *those* are the things a chart test
+> most needs to be real. **It also means L3 is the only layer that can ever tell us
+> the NetworkPolicy is unenforced, which is exactly what it did.**
+>
+> **The rules that make this safe** (a throwaway namespace on a live cluster is a
+> loaded gun, and Task 7 treats it that way):
+>
+> - **Everything is namespaced to `gonk-e2e-<runid>`**, created at the start and
+>   deleted at the end (`t.Cleanup`, plus a `make e2e-clean` that reaps orphans by
+>   label). **No test may touch an object outside its namespace**, and a preflight
+>   refuses to run if `kubectl config current-context` is not the expected one.
+> - **The harness NEVER points at the production LiteLLM
+>   (`litellm.litellm.svc.cluster.local:4000`).** It deploys its own into the run
+>   namespace, upstream = the stub model, and asserts it. The real one routes local
+>   models to **Ollama on a real GPU** and writes to the owner's **real spend
+>   ledger**: an e2e run against it would burn real compute, pollute real cost data,
+>   and make every dollar assertion nondeterministic.
+> - **The ledger is in-namespace too** (a bundled Dolt StatefulSet, or a CNPG
+>   `Cluster` — `postgres.mode: cnpg`, **never** `mode: shared`). **The e2e suite
+>   must not get tenancy on `databases-app/postgres`**, which is the owner's real
+>   database.
+> - **Images go through the real registry**: build, tag `e2e-<runid>`, push to
+>   `registry.orac.local/agentic/gonk-project/`, and let the cluster pull with
+>   `gitlab-registry-pull-creds`. **No sideload, no `sudo`, no SSH.** Tags carry the
+>   run id, so a cached `latest` cannot silently win. (This closes **OD-1**, which
+>   the plan previously called "the most likely thing to block Task 7 on day one".)
+> - **`make e2e` always rebuilds and re-pushes.** House rule: *always rebuild an
+>   image to deliver a code change; never copy a file into a running container.*
 
 ### The honest runtime table
 
@@ -122,8 +212,13 @@ A cluster (**kind by default; an existing k3s cluster via `GONK_E2E_KUBECONFIG` 
 |---|---|---|---|---|
 | L0 unit | 10 s | 10 s | none | every commit, standing gate |
 | L1 integration | 60 s | 60 s | none | every commit, standing gate |
-| L2 component | ~6 min | ~3 min | LiteLLM, ledger, stub | `make component`, pre-merge (local) |
-| L3 e2e | **~25 min** | **~12 min** | kind/k3s + gitlab-ce + full chart | `make e2e`, on demand |
+| L2 component | ~6 min | ~3 min | LiteLLM, ledger, stub (host network) | `make component`, pre-merge (local) |
+| L3 e2e | **~18 min** | **~10 min** | gitlab-ce (host) + a namespace on the **real** cluster | `make e2e`, on demand |
+
+(L3's numbers drop because there are no kind node containers to boot. **Re-measure
+them and write the real figures into ADR-006** — this table is an estimate until
+someone runs it, and a plan that states an unmeasured number as fact is doing the
+thing this whole plan exists to prevent.)
 
 **gitlab-ce is heavy and slow to boot.** A cold `gitlab/gitlab-ce` container runs `gitlab-ctl reconfigure` and is not usable for **4–8 minutes**; on a warm data volume it is **60–180 s**. It wants ~4 GB RAM and will thrash below that.
 
@@ -144,16 +239,25 @@ What that means, layer by layer:
 
 - **L1 needs no containers at all.** This is not a coincidence — it is *why* L1 is designed the way it is. The most valuable tests must not be hostage to the runtime.
 - **L2 works fine with `--network=host`.** Every component gets a fixed loopback port (stub `:8081`, LiteLLM `:4000`, ledger `:3307`/`:5432`, meter `:9091`). There is no inter-container DNS to break, because everything is `127.0.0.1`. The harness **detects podman and adds `--network=host` automatically** (Task 2), and a preflight refuses to run if the ports are occupied.
-- **L3 is the problem.** **kind's node containers require a working bridge network** — they get an IP on a `kind` network and the API server is published from it. A broken CNI bridge means **`kind create cluster` will fail, and no flag fixes it.** `--network=host` is not an option for kind: the node container needs its own network namespace.
+- **L3 does not use kind, so the bridge never comes up.** This used to be the hardest problem in the plan; it is now a non-problem, and the reason is one line of `docs/environment.md`: **`kind` is not installed, and a real 3-node cluster is reachable.** kind's node containers *require* a working bridge (they get an IP on a `kind` network and publish the API server from it), `--network=host` is not an option for them, and **no flag fixes a broken bridge.** So we do not use kind. We use the cluster.
 
-**So L3 is cluster-provider-agnostic by construction.** `test/harness` speaks to *a kubeconfig*, never to kind directly:
+**L3 speaks to *a kubeconfig*, never to kind.** `test/harness/cluster.go` has one job: get a `*rest.Config` and a namespace.
 
-| Provider | Selected by | Notes |
-|---|---|---|
-| **kind** | default, when `kind` is on `PATH` and the bridge works | `KIND_EXPERIMENTAL_PROVIDER=podman` when the runtime is podman. Images are side-loaded with `kind load`. |
-| **existing cluster** | `GONK_E2E_KUBECONFIG=/path/to/kubeconfig` | **The documented workaround for the broken bridge: run L3 against the owner's real k3s cluster in a throwaway namespace `gonk-e2e-<runid>`, torn down at the end.** Images are side-loaded with `k3s ctr images import`, or pushed to the in-cluster registry (see **OD-1**). |
+| Provider | Selected by | Images reach the cluster by | Status |
+|---|---|---|---|
+| **existing cluster (DEFAULT)** | nothing — this is the path. `GONK_E2E_KUBECONFIG` overrides the default kubeconfig; `GONK_E2E_CONTEXT` guards against pointing at the wrong cluster. | **pushed to `registry.orac.local/agentic/gonk-project/` with tag `e2e-<runid>`** and pulled with `gitlab-registry-pull-creds`. No sideload, no `sudo`, no SSH. | **The documented, supported path.** |
+| **kind** | `GONK_E2E_PROVIDER=kind`, **and only if `kind` is on `PATH` and the bridge works** | `kind load docker-image` | **Not installed on this box; kept only so the harness is portable.** If the doctor cannot create a bridge network, this provider is **refused with a diagnosis**, not attempted. |
 
-**`make e2e-doctor` is a mandatory preflight** (Task 2). It probes the runtime, tries to create a bridge network, checks memory and free ports, and either says "kind will work" or **fails with the exact diagnosis and tells you to set `GONK_E2E_KUBECONFIG`**. A future executor must not discover the broken bridge by watching `kind create cluster` hang.
+**`make e2e-doctor` is still a mandatory preflight** (Task 2), but its job changed. It now:
+
+1. Confirms `kubectl` can reach a cluster and prints **which context** — and **fails loudly if that context is not the one the run expects**. *Creating a throwaway namespace on the wrong cluster is the one mistake this harness could make that hurts.*
+2. Confirms the `trust-bundle` ConfigMap will exist in a new namespace (trust-manager publishes into every namespace; if it does not, TLS to `gitlab.orac.local` fails and the failure looks like DNS).
+3. Confirms the run can **push** to `registry.orac.local` and that the namespace will have `gitlab-registry-pull-creds` (an `ExternalSecret`, not something the harness invents).
+4. Checks the host's free ports for L2's fixed loopback map, and memory for gitlab-ce (~4 GB).
+5. **Reports that NetworkPolicy is unenforced** (Flannel; Cilium suspended) so the skipped egress test is expected, not a surprise.
+6. Only if `GONK_E2E_PROVIDER=kind`: probes the bridge and refuses with the exact diagnosis if it is broken.
+
+A future executor must not discover any of this by watching something hang.
 
 Two rules that come from the house rules and are not negotiable here:
 
@@ -168,7 +272,7 @@ Two rules that come from the house rules and are not negotiable here:
 
 | # | Source | Control |
 |---|---|---|
-| 1 | **Model output** (prose, tool calls, whether it does the task at all) | The **stub model server** (Task 1). Canned, scripted per test. **No test in this plan may reach a real model.** A NetworkPolicy test and a config assertion prove LiteLLM's only upstream is the stub. |
+| 1 | **Model output** (prose, tool calls, whether it does the task at all) | The **stub model server** (Task 1). Canned, scripted per test. **No test in this plan may reach a real model.** The harness deploys **its own LiteLLM** whose only upstream is the stub, and **asserts the config** — because the NetworkPolicy that would *enforce* it is **not enforced on this cluster** (Flannel; Cilium suspended), so a config assertion is the only control we actually have. **The harness must never point at the production LiteLLM**, which routes local models to a real Ollama on a real GPU and writes to the owner's real spend ledger. |
 | 2 | **Token counts** | The stub *reports* usage; the script says exactly how many prompt/completion tokens each call consumed. Cost is then LiteLLM's `tokens × configured price` — a pure function of two things the harness controls. |
 | 3 | **Float arithmetic on money** | Test prices are fixed and round (`$0.25/1M` synthetic local, `$2.00/1M` cloud); token counts are round. Comparisons go through `ledger.ApproxUSD(got, want)` with a `1e-9` tolerance. **Never `==` on a dollar.** |
 | 4 | **Wall clock**: month rollover, quiet-hours windows, `reservation_ttl` expiry | The **clock seam** (**HB-3**): a `testclock` meter build reads a monotonic offset from a file; the harness advances it. **No test crosses a time boundary by sleeping.** L1 injects the clock directly (Plan 03 made it an input to the pure functions). |
@@ -191,17 +295,41 @@ Two rules that come from the house rules and are not negotiable here:
 
 ### Owner decision needed
 
-**OD-1 — Registry for test images.** The harness builds `gonk-intake`, `gonk-meter`, `gonk-agent`, `gonk-stubmodel` and must get them onto the cluster.
-*Assumed default (revisit if wrong):* **no registry.** `kind load docker-image` for kind; `k3s ctr images import` (via `sudo`, over SSH if the cluster is remote) for the existing-cluster path.
-*Blast radius:* if the k3s nodes are not reachable for a sideload, L3-on-k3s needs a registry the owner must name, and `values-e2e.yaml` needs an `imagePullSecret`. **This is the most likely thing to block Task 7 on day one.**
+**OD-1 — Registry for test images. [ANSWERED — `docs/environment.md`]**
+Images go to the **in-cluster GitLab container registry**:
+`registry.orac.local/agentic/gonk-project/<image>:e2e-<runid>`, pulled with the
+per-namespace **`gitlab-registry-pull-creds`** Secret. **No sideload, no `sudo`,
+no SSH, no `kind load`.** `values-e2e.yaml` (HB-5) carries the registry and the
+pull secret. Tags carry the run id, so a stale `latest` cannot silently win —
+and `latest` is rejected by the chart's schema anyway (Plan 05, G11).
+*This was previously flagged as "the most likely thing to block Task 7 on day
+one". It is now answered, and it is the reason the real cluster is a cheaper L3
+target than kind.*
 
-**OD-2 — The gitlab-ce version pin, and it must match production.** The golden webhook payloads (P2-1) are only meaningful if the e2e GitLab is **the same version as gitlab.orac.local**. Spec 12.6 makes payload drift across upgrades a named risk.
-*Needed from the owner:* the exact running version of gitlab.orac.local, and confirmation it is **CE** (spec 7.2 assumes CE; group webhooks are Premium, so a Premium instance would let us take a path CE users cannot).
-*Assumed default:* `gitlab/gitlab-ce:<pin>` with the pin recorded in `test/e2e/versions.env` and asserted at runtime against the running instance's `/api/v4/version`. **The suite fails loudly if the pinned e2e version ≠ the version the goldens were captured from.**
+**OD-2 — The gitlab-ce version pin. [ANSWERED — `docs/environment.md`]**
+**`gitlab/gitlab-ce:18.10.1`.** The live instance is **18.10.1, Community Edition**
+(`enterprise: false`). Record it in `test/e2e/versions.env` and **assert it at
+runtime** against both the fixture's and the real instance's `/api/v4/version` —
+**the suite fails loudly if the pin, the fixture, and the goldens disagree**,
+because a golden payload is only valid for the version it was captured from
+(spec 12.6).
+**CE is not a detail — it is a constraint:** group webhooks are Premium and
+multiple MR assignees are EE, so **no test may take a path a CE user cannot**.
+Plan 02's onboarding MR sets exactly one `assignee_id`; **P2-4 verifies it.**
 
-**OD-3 — Can the dev box actually run kind?** See the podman/CNI section.
-*Assumed default:* `make e2e-doctor` decides at runtime; if the bridge is broken, the documented path is `GONK_E2E_KUBECONFIG` against the real k3s cluster in a throwaway namespace.
-*Needed from the owner:* whether pointing L3 at the **real** cluster (in an isolated namespace, with a fake GitLab group and a stub model) is acceptable, or whether the CNI bridge should be fixed (`netavark`) so kind works.
+**OD-3 — Can the dev box run kind? [ANSWERED — it does not have to.]**
+**`kind` is NOT installed, and a real 3-node cluster IS reachable.** L3's primary
+path is therefore a **throwaway namespace `gonk-e2e-<runid>` on the real orac
+cluster**, which also sidesteps podman's broken CNI bridge entirely. kind remains
+behind `GONK_E2E_PROVIDER=kind` purely so the harness is portable to a machine
+that has it; on this box it will never run.
+*What the owner is accepting by this, stated plainly:* **e2e runs create and
+destroy a namespace on the live cluster.** The guardrails are in Task 7 — a
+context check that refuses to run against an unexpected cluster; strict namespace
+scoping; **never** the production LiteLLM (it routes to a real GPU and a real
+spend ledger); **never** tenancy on `databases-app/postgres` (the owner's real
+database). If any of that is unacceptable, the fallback is to fix podman's bridge
+(`netavark`) and install kind — and say so now, not after the first surprise.
 
 **OD-4 — How long may a full e2e run take, and where does it run?**
 *Assumed default:* **L1 in the standing gate; L2 and L3 are `make` targets run on demand by a human.** They are **not** in CI, because — per PLAN.md — **every runner on gitlab.orac.local is offline and this repo's CI has never executed.** The harness is therefore designed to be **meaningful when run locally** and CI-ready if runners ever appear; the `.gitlab-ci.yml` jobs added in Task 9 are `manual` and `allow_failure: false`, so they are honest about never having run.
@@ -2495,7 +2623,12 @@ git commit -m "test(component): kill-test framework and the L2 kill matrix — e
 
 **Files:** Create `test/harness/gitlab.go`, `test/harness/cluster.go`, `test/e2e/versions.env`, `test/e2e/e2e_test.go`, `test/e2e/gitlab_test.go`.
 
-> **BEFORE YOU START:** run `make e2e-doctor`. If it says bridge networking is broken, **kind will not work and no flag will fix it** — set `GONK_E2E_KUBECONFIG` and run against the existing k3s cluster in a throwaway namespace (**OD-3**). Do not spend an afternoon fighting `kind create cluster`.
+> **BEFORE YOU START:** run `make e2e-doctor`. **Do not try to use kind — it is not installed, and podman's CNI bridge (which kind requires and no flag fixes) is broken.** L3 runs against the **real orac cluster** in a throwaway namespace `gonk-e2e-<runid>` (**OD-3**, answered by `docs/environment.md`). The doctor's first job is to tell you **which cluster you are pointed at**, and to refuse if it is not the one you meant.
+>
+> **The three things you must not do on a live cluster, and which Step 2 enforces:**
+> 1. **Do not touch anything outside `gonk-e2e-<runid>`.**
+> 2. **Do not point at the production LiteLLM** (`litellm.litellm.svc.cluster.local:4000`). It routes local models to a **real Ollama on a real GPU** and writes to the owner's **real spend ledger**. The harness deploys its **own** LiteLLM, upstream = the stub, and asserts it.
+> 3. **Do not take tenancy on `databases-app/postgres`** (the owner's real database). L3's ledger is **in-namespace**: bundled Dolt, or `postgres.mode: cnpg`. **Never `mode: shared`.**
 
 - [ ] **Step 1: `test/harness/gitlab.go` — the cached gitlab-ce fixture**
 
@@ -2522,31 +2655,81 @@ func StartGitLab(t testing.TB, rt *Runtime, c *Creds) *GitLab
 func (g *GitLab) RootToken(t testing.TB) string
 func (g *GitLab) BotUser(t testing.TB) (user glab.User, token string) // the `gonk` bot
 func (g *GitLab) NewGroup(t testing.TB, runID string) *Group
-func (g *GitLab) AssertVersionMatchesPin(t testing.TB) // OD-2: goldens are only valid for ONE version
+
+// AssertVersionMatchesPin: the pin is gitlab/gitlab-ce:18.10.1 -- the version
+// gitlab.orac.local actually runs, and it is COMMUNITY EDITION (OD-2, answered by
+// docs/environment.md). A golden payload is valid for ONE version, so this asserts
+// the fixture's /api/v4/version against test/e2e/versions.env AND fails if
+// `enterprise` is true: an EE instance would let a test take a path a CE user
+// cannot (group webhooks are Premium; multiple MR assignees are EE).
+func (g *GitLab) AssertVersionMatchesPin(t testing.TB)
+```
+
+`test/e2e/versions.env`:
+
+```sh
+# The version gitlab.orac.local ACTUALLY RUNS (docs/environment.md, 2026-07-13).
+# The golden webhook payloads in pkg/ghook/testdata are valid for THIS VERSION AND
+# NO OTHER. On a GitLab upgrade: bump this, re-run
+# TestGoldenWebhookPayloadsMatchRealGitLab, and READ THE DIFF (spec 12.6).
+GITLAB_IMAGE=gitlab/gitlab-ce:18.10.1
+GITLAB_EDITION=ce            # asserted: enterprise=false. Nothing may need EE.
+LITELLM_IMAGE=              # OD-6: the owner must name the tag they will deploy
 ```
 
 - [ ] **Step 2: `test/harness/cluster.go` — cluster-agnostic by construction**
 
 ```go
-// Cluster is A KUBECONFIG. kind is one provider; the owner's k3s is another. The
-// suite NEVER calls `kind` directly, because on this dev box kind may simply not work
-// (podman + broken CNI bridge -- see the plan's runtime section).
+// Cluster is A KUBECONFIG AND A NAMESPACE.
 //
-//	kind:     default when kind is on PATH and `make e2e-doctor` says the bridge works.
-//	          KIND_EXPERIMENTAL_PROVIDER=podman when the runtime is podman.
-//	          Images side-loaded with `kind load docker-image`.
-//	existing: GONK_E2E_KUBECONFIG=... -> a throwaway namespace `gonk-e2e-<runid>` on a
-//	          REAL cluster, torn down at the end. Images side-loaded via
-//	          `k3s ctr images import`, or pulled from a registry (OD-1 -- THE THING
-//	          MOST LIKELY TO BLOCK THIS TASK ON DAY ONE).
+// DEFAULT AND DOCUMENTED PATH: the REAL orac cluster, in a throwaway namespace
+// `gonk-e2e-<runid>`, created here and DELETED in t.Cleanup. kind is NOT installed
+// on this box, and kind's node containers require a working CNI bridge that podman
+// here does not have -- so kind is behind GONK_E2E_PROVIDER=kind and exists only so
+// the harness is portable. (docs/environment.md; OD-3.)
 //
-// ALWAYS REBUILDS AND RELOADS IMAGES. Never copies a file into a running container
-// (house rule). Image tags carry the run id so a stale :latest cannot silently win.
+// *** THE SAFETY RAILS ARE PART OF THE FIXTURE, NOT A CONVENTION. ***
+// This is a live cluster with the owner's real GitLab, real LiteLLM, real Ollama
+// and real database on it.
+//
+//   1. StartCluster REFUSES to run unless the current context matches
+//      GONK_E2E_CONTEXT (default "admin@orac"). Creating a throwaway namespace on
+//      the WRONG cluster is the one mistake this harness could make that hurts.
+//   2. Every object the suite creates is IN THE RUN NAMESPACE. Nothing else is
+//      touched, and nothing the suite did not create is ever deleted.
+//   3. The namespace is labelled gonk.orac.local/e2e-run=<runid> so `make e2e-clean`
+//      can reap orphans from a run that was killed mid-flight.
+//   4. LiteLLM is DEPLOYED BY THE HARNESS, INTO THE RUN NAMESPACE, with the stub as
+//      its only upstream -- and asserted. The production litellm.litellm.svc routes
+//      local models to a REAL GPU and writes to the owner's REAL spend ledger.
+//   5. The ledger is IN-NAMESPACE (bundled Dolt, or postgres.mode=cnpg). NEVER
+//      postgres.mode=shared: that is tenancy on databases-app/postgres, which is
+//      the owner's real database.
+//
+// IMAGES GO THROUGH THE REAL REGISTRY (OD-1, answered):
+//   build -> tag registry.orac.local/agentic/gonk-project/<img>:e2e-<runid> -> push
+//   -> the cluster pulls with `gitlab-registry-pull-creds`.
+// No sideload, no `sudo`, no SSH, no `kind load`. ALWAYS REBUILDS AND RE-PUSHES;
+// never copies a file into a running container (house rule). The run id in the tag
+// is what stops a cached image from silently winning.
+//
+// TLS: the run namespace gets trust-manager's `trust-bundle` ConfigMap like every
+// other namespace, and the chart sets SSL_CERT_FILE from it. NO TEST MAY DISABLE
+// TLS VERIFICATION.
 func StartCluster(t testing.TB, rt *Runtime) *Cluster
-func (c *Cluster) LoadImages(t testing.TB, tag string, names ...string)
-func (c *Cluster) InstallChart(t testing.TB, values map[string]any) // chart/ + values-e2e.yaml (HB-5)
-func (c *Cluster) WaitReady(t testing.TB)                           // kubectl wait; NEVER a sleep
+func (c *Cluster) Namespace() string                                 // gonk-e2e-<runid>
+func (c *Cluster) PushImages(t testing.TB, tag string, names ...string)
+func (c *Cluster) InstallChart(t testing.TB, values map[string]any)  // chart/gonk + chart/values-e2e.yaml (HB-5)
+func (c *Cluster) InstallLiteLLM(t testing.TB, stubURL string)       // the harness's OWN LiteLLM
+func (c *Cluster) WaitReady(t testing.TB)                            // kubectl wait; NEVER a sleep
 func (c *Cluster) PortForward(t testing.TB, svc string, port int) string
+
+// NetworkPolicyEnforced MEASURES whether this CNI drops what a policy forbids, by
+// applying a deny-all to a scratch pod and trying to reach a known-good endpoint.
+// On orac it returns FALSE (Flannel; Cilium suspended), which is what skips the
+// egress test in Step 3. It is a positive control, not a version check: a CNI can
+// be installed and not enforce.
+func NetworkPolicyEnforced(t testing.TB) bool
 ```
 
 - [ ] **Step 3: The spec-11 walking skeleton** — `test/e2e/e2e_test.go`
@@ -2608,14 +2791,85 @@ func TestOnboardTriageAndAttribute(t *testing.T) {
 	requireCostAPI(t, "/v1/cost/project/"+p.Path)
 }
 
-// Spec 9, and the reason budgets cannot be bypassed AT ALL: an agent pod's egress is
-// GitLab and LiteLLM. Nothing else. If a pod can reach the internet, it can reach a
-// model, and every budget in this system is decorative.
+// ============================================================================
+// SPEC 9's CENTRAL CLAIM. THIS TEST IS WRITTEN, AND IT IS SKIPPED.
+// ============================================================================
+//
+// "Agent pods have egress only to GitLab and LiteLLM, so budgets cannot be
+// bypassed." On the orac cluster that is FALSE, today, at the network layer:
+//
+//   * NetworkPolicies are NOT ENFORCED. Flannel does not implement them, and the
+//     Cilium HelmRelease that would is SUSPENDED.
+//   * LiteLLM routes local models to Ollama at http://192.168.1.142:11434, WHICH
+//     REQUIRES NO CREDENTIAL. An agent pod can call it directly, skip LiteLLM
+//     entirely, and burn local GPU with ZERO METERING and NO CEILING.
+//
+// Owner decision (2026-07-13): SHIP IT, DOCUMENT THE GAP, DO NOT GATE ON IT.
+//
+// So this test EXISTS, IN FULL, and it SKIPS.
+//
+//   * DO NOT DELETE IT. When Cilium lands, UN-SKIPPING THIS TEST IS THE GATE --
+//     and note the trap: a WRONG networkPolicy.agentPodSelector (Plan 05's OD-5;
+//     Gas City is not even deployed, so nobody knows the labels) RENDERS FINE AND
+//     ENFORCES NOTHING. The chart's render test cannot catch that. THIS TEST IS
+//     THE ONLY THING THAT CAN.
+//   * DO NOT LET IT PASS VACUOUSLY. A "pass" because the agent pod did not exist,
+//     or because `curl` was missing from the image, is a green light over an open
+//     door. The preconditions below are therefore FAILURES, not skips: we skip
+//     because the CNI does not enforce policy, and for NO OTHER REASON.
+//
+// Until then, the honest claim, and the only one anyone may make:
+//     CLOUD-rung budgets are HARD    (a cloud call needs a key the pod only ever
+//                                     holds via LiteLLM's virtual key, and LiteLLM
+//                                     refuses at the ceiling -- proven by
+//                                     TestVirtualKeyIsAHardDoorInTheRealDeployment)
+//     LOCAL-model budgets are ADVISORY.
 func TestAgentPodCannotReachAnythingButGitLabAndLiteLLM(t *testing.T) {
-	// From inside a live agent pod: curl the stub model DIRECTLY (bypassing LiteLLM)
-	// -> MUST FAIL. curl 1.1.1.1 -> MUST FAIL. curl LiteLLM -> must succeed.
+	pod := runningAgentPod(t)          // FAILS (not skips) if there is no agent pod
+	requireExecutable(t, pod, "curl")  // FAILS (not skips) if we could not test even in principle
+
+	if !harness.NetworkPolicyEnforced(t) {
+		t.Skip("SKIP: NetworkPolicy egress is unenforced — Flannel does not implement it " +
+			"and Cilium is suspended; un-skip when Cilium lands")
+	}
+
+	// ---- Everything below is the real test, and it runs the day Cilium lands. ----
+
+	// The one door that must be OPEN.
+	requireReachable(t, pod, litellmURL(t)+"/health/liveliness")
+
+	// Every door that must be SHUT. Each of these, if open, makes every budget in
+	// this system a suggestion.
+	requireUnreachable(t, pod, "http://192.168.1.142:11434/api/tags") // Ollama: NO CREDENTIAL. THE bypass.
+	requireUnreachable(t, pod, stubModelURL(t)+"/v1/models")          // the model, around LiteLLM
+	requireUnreachable(t, pod, "https://api.anthropic.com/v1/models") // a cloud model, around LiteLLM
+	requireUnreachable(t, pod, "http://1.1.1.1")                      // the internet at all
 }
 ```
+
+**`harness.NetworkPolicyEnforced` must actually measure, not assume** (Task 2). It
+is a **positive control**: apply a deny-all `NetworkPolicy` to a scratch pod in the
+run namespace, try to reach a known-good endpoint, and report whether the packet
+was dropped. Then delete it.
+
+```go
+// NetworkPolicyEnforced answers "does this CNI drop what a NetworkPolicy forbids?"
+// by MEASURING it, not by checking a version string or a values flag.
+//
+// Why a positive control and not `cilium status`: what we need to know is whether
+// a policy has TEETH, and the only honest way to learn that is to bite something.
+// A CNI can be installed and not enforce; a policy can be present and not match.
+//
+// The day this starts returning true, the egress test above un-skips ITSELF -- and
+// if it then FAILS, the agentPodSelector was wrong all along, which is exactly the
+// failure mode that renders fine and enforces nothing.
+func NetworkPolicyEnforced(t testing.TB) bool
+```
+
+**`make e2e` must print the skip.** A skipped security test that scrolls past in a
+`-v` dump has not been communicated. Task 9's `make e2e` target ends with a summary
+line: `SKIPPED (unenforced NetworkPolicy): 1 — cloud budgets hard, local budgets
+advisory. See docs/environment.md.`
 
 - [ ] **Step 4: The things only a real GitLab can answer** — `test/e2e/gitlab_test.go`. **Closes P2-1 … P2-6.**
 
@@ -2824,14 +3078,16 @@ e2e:
 Add `test/README.md` with a **"before you trust this suite"** checklist, because this plan was written against **four unexecuted plans**:
 
 - [ ] Every `pkg/` and `internal/` symbol this harness imports exists with the shape assumed. (`go build ./test/...` is the check.)
-- [ ] **HB-1** (`POST /admin/reconcile`) exists on intake, or every L1/L3 test that calls `forceReconcile` is sleeping instead — **find out which**.
-- [ ] **HB-2** (`POST /admin/spend/sync`) exists on meter.
-- [ ] **HB-3** (the `testclock` build) exists, and Task 9 Step 2's guard passes.
-- [ ] **HB-4** (the pack publishes its outcome classification and can be driven to a deterministic gate failure).
-- [ ] **HB-5** (`chart/values-e2e.yaml`).
+- [ ] **HB-1** — `POST /admin/reconcile?wait=true` exists on intake's private listener and **blocks**, returning a `ReconcileSummary` [**Plan 02, Task 10, Step 5**]. If it does not, every `forceReconcile` in L1/L3 is a `sleep` — **find out which, and do not proceed on hope.**
+- [ ] **HB-2** — `POST /admin/spend/sync` exists on meter and blocks, and `gonk_meter_spend_synced_at_seconds` is exported [**Plan 03, Task 9, Step 3b**].
+- [ ] **HB-3** — the `//go:build testclock` build of `cmd/gonk-meter` exists and reads `GONK_TESTCLOCK_FILE` [**Plan 03, Task 8, Step 5b**], **and Task 9 Step 2's guard passes** (the production image has neither the symbol nor the literal).
+- [ ] **HB-4** — **PLAN 04 IS NOT WRITTEN.** Confirm it landed with (a) the published outcome classification and (b) a deterministic gate failure [**this plan, "Requirements for Plan 04"**]. Without both, the escalation-ladder tests are **vacuous** and must be marked so, not quietly passed.
+- [ ] **HB-5** — `chart/values-e2e.yaml` exists [**Plan 05, Task 9, Step 1b**], points at a **harness-deployed** LiteLLM (**never** `litellm.litellm.svc`), and contains no credential.
 - [ ] **Plan 03 Task 0b has actually been run**, and `GONK_LEDGER` is set to whichever backend it left in force (**OD-5**). *"We assume Dolt works" is not a passing state, and a budget ceiling defended by an unproven isolation guarantee is not defended.*
-- [ ] The rung names in `test/e2e/versions.env` match the real LiteLLM model list (**OD-B/OD-D — still open across Plans 02, 03 and here**).
-- [ ] The pinned gitlab-ce version equals gitlab.orac.local's (**OD-2**), or the golden payloads are lying.
+- [ ] The store env vars the chart sets — `GONK_METER_STORE_BACKEND`, `GONK_METER_STORE_DSN_FILE` [**Plan 03, Task 8, Step 5**] — and the key sink — `keysink.NewK8s`, `GONK_KEYSINK_NAMESPACE` [**Plan 03, Task 7 Step 4b**; RBAC from **Plan 05, Task 4**] — exist. Without the key sink, **no project ever leaves `key-missing` and nothing runs at all.**
+- [ ] The rung names in `chart/values-e2e.yaml` and the operator config match the **real** LiteLLM model list — which lives in the **gitops** repo at `clusters/orac/apps/litellm/litellm.yaml` (`spec.values.proxy_config.model_list`). (**Plan 02 OD-B / Plan 03 OD-D — one question, one answer, still open.**)
+- [ ] The pinned gitlab-ce version is **18.10.1** and equals gitlab.orac.local's (**OD-2**), and it is **CE** — or the golden payloads are lying and some test may be taking an EE-only path.
+- [ ] **`harness.NetworkPolicyEnforced` returns false, the egress test skips, and the skip is REPORTED.** If it ever returns **true**, un-skip the test — and if the test then **fails**, the `agentPodSelector` was wrong all along (Plan 05's OD-5), which is the failure that renders fine and enforces nothing.
 
 - [ ] **Step 6: Update `PLAN.md`**
 
@@ -2871,6 +3127,23 @@ git add -A && git commit -m "docs: publish ADR-006, the e2e harness gates, and t
 - **Every hand-off in the checklist at the top of this plan is closed** — all ten from Plan 02, all ten from Plan 03 — **or is explicitly recorded as a finding** (e.g. "CE's member payload has no `created_at`; Plan 02's AD-3 falls back to permanent-decline"). A hand-off that is neither closed nor recorded is an open hole.
 - **The reservation race passes at all three layers** — L1 (memory store), L2 (**the real backend, whichever Task 0b left in force**), L3 (in-cluster) — at `-count≥3`. Exactly K winners against headroom for K, every run.
 - **The hard door closes with meter bypassed entirely**, at L2 and L3. If LiteLLM never refuses, **that is a fatal finding and it goes to the owner immediately**, not into a follow-up ticket.
+- **The NetworkPolicy egress test is WRITTEN, and it SKIPS with exactly this message:**
+  `SKIP: NetworkPolicy egress is unenforced — Flannel does not implement it and Cilium is suspended; un-skip when Cilium lands`
+  It is **not deleted**, it does **not pass vacuously** (a missing agent pod or a
+  missing `curl` is a **failure**, not a skip), and `harness.NetworkPolicyEnforced`
+  **measures** enforcement with a positive control rather than assuming it. **The
+  skip is reported in `make e2e`'s summary line**, not buried in `-v` output.
+  **Un-skipping it is the gate when Cilium lands.**
+- **No document, test name, or summary produced by this plan claims budgets cannot
+  be bypassed.** The honest form, everywhere: **cloud-rung budgets are hard**
+  (proven by `TestVirtualKeyIsAHardDoorInTheRealDeployment`); **local-model budgets
+  are advisory** until Cilium lands (`docs/environment.md`).
+- **L3 runs against the real cluster in a throwaway namespace, safely:** the context
+  check refuses an unexpected cluster; nothing outside `gonk-e2e-<runid>` is
+  touched; **the production LiteLLM is never used** (it routes to a real GPU and a
+  real spend ledger); **`postgres.mode: shared` is never used** (that is the
+  owner's real database); images go through `registry.orac.local` with per-run
+  tags, and `make e2e` always rebuilds and re-pushes.
 - **`TestOnboardingDefaultCanAffordItsOnlyRung` passes, and its saboteur proves it is not vacuous.**
 - **Every kill test ends in `AssertFailsClosed` with all six flags**, and `TestAssertFailsClosedCatchesEachViolation` proves the assertion can actually fail.
 - **The hostile corpus is green and the fuzz target runs.** No input crashes anything; every one is a 422; none provisions a key or fires an order.
