@@ -9,3 +9,9 @@ linters:
     - ineffassign
     - unused
     - misspell
+# golangci-lint v2 moved formatters out of `linters`. Without this block the
+# lint gate is blind to gofmt drift, which is how unformatted code reached the
+# branch in the first place.
+formatters:
+  enable:
+    - gofmt

@@ -19,8 +19,8 @@ func TestParseTokenQuantity(t *testing.T) {
 		{"2G", 2_000_000_000, false},
 		{"", 0, true},
 		{"-5", 0, true},
-		{"50m", 0, true},   // lowercase suffix rejected
-		{"1.5M", 0, true},  // fractional rejected
+		{"50m", 0, true},  // lowercase suffix rejected
+		{"1.5M", 0, true}, // fractional rejected
 		{"M", 0, true},
 		{"50MB", 0, true},
 		{"9223372036854775807K", 0, true}, // overflow
