@@ -56,8 +56,9 @@ Update the Status column as tasks complete (house rule: progress lives here).
   gitlab.orac.local was offline during plan 01. The standing gate is local:
   `gofmt -l .`, `go vet ./...`, `go test ./... -race -count=1`,
   `golangci-lint run ./...`.
-- **Lint version skew:** the local gate runs golangci-lint v2.12.2 while CI
-  pins v2.1.6. Both are green today, but they bundle different staticcheck
-  versions and can disagree later — worth pinning the local tool to match CI,
-  or reconciling the CI pin forward, before it causes a confusing local-pass/
-  CI-fail split.
+- **Toolchain:** Go 1.26 minimum (`go.mod` says `go 1.26`). The lint image must
+  be built with a Go >= that directive or golangci-lint refuses to run at all
+  (`golangci-lint:v2.1.6` is built with go1.24.2 and exits 3 against this
+  module). CI pins `golangci-lint:v2.12.2` (go1.26.2) and `golang:1.26`; v2.12.2
+  is also the local gate's version, so local and CI cannot disagree. Keep them
+  pinned together when bumping either.

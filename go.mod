@@ -1,6 +1,6 @@
 module gitlab.orac.local/agentic/gonk-project
 
-go 1.24
+go 1.26
 
 require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
