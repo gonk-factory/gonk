@@ -52,7 +52,7 @@ pkg/atags/
 
 **Files:** Create: `go.mod`, `.gitignore`, `.golangci.yml`, `.gitlab-ci.yml`, `README.md`, `PLAN.md`, `docs/adr/ADR-001-monorepo-go-layout.md`
 
-- [ ] **Step 1: Create `go.mod`**
+- [x] **Step 1: Create `go.mod`**
 
 ```
 module gitlab.orac.local/agentic/gonk-project
@@ -60,7 +60,7 @@ module gitlab.orac.local/agentic/gonk-project
 go 1.26
 ```
 
-- [ ] **Step 2: Create `.gitignore`**
+- [x] **Step 2: Create `.gitignore`**
 
 ```
 /bin/
@@ -69,7 +69,7 @@ go 1.26
 .vscode/
 ```
 
-- [ ] **Step 3: Create `.golangci.yml`**
+- [x] **Step 3: Create `.golangci.yml`**
 
 ```yaml
 version: "2"
@@ -101,7 +101,7 @@ formatters:
     - gofmt
 ```
 
-- [ ] **Step 4: Create `.gitlab-ci.yml`**
+- [x] **Step 4: Create `.gitlab-ci.yml`**
 
 ```yaml
 stages: [lint, test]
@@ -120,7 +120,7 @@ test:
     - go test ./... -race -count=1
 ```
 
-- [ ] **Step 5: Create `README.md`**
+- [x] **Step 5: Create `README.md`**
 
 ```markdown
 # gonk
@@ -146,7 +146,7 @@ pejorative has precedent (see: git).
 - `pack/`, `images/`, `chart/`, `test/` — later plans
 ```
 
-- [ ] **Step 6: Create `PLAN.md`**
+- [x] **Step 6: Create `PLAN.md`**
 
 ```markdown
 # gonk plan index
@@ -165,7 +165,7 @@ Spec: docs/superpowers/specs/2026-07-12-gonk-stack-design.md
 Update the Status column as tasks complete (house rule: progress lives here).
 ```
 
-- [ ] **Step 7: Create `docs/adr/ADR-001-monorepo-go-layout.md`**
+- [x] **Step 7: Create `docs/adr/ADR-001-monorepo-go-layout.md`**
 
 ```markdown
 # ADR-001: Single Go module, cmd/ + pkg/ layout
@@ -180,7 +180,7 @@ module means one go.sum, one CI cache, and cross-package refactors in one
 commit. pack/, images/, chart/, test/ keep their spec names (not Go code).
 ```
 
-- [ ] **Step 8: Verify and commit**
+- [x] **Step 8: Verify and commit**
 
 Run: `go build ./...`
 Expected: exits 0 with a "matched no packages" warning (no Go files exist yet).
@@ -217,7 +217,7 @@ non-scalar. Note `Load` (Task 4) schema-validates before decoding, so this is
 defense-in-depth — but the type must be sound on its own, since the schema is
 the only other thing between a typo and a wrong budget.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `pkg/gonkcfg/tokens_test.go`:
 
@@ -258,12 +258,12 @@ func TestParseTokenQuantity(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./pkg/gonkcfg/ -run TestParseTokenQuantity -v`
 Expected: FAIL (compile error: undefined TokenQuantity/ParseTokenQuantity)
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `pkg/gonkcfg/tokens.go`:
 
@@ -334,12 +334,12 @@ func (q *TokenQuantity) UnmarshalYAML(node *yaml.Node) error {
 }
 ```
 
-- [ ] **Step 4: Fetch deps, run test to verify it passes**
+- [x] **Step 4: Fetch deps, run test to verify it passes**
 
 Run: `go get gopkg.in/yaml.v3 && go test ./pkg/gonkcfg/ -run TestParseTokenQuantity -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(gonkcfg): TokenQuantity with K/M/G suffix grammar"
@@ -370,7 +370,7 @@ resolver now fails closed on a non-finite ceiling instead. Also add
 `"uniqueItems": true` to `ladder`: `[glm, glm]` validated and produced a
 duplicated rung, which would make escalation retry the same rung.
 
-- [ ] **Step 1: Write the schema**
+- [x] **Step 1: Write the schema**
 
 `pkg/gonkcfg/gonk-config.v1.schema.json`:
 
@@ -448,7 +448,7 @@ duplicated rung, which would make escalation retry the same rung.
 }
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `pkg/gonkcfg/schema_test.go`:
 
@@ -500,12 +500,12 @@ func TestValidateRejects(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `go test ./pkg/gonkcfg/ -run 'TestValidate' -v`
 Expected: FAIL (undefined: Validate)
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 `pkg/gonkcfg/schema.go`:
 
@@ -567,12 +567,12 @@ which is the desired behavior. If v6's API differs at implementation time
 (check go.sum'd version), adapt inside this file only — the exported
 `Validate([]byte) error` signature is the contract.
 
-- [ ] **Step 5: Fetch dep, run tests**
+- [x] **Step 5: Fetch dep, run tests**
 
 Run: `go get github.com/santhosh-tekuri/jsonschema/v6 && go test ./pkg/gonkcfg/ -run 'TestValidate' -v`
 Expected: PASS (all reject cases produce errors; spec example accepted)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A && git commit -m "feat(gonkcfg): embedded v1 JSON Schema and Validate"
@@ -744,7 +744,7 @@ instance veto -> group veto -> project not enabled -> ladder empty, so a project
 killed by its instance is not told to blame its ladder. Spec 5.4 keeps the
 one-line rule; ADR-002 is the precise contract, and it records this.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `pkg/gonkcfg/resolve_test.go`:
 
@@ -859,12 +859,12 @@ func TestResolveMostSpecificWins(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./pkg/gonkcfg/ -run TestResolve -v`
 Expected: FAIL (undefined: Resolve)
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `pkg/gonkcfg/resolve.go`:
 
@@ -1017,12 +1017,12 @@ func intersect(base, allowed []string) []string {
 }
 ```
 
-- [ ] **Step 4: Run all package tests**
+- [x] **Step 4: Run all package tests**
 
 Run: `go test ./pkg/gonkcfg/ -race -v`
 Expected: PASS
 
-- [ ] **Step 5: Record the resolver semantics as the published contract**
+- [x] **Step 5: Record the resolver semantics as the published contract**
 
 Create `docs/adr/ADR-002-config-precedence-semantics.md` containing the
 semantics block from the top of this task verbatim (enabled kill switch,
@@ -1031,7 +1031,7 @@ intersection, most-specific-wins scalars, defaults). Spec 5.4 states the
 one-line rule; this ADR is the precise contract the resolver implements,
 so published docs and code cannot drift apart in later plans.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A && git commit -m "feat(gonkcfg): precedence resolver with vetoes and tighten-only budgets (ADR-002)"
@@ -1043,7 +1043,7 @@ git add -A && git commit -m "feat(gonkcfg): precedence resolver with vetoes and 
 
 **Files:** Create: `docs/schemas/gonk-config.v1.schema.json` (copy of canonical), `pkg/gonkcfg/testdata/schema.v1.sha256`, `pkg/gonkcfg/drift_test.go`
 
-- [ ] **Step 1: Publish the copy and record the checksum**
+- [x] **Step 1: Publish the copy and record the checksum**
 
 ```bash
 mkdir -p docs/schemas pkg/gonkcfg/testdata
@@ -1051,7 +1051,7 @@ cp pkg/gonkcfg/gonk-config.v1.schema.json docs/schemas/
 sha256sum pkg/gonkcfg/gonk-config.v1.schema.json | cut -d' ' -f1 > pkg/gonkcfg/testdata/schema.v1.sha256
 ```
 
-- [ ] **Step 2: Write the failing-if-drifted test**
+- [x] **Step 2: Write the failing-if-drifted test**
 
 `pkg/gonkcfg/drift_test.go`:
 
@@ -1094,17 +1094,17 @@ func TestSchemaChangeIsDeliberate(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `go test ./pkg/gonkcfg/ -run 'Schema' -v`
 Expected: PASS
 
-- [ ] **Step 4: Verify the gate actually gates**
+- [x] **Step 4: Verify the gate actually gates**
 
 Run: `printf ' ' >> pkg/gonkcfg/gonk-config.v1.schema.json && go test ./pkg/gonkcfg/ -run 'Schema' ; git checkout pkg/gonkcfg/gonk-config.v1.schema.json`
 Expected: FAIL while modified (both drift tests), then restored.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(gonkcfg): published schema copy with drift and deliberate-change gates"
@@ -1116,7 +1116,7 @@ git add -A && git commit -m "feat(gonkcfg): published schema copy with drift and
 
 **Files:** Create: `pkg/atags/tags.go`, `pkg/atags/tags_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `pkg/atags/tags_test.go`:
 
@@ -1196,12 +1196,12 @@ func TestMetadataRoundTrip(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./pkg/atags/ -v`
 Expected: FAIL (package missing)
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `pkg/atags/tags.go`:
 
@@ -1290,12 +1290,12 @@ func FromMetadata(m map[string]string) (Tags, error) {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `go test ./pkg/atags/ -race -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(atags): attribution tags contract with metadata round trip"
@@ -1305,14 +1305,14 @@ git add -A && git commit -m "feat(atags): attribution tags contract with metadat
 
 ### Task 8: Full-repo verification and plan index update
 
-- [ ] **Step 1: Run everything CI will run**
+- [x] **Step 1: Run everything CI will run**
 
 Run: `go vet ./... && go test ./... -race -count=1`
 Expected: PASS. Then, if golangci-lint is available locally: `golangci-lint run ./...` (otherwise CI is the gate).
 
-- [ ] **Step 2: Update `PLAN.md`** — set plan 01 Status to `done`.
+- [x] **Step 2: Update `PLAN.md`** — set plan 01 Status to `done`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add -A && git commit -m "chore: complete plan 01 (foundation and config contract)"
