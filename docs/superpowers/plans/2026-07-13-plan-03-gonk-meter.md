@@ -1275,7 +1275,7 @@ git commit -m "spike(meter): verify Dolt's isolation for the concurrent-reservat
 - Create: `pkg/budget/limits.go`, `pkg/budget/limits_test.go`
 - Create: `pkg/budget/remaining.go`, `pkg/budget/remaining_test.go`, `pkg/budget/mutation_test.go`
 
-- [ ] **Step 1: Write the failing limits test**
+- [x] **Step 1: Write the failing limits test**
 
 `pkg/budget/limits_test.go`:
 
@@ -1372,12 +1372,12 @@ func TestUnmarshalRejectsGarbage(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail**
+- [x] **Step 2: Run it, watch it fail**
 
 Run: `go test ./pkg/budget/ -v`
 Expected: FAIL — `no Go files` / undefined `Budget`, `CostLimit`, `TokenLimit`, `FromEffective`.
 
-- [ ] **Step 3: Implement `pkg/budget/limits.go`**
+- [x] **Step 3: Implement `pkg/budget/limits.go`**
 
 ```go
 // Package budget is the JSON-safe money layer over gonkcfg.EffectiveBudget.
@@ -1496,12 +1496,12 @@ func (b Budget) AllUnlimited() bool {
 }
 ```
 
-- [ ] **Step 4: Watch it pass**
+- [x] **Step 4: Watch it pass**
 
 Run: `go test ./pkg/budget/ -run 'Marshal|RoundTrip|Unmarshal' -v`
 Expected: PASS (5 tests).
 
-- [ ] **Step 5: Write the failing remaining-math test**
+- [x] **Step 5: Write the failing remaining-math test**
 
 `pkg/budget/remaining_test.go`:
 
@@ -1654,12 +1654,12 @@ func TestFits(t *testing.T) {
 }
 ```
 
-- [ ] **Step 6: Run it, watch it fail**
+- [x] **Step 6: Run it, watch it fail**
 
 Run: `go test ./pkg/budget/ -run 'Remain|Fits' -v`
 Expected: FAIL — undefined `Spend`, `Remaining`, `Remain`.
 
-- [ ] **Step 7: Implement `pkg/budget/remaining.go`**
+- [x] **Step 7: Implement `pkg/budget/remaining.go`**
 
 ```go
 package budget
@@ -1800,12 +1800,12 @@ func fits(rem TokenLimit, est int64) bool {
 }
 ```
 
-- [ ] **Step 8: Watch it pass**
+- [x] **Step 8: Watch it pass**
 
 Run: `go test ./pkg/budget/ -race -v`
 Expected: PASS (all).
 
-- [ ] **Step 9: Hoist the table into `remainCases()` FIRST (the mutation test needs it)**
+- [x] **Step 9: Hoist the table into `remainCases()` FIRST (the mutation test needs it)**
 
 In `remaining_test.go`, move the table out of `TestRemain` into a package-level helper. Do this **before** writing `mutation_test.go`, or the package will not compile between the two steps.
 
@@ -1839,7 +1839,7 @@ func TestUnlimitedSentinelIsInf(t *testing.T) {
 
 **A note on float equality.** These cases compare `float64` exactly, and they are chosen so that they can: every expected value is exactly representable and every sum is exact in binary64 (`0.40 + 0.25 == 0.65` holds exactly; `10 - (4 + 1.5) == 4.5` holds exactly). That is deliberate, not luck — **if you add a case, verify the arithmetic is exact, or use an epsilon comparison for that case.** A money table that fails on the last bit teaches everyone to stop trusting it.
 
-- [ ] **Step 10: Write the mutation test — prove the table is not vacuous**
+- [x] **Step 10: Write the mutation test — prove the table is not vacuous**
 
 `pkg/budget/mutation_test.go`. This is the requirement that Plan 01's review earned: a resolver that ignored every config layer passed its tests because the expectations happened to equal the defaults. Here we *sabotage* the implementation and demand the table notice.
 
@@ -1933,12 +1933,12 @@ func TestSaboteursAreCaught(t *testing.T) {
 }
 ```
 
-- [ ] **Step 11: Run the mutation test, watch every saboteur get caught**
+- [x] **Step 11: Run the mutation test, watch every saboteur get caught**
 
 Run: `go test ./pkg/budget/ -run Saboteurs -v`
 Expected: PASS. If any saboteur "survived every table row", **add a table row that catches it** — do not weaken the saboteur.
 
-- [ ] **Step 12: Full gate and commit**
+- [x] **Step 12: Full gate and commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run ./...
