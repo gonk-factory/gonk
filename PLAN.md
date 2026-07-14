@@ -129,6 +129,17 @@ Update the Status column as tasks complete (house rule: progress lives here).
   `meterapi.DecideRequest` carries no attempt field on either gate, ever (a
   caller-supplied attempt is a ladder-climb forgery vector — meter reads its
   own store).
+- **Reservation reclamation (Plan 03) + idempotent order-firing (Plan 04)** —
+  found in Plan 02's final review. When intake gets a `run` from Gate-1
+  `/decide`, meter has already opened a reservation; if the subsequent
+  `FireOrder` then fails (a supervisor blip), intake logs `fire_error` and drops
+  the event — it does NOT requeue, and the reconcile loop re-derives only
+  `scaffold`, never issue-triage, so that one triage is silently lost and meter's
+  reservation dangles until it expires. This is the SAFE direction (no spend),
+  but: **Plan 03 must reclaim/expire dangling reservations (a TTL), and Plan 04's
+  `pkg/gcapi` should make `FireOrder` idempotent-retryable keyed on the
+  deterministic `BeadAnchor`** so a transient supervisor failure retries the same
+  order rather than dropping the work.
 - **Plan 04 (pack):** (a) the Gas City order API shape — **OD-A is RESOLVED**:
   `POST /v0/city/{cityName}/order/gonk-dispatch/run`, body `{"vars":{...}}`,
   no per-route auth (admission by network position). `intake.HTTPDispatcher`
