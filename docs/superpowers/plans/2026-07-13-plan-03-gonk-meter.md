@@ -1957,7 +1957,7 @@ It also carries the two things `rung.Decide` needs that `.gonk.yml` cannot suppl
 - Create: `pkg/opercfg/gonk-operator.v1.schema.json`, `pkg/opercfg/opercfg.go`, `pkg/opercfg/opercfg_test.go`, `pkg/opercfg/testdata/schema.v1.sha256`, `pkg/opercfg/drift_test.go`
 - Create: `docs/schemas/gonk-operator.v1.schema.json` (published copy)
 
-- [ ] **Step 1: Write the canonical schema**
+- [x] **Step 1: Write the canonical schema**
 
 `pkg/opercfg/gonk-operator.v1.schema.json`:
 
@@ -2080,7 +2080,7 @@ It also carries the two things `rung.Decide` needs that `.gonk.yml` cannot suppl
 
 Note `$defs/policy` mirrors `.gonk.yml`'s shape minus `version` — deliberately, so `gonkcfg.Policy` decodes both. The `ladder` here gets `uniqueItems: true` for the same reason Plan 01 added it to the project schema (a duplicated rung makes escalation retry the same rung).
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `pkg/opercfg/opercfg_test.go`:
 
@@ -2325,12 +2325,12 @@ func TestCheckLadderOrder(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run it, watch it fail**
+- [x] **Step 3: Run it, watch it fail**
 
 Run: `go test ./pkg/opercfg/ -v`
 Expected: FAIL — undefined `Load`, `OperatorConfig`, `CheckLadderOrder`.
 
-- [ ] **Step 4: Implement `pkg/opercfg/opercfg.go`**
+- [x] **Step 4: Implement `pkg/opercfg/opercfg.go`**
 
 ```go
 // Package opercfg is the contract for gonk's OPERATOR configuration: instance
@@ -2851,12 +2851,12 @@ func rejectNonFinite(v any) error {
 
 **Note for the implementer:** `gonkcfg.Policy`'s YAML tags already match this schema's `$defs/policy` (that is why the schema mirrors `.gonk.yml`'s shape), so `yaml.Unmarshal` into `gonkcfg.Policy` works directly — including `TokenQuantity.UnmarshalYAML`, which is what rejects `monthly_tokens: 1.5` at the *type* level even though the schema's `oneOf` would let `2.0` through as a zero-fraction integer. Both layers must run; do not skip the decode.
 
-- [ ] **Step 5: Watch the tests pass**
+- [x] **Step 5: Watch the tests pass**
 
 Run: `go test ./pkg/opercfg/ -race -v`
 Expected: PASS. If `unknown timezone` fails, confirm `time.LoadLocation` has a tzdata source — see Task 8, which imports `_ "time/tzdata"` in `main.go` so the container image needs no zoneinfo files.
 
-- [ ] **Step 6: Publish the schema and gate it against drift**
+- [x] **Step 6: Publish the schema and gate it against drift**
 
 Same pattern as `pkg/gonkcfg` (Plan 01 Task 6).
 
@@ -2921,12 +2921,12 @@ func TestSchemaVersionConstMatchesEmbeddedSchema(t *testing.T) {
 }
 ```
 
-- [ ] **Step 7: Prove the gate gates**
+- [x] **Step 7: Prove the gate gates**
 
 Run: `printf ' ' >> pkg/opercfg/gonk-operator.v1.schema.json && go test ./pkg/opercfg/ -run Schema ; git checkout pkg/opercfg/gonk-operator.v1.schema.json`
 Expected: FAIL (both drift tests) while modified, then restored.
 
-- [ ] **Step 8: Full gate and commit**
+- [x] **Step 8: Full gate and commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run ./...
