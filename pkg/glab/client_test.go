@@ -1,0 +1,171 @@
+package glab
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func newTestClient(t *testing.T, h http.Handler) *Client {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "s3cret")
+	c.RetryBackoff = func(int) time.Duration { return 0 } // no sleeping in tests
+	return c
+}
+
+func TestSendsPrivateToken(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("PRIVATE-TOKEN"); got != "s3cret" {
+			t.Errorf("PRIVATE-TOKEN = %q", got)
+		}
+		_, _ = fmt.Fprint(w, `{"id":7,"username":"gonk"}`)
+	}))
+	u, err := c.CurrentUser(context.Background())
+	if err != nil {
+		t.Fatalf("CurrentUser = %v", err)
+	}
+	if u.ID != 7 || u.Username != "gonk" {
+		t.Fatalf("user = %+v", u)
+	}
+}
+
+func TestNotFoundIsTyped(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"404 File Not Found"}`, http.StatusNotFound)
+	}))
+	_, err := c.GetRawFile(context.Background(), 1, ".gonk.yml", "main", 1024)
+	if !IsNotFound(err) {
+		t.Fatalf("err = %v, want IsNotFound", err)
+	}
+}
+
+// An error must never carry the token: errors get logged.
+func TestErrorDoesNotLeakToken(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	c.MaxRetries = 0
+	_, err := c.CurrentUser(context.Background())
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if strings.Contains(err.Error(), "s3cret") {
+		t.Fatalf("error leaks token: %v", err)
+	}
+}
+
+func TestRetriesOn5xxThenSucceeds(t *testing.T) {
+	var calls int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"id":7,"username":"gonk"}`)
+	}))
+	if _, err := c.CurrentUser(context.Background()); err != nil {
+		t.Fatalf("CurrentUser = %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3", calls)
+	}
+}
+
+func TestDoesNotRetry4xx(t *testing.T) {
+	var calls int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	if _, err := c.CurrentUser(context.Background()); err == nil {
+		t.Fatal("want error")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 (4xx must not retry)", calls)
+	}
+}
+
+// AD-4b: rotation slot 2 for a credential we PRESENT. Mid-rotation, GitLab still
+// only accepts the old PAT (or only the new one). One retry with the other slot
+// turns an outage into a metric. It must be exactly ONE retry, and it must never
+// happen when no previous slot is configured.
+func TestFallsBackToPreviousTokenOnce(t *testing.T) {
+	var seen []string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tok := r.Header.Get("PRIVATE-TOKEN")
+		seen = append(seen, tok)
+		if tok != "old" {
+			http.Error(w, `{"message":"401 Unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"id":7,"username":"gonk"}`)
+	}))
+	c.SetPreviousToken("old")
+	var fallbacks int
+	c.AuthFallback = func() { fallbacks++ }
+
+	if _, err := c.CurrentUser(context.Background()); err != nil {
+		t.Fatalf("CurrentUser = %v", err)
+	}
+	if len(seen) != 2 || seen[0] != "s3cret" || seen[1] != "old" {
+		t.Fatalf("tokens presented = %v, want [s3cret old]", seen)
+	}
+	if fallbacks != 1 {
+		t.Fatalf("AuthFallback fired %d times, want 1 (a silent half-rotation is the bug)", fallbacks)
+	}
+}
+
+func TestNoFallbackWhenNoPreviousSlot(t *testing.T) {
+	var calls int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	if _, err := c.CurrentUser(context.Background()); !IsForbidden(err) {
+		t.Fatalf("err = %v, want 401", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 (no previous slot means no retry)", calls)
+	}
+}
+
+func TestPaginatesMemberProjects(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "", "1":
+			w.Header().Set("X-Next-Page", "2")
+			_, _ = fmt.Fprint(w, `[{"id":1,"path_with_namespace":"a/b","default_branch":"main"}]`)
+		default:
+			w.Header().Set("X-Next-Page", "")
+			_, _ = fmt.Fprint(w, `[{"id":2,"path_with_namespace":"c/d","default_branch":"main"}]`)
+		}
+	}))
+	ps, err := c.ListMemberProjects(context.Background())
+	if err != nil {
+		t.Fatalf("ListMemberProjects = %v", err)
+	}
+	if len(ps) != 2 || ps[1].ID != 2 {
+		t.Fatalf("projects = %+v", ps)
+	}
+}
+
+// .gonk.yml is attacker-controlled: a project can commit a 2 GiB file. The
+// client must refuse to read past the cap rather than OOM the budget enforcer.
+func TestGetRawFileRefusesOversizeBody(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for range 100 {
+			_, _ = fmt.Fprint(w, strings.Repeat("x", 1024))
+		}
+	}))
+	_, err := c.GetRawFile(context.Background(), 1, ".gonk.yml", "main", 4096)
+	if err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("err = %v, want 'too large'", err)
+	}
+}
