@@ -169,7 +169,7 @@ Meter enforces the action veto at `/decide` (it is the only chokepoint before a 
 
 **OD-B — The onboarding template's ladder is derived from operator config, not a hardcoded rung.** Earlier drafts had the onboarding template ship a literal `ladder: [qwen-local]` (spec 5.4's example). That is now **wrong**: a hardcoded rung must **exactly** match a LiteLLM model name **and** appear in the instance ladder, or ADR-002's empty-ladder rule disables **every freshly-onboarded project** — and only the operator knows their catalog. So the onboarding `.gonk.yml` the bot writes into a brand-new project **renders its `ladder:` from the operator's instance ladder** (derived from operator/chart config, surfaced via meter's `Effective` / the chart's values), never from a literal in intake's source.
 *Where the operator's ladder lives — and it is a file, not a memory:* the deployed LiteLLM's model list is in the gitops repo at **`clusters/orac/apps/litellm/litellm.yaml`**, under **`spec.values.proxy_config.model_list`** (`docs/environment.md`); the chart's default instance ladder is built from those `model_name` values.
-(Same concern as Plan 03's OD-D — one operator ladder serves both. Carry-forward to **Plan 05** (its amendment): the chart owns the default instance ladder, intake renders the onboarding template from it, and `opercfg.Load` refuses to start with an empty instance ladder — which closes the fail-open PLAN.md flagged.)
+(Same concern as Plan 03's OD-D — one operator ladder serves both. Carry-forward to **Plan 05** (its amendment): the chart owns the default instance ladder and sets `GONK_INSTANCE_LADDER` from it. **The empty-ladder fail-open is closed on intake's OWN side, not by `opercfg`** — `opercfg.Load` runs in *meter*, never in intake, so it protects nothing here. Intake closes it itself: `cmd/gonk-intake`'s `loadConfig` refuses to start with an empty/unset `GONK_INSTANCE_LADDER`, and `RenderDefaultConfig` refuses to emit a `.gonk.yml` with an empty `ladder:` — two layers, both on intake's side. `opercfg.Load` separately refuses to start *meter* with an empty instance ladder; that is a different process guarding a different path.)
 
 ---
 
@@ -1288,6 +1288,7 @@ and never logged.
 package ghook
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -1298,7 +1299,15 @@ const (
 	secretB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
 
-func req(token string) *httptest.ResponseRecorder { panic("unused") } // placeholder removed below
+// req builds a webhook request carrying token in X-Gitlab-Token. An empty token
+// sets no header at all (the "missing" case), so one helper serves every test.
+func req(token string) *http.Request {
+	r := httptest.NewRequest("POST", "/hook/gitlab", nil)
+	if token != "" {
+		r.Header.Set("X-Gitlab-Token", token)
+	}
+	return r
+}
 
 func TestVerifierAcceptsEitherRotationSlot(t *testing.T) {
 	v, err := NewVerifier(secretA, secretB)
@@ -1306,9 +1315,7 @@ func TestVerifierAcceptsEitherRotationSlot(t *testing.T) {
 		t.Fatalf("NewVerifier = %v", err)
 	}
 	for _, tok := range []string{secretA, secretB} {
-		r := httptest.NewRequest("POST", "/hook/gitlab", nil)
-		r.Header.Set("X-Gitlab-Token", tok)
-		if err := v.Verify(r); err != nil {
+		if err := v.Verify(req(tok)); err != nil {
 			t.Errorf("Verify(%q…) = %v, want nil", tok[:4], err)
 		}
 	}
@@ -1324,11 +1331,7 @@ func TestVerifierRejects(t *testing.T) {
 		"empty-ish":    " ",
 	}
 	for name, tok := range cases {
-		r := httptest.NewRequest("POST", "/hook/gitlab", nil)
-		if tok != "" {
-			r.Header.Set("X-Gitlab-Token", tok)
-		}
-		if err := v.Verify(r); err == nil {
+		if err := v.Verify(req(tok)); err == nil {
 			t.Errorf("%s: Verify accepted", name)
 		}
 	}
@@ -1353,9 +1356,7 @@ func TestNewVerifierRefusesWeakConfig(t *testing.T) {
 // Errors and logs are the classic leak path for a shared secret.
 func TestErrorsDoNotContainSecrets(t *testing.T) {
 	v, _ := NewVerifier(secretA)
-	r := httptest.NewRequest("POST", "/hook/gitlab", nil)
-	r.Header.Set("X-Gitlab-Token", secretB)
-	err := v.Verify(r)
+	err := v.Verify(req(secretB))
 	if err == nil {
 		t.Fatal("want error")
 	}
@@ -1364,9 +1365,6 @@ func TestErrorsDoNotContainSecrets(t *testing.T) {
 	}
 }
 ```
-
-(Delete the `req` placeholder line before running — it is there only to remind
-you the tests construct requests inline.)
 
 - [ ] **Step 2: Run it and watch it fail**
 
@@ -1456,6 +1454,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type capture struct {
@@ -3351,12 +3350,13 @@ func (m *MeterClient) Healthy(ctx context.Context) error { /* GET /healthz -> 20
 // `defer`, a retry_after. Gate 2 (the pack) re-asks this on every pour.
 func (m *MeterClient) Decide(ctx context.Context, req meterapi.DecideRequest) (*meterapi.DecideResponse, error) {
 	var out meterapi.DecideResponse
-	code, err := m.do(ctx, http.MethodPost, "/v1/policy/decide", req, &out)
+	// Never hand-build the path (the plan's own rule): meterapi owns it.
+	code, err := m.do(ctx, http.MethodPost, meterapi.DecidePath, req, &out)
 	if err != nil {
 		return nil, err
 	}
 	if code != http.StatusOK {
-		return nil, fmt.Errorf("meter: POST /v1/policy/decide: %d", code)
+		return nil, fmt.Errorf("meter: POST %s: %d", meterapi.DecidePath, code)
 	}
 	return &out, nil
 }
@@ -3824,6 +3824,18 @@ func TestDefaultConfigIsValidAndEnabled(t *testing.T) {
 	}
 }
 
+// FAIL CLOSED on an empty ladder. Intake does NOT run opercfg, so nothing else on
+// its side stops an unset GONK_INSTANCE_LADDER from producing a `.gonk.yml` with
+// an empty `ladder:` -- which ADR-002 then uses to disable every onboarded
+// project. RenderDefaultConfig must refuse, and must NOT emit an empty ladder.
+func TestRenderDefaultConfigRefusesEmptyLadder(t *testing.T) {
+	for _, ladder := range [][]string{nil, {}} {
+		if _, err := RenderDefaultConfig(ladder); err == nil {
+			t.Fatalf("RenderDefaultConfig(%v) returned no error -- an empty ladder must fail closed", ladder)
+		}
+	}
+}
+
 // Determinism: same input, same bytes, every time. This is what makes the
 // onboarding MR reviewable and reproducible.
 func TestRenderIsDeterministic(t *testing.T) {
@@ -3993,9 +4005,21 @@ provenance:
 
 // RenderDefaultConfig renders the committed .gonk.yml, filling `ladder:` from the
 // operator's instance ladder (OD-B). DETERMINISTIC for a given ladder, NO MODEL
-// CALL. An empty ladder is a caller bug: `opercfg.Load` refuses to start intake
-// with an empty instance ladder (Plan 05), so this is never reached with one.
+// CALL.
+//
+// AN EMPTY LADDER IS A HARD ERROR, and this is the fail-closed backstop. Do NOT
+// assume some upstream refuses it: intake does NOT run `opercfg` -- meter does --
+// so nothing else on intake's side guards this. If `GONK_INSTANCE_LADDER` were
+// unset and this happily emitted a `.gonk.yml` with an empty `ladder:`, ADR-002's
+// empty-ladder rule would then disable EVERY freshly-onboarded project. So we
+// refuse here, loudly, rather than write a config that silently onboards projects
+// dead. `cmd/gonk-intake`'s loadConfig makes the same refusal at startup.
 func RenderDefaultConfig(instanceLadder []string) ([]byte, error) {
+	if len(instanceLadder) == 0 {
+		return nil, fmt.Errorf("intake: refusing to render a .gonk.yml with an empty ladder: " +
+			"GONK_INSTANCE_LADDER is unset or empty, and an empty ladder disables every " +
+			"onboarded project (ADR-002)")
+	}
 	var buf bytes.Buffer
 	if err := DefaultConfigTemplate.Execute(&buf, struct{ Ladder []string }{instanceLadder}); err != nil {
 		return nil, fmt.Errorf("intake: render default config: %w", err)
@@ -4559,6 +4583,8 @@ package intake
 
 import (
 	"context"
+	"encoding/json"
+	"log/slog"
 	"testing"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/atags"
@@ -4574,6 +4600,34 @@ func (d *recordingDispatcher) FireOrder(_ context.Context, o OrderRequest) error
 	return nil
 }
 
+// fakeDecide is the Gate-1 seam under test: it records every DecideRequest and
+// returns a canned response. The POINT of the Handle tests is what intake DOES
+// with an answer, not how meter computes one (that is Plan 03's table).
+type fakeDecide struct {
+	resp *meterapi.DecideResponse
+	err  error
+	reqs []meterapi.DecideRequest
+}
+
+func (f *fakeDecide) Decide(_ context.Context, req meterapi.DecideRequest) (*meterapi.DecideResponse, error) {
+	f.reqs = append(f.reqs, req)
+	return f.resp, f.err
+}
+
+// recordingLabeler captures the single deny-path GitLab write.
+type recordingLabeler struct {
+	calls   int
+	lastPID int64
+	lastIID int64
+	reason  string
+}
+
+func (l *recordingLabeler) ApplyDenyLabel(_ context.Context, pid, iid int64, reason string) error {
+	l.calls++
+	l.lastPID, l.lastIID, l.reason = pid, iid, reason
+	return nil
+}
+
 // validEntry: meter says active, the repo has .agent/. Note we build meter's
 // RESPONSE, not a gonkcfg.Effective -- intake has no resolver.
 func validEntry() Entry {
@@ -4583,8 +4637,45 @@ func validEntry() Entry {
 	}
 }
 
-func issueEvent(action string) *ghook.Event { /* ... as before ... */ }
-func noteEvent(body string) *ghook.Event    { /* ... as before ... */ }
+// dispatchFor builds a Dispatch whose cache already holds validEntry() at id 42,
+// wired to the given Gate-1 client, order dispatcher, and (optional) labeler.
+func dispatchFor(m DecideClient, disp Dispatcher, lbl DenyLabeler) (*Dispatch, *int) {
+	cache := NewCache()
+	cache.Put(42, validEntry())
+	kicks := 0
+	return &Dispatch{
+		Dispatcher: disp, Meter: m, Labeler: lbl, Cache: cache,
+		BotUsername: "gonk", Obs: NopObserver{}, Log: slog.New(slog.DiscardHandler),
+		KickReconcile: func() { kicks++ },
+	}, &kicks
+}
+
+func issueEvent(action string) *ghook.Event {
+	return &ghook.Event{
+		Kind:    ghook.KindIssue,
+		Project: ghook.Project{ID: 42, PathWithNamespace: "group/repo", DefaultBranch: "main"},
+		User:    ghook.User{ID: 9, Username: "human"},
+		Issue:   &ghook.Issue{IID: 3, Action: action, Title: "t"},
+	}
+}
+
+func noteEvent(body string) *ghook.Event {
+	return &ghook.Event{
+		Kind:    ghook.KindNote,
+		Project: ghook.Project{ID: 42, PathWithNamespace: "group/repo", DefaultBranch: "main"},
+		User:    ghook.User{ID: 9, Username: "human"},
+		Issue:   &ghook.Issue{IID: 3, Action: "update"},
+		Note:    &ghook.Note{ID: 5, Body: body, NoteableType: "Issue", DiscussionID: "d1"},
+	}
+}
+
+func mrEvent() *ghook.Event {
+	return &ghook.Event{
+		Kind:    ghook.KindMergeRequest,
+		Project: ghook.Project{ID: 42, PathWithNamespace: "group/repo"},
+		User:    ghook.User{ID: 9, Username: "human"},
+	}
+}
 
 func TestDecideTriageOnNewIssue(t *testing.T) {
 	d := Decide(validEntry(), issueEvent("open"), "gonk")
@@ -4682,7 +4773,21 @@ func TestMentionRepliesCanBeTurnedOff(t *testing.T) {
 	}
 }
 
-func TestMentions(t *testing.T) { /* ... unchanged: @gonk word-boundary matching ... */ }
+func TestMentions(t *testing.T) {
+	cases := map[string]bool{
+		"hey @gonk look at this":       true,
+		"GONK is case-insensitive @GONK": true,
+		"@gonkbot is a different bot":   false, // word boundary
+		"mail me at x@gonk.example":     false, // the \b after the name
+		"no mention here":               false,
+		"> a human quoting @gonk":       false, // blockquote is stripped
+	}
+	for body, want := range cases {
+		if got := Mentions(body, "gonk"); got != want {
+			t.Errorf("Mentions(%q) = %v, want %v", body, got, want)
+		}
+	}
+}
 
 // Session keys must be stable: a follow-up comment has to reach the same session
 // the triage ran in (spec 4.2, 5.5).
@@ -4697,11 +4802,143 @@ func TestSessionKeyIsDeterministicAndK8sSafe(t *testing.T) {
 	}
 }
 
-// PLAN.md carry-forward: attribution values must be safe for the ledger.
-func TestDispatchRefusesAttributionUnsafeValues(t *testing.T) { /* ... unchanged ... */ }
-func TestHandleFiresOrder(t *testing.T)                       { /* ... unchanged ... */ }
-func TestUnknownProjectTriggersReconcile(t *testing.T)        { /* ... unchanged ... */ }
-func TestOnboardingMergeKicksReconcile(t *testing.T)          { /* ... unchanged ... */ }
+// PLAN.md carry-forward: attribution values must be safe for the ledger. A
+// newline or comma in the project or rig would corrupt a downstream row.
+func TestDispatchRefusesAttributionUnsafeValues(t *testing.T) {
+	if err := attributionSafeOrder(OrderRequest{Project: "group/repo", Rig: "group-repo"}); err != nil {
+		t.Fatalf("a clean order was rejected: %v", err)
+	}
+	for _, bad := range []OrderRequest{
+		{Project: "grp\nrepo", Rig: "r"},
+		{Project: "grp,repo", Rig: "r"},
+		{Project: "group/repo", Rig: "r\ri"},
+		{Project: "", Rig: "r"},
+	} {
+		if err := attributionSafeOrder(bad); err == nil {
+			t.Errorf("attribution-unsafe order accepted: %+v", bad)
+		}
+	}
+}
+
+// GATE 1, the `run` path. The pure gate passes, meter says run, and intake fires
+// exactly one order carrying meter's answer VERBATIM. The DecideRequest it sent
+// keys bead_id on the BeadAnchor and carries NO attempt field.
+func TestHandleRun(t *testing.T) {
+	fm := &fakeDecide{resp: &meterapi.DecideResponse{
+		Decision: "run", Rung: "qwen-local", Model: "qwen3-14b", Attempt: 1,
+		ReservationID: "rsv-1",
+		Metadata:      map[string]string{"gonk_project": "group/repo", "gonk_rung": "qwen-local", "gonk_attempt": "1"},
+		KeyRef:        meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
+	}}
+	disp := &recordingDispatcher{}
+	d, _ := dispatchFor(fm, disp, &recordingLabeler{})
+
+	d.Handle(context.Background(), issueEvent("open"))
+
+	if len(disp.orders) != 1 {
+		t.Fatalf("fired %d orders, want exactly 1 on a run", len(disp.orders))
+	}
+	o := disp.orders[0]
+	// The order carries meter's decision verbatim.
+	if o.Rung != "qwen-local" || o.Model != "qwen3-14b" || o.ReservationID != "rsv-1" {
+		t.Fatalf("order did not carry meter's answer: %+v", o)
+	}
+	if o.KeyRef.SecretName != "gonk-key-abc" || o.BeadAnchor != "gonk:42:issue:3" {
+		t.Fatalf("order = %+v", o)
+	}
+	var md map[string]string
+	if err := json.Unmarshal(o.MetadataJSON, &md); err != nil || md["gonk_attempt"] != "1" {
+		t.Fatalf("metadata not stamped verbatim (attempt travels only here): %q", o.MetadataJSON)
+	}
+	// The DecideRequest keyed bead_id on the BeadAnchor and sent no attempt.
+	if len(fm.reqs) != 1 || fm.reqs[0].BeadID != "gonk:42:issue:3" {
+		t.Fatalf("Gate-1 request = %+v, want bead_id == BeadAnchor", fm.reqs)
+	}
+	raw, _ := json.Marshal(fm.reqs[0])
+	if m := map[string]any{}; json.Unmarshal(raw, &m) == nil {
+		if _, ok := m["attempt"]; ok {
+			t.Fatal("intake sent an attempt to /decide -- a ladder-climb forgery vector")
+		}
+	}
+}
+
+// GATE 1, the `defer` path. A defer is a NORMAL answer: fire nothing, and do NOT
+// treat it as an error. Quiet hours and out-of-budget both arrive this way.
+func TestHandleDefer(t *testing.T) {
+	fm := &fakeDecide{resp: &meterapi.DecideResponse{
+		Decision: "defer", Reason: "quiet-hours",
+	}}
+	disp := &recordingDispatcher{}
+	lbl := &recordingLabeler{}
+	d, _ := dispatchFor(fm, disp, lbl)
+
+	d.Handle(context.Background(), issueEvent("open"))
+
+	if len(disp.orders) != 0 {
+		t.Fatal("a defer must fire NOTHING")
+	}
+	if lbl.calls != 0 {
+		t.Fatal("a defer must not label -- only a deny does")
+	}
+	if len(fm.reqs) != 1 {
+		t.Fatalf("meter /decide called %d times, want exactly 1", len(fm.reqs))
+	}
+}
+
+// GATE 1, the `deny` path. Fire nothing, and apply the deny label so a human sees
+// meter refused.
+func TestHandleDeny(t *testing.T) {
+	fm := &fakeDecide{resp: &meterapi.DecideResponse{
+		Decision: "deny", Reason: "ladder-exhausted",
+	}}
+	disp := &recordingDispatcher{}
+	lbl := &recordingLabeler{}
+	d, _ := dispatchFor(fm, disp, lbl)
+
+	d.Handle(context.Background(), issueEvent("open"))
+
+	if len(disp.orders) != 0 {
+		t.Fatal("a deny must fire NOTHING")
+	}
+	if lbl.calls != 1 || lbl.lastPID != 42 || lbl.lastIID != 3 || lbl.reason != "ladder-exhausted" {
+		t.Fatalf("deny label = %+v, want one call on (42, 3) with the meter reason", lbl)
+	}
+}
+
+// A merge-request delivery is a reconcile signal, never work: it kicks a reconcile
+// and fires nothing (an onboarding MR merging is what flips a project to pending).
+func TestOnboardingMergeKicksReconcile(t *testing.T) {
+	fm := &fakeDecide{resp: &meterapi.DecideResponse{Decision: "run"}}
+	disp := &recordingDispatcher{}
+	d, kicks := dispatchFor(fm, disp, &recordingLabeler{})
+
+	d.Handle(context.Background(), mrEvent())
+
+	if len(disp.orders) != 0 || len(fm.reqs) != 0 {
+		t.Fatal("an MR event must not call meter or fire an order")
+	}
+	if *kicks != 1 {
+		t.Fatalf("kicks = %d, want 1 (an MR event is a reconcile signal)", *kicks)
+	}
+}
+
+// An event for a project the cache has never seen kicks a reconcile (which will
+// PUT it to meter) and fires nothing now -- nothing is metered yet.
+func TestUnknownProjectTriggersReconcile(t *testing.T) {
+	fm := &fakeDecide{resp: &meterapi.DecideResponse{Decision: "run"}}
+	disp := &recordingDispatcher{}
+	d, kicks := dispatchFor(fm, disp, &recordingLabeler{})
+	d.Cache.Delete(42) // make the project unknown
+
+	d.Handle(context.Background(), issueEvent("open"))
+
+	if len(disp.orders) != 0 || len(fm.reqs) != 0 {
+		t.Fatal("an unknown project must not call meter or fire an order")
+	}
+	if *kicks != 1 {
+		t.Fatalf("kicks = %d, want 1", *kicks)
+	}
+}
 ```
 
 - [ ] **Step 2: Implement `pkg/intake/dispatch.go`**
@@ -4741,16 +4978,25 @@ type OrderRequest struct {
 
 	// These are carried ONLY on a Gate-1 `run`: they are meter's decision, passed
 	// through verbatim as order vars for the session. They are NOT trusted by
-	// Gate 2 -- the pack re-decides at pour time and derives its own values. In
-	// particular Attempt is meter's, echoed forward; intake never computes or
-	// sends an attempt as an INPUT to /decide (that would be a ladder-climb
-	// forgery vector).
+	// Gate 2 -- the pack re-decides at pour time and derives its own values.
+	//
+	// ATTEMPT IS CARRIED IN EXACTLY ONE PLACE: inside MetadataJSON. Meter mints the
+	// atags (the seven `gonk_*` keys, `gonk_attempt` among them) as
+	// `map[string]string` and returns them in `DecideResponse.Metadata`; intake
+	// stamps that JSON here verbatim. There is deliberately NO separate
+	// `Attempt` field on OrderRequest: an earlier draft carried it BOTH here as an
+	// `int64` AND inside MetadataJSON, which is (a) redundant and (b) a needless
+	// int/int64 width crossing (`DecideResponse.Attempt` is `int`, `atags.Tags.Attempt`
+	// is `int`; nothing on this path needs an `int64`). Keeping it only inside the
+	// verbatim metadata removes both the duplication and the crossing. Intake never
+	// computes or sends an attempt as an INPUT to /decide (that would be a
+	// ladder-climb forgery vector); the value here is meter's, echoed forward for
+	// attribution, never a decision input.
 	Rung          string          `json:"rung,omitempty"`
 	Model         string          `json:"model,omitempty"`
 	MetadataJSON  json.RawMessage `json:"metadata_json,omitempty"`
 	KeyRef        meterapi.KeyRef `json:"key_ref,omitempty"`
 	ReservationID string          `json:"reservation_id,omitempty"`
-	Attempt       int64           `json:"attempt,omitempty"`
 }
 
 // Dispatcher is the seam to Gas City. Plan 04 supplies the real implementation.
@@ -4862,9 +5108,22 @@ func BeadAnchor(projectID, issueIID int64) string {
 }
 
 // Mentions reports whether the note addresses the bot. Quoted lines (markdown
-// blockquotes) are stripped first: a human quoting gonk's own comment is not a
-// new request, and treating it as one is how a bot ends up talking to itself.
-func Mentions(body, botUsername string) bool { /* ... unchanged ... */ }
+// blockquotes, `>`-prefixed) are stripped first: a human quoting gonk's own
+// comment is not a new request, and treating it as one is how a bot ends up
+// talking to itself. The `\b` after the name stops `@gonkbot` or
+// `email@gonk.example` from counting as an address to the bot.
+func Mentions(body, botUsername string) bool {
+	re := regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(botUsername) + `\b`)
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), ">") {
+			continue // a quoted line is not a fresh mention
+		}
+		if re.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
 
 // DecideClient is the Gate-1 seam. *MeterClient satisfies it; tests use a fake.
 // It is deliberately narrower than MeterClient: Handle needs only /policy/decide.
@@ -4872,11 +5131,22 @@ type DecideClient interface {
 	Decide(ctx context.Context, req meterapi.DecideRequest) (*meterapi.DecideResponse, error)
 }
 
+// DenyLabeler applies the ONE GitLab label intake writes on the dispatch path:
+// the narrow Gate-1 `deny` marker (default `gonk::denied`), so a human can see
+// meter refused the work. The SESSION posts every other label and comment (spec
+// 4.3 step 5); intake writes nothing else here. Implemented over pkg/glab in
+// cmd/gonk-intake; tests use a recorder. A nil Labeler is tolerated (Handle logs
+// the deny instead of labelling), so a LogDispatcher-only wiring still runs.
+type DenyLabeler interface {
+	ApplyDenyLabel(ctx context.Context, projectID, issueIID int64, reason string) error
+}
+
 // Dispatch is the webhook-side consumer: cache lookup, gate, GATE 1, fire.
 // It has no clock. (`Now func() time.Time` is gone with quiet hours.)
 type Dispatch struct {
 	Dispatcher    Dispatcher
 	Meter         DecideClient // Gate 1: POST /v1/policy/decide before the first dispatch
+	Labeler       DenyLabeler  // applies the deny label; nil -> Handle logs the deny
 	Cache         *Cache
 	BotUsername   string
 	Obs           Observer
@@ -4884,12 +5154,127 @@ type Dispatch struct {
 	KickReconcile func() // request an out-of-band reconcile pass (coalesced)
 }
 
-// Handle runs the pure gate, then Gate 1 (d.Meter.Decide), then fires ONLY when
-// MayFire says so. On `defer` it records retry_after (metric); on `deny` it
-// labels. This is the one place intake calls /policy/decide, and the fields it
-// reads back on a `run` (rung, model, metadata_json, key_ref, reservation_id,
-// attempt) become OrderRequest vars.
-func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) { /* ... pure gate, then Gate 1 via MayFire, then fire ... */ }
+// Handle is intake's webhook-side entry point and the ONE place it calls
+// /policy/decide (Gate 1). The flow is fixed and total:
+//
+//  1. A merge-request event carries no work -- it is a reconcile signal (an
+//     onboarding MR merging/closing changes derived state). Kick a reconcile,
+//     fire nothing.
+//  2. An unknown project has never been reconciled, so it is not registered with
+//     meter and nothing is dispatchable for it. Kick a reconcile so the next
+//     delivery finds it; fire nothing now.
+//  3. Run the PURE GitLab-state gate (Decide). If it drops, record why and stop.
+//  4. GATE 1: ask meter. On `run` fire the order ONCE, carrying meter's answer
+//     VERBATIM (rung, model, metadata_json, key_ref, reservation_id); on `defer`
+//     record retry_after and fire nothing; on `deny` apply the deny label and
+//     fire nothing. All three decisions are HTTP 200 -- normal answers.
+//
+// It never sends an attempt to meter (DecideRequest has no such field) and never
+// evaluates quiet hours (they arrive as a `defer` it simply handles).
+func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) {
+	if ev.Kind == ghook.KindMergeRequest {
+		d.KickReconcile()
+		return
+	}
+
+	entry, ok := d.Cache.Get(ev.Project.ID)
+	if !ok {
+		d.Obs.DispatchDropped("unknown_project")
+		d.KickReconcile()
+		return
+	}
+
+	dec := Decide(entry, ev, d.BotUsername)
+	if !dec.Dispatch {
+		d.Obs.DispatchDropped(dec.Reason)
+		return
+	}
+
+	project := entry.Project.PathWithNamespace
+	rig := RigName(project)
+
+	// ---- GATE 1 -----------------------------------------------------------
+	// bead_id IS THE DETERMINISTIC BeadAnchor -- the SAME identifier Gate 2 (the
+	// pack's gonk-dispatch exec order) will send for this work item, so meter
+	// reuses its one open reservation instead of minting a second (the cross-plan
+	// BeadAnchor contract). It is NOT a Gas City bead id: that bead does not exist
+	// yet -- the order this fires is what creates it. And there is NO attempt field
+	// (a caller-supplied attempt is a ladder-climb forgery vector).
+	resp, err := d.Meter.Decide(ctx, meterapi.DecideRequest{
+		Project:    project,
+		Rig:        rig,
+		BeadID:     dec.BeadAnchor, // bead_id == BeadAnchor, always
+		SessionKey: dec.SessionKey,
+		Trigger:    dec.Trigger,
+	})
+	if err != nil {
+		// FAIL CLOSED. An unreachable budget enforcer is not permission to spend;
+		// the next reconcile/delivery retries.
+		d.Obs.DispatchDropped("decide_error")
+		d.Log.Error("meter /decide failed; firing nothing", "err", err, "bead", dec.BeadAnchor)
+		return
+	}
+
+	if MayFire(resp.Decision) { // "run"
+		md, err := json.Marshal(resp.Metadata) // meter's atags, stamped verbatim
+		if err != nil {
+			d.Obs.DispatchDropped("metadata_encode_error")
+			d.Log.Error("could not marshal meter metadata; firing nothing", "err", err, "bead", dec.BeadAnchor)
+			return
+		}
+		o := OrderRequest{
+			Trigger:       dec.Trigger,
+			Project:       project,
+			ProjectID:     entry.Project.ID,
+			Rig:           rig,
+			IssueIID:      ev.Issue.IID,
+			DiscussionID:  dec.DiscussionID,
+			SessionKey:    dec.SessionKey,
+			BeadAnchor:    dec.BeadAnchor,
+			ConfigHash:    entry.Classification.ConfigHash,
+			Rung:          resp.Rung,
+			Model:         resp.Model,
+			MetadataJSON:  md,
+			KeyRef:        resp.KeyRef,
+			ReservationID: resp.ReservationID,
+		}
+		if err := attributionSafeOrder(o); err != nil {
+			d.Obs.DispatchDropped("attribution_unsafe")
+			d.Log.Error("refusing an attribution-unsafe order", "err", err, "bead", dec.BeadAnchor)
+			return
+		}
+		if err := d.Dispatcher.FireOrder(ctx, o); err != nil {
+			d.Obs.DispatchDropped("fire_error")
+			d.Log.Error("FireOrder failed", "err", err, "bead", dec.BeadAnchor)
+			return
+		}
+		d.Obs.Dispatched(dec.Trigger)
+		return
+	}
+
+	switch resp.Decision {
+	case "defer":
+		// A NORMAL answer. Quiet hours and out-of-budget both land here. Record it
+		// (metric + log with retry_after) and FIRE NOTHING; the pack unparks at
+		// retry_after by re-deciding at Gate 2.
+		d.Obs.DispatchDropped("decide_defer")
+		d.Log.Info("meter deferred; firing nothing", "bead", dec.BeadAnchor,
+			"reason", resp.Reason, "retry_after", resp.RetryAfter)
+	case "deny":
+		// Also HTTP 200. Apply the deny label so a human sees it, and FIRE NOTHING.
+		d.Obs.DispatchDropped("decide_deny")
+		if d.Labeler != nil {
+			if err := d.Labeler.ApplyDenyLabel(ctx, entry.Project.ID, ev.Issue.IID, resp.Reason); err != nil {
+				d.Log.Error("could not apply deny label", "err", err, "bead", dec.BeadAnchor)
+			}
+		}
+		d.Log.Info("meter denied; firing nothing", "bead", dec.BeadAnchor, "reason", resp.Reason)
+	default:
+		// A decision kind this binary does not know. Fail closed.
+		d.Obs.DispatchDropped("decide_unknown")
+		d.Log.Error("meter returned an unknown decision; firing nothing", "decision", resp.Decision)
+	}
+}
 
 // MayFire is the Gate-1 verdict->action rule, and it lives here so Plan 04's
 // Task 3 Step 8 shared-semantics test can compare it against Gate 2 (the pack's
@@ -4901,10 +5286,63 @@ func MayFire(decision string) bool {
 }
 
 // FireScaffold is called by the reconciler for a pending project (spec 5.3: the
-// .agent/ scaffold MR is the one metered action permitted while pending).
-func (d *Dispatch) FireScaffold(ctx context.Context, e Entry) error { /* ... as before ... */ }
+// `.agent/` scaffold is the one metered action permitted while pending). It runs
+// the SAME Gate-1 path as Handle -- scaffold is an agent formula (`gonk-scaffold`,
+// Plan 04), so it needs a rung and a reservation exactly like triage does -- but
+// the work item is the PROJECT, not an issue, so its BeadAnchor/SessionKey are
+// project-scoped. As in Handle, bead_id is that BeadAnchor and no attempt is sent.
+func (d *Dispatch) FireScaffold(ctx context.Context, e Entry) error {
+	project := e.Project.PathWithNamespace
+	rig := RigName(project)
+	anchor := fmt.Sprintf("gonk:%d:scaffold", e.Project.ID)
+	session := fmt.Sprintf("gonk-%d-scaffold", e.Project.ID)
 
-func attributionSafeOrder(o OrderRequest) error { /* ... unchanged ... */ }
+	resp, err := d.Meter.Decide(ctx, meterapi.DecideRequest{
+		Project: project, Rig: rig, BeadID: anchor, SessionKey: session,
+		Trigger: atags.TriggerScaffold,
+	})
+	if err != nil {
+		return fmt.Errorf("scaffold decide: %w", err) // fail closed
+	}
+	if !MayFire(resp.Decision) {
+		d.Obs.DispatchDropped("scaffold_" + resp.Decision)
+		return nil // defer/deny: fire nothing, retry next pass
+	}
+	md, err := json.Marshal(resp.Metadata)
+	if err != nil {
+		return fmt.Errorf("scaffold metadata: %w", err)
+	}
+	o := OrderRequest{
+		Trigger: atags.TriggerScaffold, Project: project, ProjectID: e.Project.ID, Rig: rig,
+		SessionKey: session, BeadAnchor: anchor, ConfigHash: e.Classification.ConfigHash,
+		Rung: resp.Rung, Model: resp.Model, MetadataJSON: md,
+		KeyRef: resp.KeyRef, ReservationID: resp.ReservationID,
+	}
+	if err := attributionSafeOrder(o); err != nil {
+		return err
+	}
+	if err := d.Dispatcher.FireOrder(ctx, o); err != nil {
+		return err
+	}
+	d.Obs.Dispatched(atags.TriggerScaffold)
+	return nil
+}
+
+// attributionSafeOrder is the boundary check for the fields that become atags /
+// ledger columns downstream (PLAN.md carry-forward: pkg/atags accepts any string,
+// so the caller enforces the charset). A newline or comma in Project or Rig would
+// corrupt a CSV row, a log line, or a header.
+func attributionSafeOrder(o OrderRequest) error {
+	for name, v := range map[string]string{"project": o.Project, "rig": o.Rig} {
+		if v == "" {
+			return fmt.Errorf("order %s is empty", name)
+		}
+		if strings.ContainsAny(v, "\n\r,") {
+			return fmt.Errorf("order %s contains attribution-unsafe characters", name)
+		}
+	}
+	return nil
+}
 ```
 
 - [ ] **Step 3: Run the package**
@@ -5370,8 +5808,13 @@ func run(log *slog.Logger) error {
 	meter := intake.NewMeterClient(cfg.MeterURL, meterToken, nil)
 
 	// Meter is the Gate-1 /policy/decide client too: the same seam intake uses for
-	// project registration answers the pre-dispatch rung/budget decision.
-	dp := &intake.Dispatch{Dispatcher: dispatcher, Meter: meter, Cache: cache, BotUsername: cfg.BotUsername, Obs: metrics, Log: log}
+	// project registration answers the pre-dispatch rung/budget decision. Labeler
+	// is a thin glab wrapper that applies the idempotent `gonk::denied` label on a
+	// Gate-1 `deny` (intake's ONLY GitLab write on the dispatch path).
+	dp := &intake.Dispatch{
+		Dispatcher: dispatcher, Meter: meter, Labeler: intake.NewDenyLabeler(gl),
+		Cache: cache, BotUsername: cfg.BotUsername, Obs: metrics, Log: log,
+	}
 
 	rec := &intake.Reconciler{
 		GL: gl, Meter: meter, Cache: cache, Obs: metrics, Log: log,
@@ -5439,6 +5882,18 @@ Implementer notes:
   concurrent kicks coalesce into one extra pass. Add
   `TestKickCoalesces`.
 - `LogDispatcher` / `HTTPDispatcher` live in `dispatch.go`.
+- `NewDenyLabeler(gl)` is a thin `glab`-backed `DenyLabeler`: on a Gate-1 `deny`
+  it applies the project's `triage.label_prefix + "denied"` label (default
+  `gonk::denied`) to the issue, idempotently (skip if already present). It is the
+  ONLY GitLab write intake makes on the dispatch path.
+- **`loadConfig` FAILS CLOSED on an empty instance ladder.** It parses
+  `GONK_INSTANCE_LADDER` (comma-separated) and **returns an error if it is unset
+  or empty**, so intake refuses to start rather than onboard every project into a
+  `.gonk.yml` with an empty `ladder:` — which ADR-002 then uses to disable every
+  one of them. This is intake's OWN guard: intake does NOT run `opercfg` (meter
+  does), so nothing else on its side protects this. It mirrors
+  `RenderDefaultConfig`'s backstop, one layer earlier. Add
+  `TestLoadConfigRejectsEmptyInstanceLadder` (unset → error; `"a,b"` → `["a","b"]`).
 - **Never log a token, a secret, or `HookOptions`.** Add a test that
   `slog`-formatting an `OrderRequest` cannot contain the hook token (it has no
   such field — keep it that way).
@@ -5556,8 +6011,12 @@ Add these to `PLAN.md`'s "Carried into later plans" in Task 10:
   and it is the source the onboarding template renders its `ladder:` from (OD-B) —
   intake writes the operator's instance ladder into a new project's `.gonk.yml`,
   never a hardcoded rung. If the instance ladder is empty, every newly-onboarded
-  project resolves to `disabled` (ADR-002). (`opercfg.Load` now refuses to start
-  with an empty instance ladder, which closes the fail-open PLAN.md flagged.)
+  project resolves to `disabled` (ADR-002). The empty-ladder fail-open is closed
+  on **intake's own side** — `loadConfig` refuses to start on an empty/unset
+  `GONK_INSTANCE_LADDER` and `RenderDefaultConfig` refuses to emit an empty
+  `ladder:` — because intake never runs `opercfg`. (`opercfg.Load` separately
+  refuses to start *meter* with an empty instance ladder; a different process,
+  a different path.)
   Secrets are **file mounts from existingSecret refs** — **never env values**:
   `GONK_GITLAB_TOKEN_FILE` + **`GONK_GITLAB_TOKEN_PREVIOUS_FILE`** (AD-4b — the
   second slot the chart previously did not mount),

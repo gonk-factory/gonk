@@ -204,6 +204,14 @@ with a shared table test. What each drift costs:
 > `gonk-gate dispatch` always calls `/v1/policy/decide` first. There is no second
 > pour path. A rung escalation must be paid for by a decision meter made.**
 
+**Assumption to confirm with the owner:** both gates key meter's budget/ladder
+state on the **deterministic `BeadAnchor`** (`gonk:{project}:issue:{iid}`), NOT on
+the Gas City internal bead id. The BeadAnchor is the only identifier both gates
+share (the Gas City bead does not exist at Gate 1) and it is stable across
+re-slings, which is exactly what `/decide`'s open-reservation idempotency needs.
+The Gas City bead id remains available at Gate 2 for the comment marker and the
+bead-store record, but it never reaches meter.
+
 ---
 
 ## Why the classifier is a **sweeper order**, not a formula step
@@ -266,7 +274,10 @@ The fields this plan uses:
   **there is NO attempt field and there never will be.** A caller-supplied attempt
   is a forgery vector for climbing the ladder (Plan 03, Decision 2). Task 3
   Step 3's `TestDispatchNeverSendsAnAttempt` asserts the marshalled JSON has no
-  `attempt` key.
+  `attempt` key. **`BeadID` is the deterministic BeadAnchor** (`gonk:{project}:issue:{iid}`),
+  the SAME value intake sent at Gate 1 and stable across re-slings — **not** the Gas
+  City internal bead id. Gate 2 sends `dispatchArgs.BeadAnchor` here, never
+  `dispatchArgs.BeadID`; Task 3 Step 8's `TestBothGatesSendTheSameBeadID` asserts it.
 - `meterapi.DecideResponse{Decision, Rung, Model, Attempt, Reason, Detail,
   RetryAfter, Metadata, KeyRef, ReservationID, ReservationExpiresAt, Budget,
   Remaining, SpendAsOf}`. `defer` and `deny` are **HTTP 200** — normal answers,
@@ -1640,11 +1651,19 @@ var orderForTrigger = map[string]string{
 }
 
 type dispatchArgs struct {
-	Project    string
-	ProjectID  int64
-	Rig        string
-	IssueIID   int64
+	Project   string
+	ProjectID int64
+	Rig       string
+	IssueIID  int64
+	// BeadAnchor is the deterministic, re-sling-stable identifier
+	// (`gonk:{project_id}:issue:{iid}`). IT is what goes on the wire as
+	// meterapi.DecideRequest.BeadID -- the budget/ladder/reservation key, identical
+	// to the value intake sent at Gate 1.
 	BeadAnchor string
+	// BeadID is the Gas City internal bead id (e.g. gk-1a2b). It exists by Gate 2
+	// (intake's order created the bead) and is used for the comment marker and the
+	// bead-store record -- but it MUST NOT be sent to meter: it differs between the
+	// gates and is not stable across re-slings.
 	BeadID     string
 	SessionKey string
 	Trigger    string
@@ -1692,10 +1711,18 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 	// ---- THE GATE. Every pour. No exceptions. -------------------------------
 	// NOTE what is NOT in this request: an attempt count. Meter owns ladder state
 	// (Plan 03, Decision 2); a caller-supplied attempt is a forgery vector.
+	//
+	// bead_id IS THE BeadAnchor -- the SAME value intake sent at Gate 1, NOT the Gas
+	// City bead id (a.BeadID). Meter keys /decide idempotency, ladder state and the
+	// reservation on bead_id; if Gate 1 sent the BeadAnchor and Gate 2 sent the Gas
+	// City bead id, meter would see two different beads for one work item and mint a
+	// SECOND reservation -- double budget headroom, and Gate 1's reservation leaks
+	// until its TTL. The Gas City bead id stays in a.BeadID for the marker/record,
+	// but it never reaches meter. See the cross-plan BeadAnchor contract.
 	dec, err := d.Meter.Decide(ctx, meterapi.DecideRequest{
 		Project:    a.Project,
 		Rig:        a.Rig,
-		BeadID:     a.BeadID,
+		BeadID:     a.BeadAnchor, // bead_id == BeadAnchor, the same value Gate 1 sent
 		SessionKey: a.SessionKey,
 		Trigger:    a.Trigger,
 	})
@@ -1933,6 +1960,41 @@ func TestGateSemanticsAreSharedWithIntake(t *testing.T) {
 	// meter must not be silently treated as `run` by an old binary.
 	if MayPour("something-new") || intake.MayFire("something-new") {
 		t.Fatal("an unknown decision kind must fail closed on both sides")
+	}
+}
+
+// Gate 1 (intake) and Gate 2 (gonk-dispatch) MUST send meter the SAME bead_id for
+// one work item, or meter mints TWO reservations for one attempt -- double budget
+// headroom, and Gate 1's reservation leaks until its TTL. Both sides pin bead_id
+// to the deterministic BeadAnchor, NOT the Gas City bead id. Here we drive Gate 2
+// with a BeadAnchor equal to intake's own BeadAnchor(42, 3) AND a *different* Gas
+// City bead id, and assert the /decide body carries the BeadAnchor -- so meter
+// reuses the one open reservation Gate 1 already opened.
+func TestBothGatesSendTheSameBeadID(t *testing.T) {
+	anchor := intake.BeadAnchor(42, 3) // the exact value Gate 1 sends
+	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		Decision: meterapi.DecisionDefer, Attempt: 1, RetryAfter: time.Now().Add(time.Hour),
+	}}
+	_ = runDispatch(context.Background(), dispatchDeps{
+		Meter: meterClient(fm.server(t)), GC: gcapitest.New(t).Client("gonk-city"),
+		Store: beadstore.NewMemory(),
+		Args: dispatchArgs{
+			Project: "group/repo", ProjectID: 42, Rig: "group-repo", IssueIID: 3,
+			BeadAnchor: anchor, BeadID: "gk-1a2b", // Gas City id differs ON PURPOSE
+			SessionKey: "gonk-42-issue-3", Trigger: "issue-triage",
+		},
+	})
+
+	var got map[string]any
+	if err := json.Unmarshal(fm.lastBody, &got); err != nil {
+		t.Fatalf("decode /decide body: %v", err)
+	}
+	if got["bead_id"] != anchor {
+		t.Fatalf("Gate 2 sent bead_id=%v, want the BeadAnchor %q that Gate 1 sends -- "+
+			"a mismatch mints a SECOND reservation for one attempt", got["bead_id"], anchor)
+	}
+	if got["bead_id"] == "gk-1a2b" {
+		t.Fatal("Gate 2 leaked the Gas City bead id onto the wire; it must send the BeadAnchor")
 	}
 }
 ```

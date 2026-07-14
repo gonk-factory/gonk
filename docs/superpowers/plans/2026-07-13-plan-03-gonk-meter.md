@@ -104,11 +104,19 @@ NetworkPolicy is the only thing that forces it to, and it is not enforced.
 **Say it exactly this way, everywhere (ADR-004, the metrics help text, the
 dashboards, the README):**
 
-> **Cloud-rung budgets are hard.** A cloud call needs an API key, the pod's only
-> route to one is LiteLLM's virtual key, and LiteLLM refuses at the ceiling.
-> **Local-model budgets are advisory** until Cilium is unsuspended and the egress
-> policy is actually enforced. Decision 9's synthetic pricing gives the token
-> budget a hard door *through LiteLLM*; it does not give it one *around* LiteLLM.
+> **Cloud-rung budgets are hard — *when the project sets a finite `monthly_tokens`
+> as well as a finite `monthly_cost_usd`.*** A cloud call needs an API key, the
+> pod's only route to one is LiteLLM's virtual key, and LiteLLM refuses at the
+> ceiling. **But that ceiling only exists when both budget dimensions are finite:**
+> `MaxBudgetFor` provisions **no `max_budget` at all** if *either* `monthly_cost_usd`
+> or `monthly_tokens` is unlimited (see its contract). So a project with, say,
+> `monthly_cost_usd: 10` and no `monthly_tokens` gets an **UNBUDGETED** virtual key
+> — no LiteLLM backstop — and is protected only by meter's soft
+> reservation-estimate gate, which a runaway session can overshoot. **Local-model
+> budgets are advisory** until Cilium is unsuspended and the egress policy is
+> actually enforced. Decision 9's synthetic pricing gives the token budget a hard
+> door *through LiteLLM*; it does not give it one *around* LiteLLM, and it gives it
+> none at all when `monthly_tokens` is unlimited.
 
 What this plan still does, and it is not nothing: it makes the door **correct**,
 so that the day Cilium lands, the guarantee is real without another line of Go.
@@ -116,6 +124,21 @@ Plan 05 ships the egress NetworkPolicy anyway (documentation-as-code); Plan 06
 **writes the egress-denial test and skips it**, naming Cilium in the skip
 message. Un-skipping that test is the gate. Nothing in this plan may be written
 as though that day has already come.
+
+**Known limitation — the hard cloud door needs a finite `monthly_tokens`, not
+just a finite `monthly_cost_usd`.** `MaxBudgetFor` folds the token ceiling into
+the single USD `max_budget` LiteLLM can enforce, and it provisions **no
+`max_budget` at all if *either* dimension is unlimited.** That is deliberate:
+`monthly_tokens` is optional, and LiteLLM's one counter unifies real and
+*synthetic* USD, so provisioning `max_budget = monthly_cost_usd` alone would let
+synthetic local dollars close the door early on legitimate local work — worse
+than no door. The consequence the owner must know: a project with a finite
+`monthly_cost_usd` but **no `monthly_tokens`** gets an **unbudgeted virtual key**,
+and its cost ceiling is defended only by meter's soft reservation-estimate gate,
+which a runaway session can overshoot. So "cloud-rung budgets are hard" is
+**conditional on the project setting both budget dimensions finite.** This is a
+config-shape limitation, not a code bug — but say it wherever the guarantee is
+quoted (README, ADR, dashboards), exactly as the network-bypass gap is said.
 
 ---
 
@@ -248,7 +271,8 @@ Task 2's `TestGroupFor`, `TestGroupForCeilingsOnlyTighten`, and the nil-vs-empty
 | **Dolt does not actually provide the isolation the reservation race needs** | **Task 0b proves or disproves this before anything depends on it.** If the racing test overspends, the fallback is (a) keep meter single-replica so the in-process per-project lock *is* the serialization and Dolt supplies durability only, or (b) move the ledger to **Postgres on the owner's existing CNPG cluster** (owner-approved 2026-07-13 — not a new dependency; take it without hesitation if the spike fails OR is inconclusive). The plan does not proceed on the assumption. | An unverified transactional guarantee under a budget ceiling is exactly the thing that must not be assumed. |
 | Two meter **replicas** race the same ceiling | The per-project `keyedMutex` is **in-process**: it serializes decisions inside one meter, and does nothing across pods. **Assumed default: meter runs single-replica** (`replicas: 1`, `strategy: Recreate` — Plan 05). With >1 replica, correctness depends entirely on the store's isolation, which is what Task 0b measures. | Stated, not hidden. A silent second replica is a silent budget escape. |
 | A local rung burns the whole token budget **through LiteLLM** | LiteLLM's USD `max_budget` now covers it: local models carry a **synthetic** per-token price, and meter folds the token ceiling into the dollar ceiling it provisions (Decision 9). Meter's reservation gate refuses first; LiteLLM refuses if meter is wrong. | The token budget has a hard door **on that path**. |
-| **An agent pod calls Ollama (`http://192.168.1.142:11434`) DIRECTLY, around LiteLLM** | **NOTHING IN THIS PLAN STOPS IT.** Ollama needs no credential, and the NetworkPolicy that would forbid the egress **is not enforced** (Flannel; Cilium suspended). Zero metering, no ceiling, no attribution. | **NOT CLOSED.** Owner decision: ship, document, do not gate. **Local-model budgets are advisory** until Cilium lands; cloud-rung budgets remain hard (a cloud call needs a key the pod only holds via LiteLLM). Plan 05 ships the policy; Plan 06 skip-tests it; un-skipping that test is the gate. |
+| **An agent pod calls Ollama (`http://192.168.1.142:11434`) DIRECTLY, around LiteLLM** | **NOTHING IN THIS PLAN STOPS IT.** Ollama needs no credential, and the NetworkPolicy that would forbid the egress **is not enforced** (Flannel; Cilium suspended). Zero metering, no ceiling, no attribution. | **NOT CLOSED.** Owner decision: ship, document, do not gate. **Local-model budgets are advisory** until Cilium lands; cloud-rung budgets are hard **only when the project also sets a finite `monthly_tokens`** (else `MaxBudgetFor` provisions no `max_budget` and the key is unbudgeted — see the row below). Plan 05 ships the policy; Plan 06 skip-tests it; un-skipping that test is the gate. |
+| **A project sets `monthly_cost_usd` finite but leaves `monthly_tokens` unlimited** | `MaxBudgetFor` returns `nil` (LiteLLM omits `max_budget`): the virtual key has **no hard door at all**, not even on cost. The choice is deliberate (LiteLLM unifies real + synthetic USD, so a `max_budget = cost` alone would let synthetic local dollars close the door early on legitimate local work), but the consequence is real: only meter's soft reservation-estimate gate protects the cost ceiling, and a runaway session can overshoot it. | **Known limitation** (see the note below the matrix). The hard cloud door requires a finite `monthly_tokens` too. Set both dimensions for a hard backstop. |
 | Synthetic dollars get counted as real spend | `spend.Row.Synthetic` is set at ingest from the rung's `kind`; `budget.Spend` keeps `CostUSD` (real) and `SyntheticCostUSD` separate; `rung.Decide`'s cost gate reads **real only**. A rung missing from the catalog is treated as **real** (fail closed). | If synthetic dollars reached the cost gate, `monthly_cost_usd: 0` would make the onboarding default's own local rung unaffordable — the project would be dead on arrival. |
 | A spend row for last month lands after the window rolled | Rows are windowed by **the row's timestamp**, never by ingest time. A July row arriving on 1 August is charged to July. | Otherwise every project gets a free budget on the 1st. |
 | `.gonk.yml` invalid / project disabled / ladder exhausted / per-task tokens gone | **deny** with a machine reason. Never `run`, never an infinite `defer`. | Retrying cannot help. |
@@ -452,7 +476,7 @@ Spec §6.2.3 says the dispatch *formula* asks for the rung. A Gas City formula *
 
 **What breaks if the two callers drift (Plan 03 owns this endpoint, so it states it):**
 - **Gate 2 must NEVER trust a rung/reservation passed in order vars — it always re-decides.** If it trusted intake's vars, a controller-initiated re-sling would spawn a higher rung against the *original* reservation and `key_ref`, i.e. **spend unmetered and mis-attributed** to the previous attempt's tags, and `/outcome` would be bound to a reservation already closed. That is "budgets cannot be bypassed" becoming false at the application layer. (Plan 04 Task 3's `TestDispatchAlwaysDecidesEvenWhenVarsCarryARung` guards it.)
-- **`/decide` MUST be idempotent on an OPEN RESERVATION.** Because a bead can be `/decide`d twice before any outcome is reported (intake, then `gonk-dispatch`), a second call for the same `(project, bead_id, session_key)` **MUST return the existing open, unexpired reservation, not mint a second one.** Attempt and rung are naturally stable (meter derives them from **outcome** history, which has not changed between the two calls); the reservation is the only thing at risk. *If it minted a second:* two reservations would hold **double the budget headroom** for one attempt, `/outcome` (bound to a reservation meter minted) would settle one while the other leaks until `reservation_ttl`, remaining budget would be understated, and a spurious early `defer` would fire for a reason nobody can find. **Tested: `TestDecideIsIdempotentOnOpenReservation`** — call `/decide` twice for one `(project, bead, session)` with no intervening `/outcome`, assert one reservation exists and the two responses carry the same `reservation_id`.
+- **`/decide` MUST be idempotent on an OPEN RESERVATION.** Because a bead can be `/decide`d twice before any outcome is reported (intake, then `gonk-dispatch`), a second call for the same `(project, bead_id, session_key)` **MUST return the existing open, unexpired reservation, not mint a second one.** This is exactly why `bead_id` is pinned to the **deterministic BeadAnchor** at both gates (see `DecideRequest.BeadID`): if the two gates sent different ids — say the Gas City bead id at Gate 2 — the second call would look like a *different* bead and mint a second reservation, defeating this idempotency entirely. Attempt and rung are naturally stable (meter derives them from **outcome** history, which has not changed between the two calls); the reservation is the only thing at risk. *If it minted a second:* two reservations would hold **double the budget headroom** for one attempt, `/outcome` (bound to a reservation meter minted) would settle one while the other leaks until `reservation_ttl`, remaining budget would be understated, and a spurious early `defer` would fire for a reason nobody can find. **Tested: `TestDecideIsIdempotentOnOpenReservation`** — call `/decide` twice with the **same BeadAnchor** for one `(project, bead, session)` and no intervening `/outcome`, assert one reservation exists and the two responses carry the same `reservation_id`.
 - `run`/`defer`/`deny` are all **HTTP 200** — normal answers, identical whichever gate asks.
 
 Machine `reason` codes (bounded set; also the Prometheus label value):
@@ -889,8 +913,18 @@ const (
 // straight to the most expensive rung. Any client that tries to send one is
 // wrong; any server that reads one is a bug.
 type DecideRequest struct {
-	Project    string `json:"project"`
-	Rig        string `json:"rig"`
+	Project string `json:"project"`
+	Rig     string `json:"rig"`
+	// BeadID is the deterministic BeadAnchor -- the stable identifier derived from
+	// the GitLab artifact (`gonk:{project_id}:issue:{iid}`), IDENTICAL at intake's
+	// Gate 1 and the pack's Gate 2 and stable across every re-sling. It is NOT the
+	// Gas City internal bead id: that id does not even exist at Gate 1 (the first
+	// dispatch is what creates it), and it is an execution detail, not a budget
+	// key. /decide IDEMPOTENCY, ladder state, and reservation binding all key on
+	// this value -- so both gates MUST send the same one, or meter mints two
+	// reservations for one attempt (double headroom, a leaked reservation). If
+	// per-session tracing ever needs the Gas City bead id, that is a separate
+	// future field (YAGNI -- do not add it now).
 	BeadID     string `json:"bead_id"`
 	SessionKey string `json:"session_key"`
 	Trigger    string `json:"trigger"` // an atags.Trigger* value
@@ -937,7 +971,11 @@ const (
 // to a reservation METER minted: without it, `gate-failed` is a forgery vector
 // (repeat it and a project walks itself up to its most expensive rung).
 type OutcomeRequest struct {
-	Project       string `json:"project"`
+	Project string `json:"project"`
+	// BeadID is the SAME deterministic BeadAnchor the two /decide gates sent (see
+	// DecideRequest.BeadID) -- NOT the Gas City bead id. The outcome must settle the
+	// reservation that the matching /decide opened, so it has to key on the same
+	// identifier or the reservation it names does not exist.
 	BeadID        string `json:"bead_id"`
 	SessionKey    string `json:"session_key"`
 	Attempt       int    `json:"attempt"`
@@ -4044,6 +4082,7 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/pkg/atags"
 	"gitlab.orac.local/agentic/gonk-project/pkg/budget"
 	"gitlab.orac.local/agentic/gonk-project/pkg/gonkcfg"
+	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
 	"gitlab.orac.local/agentic/gonk-project/pkg/opercfg"
 	"gitlab.orac.local/agentic/gonk-project/pkg/spend"
 )
@@ -4805,10 +4844,37 @@ Reservations are the mechanism that makes the budget check survive spend-log lag
 //	func TestMemory(t *testing.T) { storetest.Run(t, func() store.Store { return store.NewMemory() }) }
 //	//go:build dolt
 //	func TestDolt(t *testing.T)   { storetest.Run(t, func() store.Store { return newDoltStore(t) }) }
+//
+// Run MUST include a Registration round-trip whose Effective.Budget is UNLIMITED
+// (both math.Inf(1) cost AND math.MaxInt64 tokens) -- the same fixture
+// memory_test.go's TestRegistrationRoundTrip now uses -- so BOTH durable backends
+// prove they can persist the first unlimited-budget project. See the +Inf-safe
+// persistence rule below; a zero Effective would let this hazard ship undetected.
 func Run(t *testing.T, newStore func() store.Store)
 ```
 
-**Files:** Create `internal/meter/store/store.go`, `internal/meter/store/memory.go`, `internal/meter/store/dolt.go` (**gated on Task 0b**), `internal/meter/store/storetest/suite.go`, `internal/meter/store/memory_test.go`, `internal/meter/store/dolt_test.go`
+**`Registration` persistence MUST be `+Inf`-safe (this is a real fail-closed bug,
+not a formality).** `Registration.Effective` is a raw `gonkcfg.Effective`, whose
+`Budget` carries `math.Inf(1)` (cost) / `math.MaxInt64` (tokens) for an unlimited
+project. The obvious `json.Marshal(reg.Effective)` **RETURNS AN ERROR** on `+Inf`
+(`json: unsupported value: +Inf`), and a Dolt `DOUBLE` column **rejects `Inf`** —
+so a durable store that marshals `Effective` directly cannot register the FIRST
+unlimited-budget project. **Pick ONE convention and state it in both `dolt.go` and
+`postgres.go`:**
+
+- **(preferred) persist the raw `.gonk.yml` and re-resolve on read.** Store only
+  `Registration.Raw` (plus scalar columns: `project`, `rig`, `state`,
+  `invalid_detail`, `key_alias`, `key_ref`, `updated_at`), and on `GetRegistration`
+  re-run `gonkcfg.Resolve(cfg.Instance, cfg.GroupFor(p), Load(raw))` to rebuild
+  `Effective`. This is the reresolve loop's own operation (`Registration.Raw`
+  already exists precisely for it), it never serializes a float sentinel at all,
+  and it keeps exactly one derivation of `Effective`; OR
+- **apply the same `null`-for-unlimited convention `meterapi.Budget` uses:** persist
+  `Effective.Budget` via `meterapi.BudgetFrom` (which maps `+Inf`/`MaxInt64` → JSON
+  `null`) and reverse it on read. Never write a bare `+Inf` or `MaxInt64` to a
+  numeric column.
+
+**Files:** Create `internal/meter/store/store.go`, `internal/meter/store/memory.go`, `internal/meter/store/dolt.go` (**gated on Task 0b**), `internal/meter/store/postgres.go` (**the OWNER-APPROVED CNPG fallback**), `internal/meter/store/storetest/suite.go`, `internal/meter/store/memory_test.go`, `internal/meter/store/dolt_test.go`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4819,10 +4885,12 @@ package store
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/atags"
+	"gitlab.orac.local/agentic/gonk-project/pkg/gonkcfg"
 	"gitlab.orac.local/agentic/gonk-project/pkg/rung"
 	"gitlab.orac.local/agentic/gonk-project/pkg/spend"
 )
@@ -4840,13 +4908,39 @@ func TestRegistrationRoundTrip(t *testing.T) {
 	if _, ok, _ := s.GetRegistration(ctx, "group/repo"); ok {
 		t.Fatal("empty store returned a registration")
 	}
-	reg := Registration{Project: "group/repo", Rig: "group-repo", State: StateActive}
+	// UNLIMITED BUDGET ON PURPOSE. Effective encodes "unlimited" as math.Inf(1)
+	// (cost) and math.MaxInt64 (tokens). +Inf is NOT JSON-serializable --
+	// json.Marshal(reg.Effective) RETURNS AN ERROR -- and a Dolt DOUBLE column
+	// rejects Inf. A durable store that naively marshals reg.Effective would fail
+	// to persist the FIRST unlimited-budget project (fail-closed, but a bug). A
+	// zero Effective (the old fixture) hid this completely; this fixture forces
+	// every backend's persistence to be +Inf-safe.
+	reg := Registration{
+		Project: "group/repo", Rig: "group-repo", State: StateActive,
+		Raw: []byte("version: 1\n"),
+		Effective: gonkcfg.Effective{
+			Enabled: true,
+			Ladder:  []string{"qwen-local"},
+			Budget: gonkcfg.EffectiveBudget{
+				MonthlyCostUSD: math.Inf(1),
+				MonthlyTokens:  gonkcfg.TokenQuantity(math.MaxInt64),
+				PerTaskTokens:  gonkcfg.TokenQuantity(math.MaxInt64),
+			},
+		},
+	}
 	if err := s.PutRegistration(ctx, reg); err != nil {
-		t.Fatal(err)
+		t.Fatalf("PutRegistration of an UNLIMITED-budget project failed: %v", err)
 	}
 	got, ok, err := s.GetRegistration(ctx, "group/repo")
 	if err != nil || !ok || got.State != StateActive || got.Rig != "group-repo" {
 		t.Fatalf("GetRegistration = %+v %v %v", got, ok, err)
+	}
+	// The unlimited sentinels must survive the round trip, whatever on-disk
+	// convention the backend uses (persist-raw-and-re-resolve, or
+	// null-for-unlimited): the value read back must still be unlimited.
+	if !math.IsInf(got.Effective.Budget.MonthlyCostUSD, 1) ||
+		got.Effective.Budget.MonthlyTokens != gonkcfg.TokenQuantity(math.MaxInt64) {
+		t.Fatalf("unlimited budget did not round-trip: %+v", got.Effective.Budget)
 	}
 	if err := s.DeleteRegistration(ctx, "group/repo"); err != nil {
 		t.Fatal(err)
@@ -5571,13 +5665,26 @@ type KeySpec struct {
 // catches meter being wrong or being bypassed.
 //
 // If EITHER ceiling is unlimited, there is no finite dollar ceiling to compute
-// and we return nil: the project genuinely has no hard door. Do not silently
-// substitute a number.
+// and we return nil (LiteLLM then omits `max_budget` -- no hard door at all).
+//
+// READ THIS BEFORE YOU "SIMPLIFY" IT: returning nil when only ONE ceiling is
+// unlimited does NOT mean "the project has no hard door because it wants none".
+// A project with a finite `monthly_cost_usd` but an unlimited `monthly_tokens`
+// DOES have a cost ceiling it expects to be enforced -- and it gets NO LiteLLM
+// backstop, only meter's soft reservation-estimate gate, which a runaway session
+// can overshoot. We still return nil deliberately (folding cost alone into
+// `max_budget` would let synthetic local dollars slam the door on legitimate
+// local work -- see Decision 9), but the money consequence is real and is
+// recorded as a Known limitation, not waved away as "no door wanted". The only
+// case that is genuinely door-free is BOTH ceilings unlimited.
 func MaxBudgetFor(b gonkcfg.EffectiveBudget, ladder []string, catalog map[string]opercfg.RungSpec) *float64 {
 	cost := budget.CostLimit(b.MonthlyCostUSD)
 	tokens := budget.TokenLimit(b.MonthlyTokens)
 	if cost.Unlimited() || tokens.Unlimited() {
-		return nil // no finite hard door exists. ADR-004 records this as a known limit.
+		// No finite dollar ceiling to provision. A finite cost + unlimited tokens
+		// lands here too: it keeps its soft meter gate but has NO LiteLLM backstop.
+		// ADR-004 records this as a Known limitation.
+		return nil
 	}
 	var maxPrice float64
 	for _, name := range ladder {
@@ -5813,26 +5920,51 @@ func TestHTTPAdminErrorDoesNotLeakTheKey(t *testing.T) {
 }
 
 func TestHTTPSpendSourceParsesTagsAndClock(t *testing.T) {
+	var reqs int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// THE BOUND IS NOT OPTIONAL. An unbounded /spend/logs OOM-killed the live
-		// LiteLLM (docs/environment.md, OPERATIONAL HAZARD). Every poll MUST carry a
-		// start_date; a request without one is the bug this assertion exists to catch.
-		if r.URL.Query().Get("start_date") == "" {
+		reqs++
+		q := r.URL.Query()
+		// THE BOUND IS NOT OPTIONAL, ON EVERY PAGE. An unbounded /spend/logs
+		// OOM-killed the live LiteLLM (docs/environment.md, OPERATIONAL HAZARD).
+		// Every request MUST carry BOTH a start_date and an end bound; a request
+		// missing either is the bug these two assertions exist to catch.
+		if q.Get("start_date") == "" {
 			t.Fatalf("spend poll had no start_date -- an unbounded /spend/logs takes down the cluster's gateway")
+		}
+		if q.Get("end_date") == "" {
+			t.Fatalf("spend poll had no end_date -- the window must be bounded at BOTH ends, not just the start")
 		}
 		w.Header().Set("Date", "Mon, 13 Jul 2026 10:00:00 GMT")
 		w.Header().Set("Content-Type", "application/json")
-		// LiteLLM persists the header-supplied tags at metadata.spend_logs_metadata
-		// (VERIFIED, docs/environment.md). The row's `metadata` object nests them there.
-		_, _ = w.Write([]byte(`[
-		  {"request_id":"c1","spend":0.40,"prompt_tokens":8000,"completion_tokens":1500,
-		   "startTime":"2026-07-05T10:00:00Z",
-		   "metadata":{"spend_logs_metadata":{
-		               "gonk_project":"group/repo","gonk_rig":"repo","gonk_bead_id":"gk-1",
-		               "gonk_session_key":"s1","gonk_rung":"glm","gonk_attempt":"1",
-		               "gonk_trigger":"issue-triage"}}},
-		  {"request_id":"c2","spend":0.10,"startTime":"2026-07-05T11:00:00Z","metadata":{}}
-		]`))
+		// TWO PAGES, so a regression to a single unbounded-page fetch FAILS: the
+		// client must page until the source says there are no more. The exact paging
+		// marker follows the pinned LiteLLM /spend/logs/v2 contract (mandatory dates,
+		// 10k cap); here an X-Next-Page header stands in for it, and Plan 06 verifies
+		// the real one. LiteLLM persists the header-supplied tags at
+		// metadata.spend_logs_metadata (VERIFIED, docs/environment.md).
+		switch q.Get("page") {
+		case "", "1":
+			w.Header().Set("X-Next-Page", "2")
+			_, _ = w.Write([]byte(`[
+			  {"request_id":"c1","spend":0.40,"prompt_tokens":8000,"completion_tokens":1500,
+			   "startTime":"2026-07-05T10:00:00Z",
+			   "metadata":{"spend_logs_metadata":{
+			               "gonk_project":"group/repo","gonk_rig":"repo","gonk_bead_id":"gk-1",
+			               "gonk_session_key":"s1","gonk_rung":"glm","gonk_attempt":"1",
+			               "gonk_trigger":"issue-triage"}}},
+			  {"request_id":"c2","spend":0.10,"startTime":"2026-07-05T11:00:00Z","metadata":{}}
+			]`))
+		default:
+			w.Header().Set("X-Next-Page", "")
+			_, _ = w.Write([]byte(`[
+			  {"request_id":"c3","spend":0.25,"prompt_tokens":4000,"completion_tokens":500,
+			   "startTime":"2026-07-06T10:00:00Z",
+			   "metadata":{"spend_logs_metadata":{
+			               "gonk_project":"group/repo","gonk_rig":"repo","gonk_bead_id":"gk-2",
+			               "gonk_session_key":"s3","gonk_rung":"glm","gonk_attempt":"1",
+			               "gonk_trigger":"issue-triage"}}}
+			]`))
+		}
 	}))
 	defer srv.Close()
 
@@ -5841,14 +5973,23 @@ func TestHTTPSpendSourceParsesTagsAndClock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// c2 has no attribution tags: skipped, not fatal. An un-attributable call
-	// must not stall the whole ledger -- but it MUST be counted (Task 9's
-	// gonk_meter_spend_rows_unattributed_total).
-	if len(rows) != 1 {
-		t.Fatalf("got %d rows, want 1 (the untagged row must be skipped)", len(rows))
+	// The source MUST page: c1 is on page 1, c3 on page 2. A single-page fetch
+	// would silently miss c3 (and undercount spend), which is exactly the
+	// regression this guards against.
+	if reqs < 2 {
+		t.Fatalf("spend source issued %d request(s) -- it did not page; a single unbounded fetch is the bug", reqs)
+	}
+	// c2 has no attribution tags: skipped, not fatal, but COUNTED (Task 9's
+	// gonk_meter_spend_rows_unattributed_total). The two attributable rows -- one
+	// per page -- must both come back.
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2 (c1 on page 1 + c3 on page 2; the untagged c2 is skipped)", len(rows))
 	}
 	if rows[0].Tags.BeadID != "gk-1" || rows[0].CostUSD != 0.40 || rows[0].CallID != "c1" {
-		t.Fatalf("row = %+v", rows[0])
+		t.Fatalf("row[0] = %+v", rows[0])
+	}
+	if rows[1].Tags.BeadID != "gk-2" || rows[1].CallID != "c3" {
+		t.Fatalf("row[1] = %+v (page 2 must be collected too)", rows[1])
 	}
 	if !clock.Equal(time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)) {
 		t.Fatalf("source clock = %v (the Date header is what guards month rollover)", clock)
@@ -5866,9 +6007,11 @@ Guidance for the implementer (write these in `admin.go` and `spendsource.go`):
 - `NewHTTPAdmin(baseURL, adminKey string, c *http.Client) *HTTPAdmin`. `EnsureKey` POSTs `/key/generate`; on a "already exists" response it POSTs `/key/update`. `RotateKey` POSTs `/key/generate` with the same alias after `/key/delete`. `DeleteKey` POSTs `/key/delete`.
 - The request body type uses `MaxBudget *float64` with `json:"max_budget,omitempty"` — **never** marshal `+Inf`. The value comes from `MaxBudgetFor(eff.Budget, eff.Ladder, catalog)` and from nowhere else; `nil` (unlimited) omits the field entirely.
 - **Write `TestMaxBudgetFor`.** It is the arithmetic the whole hard door rests on. Cover, at minimum: a cloud+local ladder (the token term prices at the *most expensive* rung); a local-only ladder with `monthly_cost_usd: 0` (the onboarding default — its `max_budget` must be **> 0**, which is the entire point of Decision 9: *before* this change that project's hard door was $0 or nonexistent); an unlimited cost ceiling → `nil`; an unlimited token ceiling → `nil`; and an empty ladder → the token term is 0 (a project with no rungs cannot spend, and `Resolve` has already disabled it anyway).
+  - **And one row for the money consequence, not just the abstract `nil`:** a project with a **finite `monthly_cost_usd` (e.g. `10`) but unlimited `monthly_tokens`** → `MaxBudgetFor` returns `nil`, i.e. **LiteLLM provisions no `max_budget` and there is no hard backstop even on the finite cost ceiling.** Assert `nil` explicitly *and name why it matters in the test message* ("finite cost + unlimited tokens ⇒ unbudgeted key; only meter's soft gate guards the cost ceiling — this is the Known limitation, not a bug"). Without this row the table proves "unlimited → nil" abstractly and hides that a project which *did* set a cost ceiling still gets no LiteLLM door.
 - **Every error must be constructed from the status code and the response body only.** Never format the request (it carries the admin key) or the `KeyInfo` (it carries the project's token) into an error.
 - `NewHTTPSpendSource(baseURL, adminKey string, c *http.Client) *HTTPSpendSource`. `Since` GETs `/spend/logs?start_date=<RFC3339>` (**Decision 11: the HTTP API, not LiteLLM's Postgres** — a supported surface that survives upgrades), decodes the array, and for each entry reads the attribution tags from **`metadata.spend_logs_metadata`** — the sub-object LiteLLM persists opencode's `x-litellm-spend-logs-metadata` header into (VERIFIED, `docs/environment.md`) — by calling `atags.FromMetadata(entry.Metadata.SpendLogsMetadata)`. On error: increment an `unattributed` counter (exposed by `Unattributed() int`) and **skip the row**. Parse the `Date` header with `http.ParseTime`; a missing or unparseable header yields the zero time, which `spend.SkewOK` treats as "no evidence".
-- **THE POLL MUST ALWAYS BE BOUNDED, PAGINATED, AND NEVER NAKED.** `Since` **must** set `start_date` (and an end bound) on every request and page through the results; it must **never** issue a `/spend/logs` query with no date window. This is a **code-review blocker**, not a preference: a verified smoke test OOM-killed the live LiteLLM pod (2Gi, exit 137, ~90s outage) with one unbounded query, and meter shares that LiteLLM with the whole cluster (`docs/environment.md`, "OPERATIONAL HAZARD"). Where the pinned LiteLLM version offers the bounded **`/spend/logs/v2`** (paginated, mandatory dates, 10k cap), prefer it and record the version dependency; when resolving a single row prefer a `request_id=` lookup over a window scan. `TestHTTPSpendSourceParsesTagsAndClock` asserts the request carries a `start_date`; keep that assertion.
+- **A project-resolvable row must still count against the MONTHLY CEILING even if a SECONDARY field is malformed — do not drop it wholesale (spend undercount).** `atags.FromMetadata` fails a row if *any* field is malformed, so a row that carries a perfectly good `gonk_project` but, say, a non-numeric `gonk_attempt` is currently skipped entirely — and that project's *real* spend is undercounted, which can let it slip past its `monthly_cost_usd` ceiling. **Rule: if `gonk_project` is present and attribution-safe, the row counts against that project's budget window regardless of a bad `gonk_attempt`/`gonk_rung`/`gonk_session_key`.** Only a row with no resolvable project is truly unattributable. If cheap, add a `ProjectFromMetadata(md) (string, bool)` fast path that validates just the project field: on a full-parse failure, fall back to it and, when it resolves, emit a `Row` with `Tags{Project: p}` and the secondary fields zeroed, counted under a **distinct** `partially_attributed` counter (so it is visible, not silent) rather than dropped under `unattributed`. The per-bead/per-session breakdowns lose that row; the project total does not.
+- **THE POLL MUST ALWAYS BE BOUNDED, PAGINATED, AND NEVER NAKED.** `Since` **must** set `start_date` **and an `end_date`** on every request and page through the results; it must **never** issue a `/spend/logs` query with no date window. This is a **code-review blocker**, not a preference: a verified smoke test OOM-killed the live LiteLLM pod (2Gi, exit 137, ~90s outage) with one unbounded query, and meter shares that LiteLLM with the whole cluster (`docs/environment.md`, "OPERATIONAL HAZARD"). Where the pinned LiteLLM version offers the bounded **`/spend/logs/v2`** (paginated, mandatory dates, 10k cap), prefer it and record the version dependency; when resolving a single row prefer a `request_id=` lookup over a window scan. `TestHTTPSpendSourceParsesTagsAndClock` asserts the request carries **both a `start_date` and an `end_date`** AND that the source **pages** (it serves two pages and fails if the client fetches only one); keep all three assertions.
 - **Per-key metadata is a backstop, not the source of truth.** LiteLLM merges per-key metadata (set at virtual-key creation) with the per-request header metadata, **request wins, key fills gaps**. So meter MAY set `gonk_project`/`gonk_rig` as key-metadata when it provisions a project's virtual key, as a backstop for any row that somehow arrives without the header — but the **authoritative** per-session tags (bead, session, rung, attempt, trigger) come from opencode's per-pod header, and that is what the ledger joins on.
 - **Enterprise-gate fallback (documented contingency).** LiteLLM's docs *claim* per-k/v `spend_logs_metadata` is an enterprise feature; it was **not** enforced on v1.92.0 (the smoke test wrote and read it back). If a future LiteLLM upgrade starts enforcing the gate, the fallback is the `x-litellm-tags` header → the `request_tags` column (also verified populated); the source would then read tags from `request_tags` instead of `metadata.spend_logs_metadata`. Plan 06 detects the break.
 - **`Since` must set `Row.Synthetic`** from the rung catalog: `catalog[tags.Rung].Kind == opercfg.KindLocal`. A rung the catalog has never heard of is **NOT synthetic** — fail closed, so an unknown rung's dollars count against the real money ceiling instead of being waved through as accounting fiction. Give the source the catalog at construction; it is the only place the flag can be set correctly, because LiteLLM has a single `spend` column and does not know the difference (Decision 9).
