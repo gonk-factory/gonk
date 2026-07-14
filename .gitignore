@@ -5,3 +5,8 @@
 
 # git worktrees for plan execution
 /.worktrees/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
