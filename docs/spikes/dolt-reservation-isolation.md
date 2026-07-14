@@ -157,21 +157,30 @@ Task 0b names two fallbacks, in preference order:
    stateful dependency — CNPG is already run in-cluster. Costs Dolt's
    versioned audit history (mitigated by append-only ledger tables).
 
-**Recorded decision for this spike: Fallback 1 is recommended per the plan's
-own preference ordering — Dolt stays for durability, meter runs
-single-replica (AD-10), and the in-process `keyedMutex` is the actual safety
-property.** Fallback 2 (CNPG Postgres) remains fully owner-approved and
-available without further spike work if meter's horizontal-scaling needs
-change that calculus later — Postgres's `SERIALIZABLE`/`FOR UPDATE`
-guarantees don't need to be re-verified the way Dolt's did, because they are
-a well-established property of the engine, not an open question.
+**OWNER DECISION (2026-07-14): Fallback 2 — CNPG Postgres for the ledger.**
+The spike agent recommended Fallback 1 (single-replica Dolt + in-process
+mutex); the owner overrode it in favour of Postgres, for a decisive reason:
+the reservation race is THE core money-safety property, and Fallback 1 makes
+it depend on meter never running more than one replica — a single
+`replicas: 2` misconfiguration silently reintroduces the 12.8× overspend this
+spike found, with no error. That is too fragile a foundation for the
+guarantee. Postgres on the existing CNPG cluster enforces the race in the
+database itself (`SERIALIZABLE` / `SELECT ... FOR UPDATE`, decades of
+production use), so the safety property holds regardless of replica count, and
+meter can scale. CNPG is already deployed — not a new dependency. The cost is
+Dolt's versioned audit history for the ledger, mitigated by append-only ledger
+tables. **Dolt is NOT dropped from the system** — it remains Gas City's beads
+store (versioned audit history, no reservation-race requirement); it is simply
+not meter's reservation store.
 
-**Either fallback means `store/dolt.go` (Task 6) MUST NOT rely on Dolt
-transactions to make `ReserveIfFits` atomic.** If Task 6 targets Dolt, its
-`ReserveIfFits` implementation needs its atomicity from the single-replica
-in-process mutex (Fallback 1), not from the store. If Task 6 targets
-Postgres/CNPG instead, `SERIALIZABLE` + `SELECT ... FOR UPDATE` there are the
-verified mechanism.
+**Consequence for Task 6:** the store targets **Postgres/CNPG**. `store.Store`'s
+`ReserveIfFits` gets its atomicity from Postgres `SERIALIZABLE` +
+`SELECT ... FOR UPDATE` (the verified mechanism), NOT from an in-process mutex
+and NOT from Dolt. There is no `store/dolt.go` for the ledger. Task 6 adds a
+Postgres driver (pgx or lib/pq), and this spike's `go-sql-driver/mysql`
+dependency + the `//go:build dolt` race test are removed (the finding lives in
+this doc; the test can never run in CI without Dolt anyway). `meter` is NOT
+constrained to single-replica by the store.
 
 **`ADR-004` (Task 10) cites this document** and must record explicitly that
 Dolt's transactional guarantees were measured and found insufficient for
