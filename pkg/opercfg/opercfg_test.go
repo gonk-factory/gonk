@@ -206,11 +206,29 @@ func TestLoadRejects(t *testing.T) {
 		"unknown timezone": "version: 1\nrungs: [{name: a, kind: local, model: m, est_tokens: \"200K\", synthetic_usd_per_1m_tokens: 0.2}]\ninstance: { ladder: [a], schedule: { quiet_hours: \"22:00-07:00\", timezone: Mars/Olympus } }",
 		"wrong version":    "version: 2\ninstance: { ladder: [a] }\nrungs: [{name: a, kind: local, model: m, est_tokens: \"200K\", synthetic_usd_per_1m_tokens: 0.2}]",
 		"not yaml":         "{{{{",
+		// max_infra_retries: 0 denies a FRESH bead (trailing_infra_failures 0 >=
+		// max_infra_retries 0) with a misleading infra-retries-exhausted reason;
+		// every decision on the instance bricks. 1 is the minimum sane value.
+		"zero max_infra_retries":     base("meter: { max_infra_retries: 0 }"),
+		"negative max_infra_retries": base("meter: { max_infra_retries: -1 }"),
 	}
 	for name, doc := range cases {
 		if _, err := Load([]byte(doc)); err == nil {
 			t.Errorf("%s: Load accepted %q, want error", name, strings.TrimSpace(doc))
 		}
+	}
+}
+
+// max_infra_retries defaults to 5 when unset (the rung policy needs a sane
+// deny-after-N floor even when the operator says nothing). 0 or negative bricks
+// the instance and is rejected; see TestLoadRejects.
+func TestMaxInfraRetriesDefault(t *testing.T) {
+	oc, err := Load([]byte(base("")))
+	if err != nil {
+		t.Fatalf("Load = %v", err)
+	}
+	if oc.Meter.MaxInfraRetries != 5 {
+		t.Fatalf("unset max_infra_retries default = %d, want 5", oc.Meter.MaxInfraRetries)
 	}
 }
 

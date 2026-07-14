@@ -216,6 +216,15 @@ func Load(raw []byte) (*OperatorConfig, error) {
 		*d.dst = v
 	}
 	if rc.Meter.MaxInfraRetries != nil {
+		// Belt-and-braces with the schema's "minimum": 1. The rung policy denies
+		// when trailing_infra_failures >= MaxInfraRetries, so a value of 0 denies a
+		// FRESH bead (0 >= 0) with a misleading "infra-retries-exhausted" reason --
+		// every decision on the instance bricks. 1 ("deny after the first infra
+		// failure") is the minimum sane value; 0 or negative self-DoSes the
+		// instance. Re-check here because MeterConfig can be built outside Load.
+		if *rc.Meter.MaxInfraRetries < 1 {
+			return nil, fmt.Errorf("operator config: meter.max_infra_retries must be >= 1, got %d; a value of 0 denies even a fresh bead (trailing_infra_failures >= max_infra_retries) and bricks every decision on the instance", *rc.Meter.MaxInfraRetries)
+		}
 		m.MaxInfraRetries = *rc.Meter.MaxInfraRetries
 	}
 	if rc.Meter.EnforceLadderOrder != nil {
