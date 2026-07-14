@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -167,5 +168,37 @@ func TestGetRawFileRefusesOversizeBody(t *testing.T) {
 	_, err := c.GetRawFile(context.Background(), 1, ".gonk.yml", "main", 4096)
 	if err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Fatalf("err = %v, want 'too large'", err)
+	}
+}
+
+// A misbehaving or MITM'd GitLab that always advertises a next page one greater
+// than the one requested drives paginate to unbounded requests. The self-
+// reference and non-numeric guards don't catch a monotonically-increasing
+// hostile sequence, so pagination must be bounded like MaxBytes/MaxRetries.
+// Reconciliation calls ListMemberProjects (-> paginate) as its entry point, so
+// an uncapped loop stalls the whole reconciler.
+func TestPaginateCapsHostilePages(t *testing.T) {
+	var hits int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		page := r.URL.Query().Get("page")
+		n, _ := strconv.Atoi(page)
+		if n == 0 {
+			n = 1
+		}
+		w.Header().Set("X-Next-Page", strconv.Itoa(n+1)) // always one more, forever
+		_, _ = fmt.Fprint(w, `[{"id":1,"path_with_namespace":"a/b","default_branch":"main"}]`)
+	}))
+	c.MaxPages = 5
+	// Backstop so a broken cap can't hang the suite.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := c.ListMemberProjects(ctx)
+	if err == nil || !strings.Contains(err.Error(), "pagination exceeded") {
+		t.Fatalf("err = %v, want 'pagination exceeded'", err)
+	}
+	if hits > c.MaxPages+2 {
+		t.Fatalf("server hit %d times, want <= %d (cap not enforced)", hits, c.MaxPages+2)
 	}
 }

@@ -32,9 +32,18 @@ type Client struct {
 	HTTP      *http.Client
 	// AdminToken, when non-empty, is used ONLY for webhook management
 	// (split-credential mode, spec 5.1). Empty means bot-does-everything.
-	AdminToken   string
-	MaxBytes     int64
-	MaxRetries   int
+	AdminToken string
+	MaxBytes   int64
+	MaxRetries int
+	// MaxPages bounds a single paginate walk. GitLab is semi-trusted: a
+	// misbehaving or MITM'd server that always advertises X-Next-Page one
+	// greater than requested would otherwise drive paginate to unbounded
+	// requests (the self-reference / non-numeric guards don't catch a
+	// monotonic hostile sequence). 1000 pages * per_page=100 = 100k items is
+	// far past any real bot membership (a group with thousands of projects),
+	// while still finite. Exceeding it is an error, not a silent truncation: a
+	// short project list would make the reconciler act on a partial view.
+	MaxPages     int
 	RetryBackoff func(attempt int) time.Duration
 	UserAgent    string
 	// AuthFallback is called when slot 1 was rejected and slot 2 was used
@@ -65,6 +74,7 @@ func New(baseURL, token string) *Client {
 		HTTP:         &http.Client{Timeout: 30 * time.Second},
 		MaxBytes:     DefaultMaxBytes,
 		MaxRetries:   3,
+		MaxPages:     1000,
 		RetryBackoff: func(a int) time.Duration { return time.Duration(1<<a) * 250 * time.Millisecond },
 		UserAgent:    "gonk-intake",
 	}
@@ -226,7 +236,12 @@ func (c *Client) getJSON(ctx context.Context, rq request, out any) error {
 func paginate[T any](ctx context.Context, c *Client, rq request) ([]T, error) {
 	var all []T
 	page := "1"
-	for {
+	for pages := 0; ; pages++ {
+		// Bound the walk like MaxBytes/MaxRetries: a hostile monotonic
+		// X-Next-Page sequence must error, not loop or truncate.
+		if c.MaxPages > 0 && pages >= c.MaxPages {
+			return nil, fmt.Errorf("glab: pagination exceeded %d pages for %s", c.MaxPages, rq.path)
+		}
 		q := map[string]string{"per_page": "100", "page": page}
 		for k, v := range rq.query {
 			q[k] = v
