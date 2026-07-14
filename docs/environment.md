@@ -142,17 +142,25 @@ is disabled but no external DSN is supplied).
 ExternalSecrets. A private `gonk-city` app-level repo is kept as a *future
 option* if app-level instance config outgrows the gitops repo; not needed now.
 
-## Ledger backend (deployed by the chart, toggleable)
+## Ledger backend — SETTLED: CNPG Postgres (Task 0b spike ran, Dolt failed)
 
-- Primary: **Dolt**, deployed as a SQL server BY the uber-chart (`dolt.enabled`),
-  shared by the Gas City beads store and gonk-meter's ledger. It is NOT
-  pre-existing — the gitops repo's own `.beads` uses *embedded per-repo* Dolt,
-  which is a different thing. Plan 03 Task 0b is a blocking spike that must
-  empirically prove Dolt (as deployed) can serialize the concurrent reservation
-  race.
-- Fallback (owner-approved) for **gonk-meter's ledger only**: **Postgres on the
-  existing CNPG cluster** (`databases-app/postgres`, healthy, 2 instances). Take
-  it if the Task 0b spike fails or is inconclusive.
+- **gonk-meter's ledger / reservation store is Postgres on the existing CNPG
+  cluster** (`databases-app/postgres`, healthy, 2 instances) — owner decision
+  2026-07-14, after the Task 0b spike. **Dolt was tested and FAILED the
+  reservation-race isolation test decisively:** 32 concurrent writers all won a
+  ceiling-of-2 race, persisting 12.8× the ceiling, under default isolation,
+  `SERIALIZABLE`, AND `SELECT ... FOR UPDATE` — the last confirmed a no-op
+  (Dolt's concurrency is optimistic/commit-time keyed on write-set overlap;
+  distinct reservation rows never conflict, so the locking keywords are accepted
+  but not enforced). See `docs/spikes/dolt-reservation-isolation.md`. Postgres
+  enforces the race in the DB (`SERIALIZABLE`/`FOR UPDATE`), so meter can run
+  >1 replica safely — the money guarantee does NOT depend on single-replica.
+- **Dolt is NOT dropped** — it remains **Gas City's beads store** (versioned
+  audit history, no reservation-race requirement; `[beads] backend` is Dolt-only,
+  no Postgres path). The chart deploys a Dolt server for beads; meter's ledger
+  is CNPG Postgres. Two stores, two engines, by design.
+- Do NOT re-frame this as "Dolt primary, Postgres fallback" — that was the
+  pre-spike plan. The spike settled it: Postgres for the ledger, full stop.
 - **The Gas City beads store is Dolt-ONLY — verified, no Postgres path exists**
   (`[beads] backend` enum is `dolt`/`doltlite`; sqlite/coordstore were removed
   and hard-error). So the `dolt.enabled: false` toggle means "point Gas City AND
