@@ -3414,7 +3414,7 @@ Two rules do the most work:
 
 **Files:** Create `pkg/rung/outcome.go`, `pkg/rung/decide.go`, `pkg/rung/decide_test.go`, `pkg/rung/mutation_test.go`
 
-- [ ] **Step 1: Write `pkg/rung/outcome.go` first (it is pure data, and the test needs it)**
+- [x] **Step 1: Write `pkg/rung/outcome.go` first (it is pure data, and the test needs it)**
 
 ```go
 package rung
@@ -3489,7 +3489,7 @@ func ConsecutiveInfraFailures(prior []Attempt, at string) int {
 }
 ```
 
-- [ ] **Step 2: Write the failing decision test**
+- [x] **Step 2: Write the failing decision test**
 
 `pkg/rung/decide_test.go`. Note the two rules this file obeys, both earned by Plan 01's review:
 
@@ -4059,9 +4059,9 @@ func TestDecideTableCoversTheContract(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run it, watch it fail.** Run: `go test ./pkg/rung/ -v` — FAIL, undefined `Decide`/`Input`/`Decision`.
+- [x] **Step 3: Run it, watch it fail.** Run: `go test ./pkg/rung/ -v` — FAIL, undefined `Decide`/`Input`/`Decision`.
 
-- [ ] **Step 4: Implement `pkg/rung/decide.go`**
+- [x] **Step 4: Implement `pkg/rung/decide.go`**
 
 ```go
 // Package rung is gonk's wait-vs-spend brain: given a project's resolved
@@ -4349,7 +4349,7 @@ func costStr(c budget.CostLimit) string {
 }
 ```
 
-- [ ] **Step 5: Implement `QuietHours` (append to `pkg/rung/outcome.go`)**
+- [x] **Step 5: Implement `QuietHours` (append to `pkg/rung/outcome.go`)**
 
 ```go
 // QuietHours is a resolved schedule.quiet_hours window (spec 5.4). It is
@@ -4423,9 +4423,9 @@ func (q *QuietHours) EndAfter(now time.Time) (time.Time, bool) {
 
 Add `"time"` to `outcome.go`'s imports (and `"fmt"`).
 
-- [ ] **Step 6: Watch the table pass.** Run: `go test ./pkg/rung/ -race -v` — PASS (all rows + both invariant tests).
+- [x] **Step 6: Watch the table pass.** Run: `go test ./pkg/rung/ -race -v` — PASS (all rows + both invariant tests).
 
-- [ ] **Step 7: Write the mutation test — prove the table cannot pass vacuously**
+- [x] **Step 7: Write the mutation test — prove the table cannot pass vacuously**
 
 `pkg/rung/mutation_test.go`. Same technique as Task 1, aimed at the money: each saboteur is a *plausible bug* someone will actually write. If the table lets one through, the table is the problem.
 
@@ -4596,12 +4596,12 @@ func TestSaboteursAreCaught(t *testing.T) {
 }
 ```
 
-- [ ] **Step 8: Run the mutation test**
+- [x] **Step 8: Run the mutation test**
 
 Run: `go test ./pkg/rung/ -run Saboteurs -v`
 Expected: PASS. Every saboteur must be caught. If one survives, **add a table row**.
 
-- [ ] **Step 9: Full gate and commit**
+- [x] **Step 9: Full gate and commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run ./...
