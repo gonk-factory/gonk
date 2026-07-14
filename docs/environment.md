@@ -13,9 +13,20 @@ any of it** — it is a snapshot, not a contract.
 - Repo: `agentic/gonk-project` (project id 69). Images go to the in-cluster
   GitLab container registry at **`registry.orac.local`** (owner decision
   2026-07-13), path `registry.orac.local/agentic/gonk-project/<image>:<tag>`.
-- **Every CI runner is currently OFFLINE** (stale registrations from cycled
-  `gitlab-gitlab-runner-*` pods). CI has never executed for this repo. The
-  standing gate is local; first images must be built and pushed by hand.
+- **CI works (verified 2026-07-13, pipeline 1437 green).** A live Kubernetes
+  executor runner picks up jobs (`kubernetes` executor, namespace `gitlab`).
+  Caveat: the project-scoped `/runners` API still lists 20 stale registrations
+  as "0 online" — ignore it; the proof is that pipelines actually run and
+  complete. Don't re-conclude "no runner" from that endpoint.
+- **CI is vendored/hermetic.** golangci-lint was timing out (`run.timeout: 5m`)
+  because the runner pod stalls downloading modules (can't reach
+  `proxy.golang.org`, or is heavily throttled). Fix: **dependencies are vendored
+  (`vendor/` committed)**, so `go build`, `go test -race`, and `golangci-lint`
+  all build offline. **Any plan that adds a Go dependency MUST run
+  `go mod vendor` and commit `vendor/`, or CI goes red again.** Verified both CI
+  images pass with `--network=none`.
+- First-party images still must be built and pushed by hand for now (image build
+  is not yet a CI stage).
 - Serves a **private CA** cert. Clients must trust the CA — mount the bundle.
   Do not disable TLS verification in any service. (The repo's git remote uses
   `http.sslVerify=false` as a local convenience; services must not copy that.)
