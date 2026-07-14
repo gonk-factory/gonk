@@ -1,0 +1,20 @@
+{
+  "object_kind": "merge_request",
+  "event_type": "merge_request",
+  "user": { "id": 9, "username": "human", "name": "A Human" },
+  "project": {
+    "id": 42,
+    "name": "repo",
+    "path_with_namespace": "group/repo",
+    "default_branch": "main",
+    "web_url": "https://gitlab.orac.local/group/repo"
+  },
+  "object_attributes": {
+    "id": 3001,
+    "iid": 5,
+    "source_branch": "gonk/onboard",
+    "target_branch": "main",
+    "state": "closed",
+    "action": "close"
+  }
+}
