@@ -99,24 +99,63 @@ inference gateway for the entire cluster, not just gonk. Treat a missing date
 bound as a code-review blocker in Plan 03. Prefer `request_id=` lookups when
 resolving a single row.
 
-## Ledger backend
+## Deployment topology: ONE uber-chart (owner decision 2026-07-13)
 
-- Primary: **Dolt** (already used for the beads store). Plan 03 Task 0b is a
-  blocking spike that must empirically prove Dolt can serialize the concurrent
-  reservation race.
+**Correction of an earlier framing error.** An earlier pass treated Gas City and
+Dolt as "bring-your-own / already exists." They are NOT. Verified against the
+live cluster: **no Dolt SQL server is deployed, no Gas City is deployed, and no
+`gonk-city` repo exists.** Only **GitLab, LiteLLM, and the CNPG Postgres
+operator** pre-exist and stay BYO.
+
+Gonk ships **one umbrella Helm chart** (Plan 05) that deploys the whole factory:
+
+- the **Gas City controller** (reconcile loop + supervisor REST/SSE on :8372 +
+  hosts pack services + spawns agent pods via its k8s session provider),
+- a **Dolt SQL server** (backs the Gas City beads store AND gonk-meter's ledger),
+- **gonk-intake** and **gonk-meter**,
+- the **gonk pack** (installed into the controller),
+
+wiring to BYO GitLab / LiteLLM / CNPG. `helm install` (in practice a Flux
+HelmRelease) yields a working factory.
+
+**Every bundled component is individually toggleable** (`<component>.enabled`),
+so a component can be disabled when it is managed or replaced elsewhere — e.g.
+migrate to a self-hosted DoltHub/DoltLab one day, set `dolt.enabled: false`, and
+point meter + Gas City at the external server. Standard umbrella-chart /
+conditional-subchart pattern. The chart must be honest about a disabled
+component's external replacement being required (a render `fail` if, say, Dolt
+is disabled but no external DSN is supplied).
+
+**Instance wiring lives in the gitops repo** — the Flux HelmRelease, the values
+(operator rung catalog + instance ladder + synthetic prices), and the
+ExternalSecrets. A private `gonk-city` app-level repo is kept as a *future
+option* if app-level instance config outgrows the gitops repo; not needed now.
+
+## Ledger backend (deployed by the chart, toggleable)
+
+- Primary: **Dolt**, deployed as a SQL server BY the uber-chart (`dolt.enabled`),
+  shared by the Gas City beads store and gonk-meter's ledger. It is NOT
+  pre-existing — the gitops repo's own `.beads` uses *embedded per-repo* Dolt,
+  which is a different thing. Plan 03 Task 0b is a blocking spike that must
+  empirically prove Dolt (as deployed) can serialize the concurrent reservation
+  race.
 - Fallback (owner-approved): **Postgres on the existing CNPG cluster** —
-  `databases-app/postgres`, healthy, 2 instances. Not a new dependency. Take it
-  without hesitation if the spike fails *or* is inconclusive.
+  `databases-app/postgres`, healthy, 2 instances. Take it without hesitation if
+  the spike fails *or* is inconclusive; set `dolt.enabled: false` and point the
+  ledger at CNPG. (CNPG serves meter's ledger; the Gas City beads store still
+  needs a Dolt unless Gas City supports Postgres — verify.)
 
-## Gas City
+## Gas City (deployed by the chart)
 
-- **Not deployed yet** (owner, 2026-07-13). Deploying it is a prerequisite for
-  Plan 04 (pack & images).
-- Consequence: the agent-pod label selector that the "budgets cannot be
-  bypassed" NetworkPolicy depends on **is not yet knowable**. The chart takes it
-  from values with a render guard against an empty selector, and Plan 06's
-  egress-denial test is the gate — a *wrong* selector renders fine and enforces
-  nothing, so the test, not the template, is what proves it.
+- **Not deployed yet, and the uber-chart is what deploys it.** Its container
+  image (`gonk-controller`) is built in Plan 04; the chart runs it as a
+  Deployment + Service (:8372) with the RBAC its k8s session provider needs to
+  create/manage agent pods, plus state storage.
+- Agent-pod label selector for the "budgets cannot be bypassed" NetworkPolicy is
+  now KNOWN, not guessed: Gas City hardcodes **`app: gc-agent`** on every agent
+  pod (`internal/runtime/k8s/pod.go`). Plan 06's egress-denial test is still the
+  gate that proves the policy actually binds — but see the network-layer
+  limitation below: it is unenforced until Cilium lands regardless.
 
 ## KNOWN LIMITATION: the network-layer budget bypass is real and NOT closed
 
