@@ -4618,7 +4618,7 @@ git add pkg/rung && git commit -m "feat(rung): deterministic outcome-gated ladde
 
 **Files:** Create `internal/meter/tagmint/tagmint.go`, `internal/meter/tagmint/tagmint_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `internal/meter/tagmint/tagmint_test.go`:
 
@@ -4705,9 +4705,9 @@ func TestMintAcceptsRealisticValues(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail.** Run: `go test ./internal/meter/tagmint/ -v`
+- [x] **Step 2: Run it, watch it fail.** Run: `go test ./internal/meter/tagmint/ -v`
 
-- [ ] **Step 3: Implement `internal/meter/tagmint/tagmint.go`**
+- [x] **Step 3: Implement `internal/meter/tagmint/tagmint.go`**
 
 ```go
 // Package tagmint is the boundary where gonk's attribution tags are created.
@@ -4812,7 +4812,7 @@ func check(name, value string, pattern *regexp.Regexp) error {
 }
 ```
 
-- [ ] **Step 4: Watch it pass, gate, commit**
+- [x] **Step 4: Watch it pass, gate, commit**
 
 ```bash
 go test ./internal/meter/tagmint/ -race -v
