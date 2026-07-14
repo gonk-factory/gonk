@@ -124,14 +124,15 @@ Both plans were instructed to flag anything needing live infrastructure and hand
 | **HB-1** | **Plan 02, Task 10 Step 5** (`cmd/gonk-intake` private listener, `:9090`) | **`POST /admin/reconcile?wait=true`** — kick a pass **that starts at or after the request**, block until it completes, return an `intake.ReconcileSummary` (JSON: `states`, `meter_pushes`, `dispatched`, `errors`, `result`). Bare `POST /admin/reconcile` still returns `202` immediately. | **✅ ACCEPTED** — specified in Plan 02, Task 10 Step 5, with `TestAdminReconcileWaitBlocksAndSummarizes`. | Intake's reconcile loop runs every ~10 minutes. Without this the harness either **sleeps ten minutes per assertion** or races the timer. Note the subtlety Plan 02 encodes: waiting on a pass *already in flight* would observe a **pre-request** world, which is the exact race this endpoint exists to remove. |
 | **HB-2** | **Plan 03, Task 9 Step 3b** (meter, `:8080`, bearer-auth like every other route) | **`POST /admin/spend/sync`** — force one spend-log poll, **block**, return `{"spend_as_of":…,"rows_ingested":…,"synced":…}`. Plus the **`gonk_meter_spend_synced_at_seconds`** gauge (an absolute Unix timestamp — a *predicate to wait on*, distinct from the `…_age_seconds` gauge, which is for *alerting*). | **✅ ACCEPTED** — specified in Plan 03, Task 9 Step 3b; the endpoint is in Plan 03's endpoint table. | Meter's view of spend is a **poll**. Every "assert the ledger says X" needs a predicate: `spend_as_of >= the timestamp of the call I made`, with a deadline. |
 | **HB-3** | **Plan 03, Task 8 Step 5b** | A **clock seam**: `cmd/gonk-meter/clock_testclock.go` behind `//go:build testclock`, whose `Now()` applies a **signed second offset** read from `GONK_TESTCLOCK_FILE`. An *offset*, not an absolute time, so the clock stays **monotone** (`spend.Advance` requires it). The production build has no such file and no such symbol. | **✅ ACCEPTED** — specified in Plan 03, Task 8 Step 5b. **Task 9 Step 2 of THIS plan asserts the production binary contains neither the symbol nor the literal.** | Month rollover, quiet-hours windows and `reservation_ttl` expiry cannot be tested by waiting: the shortest wait is an hour and the longest is a month. See **OD-7**. |
-| **HB-4** | **Plan 04** (the pack) | The outcome gate must (a) publish its classification (`success` / `gate-failed` / `infra-failed` / `aborted`) to the event bus, and (b) be drivable to a **deterministic gate failure** by a canned model response that produces no artifact. | **⚠ NOT ACCEPTED — PLAN 04 IS NOT WRITTEN YET.** It is therefore **recorded here as a requirement Plan 04 must satisfy**, and it is repeated in the "Requirements for Plan 04" section below so that whoever writes Plan 04 cannot miss it. **Do not let it evaporate:** without (a) and (b), *"infra failures never escalate a rung"* — the single subtlest invariant in the system — **cannot be distinguished from "nothing escalates at all"**, and the ladder tests are vacuous. |
+| **HB-4** | **Plan 04** (the pack) | The outcome gate must (a) publish its classification (`success` / `gate-failed` / `infra-failed` / `aborted`), and (b) be drivable to a **deterministic gate failure** by a canned model response that produces no artifact. | **✅ ACCEPTED, WITH ONE HALF DEFERRED.** Plan 04 delivers the classification via **`POST /v1/policy/outcome`** (the authoritative report meter acts on, `meterapi`'s own enum), plus a stable machine-readable stdout JSON line from `gonk-gate sweep` (`{"event":"gonk.outcome",…,"signals":{…}}`) and the bead's own `bd` history. The classifier itself is `pkg/gate.Classify` (pure). **The literal "publish onto the Gas City event bus" half is DEFERRED as a Plan 04/06 hand-off:** the Gas City event-bus *publish* API is not among the facts available to Plan 04 (its OD-6), and it would not invent one. **Plan 06 subscribes to whichever surface exists — `POST /v1/policy/outcome` is the strongest — and must NOT mark the ladder tests green against a surface that does not exist.** HB-4b (the deterministic gate failure) is delivered in full: a canned response with **no** tool call → `ArtifactPresent:false, ModelTokens>0` → `gate-failed`. **Escalation testing therefore depends on HB-2** (see the note below the table). |
 | **HB-5** | **Plan 05, Task 9 Step 1b** | **`chart/values-e2e.yaml`** — the per-run image tags, the **`testclock`** meter image, the e2e rung catalog with **round** synthetic prices, a fixed instance ladder, and `litellm.externalURL` pointed at a **harness-deployed** LiteLLM whose only upstream is the stub. | **✅ ACCEPTED, with one correction.** The original ask said *"bundled LiteLLM… `litellm.enabled: true`"* — **there is no such value.** Plan 05's chart is **external-LiteLLM-only** (its OD-3), and adding a subchart to satisfy a test would be the tail wagging the dog. **The harness deploys its own LiteLLM into the run namespace and passes the URL.** | The harness must not hand-assemble the deployment it is supposed to be testing: the first time the two diverge, e2e goes green on something nobody deploys. |
 
 ### Requirements for Plan 04 (which does not exist yet — carry these forward)
 
 **Plan 04 has not been written.** These are the things it must satisfy for this harness to mean anything. Whoever writes Plan 04: this list is a hand-back, not a suggestion.
 
-1. **HB-4a — publish the outcome classification.** The gate step emits `success` | `gate-failed` | `infra-failed` | `aborted` onto the Gas City event bus, and calls `POST /v1/policy/outcome` with the same value. Plan 03 is blunt about why this matters: *"if it reports an infra failure as `gate-failed`, it buys an escalation the project did not earn, and that classification is the single most important thing the pack gets right."*
+1. **HB-4a — publish the outcome classification. [RESOLVED by Plan 04, one half deferred.]** The classification (`success` | `gate-failed` | `infra-failed` | `aborted`) is produced by `pkg/gate.Classify` (pure, no LLM) and reported authoritatively via `POST /v1/policy/outcome`, plus a stable stdout JSON line from `gonk-gate sweep` and the bead's `bd` history. Plan 03 is blunt about why the classification matters: *"if it reports an infra failure as `gate-failed`, it buys an escalation the project did not earn, and that classification is the single most important thing the pack gets right."* **The event-bus *publish* half is DEFERRED as a Plan 04/06 hand-off** — the Gas City event-bus publish API is unknown (Plan 04 OD-6). **Subscribe to what exists (`/v1/policy/outcome` is the strongest surface); do not mark the ladder tests green against a surface that is not there.**
+   **And it depends on HB-2:** `gonk-gate sweep` forces a spend sync (`POST /admin/spend/sync`) and waits on `spend_as_of` before it will classify anything `gate-failed` — uncertainty never escalates. So **if `POST /admin/spend/sync` is broken, every gate failure classifies as `infra-failed` and the ladder never climbs**, which looks exactly like "the ladder is broken". When an escalation test goes mysteriously quiet, **check HB-2 first.** Note too that `/admin/spend/sync` is now a **production dependency of the pack** (the sweeper calls it every ~30s), not merely a harness endpoint.
 2. **HB-4b — a deterministic gate failure.** A canned stub-model response that produces **no artifact** must drive the gate to `gate-failed`, reliably, every run. Without it, `TestInterleavedFailuresCountOnlyGateFailures` cannot tell a working ladder from a dead one.
 3. **The agent-pod labels** (`networkPolicy.agentPodSelector`, Plan 05's **OD-5**). Gas City is **not deployed yet**, so nobody knows them. **A wrong selector renders fine and enforces nothing** — this test suite is the only thing that can catch that, and only once Cilium is unsuspended.
 4. **`OrderRequest.BeadAnchor` is an idempotency key** (Plan 02's carry-forward): intake can fire the same order twice across a restart, and a duplicate bead is duplicate spend. Kill tests **K13** and **K18** rest on this entirely.
@@ -277,7 +278,7 @@ Two rules that come from the house rules and are not negotiable here:
 | 3 | **Float arithmetic on money** | Test prices are fixed and round (`$0.25/1M` synthetic local, `$2.00/1M` cloud); token counts are round. Comparisons go through `ledger.ApproxUSD(got, want)` with a `1e-9` tolerance. **Never `==` on a dollar.** |
 | 4 | **Wall clock**: month rollover, quiet-hours windows, `reservation_ttl` expiry | The **clock seam** (**HB-3**): a `testclock` meter build reads a monotonic offset from a file; the harness advances it. **No test crosses a time boundary by sleeping.** L1 injects the clock directly (Plan 03 made it an input to the pure functions). |
 | 5 | **Clock skew detection** (meter compares its clock to the spend source's `Date` header) | A **`Date`-rewriting reverse proxy** in front of LiteLLM's `/spend/logs` (Task 5). Skew is *injected*, not waited for. |
-| 6 | **Spend-log polling lag** (meter's view of spend trails reality) | Forced sync (**HB-2**) + **wait on a predicate**: poll until `spend_as_of` advances past the timestamp of the call we made, with a deadline. At L2 the real lag is **measured and recorded** (P3-3), and `max_spend_staleness` is set above it. |
+| 6 | **Spend-log polling lag** (meter's view of spend trails reality) | Forced sync (**HB-2**) + **wait on a predicate**: poll until `spend_as_of` advances past the timestamp of the call we made, with a deadline. At L2 the real lag is **measured and recorded** (P3-3), and `max_spend_staleness` is set above it. **Every `/spend/logs` query the harness or meter issues MUST be date-bounded and paginated — never naked.** An unbounded query OOM-killed the live LiteLLM (`docs/environment.md`); `TestMeterSpendPollerAlwaysCarriesADateBound` (Task 5) is the guard. |
 | 7 | **Intake's 10-minute reconcile loop** | Forced reconcile (**HB-1**). Also: the harness prefers *forcing a reconcile* over *waiting for a webhook* wherever both would work — reconciliation is the correctness path (spec 5.2), so it is also the deterministic one. |
 | 8 | **Container / pod start order** | Every fixture blocks on readiness before proceeding: `/readyz` for gonk services, LiteLLM's `/health/liveliness`, a `SELECT 1` for the ledger, `kubectl wait --for=condition=Ready` in-cluster. **No fixture sleeps.** |
 | 9 | **GitLab's async job processing** (Sidekiq delivers webhooks and renders MRs out-of-band) | Poll the **GitLab API for the observable end state** (the MR exists; the note exists; the branch exists) with a deadline. Never sleep, never assume a hook arrived. Where a test does not specifically care about hook delivery, force a reconcile instead. |
@@ -1700,7 +1701,7 @@ Three independent views of the same spend, which must agree. If any two disagree
 | View | Source | What it is ground truth for |
 |---|---|---|
 | **The stub's request log** | `stubmodel.Log()` | **How many model calls actually happened, and what usage each reported.** Nothing else in the system knows this independently. |
-| **LiteLLM's spend log** | `GET /spend/logs` | What the **ledger** believes: one row per call, with the attribution `metadata` the pack stamped. |
+| **LiteLLM's spend log** | `GET /spend/logs` (bounded, paginated) | What the **ledger** believes: one row per call, carrying the attribution tags at **`metadata.spend_logs_metadata`** — the sub-object LiteLLM persists opencode's static `x-litellm-spend-logs-metadata` provider header into. This mechanism is **VERIFIED** (`docs/environment.md`): all seven `gonk_*` keys round-trip on LiteLLM v1.92.0. |
 | **meter's cost API** | `GET /v1/cost/bead/{id}`, `/cost/project/{p}` | What gonk **reports** — the join of spend → bead → GitLab artifact (spec 6.2.1). |
 
 ```go
@@ -2285,11 +2286,28 @@ func TestLiteLLMAdminAPIShapes(t *testing.T) {
 	//   /key/generate  -> a usable key with a USD max_budget and budget_duration
 	//   /key/update    -> raising and lowering max_budget takes effect
 	//   /key/delete    -> the key stops working IMMEDIATELY (not eventually)
-	//   /spend/logs    -> rows appear, carrying the metadata we stamped
+	//   /spend/logs    -> rows appear, carrying the metadata we stamped. THE QUERY
+	//                     MUST BE BOUNDED: always a start_date + end bound, paginated,
+	//                     NEVER naked. An unbounded /spend/logs OOM-killed the live
+	//                     LiteLLM (docs/environment.md, OPERATIONAL HAZARD: 2Gi, exit
+	//                     137, ~90s outage). This harness must never issue one either.
 	//   /model/info    -> the model list matches the rung catalog (P3-8; assert
 	//                     gonk_meter_catalog_drift_total == 0)
 	// FAILURE HERE IS A PLAN 03 BUG, NOT A HARNESS BUG. Fix internal/meter/litellm,
 	// record the real shape in docs/spikes/litellm-verified.md, and amend Plan 03.
+}
+
+// THE POLLER MUST BE BOUNDED. This is a code-review blocker in Plan 03, and here it
+// is a TEST: meter must never issue a naked /spend/logs. Put a recording reverse
+// proxy in front of the real LiteLLM's /spend/logs, drive meter through several
+// spend syncs, and assert EVERY captured request carried a start_date (a date
+// window), never an unbounded query. Rationale: one unbounded query takes down the
+// LiteLLM the WHOLE cluster shares, not just gonk (docs/environment.md).
+func TestMeterSpendPollerAlwaysCarriesADateBound(t *testing.T) {
+	// recording proxy -> real LiteLLM; force N syncs via POST /admin/spend/sync (HB-2);
+	// for each captured GET /spend/logs, require q.Get("start_date") != "".
+	// If Plan 03's pinned LiteLLM offers the bounded /spend/logs/v2 (mandatory dates,
+	// 10k cap), assert meter prefers it, and record the version in litellm-verified.md.
 }
 
 // P3-6 (Plan 03 OD-A): can a DEDICATED admin key do all of this, or are we forced
@@ -2789,6 +2807,26 @@ func TestOnboardTriageAndAttribute(t *testing.T) {
 	// Spec 11.5's other half: the attribution is visible at bead AND project granularity.
 	requireCostAPI(t, "/v1/cost/bead/"+beadFor(t, iss))
 	requireCostAPI(t, "/v1/cost/project/"+p.Path)
+
+	// 6. THE ATTRIBUTION SEAM, END TO END (Plan 04's OD-7 hand-off). The mechanism
+	//    is VERIFIED (docs/environment.md): opencode sets a static per-provider
+	//    header `x-litellm-spend-logs-metadata` (the seven pkg/atags keys) at pod
+	//    spawn, and LiteLLM persists it to metadata.spend_logs_metadata. Assert that
+	//    a spend row produced by a REAL agent pod carries ALL SEVEN keys there --
+	//    nothing before L3 exercises a real opencode, and spec goal 4 rests on it.
+	row := requireSpendRow(t, views, beadFor(t, iss)) // bounded /spend/logs lookup
+	for _, k := range atags.Keys() { // gonk_project, gonk_rig, gonk_bead_id, gonk_session_key, gonk_rung, gonk_attempt, gonk_trigger
+		if row.SpendLogsMetadata[k] == "" {
+			t.Fatalf("attribution key %q missing from metadata.spend_logs_metadata: %+v", k, row.SpendLogsMetadata)
+		}
+	}
+	// UPGRADE-BREAK DETECTOR. LiteLLM's docs CLAIM per-k/v spend_logs_metadata is an
+	// enterprise feature; it was NOT enforced on v1.92.0. If a version bump starts
+	// enforcing it, these keys vanish from metadata.spend_logs_metadata -- and the
+	// documented fallback is the `x-litellm-tags` header -> the request_tags column.
+	// This assertion FAILS LOUDLY on that regression rather than silently reporting
+	// project-only attribution; when it fires, switch meter's spend source to
+	// request_tags and record the LiteLLM version that forced it (litellm-verified.md).
 }
 
 // ============================================================================
@@ -3081,7 +3119,7 @@ Add `test/README.md` with a **"before you trust this suite"** checklist, because
 - [ ] **HB-1** — `POST /admin/reconcile?wait=true` exists on intake's private listener and **blocks**, returning a `ReconcileSummary` [**Plan 02, Task 10, Step 5**]. If it does not, every `forceReconcile` in L1/L3 is a `sleep` — **find out which, and do not proceed on hope.**
 - [ ] **HB-2** — `POST /admin/spend/sync` exists on meter and blocks, and `gonk_meter_spend_synced_at_seconds` is exported [**Plan 03, Task 9, Step 3b**].
 - [ ] **HB-3** — the `//go:build testclock` build of `cmd/gonk-meter` exists and reads `GONK_TESTCLOCK_FILE` [**Plan 03, Task 8, Step 5b**], **and Task 9 Step 2's guard passes** (the production image has neither the symbol nor the literal).
-- [ ] **HB-4** — **PLAN 04 IS NOT WRITTEN.** Confirm it landed with (a) the published outcome classification and (b) a deterministic gate failure [**this plan, "Requirements for Plan 04"**]. Without both, the escalation-ladder tests are **vacuous** and must be marked so, not quietly passed.
+- [ ] **HB-4** — Confirm Plan 04 landed (a) the outcome classification via `pkg/gate.Classify` + `POST /v1/policy/outcome` (+ stdout JSON + bead history), the **event-bus publish half deferred** as a Plan 04/06 hand-off (Gas City publish API unknown, Plan 04 OD-6), and (b) a deterministic gate failure [**this plan, "Requirements for Plan 04"**]. Subscribe to `/v1/policy/outcome`, not a nonexistent bus. **Escalation depends on HB-2** — a broken `POST /admin/spend/sync` makes every gate failure classify `infra-failed` and the ladder never climbs; check it first. Without (a)+(b) the escalation-ladder tests are **vacuous** and must be marked so, not quietly passed.
 - [ ] **HB-5** — `chart/values-e2e.yaml` exists [**Plan 05, Task 9, Step 1b**], points at a **harness-deployed** LiteLLM (**never** `litellm.litellm.svc`), and contains no credential.
 - [ ] **Plan 03 Task 0b has actually been run**, and `GONK_LEDGER` is set to whichever backend it left in force (**OD-5**). *"We assume Dolt works" is not a passing state, and a budget ceiling defended by an unproven isolation guarantee is not defended.*
 - [ ] The store env vars the chart sets — `GONK_METER_STORE_BACKEND`, `GONK_METER_STORE_DSN_FILE` [**Plan 03, Task 8, Step 5**] — and the key sink — `keysink.NewK8s`, `GONK_KEYSINK_NAMESPACE` [**Plan 03, Task 7 Step 4b**; RBAC from **Plan 05, Task 4**] — exist. Without the key sink, **no project ever leaves `key-missing` and nothing runs at all.**

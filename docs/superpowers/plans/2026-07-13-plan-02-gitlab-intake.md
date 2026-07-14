@@ -100,7 +100,7 @@ Plans 02 and 03 were written in parallel by authors who could not see each other
 | Operator instance/group policy (`pkg/opercfg`); folding **nested** GitLab groups | **meter** |
 | Is this project enabled? What is its ladder? Its budget? Its actions? | **meter** (intake reads the answer) |
 | **Quiet hours** (`schedule.quiet_hours`) | **meter** (as a `defer`) |
-| Rung choice (`/policy/decide`) | **meter**, called by the **pack** |
+| Rung choice (`/policy/decide`) | **meter**, called by **intake (Gate 1)** and the **pack (Gate 2)** |
 | Budget enforcement (soft) | **meter** |
 | Budget enforcement (hard) | **LiteLLM's virtual key**, provisioned by meter |
 | Virtual-key provisioning | **meter** |
@@ -109,12 +109,12 @@ Plans 02 and 03 were written in parallel by authors who could not see each other
 | GitLab state: member? `.gonk.yml` present? `.agent/` present? declined? | **intake** |
 | Webhook receipt, verification, dedupe, bot-loop suppression | **intake** |
 | The deterministic onboarding MR | **intake** |
-| **Firing the order** at the Gas City supervisor | **intake** |
+| **Firing the order** at the Gas City supervisor (only on a `run` decision) | **intake** |
 | Parking a **deferred** bead and retrying at `retry_after` | **pack** (Plan 04) |
 
 **Why resolution moved to meter.** Meter is the only component that holds operator policy. If intake also resolved, a project's budget ceiling would have two independent derivations that could disagree — and the one that decides whether money may be spent is meter's. One resolver, one truth.
 
-**Consequence: intake never sees a `defer`.** Intake does not call `/policy/decide` — the pack does, immediately before the session spawns (spec 6.2.3). So intake **fires the order unconditionally** (subject to its own GitLab-state gates), and if the project is inside its quiet hours, or out of budget, **meter defers the order downstream and the pack parks the bead.** Intake has no quiet-hours code, no `not_before`, and no deferral logic. That is not a gap — it is the whole point of putting the wait-vs-spend decision at the last possible moment, next to the spend.
+**Consequence: intake calls `/policy/decide` as Gate 1, and DOES see `defer` and `deny`.** The rung/budget decision is gated in **two** places (spec §6.2.3's single-gate model is impossible — a dispatch *formula* cannot call meter). **Gate 1 is gonk-intake**, which decides once before the *first* dispatch; **Gate 2 is the pack** (`gonk-dispatch`, Plan 04), which re-decides on *every* pour and is the real enforcement point. So after its GitLab-state gates pass, intake asks meter, then acts on the answer: on `run` it **fires the order once**, carrying `rung`, `model`, `metadata_json`, `key_ref`, `reservation_id` and `attempt` as order vars; on `defer` it **fires nothing and records `retry_after`** (this is where quiet hours and out-of-budget land — as a normal `defer`, not a gap); on `deny` it **fires nothing and labels**. All three are HTTP 200 — normal answers. Intake **still** has no quiet-hours code, no `not_before`, and no clock: quiet hours simply arrive as a `defer` it now handles. And intake **still** never sends an attempt count (`meterapi.DecideRequest` has no such field — a forgery vector for climbing the ladder). Gate 1 is an optimization: skip churning a bead meter would certainly deny, and emit an early `defer`/`deny` metric. Gate 2 remains the enforcement point that re-decides at pour time and never trusts the order vars intake passed.
 
 ---
 
@@ -163,13 +163,13 @@ Meter enforces the action veto at `/decide` (it is the only chokepoint before a 
 
 ### Owner decision needed (a fact only you have)
 
-**OD-A — The Gas City supervisor order API.** Spec 4.1 says the controller exposes a "supervisor REST API + SSE event bus"; nothing in the spec gives the shape for *firing an order*.
+**OD-A — The Gas City supervisor order API. RESOLVED by Plan 04, Task 2.** Spec 4.1 said the controller exposes a "supervisor REST API + SSE event bus" but gave no shape for *firing an order*. Plan 04 Task 2 settled it: the real contract is `POST /v0/city/{cityName}/order/gonk-dispatch/run` with body `{"vars":{...}}`, and there is **no per-route auth** — admission is by network position. The client becomes `pkg/gcapi` (Plan 04, Task 2).
 *Built (Task 9):* a `Dispatcher` interface with (i) a `LogDispatcher` that structured-logs the order — so intake runs and is fully testable today — and (ii) an `HTTPDispatcher` that POSTs our `OrderRequest` JSON to a configurable URL.
-*Needed:* the real endpoint and payload. **Plan 04 must reconcile `HTTPDispatcher` with Gas City's actual contract.** Until then this is a placeholder and the plan says so.
+*Reconciliation:* Plan 04 Task 2 maps `HTTPDispatcher` onto the `POST /v0/city/{cityName}/order/gonk-dispatch/run` contract via `pkg/gcapi`. The `LogDispatcher` seam stays — it is how intake runs and is tested with no controller present.
 
-**OD-B — The canonical local rung name.** The onboarding template ships `ladder: [qwen-local]` (spec 5.4's example). That string must **exactly** match a LiteLLM model name **and** appear in the instance ladder, or ADR-002's empty-ladder rule disables **every freshly-onboarded project**. Is `qwen-local` the real name?
-*Where the answer lives — and it is a file, not a memory:* the deployed LiteLLM's model list is in the gitops repo at **`clusters/orac/apps/litellm/litellm.yaml`**, under **`spec.values.proxy_config.model_list`** (`docs/environment.md`). Read the `model_name` values there and pick one; do not guess.
-(Same question as Plan 03's OD-D — one answer serves both. Carry-forward to **Plan 05**: the chart's default instance ladder **must contain it**; `opercfg.Load` now refuses to start with an empty instance ladder, which closes the fail-open PLAN.md flagged.)
+**OD-B — The onboarding template's ladder is derived from operator config, not a hardcoded rung.** Earlier drafts had the onboarding template ship a literal `ladder: [qwen-local]` (spec 5.4's example). That is now **wrong**: a hardcoded rung must **exactly** match a LiteLLM model name **and** appear in the instance ladder, or ADR-002's empty-ladder rule disables **every freshly-onboarded project** — and only the operator knows their catalog. So the onboarding `.gonk.yml` the bot writes into a brand-new project **renders its `ladder:` from the operator's instance ladder** (derived from operator/chart config, surfaced via meter's `Effective` / the chart's values), never from a literal in intake's source.
+*Where the operator's ladder lives — and it is a file, not a memory:* the deployed LiteLLM's model list is in the gitops repo at **`clusters/orac/apps/litellm/litellm.yaml`**, under **`spec.values.proxy_config.model_list`** (`docs/environment.md`); the chart's default instance ladder is built from those `model_name` values.
+(Same concern as Plan 03's OD-D — one operator ladder serves both. Carry-forward to **Plan 05** (its amendment): the chart owns the default instance ladder, intake renders the onboarding template from it, and `opercfg.Load` refuses to start with an empty instance ladder — which closes the fail-open PLAN.md flagged.)
 
 ---
 
@@ -183,18 +183,19 @@ The normative Go source is **Plan 03, Task 0** (`docs/superpowers/plans/2026-07-
 
 ### What intake calls, and what it does not
 
-Intake calls **exactly four** endpoints:
+Intake calls **exactly five** endpoints:
 
 ```
 PUT    /v1/projects/{project}     push RAW .gonk.yml; meter validates + resolves + provisions the key
 GET    /v1/projects/{project}     read back state / effective / budget          (readiness, admin)
 DELETE /v1/projects/{project}     de-onboard: disable the project, delete the key
+POST   /v1/policy/decide          Gate 1: decide run/defer/deny before the FIRST dispatch
 GET    /healthz                   readiness gate
 ```
 
 `{project}` is the GitLab `path_with_namespace`, URL-path-escaped. Use `meterapi.ProjectPath(project)`; never hand-build it.
 
-**Intake does NOT call `/v1/policy/decide`.** Spec 6.2.3 puts the rung decision in the *dispatch formula* (the pack, Plan 04), immediately before the session spawns. Intake never touches it, never sends an attempt count (`meterapi.DecideRequest` has no such field, deliberately — it is a forgery vector for climbing the ladder), and **never sees a `defer`**.
+**Intake DOES call `/v1/policy/decide` — as Gate 1.** The rung/budget decision is gated twice: **Gate 1 is intake** (before the *first* dispatch) and **Gate 2 is the pack** (`gonk-dispatch`, Plan 04), which re-decides on *every* pour and is the real enforcement point. Intake fires the order **only on `run`** — passing `rung`, `model`, `metadata_json`, `key_ref`, `reservation_id` and `attempt` as order vars — records `retry_after` on a `defer`, and labels on a `deny`. Gate 1 is an optimization (skip a bead meter would certainly deny; emit an early `defer`/`deny` metric); Gate 2 stays the enforcement point and never trusts those order vars. Intake **still** never sends an attempt count (`meterapi.DecideRequest` has no such field, deliberately — it is a forgery vector for climbing the ladder): the `attempt` intake reads back on a `run` is meter's, carried forward as an order var, never an input to the decision.
 
 ### Intake pushes RAW config. Meter resolves.
 
@@ -2826,7 +2827,7 @@ The ones that matter most to *this* plan:
 
 - `TestUnlimitedBudgetSerializesAsNull` — PLAN.md's highest-value carry-forward. `json.Marshal(math.Inf(1))` **returns an error**, so an unlimited project would fail to serialize *at all*. `meterapi.Budget` (`*float64`/`*int64`, `nil` == unlimited) is where that is solved, once, for both sides.
 - `TestZeroBudgetIsNotAnEmptyBudget` — an empty `Budget{}` is all-nil, and **nil means UNLIMITED**. For a project you are *disabling*, that is the exact opposite of fail-closed. Use `meterapi.ZeroBudget()`.
-- `TestDecideRequestHasNoAttemptField` — intake never calls `/decide` at all, but this test protects the seam from a well-meaning future edit: a caller-supplied attempt count is a forgery vector for climbing the ladder straight to the most expensive rung.
+- `TestDecideRequestHasNoAttemptField` — intake DOES call `/decide` now (Gate 1), but it must never send an attempt: this test protects the seam from a well-meaning future edit, because a caller-supplied attempt count is a forgery vector for climbing the ladder straight to the most expensive rung. `attempt` travels only the other way — meter returns it on a `run`, and intake forwards it as an order var.
 - `TestProjectPathEscapes` — `ProjectPath("group/repo")` is `/v1/projects/group%2Frepo`. Intake **must** use it; an unescaped slash routes to a different handler, or to none.
 
 - [ ] **Step 3: Arm the drift gate**
@@ -3342,6 +3343,24 @@ func (m *MeterClient) Deregister(ctx context.Context, project string) error {
 
 func (m *MeterClient) Healthy(ctx context.Context) error { /* GET /healthz -> 200 */ }
 
+// Decide is Gate 1: POST /v1/policy/decide. run/defer/deny are ALL HTTP 200 --
+// normal answers, not errors. The request carries NO attempt count (meterapi.
+// DecideRequest has no such field, deliberately: a caller-supplied attempt is a
+// forgery vector for climbing the ladder). On a `run`, the response carries the
+// rung/model/key_ref/reservation_id/attempt intake forwards as order vars; on a
+// `defer`, a retry_after. Gate 2 (the pack) re-asks this on every pour.
+func (m *MeterClient) Decide(ctx context.Context, req meterapi.DecideRequest) (*meterapi.DecideResponse, error) {
+	var out meterapi.DecideResponse
+	code, err := m.do(ctx, http.MethodPost, "/v1/policy/decide", req, &out)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("meter: POST /v1/policy/decide: %d", code)
+	}
+	return &out, nil
+}
+
 // do sends one request with the bearer token, caps the response body, and
 // decodes it. It NEVER puts the token in an error string: errors get logged.
 func (m *MeterClient) do(ctx context.Context, method, path string, body, out any) (int, error) {
@@ -3758,9 +3777,11 @@ task reaches for an LLM, it is wrong: the whole point of the Renovate model is
 that a maintainer can read the MR and know exactly what merging it authorizes,
 and that the same invite always produces the same MR.
 
-The MR carries (a) a conservative default `.gonk.yml` — triage only, local rungs
-only, **zero cloud budget** — and (b) an explanation *re-rendered from the actual
-config values*, so the prose cannot drift from the settings.
+The MR carries (a) a conservative default `.gonk.yml` — triage only, ladder
+seeded from the operator's instance ladder (OD-B), **zero cloud budget** so no
+paid model is reachable whatever the ladder holds — and (b) an explanation
+*re-rendered from the actual config values*, so the prose cannot drift from the
+settings.
 
 - [ ] **Step 1: Write the failing render test** — `pkg/intake/render_test.go`
 
@@ -3776,10 +3797,15 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/pkg/gonkcfg"
 )
 
-// The template must be a valid, enabled config — an onboarding MR that lands a
-// config gonk then rejects would be a spectacular own goal.
+// The template must render a valid, enabled config — an onboarding MR that lands
+// a config gonk then rejects would be a spectacular own goal. We render with a
+// representative operator ladder (this instance's catalog is qwen-local).
 func TestDefaultConfigIsValidAndEnabled(t *testing.T) {
-	cfg, err := gonkcfg.Load(DefaultConfigYAML)
+	raw, err := RenderDefaultConfig([]string{"qwen-local"})
+	if err != nil {
+		t.Fatalf("render default config: %v", err)
+	}
+	cfg, err := gonkcfg.Load(raw)
 	if err != nil {
 		t.Fatalf("the config we ask projects to merge does not validate: %v", err)
 	}
@@ -3801,12 +3827,12 @@ func TestDefaultConfigIsValidAndEnabled(t *testing.T) {
 // Determinism: same input, same bytes, every time. This is what makes the
 // onboarding MR reviewable and reproducible.
 func TestRenderIsDeterministic(t *testing.T) {
-	a, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0"})
+	a, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0", Ladder: []string{"qwen-local"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range 5 {
-		b, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0"})
+		b, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0", Ladder: []string{"qwen-local"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3817,7 +3843,7 @@ func TestRenderIsDeterministic(t *testing.T) {
 }
 
 func TestRenderMatchesGolden(t *testing.T) {
-	got, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0"})
+	got, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0", Ladder: []string{"qwen-local"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3847,7 +3873,7 @@ func TestMRBodyDocumentsEveryConfigKey(t *testing.T) {
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatal(err)
 	}
-	body, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0"})
+	body, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0", Ladder: []string{"qwen-local"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3868,11 +3894,15 @@ func TestMRBodyDocumentsEveryConfigKey(t *testing.T) {
 
 // The prose must be generated from the values, not typed alongside them.
 func TestRenderedBodyQuotesTheActualValues(t *testing.T) {
-	body, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0"})
+	body, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0", Ladder: []string{"qwen-local"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(body, string(DefaultConfigYAML)) {
+	cfg, err := RenderDefaultConfig([]string{"qwen-local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, string(cfg)) {
 		t.Fatal("the MR body must embed the exact .gonk.yml it commits, byte for byte")
 	}
 	for _, want := range []string{"$0", "qwen-local", "@gonk", "group/repo"} {
@@ -3886,7 +3916,7 @@ func TestRenderedBodyQuotesTheActualValues(t *testing.T) {
 - [ ] **Step 2: Run it and watch it fail**
 
 Run: `go test ./pkg/intake/ -run 'Render|DefaultConfig|MRBody' -v`
-Expected: FAIL — undefined `DefaultConfigYAML`, `RenderOnboardingMR`.
+Expected: FAIL — undefined `DefaultConfigTemplate`, `RenderDefaultConfig`, `RenderOnboardingMR`.
 
 - [ ] **Step 3: Implement `pkg/intake/render.go`**
 
@@ -3902,15 +3932,22 @@ import (
 // OnboardBranch is the branch the onboarding MR is opened from (spec, Appendix A).
 const OnboardBranch = "gonk/onboard"
 
-// DefaultConfigYAML is what the onboarding MR commits: the most conservative
-// configuration that still does something (spec 5.3) — triage only, local rungs
-// only, zero cloud budget. A maintainer who merges this without reading it has
-// authorized nothing that costs money.
+// DefaultConfigTemplate is the text of the .gonk.yml the onboarding MR commits:
+// the most conservative configuration that still does something (spec 5.3) —
+// triage only, zero cloud budget. A maintainer who merges this without reading it
+// has authorized nothing that costs money.
 //
-// It is a byte-exact constant, not a marshaled struct: the comments ARE the
-// product, and a YAML marshaler would strip them. TestDefaultConfigIsValidAndEnabled
-// keeps it honest against the schema and the resolver.
-var DefaultConfigYAML = []byte(`# gonk configuration. https://gitlab.orac.local/agentic/gonk-project
+// Every value is a fixed, conservative literal EXCEPT `ladder:`, which is
+// RENDERED from the operator's instance ladder (OD-B) — intake must NOT hardcode a
+// rung. A hardcoded rung that is absent from the operator's catalog would disable
+// every freshly-onboarded project (ADR-002's empty-ladder rule); only the operator
+// knows their catalog. The instance ladder reaches intake from operator/chart
+// config (Plan 05's amendment); meter derives its own from the same source.
+//
+// It is comment-rich, not a marshaled struct: the comments ARE the product, and a
+// YAML marshaler would strip them. TestDefaultConfigIsValidAndEnabled keeps it
+// honest against the schema and the resolver.
+var DefaultConfigTemplate = template.Must(template.New("gonkcfg").Parse(`# gonk configuration. https://gitlab.orac.local/agentic/gonk-project
 # Schema: docs/schemas/gonk-config.v1.schema.json
 #
 # Removing this file, or removing the gonk bot from this project, de-onboards it.
@@ -3935,8 +3972,11 @@ budget:
 # Models gonk may use here, cheapest first. This is an allow-list: a model that
 # is not listed cannot be used, whatever the budget says. Cloud rungs must be
 # added deliberately (and need a non-zero monthly_cost_usd to be reachable).
+# Seeded from the operator's instance ladder; trim or reorder as you like.
 ladder:
-  - qwen-local
+{{- range .Ladder}}
+  - {{.}}
+{{- end}}
 
 # resume: continue an interrupted session where it left off. fresh: start over.
 continuity: resume
@@ -3949,26 +3989,44 @@ triage:
 provenance:
   commit_trailers: true
   include_usage: false     # true also records token/cost in commit trailers
-`)
+`))
+
+// RenderDefaultConfig renders the committed .gonk.yml, filling `ladder:` from the
+// operator's instance ladder (OD-B). DETERMINISTIC for a given ladder, NO MODEL
+// CALL. An empty ladder is a caller bug: `opercfg.Load` refuses to start intake
+// with an empty instance ladder (Plan 05), so this is never reached with one.
+func RenderDefaultConfig(instanceLadder []string) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := DefaultConfigTemplate.Execute(&buf, struct{ Ladder []string }{instanceLadder}); err != nil {
+		return nil, fmt.Errorf("intake: render default config: %w", err)
+	}
+	return buf.Bytes(), nil
+}
 
 // OnboardingContext is everything the MR body varies on. Keep it small: every
 // field here is a way for two renders to differ.
 type OnboardingContext struct {
-	Project     string // path_with_namespace
+	Project     string   // path_with_namespace
 	BotUsername string
-	Version     string // gonk version, for the provenance trailer
+	Version     string   // gonk version, for the provenance trailer
+	Ladder      []string // operator instance ladder (OD-B); NOT a hardcoded rung
 }
 
 // RenderOnboardingMR produces the MR description. It is a pure function of its
-// input and the default config — DETERMINISTIC, NO MODEL CALL (spec 5.3). The
-// consequences it lists are rendered from the config values themselves, so the
-// text cannot drift from the settings.
+// input (including the operator instance ladder) — DETERMINISTIC, NO MODEL CALL
+// (spec 5.3). The consequences it lists are rendered from the config values
+// themselves — the SAME rendered bytes it embeds — so the text cannot drift from
+// the settings, and it names whatever rungs the operator's ladder actually holds.
 func RenderOnboardingMR(c OnboardingContext) (string, error) {
+	cfg, err := RenderDefaultConfig(c.Ladder)
+	if err != nil {
+		return "", err
+	}
 	var buf bytes.Buffer
 	if err := onboardingTmpl.Execute(&buf, struct {
 		OnboardingContext
 		Config string
-	}{c, string(DefaultConfigYAML)}); err != nil {
+	}{c, string(cfg)}); err != nil {
 		return "", fmt.Errorf("intake: render onboarding MR: %w", err)
 	}
 	return buf.String(), nil
@@ -3997,7 +4055,7 @@ values committed here, so the two cannot disagree.
 | ` + "`budget.monthly_cost_usd`" + ` | ` + "`0`" + ` | **$0.** No paid model can be used on this project. Raising this is the only way to spend money here. |
 | ` + "`budget.monthly_tokens`" + ` | ` + "`50M`" + ` | Ceiling on tokens per calendar month across all of gonk's work here. |
 | ` + "`budget.per_task_tokens`" + ` | ` + "`2M`" + ` | Ceiling for a single work item, so one runaway task cannot eat the month. |
-| ` + "`ladder`" + ` | ` + "`[qwen-local]`" + ` | The only model gonk may use here: the local one. It costs no money. Cloud models must be listed explicitly to be usable. |
+| ` + "`ladder`" + ` | ` + "`{{.Ladder}}`" + ` | The models gonk may use here, cheapest first — seeded from this instance's configured ladder, not a hardcoded rung. A model not listed cannot be used, whatever the budget says. Cloud rungs must be added deliberately (and need a non-zero budget). |
 | ` + "`continuity`" + ` | ` + "`resume`" + ` | An interrupted session resumes rather than starting over. |
 | ` + "`triage.label_prefix`" + ` | ` + "`gonk::`" + ` | Every label gonk creates starts with this, so its labels are always distinguishable from yours. |
 | ` + "`triage.respond_to_mentions`" + ` | ` + "`true`" + ` | Mentioning ` + "`@{{.BotUsername}}`" + ` in an issue comment gets a reply in that thread. |
@@ -4054,7 +4112,7 @@ func TestWriteGolden(t *testing.T) {
 	if os.Getenv("UPDATE_GOLDEN") == "" {
 		t.Skip("set UPDATE_GOLDEN=1 to regenerate")
 	}
-	body, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0"})
+	body, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0", Ladder: []string{"qwen-local"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4092,8 +4150,11 @@ import (
 )
 
 func newOnboarder(gl *glabtest.Server) *GitLabOnboarder {
+	// This test instance's operator ladder is qwen-local -- a valid operator
+	// catalog, seeded into the template like the chart does in production (Plan 05).
 	return &GitLabOnboarder{
-		GL: gl.Client(), BotUserID: 7, BotUsername: "gonk", Version: "v0", Obs: NopObserver{},
+		GL: gl.Client(), BotUserID: 7, BotUsername: "gonk", Version: "v0",
+		InstanceLadder: []string{"qwen-local"}, Obs: NopObserver{},
 	}
 }
 
@@ -4114,7 +4175,8 @@ func TestOnboardOpensMRWithTheConfig(t *testing.T) {
 		t.Fatal("MR description is not the rendered explanation")
 	}
 	raw, err := gl.Client().GetRawFile(ctx, p.ID, ConfigPath, OnboardBranch, 65536)
-	if err != nil || string(raw) != string(DefaultConfigYAML) {
+	want, _ := RenderDefaultConfig(o.InstanceLadder)
+	if err != nil || string(raw) != string(want) {
 		t.Fatalf("branch does not carry the exact default config: %v", err)
 	}
 	// The commit must not land on the default branch. Only a human merging can
@@ -4256,11 +4318,12 @@ const OnboardingIssueLabel = "gonk::onboarding"
 //
 // DETERMINISTIC. NO MODEL CALL. Every byte it writes comes from render.go.
 type GitLabOnboarder struct {
-	GL          OnboardGitLab
-	BotUserID   int64
-	BotUsername string
-	Version     string
-	Obs         Observer
+	GL             OnboardGitLab
+	BotUserID      int64
+	BotUsername    string
+	Version        string
+	InstanceLadder []string // operator instance ladder seeded into the template (OD-B; from chart/operator config, Plan 05)
+	Obs            Observer
 }
 
 // OnboardGitLab is the API slice onboarding needs.
@@ -4296,6 +4359,13 @@ func (o *GitLabOnboarder) Onboard(ctx context.Context, p glab.Project) error {
 		target = "main"
 	}
 
+	// Render the committed .gonk.yml once, with the operator's instance ladder
+	// (OD-B) -- the SAME bytes the MR body embeds, so they cannot disagree.
+	cfgBytes, err := RenderDefaultConfig(o.InstanceLadder)
+	if err != nil {
+		return fmt.Errorf("onboard: render config: %w", err)
+	}
+
 	// A branch may survive a crashed earlier attempt; that is not an error.
 	if _, err := o.GL.CreateBranch(ctx, p.ID, OnboardBranch, target); err != nil && !isAlreadyExists(err) {
 		return fmt.Errorf("onboard: create branch: %w", err)
@@ -4306,7 +4376,7 @@ func (o *GitLabOnboarder) Onboard(ctx context.Context, p glab.Project) error {
 		Branch:        OnboardBranch,
 		CommitMessage: o.commitMessage(),
 		Actions: []glab.CommitAction{{
-			Action: action, FilePath: ConfigPath, Content: string(DefaultConfigYAML),
+			Action: action, FilePath: ConfigPath, Content: string(cfgBytes),
 		}},
 	}); err != nil {
 		// The file may already exist on a leftover branch: retry as an update.
@@ -4314,7 +4384,7 @@ func (o *GitLabOnboarder) Onboard(ctx context.Context, p glab.Project) error {
 			Branch:        OnboardBranch,
 			CommitMessage: o.commitMessage(),
 			Actions: []glab.CommitAction{{
-				Action: "update", FilePath: ConfigPath, Content: string(DefaultConfigYAML),
+				Action: "update", FilePath: ConfigPath, Content: string(cfgBytes),
 			}},
 		}); uerr != nil {
 			return fmt.Errorf("onboard: commit: %w", err)
@@ -4323,6 +4393,7 @@ func (o *GitLabOnboarder) Onboard(ctx context.Context, p glab.Project) error {
 
 	body, err := RenderOnboardingMR(OnboardingContext{
 		Project: p.PathWithNamespace, BotUsername: o.BotUsername, Version: o.Version,
+		Ladder: o.InstanceLadder,
 	})
 	if err != nil {
 		return err
@@ -4457,25 +4528,29 @@ git add pkg/intake && git commit -m "feat(intake): deterministic Renovate-style 
 
 **Files:** Create `pkg/intake/dispatch.go`, `pkg/intake/dispatch_test.go`.
 
-**There is no `quiet.go`, and there is no quiet-hours code in this plan.** That is **Conflict B**, settled: `schedule.quiet_hours` is a **wait-vs-spend decision**, and every wait-vs-spend decision belongs to meter, which already speaks `defer` and already returns `retry_after`. Intake dispatches; **meter defers**; the pack parks the bead and retries. Intake never even sees it.
+**There is no `quiet.go`, and there is no quiet-hours *computation* in this plan.** That is **Conflict B**, settled: `schedule.quiet_hours` is a **wait-vs-spend decision**, and every wait-vs-spend decision belongs to meter, which already speaks `defer` and already returns `retry_after`. Intake never evaluates a quiet-hours window; it asks meter at **Gate 1** (`POST /v1/policy/decide`) and quiet hours come back as a `defer` it simply **handles** — records `retry_after`, fires nothing. **Gate 2** (the pack, Plan 04) re-decides on every pour and is the enforcement point.
 
 The chain, end to end:
 
 ```
-issue webhook -> intake.Decide (GitLab state + meter's Effective) -> fire order
+issue webhook -> intake.Decide (GitLab state + meter's Effective) -> POST /v1/policy/decide  [GATE 1]
                                                                       |
-                                          Gas City controller --------+
+                              run  -> fire order (vars: rung, model, key_ref, reservation_id, attempt)
+                              defer-> record retry_after, fire nothing (quiet hours land here)
+                              deny -> label, fire nothing
                                                                       |
-                              pack dispatch formula -> POST /v1/policy/decide
+                                          Gas City controller --------+  (only on run)
+                                                                      |
+                              pack dispatch formula -> POST /v1/policy/decide  [GATE 2, re-decides every pour]
                                                                       |
                                               meter: "defer, quiet-hours, retry_after=07:00"
                                                                       |
                                           pack: park the bead, retry at 07:00
 ```
 
-Nothing is lost and intake stays stateless — which is exactly what the old design was straining to achieve by inventing a `not_before` field on the order and making it a **Plan 04 dependency**. That field is gone; so is the dependency.
+Intake stays stateless: a `defer` at Gate 1 is a metric plus a `retry_after`, not parked state — no bead exists yet, because nothing was fired. The old `not_before` field on the order is still gone, and so is the Plan 04 dependency it created; scheduling remains meter's, expressed as `retry_after`.
 
-The gate is still a **pure function** — `Decide(entry, event, botUsername) Decision` — for the same reason meter's rung decision is (spec 10.2): "may this event cause work?" must be answerable exhaustively in a table test with zero infrastructure. Note it **no longer takes a clock**: with quiet hours gone, nothing in intake's gate is time-dependent.
+The GitLab-state gate is still a **pure function** — `Decide(entry, event, botUsername) Decision` — for the same reason meter's rung decision is (spec 10.2): "may this event cause work?" must be answerable exhaustively in a table test with zero infrastructure. It **still takes no clock**: it is time-independent because quiet hours are not evaluated here at all. Gate 1 (the meter `/decide` call) is a **separate step in `Handle`**, after the pure gate passes and before `FireOrder` — that is where run/defer/deny is seen and acted on.
 
 - [ ] **Step 1: Write the failing test** — `pkg/intake/dispatch_test.go`
 
@@ -4560,10 +4635,12 @@ func TestDecideDrops(t *testing.T) {
 }
 
 // *** CONFLICT B'S REGRESSION GUARD. ***
-// A project with quiet hours set DISPATCHES NORMALLY from intake. The deferral
-// happens downstream, at meter's /policy/decide, where the pack asks. If this
-// test ever starts failing because someone "helpfully" re-added quiet-hours
-// handling here, we are back to two components owning one decision.
+// The PURE GATE never evaluates quiet hours: a project with quiet hours set still
+// returns Dispatch=true here. Quiet hours are meter's, seen as a `defer` at the
+// /policy/decide call -- Gate 1 in intake's Handle, Gate 2 in the pack -- NOT
+// computed in this gate. If this test ever fails because someone "helpfully"
+// re-added quiet-hours evaluation to the gate, we are back to two components
+// owning one decision. (Gate 1's handling of the defer is tested in Handle.)
 func TestQuietHoursAreNotIntakesProblem(t *testing.T) {
 	e := validEntry()
 	e.Classification = Classify(obs(nil), active(func(r *meterapi.ProjectResponse) {
@@ -4631,15 +4708,17 @@ func TestOnboardingMergeKicksReconcile(t *testing.T)          { /* ... unchanged
 
 ```go
 // OrderRequest is what intake asks the Gas City supervisor to do (spec 4.3
-// step 2). NOTE (OD-A): the real supervisor endpoint and payload are not in the
-// spec. This is gonk's internal shape; Plan 04 maps it onto Gas City's actual
-// order API.
+// step 2). OD-A is RESOLVED by Plan 04, Task 2: the real contract is
+// `POST /v0/city/{cityName}/order/gonk-dispatch/run` with body `{"vars":{...}}`,
+// no per-route auth (admission by network position). Plan 04's `pkg/gcapi`
+// marshals this struct into that `vars` map; intake fires it only on a Gate-1
+// `run`.
 //
 // NOTE what is NOT here: there is no `not_before`. Quiet hours -- and every other
-// wait-vs-spend decision -- belong to gonk-meter, which the PACK asks at
-// /v1/policy/decide immediately before the session spawns, and which answers
-// `defer` with a `retry_after`. Intake does not schedule work; it only says work
-// exists. (Conflict B.)
+// wait-vs-spend decision -- belong to gonk-meter, which answers `defer` with a
+// `retry_after`. Intake asks at Gate 1 and the PACK re-asks at Gate 2 (every
+// pour); intake does not schedule work, it only fires the first `run`. On a
+// `defer` intake records `retry_after` and fires nothing. (Conflict B.)
 type OrderRequest struct {
 	Trigger      string `json:"trigger"` // atags.Trigger*
 	Project      string `json:"project"` // path_with_namespace
@@ -4659,6 +4738,19 @@ type OrderRequest struct {
 
 	// ConfigHash names the .gonk.yml that authorized this work.
 	ConfigHash string `json:"config_hash"`
+
+	// These are carried ONLY on a Gate-1 `run`: they are meter's decision, passed
+	// through verbatim as order vars for the session. They are NOT trusted by
+	// Gate 2 -- the pack re-decides at pour time and derives its own values. In
+	// particular Attempt is meter's, echoed forward; intake never computes or
+	// sends an attempt as an INPUT to /decide (that would be a ladder-climb
+	// forgery vector).
+	Rung          string          `json:"rung,omitempty"`
+	Model         string          `json:"model,omitempty"`
+	MetadataJSON  json.RawMessage `json:"metadata_json,omitempty"`
+	KeyRef        meterapi.KeyRef `json:"key_ref,omitempty"`
+	ReservationID string          `json:"reservation_id,omitempty"`
+	Attempt       int64           `json:"attempt,omitempty"`
 }
 
 // Dispatcher is the seam to Gas City. Plan 04 supplies the real implementation.
@@ -4679,12 +4771,13 @@ type Decision struct {
 
 // Decide is a pure function: entry + event -> verdict. No IO, no clock.
 //
-// This gate is a PRE-FILTER. It exists to avoid firing orders that meter will
-// certainly deny (which would churn a bead and a session slot for nothing). It
-// is NOT the enforcement point -- meter's /policy/decide is, and it is the only
-// chokepoint before a session spawns. So every rule here must be a SUBSET of
-// meter's: dropping something meter would have allowed is a silent bug, and a
-// much harder one to see than the reverse.
+// This is the GitLab-STATE pre-filter, not the rung/budget gate. It exists to
+// avoid even asking meter about work meter would certainly refuse (which would
+// churn a bead and a session slot for nothing). The rung/budget gate is the
+// /policy/decide call, made twice: Gate 1 in Handle (before the first dispatch)
+// and Gate 2 in the pack (every pour, the enforcement point). So every rule here
+// must be a SUBSET of meter's: dropping something meter would have allowed is a
+// silent bug, and a much harder one to see than the reverse.
 func Decide(e Entry, ev *ghook.Event, botUsername string) Decision {
 	cls := e.Classification
 
@@ -4773,10 +4866,17 @@ func BeadAnchor(projectID, issueIID int64) string {
 // new request, and treating it as one is how a bot ends up talking to itself.
 func Mentions(body, botUsername string) bool { /* ... unchanged ... */ }
 
-// Dispatch is the webhook-side consumer: cache lookup, gate, fire.
+// DecideClient is the Gate-1 seam. *MeterClient satisfies it; tests use a fake.
+// It is deliberately narrower than MeterClient: Handle needs only /policy/decide.
+type DecideClient interface {
+	Decide(ctx context.Context, req meterapi.DecideRequest) (*meterapi.DecideResponse, error)
+}
+
+// Dispatch is the webhook-side consumer: cache lookup, gate, GATE 1, fire.
 // It has no clock. (`Now func() time.Time` is gone with quiet hours.)
 type Dispatch struct {
 	Dispatcher    Dispatcher
+	Meter         DecideClient // Gate 1: POST /v1/policy/decide before the first dispatch
 	Cache         *Cache
 	BotUsername   string
 	Obs           Observer
@@ -4784,7 +4884,21 @@ type Dispatch struct {
 	KickReconcile func() // request an out-of-band reconcile pass (coalesced)
 }
 
-func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) { /* ... as before, minus the clock ... */ }
+// Handle runs the pure gate, then Gate 1 (d.Meter.Decide), then fires ONLY when
+// MayFire says so. On `defer` it records retry_after (metric); on `deny` it
+// labels. This is the one place intake calls /policy/decide, and the fields it
+// reads back on a `run` (rung, model, metadata_json, key_ref, reservation_id,
+// attempt) become OrderRequest vars.
+func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) { /* ... pure gate, then Gate 1 via MayFire, then fire ... */ }
+
+// MayFire is the Gate-1 verdict->action rule, and it lives here so Plan 04's
+// Task 3 Step 8 shared-semantics test can compare it against Gate 2 (the pack's
+// gonk-dispatch exec order) and detect drift MECHANICALLY: intake fires the order
+// on exactly the decisions the pack pours on. Keep it three lines and literal.
+// (The shared decision table itself is defined in Plan 04.)
+func MayFire(decision string) bool {
+	return decision == "run"
+}
 
 // FireScaffold is called by the reconciler for a pending project (spec 5.3: the
 // .agent/ scaffold MR is the one metered action permitted while pending).
@@ -5167,7 +5281,8 @@ type Config struct {
 	BotUsername           string // GONK_BOT_USERNAME (default "gonk")
 	MeterURL              string // GONK_METER_URL
 	MeterTokenFile        string // GONK_METER_TOKEN_FILE (bearer we PRESENT; meter verifies both slots)
-	SupervisorURL         string // GONK_SUPERVISOR_URL ("" -> LogDispatcher, OD-A)
+	SupervisorURL         string // GONK_SUPERVISOR_URL ("" -> LogDispatcher; else HTTPDispatcher -> gonk-dispatch order API, Plan 04 Task 2)
+	InstanceLadder        []string // GONK_INSTANCE_LADDER (operator ladder seeded into onboarding templates, OD-B; the chart sets it from the same operator config meter resolves from, Plan 05)
 	ReconcileInterval     time.Duration // GONK_RECONCILE_INTERVAL (default 10m)
 	ListenAddr            string // GONK_LISTEN_ADDR  (default :8080, public: hook only)
 	PrivateAddr           string // GONK_PRIVATE_ADDR (default :9090, cluster-internal)
@@ -5243,18 +5358,24 @@ func run(log *slog.Logger) error {
 
 	dispatcher := intake.Dispatcher(intake.NewLogDispatcher(log))
 	if cfg.SupervisorURL != "" {
-		dispatcher = intake.NewHTTPDispatcher(cfg.SupervisorURL, nil) // OD-A: shape pending Plan 04
+		// OD-A is resolved (Plan 04, Task 2): POST /v0/city/{cityName}/order/gonk-dispatch/run,
+		// body {"vars":{...}}, no per-route auth. HTTPDispatcher is that client (pkg/gcapi).
+		dispatcher = intake.NewHTTPDispatcher(cfg.SupervisorURL, nil)
 	}
-	dp := &intake.Dispatch{Dispatcher: dispatcher, Cache: cache, BotUsername: cfg.BotUsername, Obs: metrics, Log: log}
 
 	meterToken, err := readSecretFile(cfg.MeterTokenFile)
 	if err != nil {
 		return err
 	}
+	meter := intake.NewMeterClient(cfg.MeterURL, meterToken, nil)
+
+	// Meter is the Gate-1 /policy/decide client too: the same seam intake uses for
+	// project registration answers the pre-dispatch rung/budget decision.
+	dp := &intake.Dispatch{Dispatcher: dispatcher, Meter: meter, Cache: cache, BotUsername: cfg.BotUsername, Obs: metrics, Log: log}
 
 	rec := &intake.Reconciler{
-		GL: gl, Meter: intake.NewMeterClient(cfg.MeterURL, meterToken, nil), Cache: cache, Obs: metrics, Log: log,
-		Onboarder: &intake.GitLabOnboarder{GL: gl, BotUserID: me.ID, BotUsername: cfg.BotUsername, Version: cfg.Version, Obs: metrics},
+		GL: gl, Meter: meter, Cache: cache, Obs: metrics, Log: log,
+		Onboarder: &intake.GitLabOnboarder{GL: gl, BotUserID: me.ID, BotUsername: cfg.BotUsername, Version: cfg.Version, InstanceLadder: cfg.InstanceLadder, Obs: metrics},
 		Dispatch:  dp,
 		BotUserID: me.ID, HookURL: cfg.WebhookPublicURL, HookToken: hookSecret,
 		TokenGen: cfg.WebhookTokenGen, SSLVerify: cfg.HookSSLVerify,
@@ -5349,11 +5470,12 @@ Content (the decisions this plan locks, so later plans cannot silently undo them
    intake records.** Intake may call `gonkcfg.Load` to ask "do these bytes
    parse?", but that answer is **advisory**: where intake and meter disagree,
    **meter wins.** (This ADR does not modify ADR-002; it *narrows who applies it*.)
-7. **INTAKE DOES NOT ENFORCE QUIET HOURS.** `schedule.quiet_hours` is a
-   wait-vs-spend decision, and every wait-vs-spend decision is meter's. Intake
-   dispatches; meter answers the pack's `/policy/decide` with `defer` +
-   `retry_after`; the pack parks the bead. There is no `not_before` on an order,
-   and intake has no clock in its gate.
+7. **INTAKE DOES NOT EVALUATE QUIET HOURS.** `schedule.quiet_hours` is a
+   wait-vs-spend decision, and every wait-vs-spend decision is meter's — computed
+   only inside `/policy/decide`. Intake asks at **Gate 1** and gets quiet hours
+   back as a `defer` + `retry_after`, which it records (fires nothing); the pack
+   asks at **Gate 2** (every pour) and parks the bead. There is no `not_before` on
+   an order, and intake's GitLab-state gate has no clock and no quiet-hours logic.
 8. **Fail closed.** Unknown project, unresolved policy (`unsynced`), invalid
    config, disabled config, missing virtual key, unreachable meter → **no
    dispatch**. Dispatchability is a *whitelist* (`valid`, `pending`), so a state
@@ -5361,14 +5483,18 @@ Content (the decisions this plan locks, so later plans cannot silently undo them
 9. **The meter seam is `pkg/meterapi`, owned by Plan 03.** Intake imports it and
    restates nothing. `+Inf`/`MaxInt64` become `null` there (ADR-002), and an
    empty `Budget{}` means *unlimited*, never *zero*.
-10. **Intake's action check is a pre-filter, not enforcement.** Meter's
-    `/policy/decide` is the only chokepoint before a session spawns. Intake's
-    gate must be a **subset** of meter's rules, never a superset — dropping work
-    meter would have allowed is a silent bug. The exception is
+10. **Intake's action check is a pre-filter, not enforcement.** The rung/budget
+    gate is `/policy/decide`, called at **Gate 1** (intake, before the first
+    dispatch) and **Gate 2** (the pack, every pour — the enforcement chokepoint
+    that never trusts the order vars intake passed). Intake's GitLab-state gate
+    must be a **subset** of meter's rules, never a superset — dropping work meter
+    would have allowed is a silent bug. The exception is
     `triage.respond_to_mentions`, which is *not* one of `Effective.Actions`, so
     **meter never checks it and intake is its only enforcement point.**
-11. **The order seam is `intake.Dispatcher`**, shape provisional until Plan 04
-    (OD-A). The controller must dedupe on `BeadAnchor`.
+11. **The order seam is `intake.Dispatcher`; OD-A is RESOLVED by Plan 04, Task 2**
+    (`POST /v0/city/{cityName}/order/gonk-dispatch/run`, body `{"vars":{...}}`, no
+    per-route auth; client is `pkg/gcapi`). The controller must dedupe on
+    `BeadAnchor`.
 12. **Secrets are file mounts with two rotation slots**, never env values.
 13. **Nothing in intake calls a model.**
 
@@ -5406,21 +5532,30 @@ Add these to `PLAN.md`'s "Carried into later plans" in Task 10:
   there. Meter **owns quiet hours**, as a `defer`. A 422 means *the project's yaml
   is bad* (recorded, key deleted, error echoed to intake); a 400 means *intake's
   request is bad*. `null` budget means *unlimited*. `key_ref` is never key
-  material. Meter no-ops on an unchanged `config_hash`. **Intake never calls
-  `/policy/decide`** — that is the dispatch formula's call (spec 6.2.3).
-- **Plan 04 (pack):** (a) the Gas City order API shape (OD-A) — `HTTPDispatcher`
-  is a placeholder; (b) **the controller must treat `OrderRequest.BeadAnchor` as
+  material. Meter no-ops on an unchanged `config_hash`. **Intake calls
+  `/policy/decide` as Gate 1** (before the first dispatch); the dispatch formula
+  (the pack) is Gate 2, spec 6.2.3 — the enforcement point that re-decides on
+  every pour. `meterapi.DecideRequest` carries no attempt field either way.
+- **Plan 04 (pack):** (a) the Gas City order API shape — **OD-A is RESOLVED by
+  Task 2**: `POST /v0/city/{cityName}/order/gonk-dispatch/run`, body
+  `{"vars":{...}}`, no per-route auth; `HTTPDispatcher` maps onto it via
+  `pkg/gcapi`; (b) **the controller must treat `OrderRequest.BeadAnchor` as
   an idempotency key** — intake can fire the same order twice across a restart,
-  and a duplicate bead means duplicate spend; (c) **the pack calls
-  `POST /v1/policy/decide` before every session spawn, and a `defer` is a NORMAL
-  answer: park the bead in `waiting-for-capacity` and retry at `retry_after`.
-  This is where quiet hours land, and it is the only place a deferral is
-  handled** — intake no longer carries a `not_before`; (d) the pack must **never**
+  and a duplicate bead means duplicate spend; (c) **the pack is Gate 2: it calls
+  `POST /v1/policy/decide` before every session spawn and never trusts intake's
+  order vars, and a `defer` is a NORMAL answer: park the bead in
+  `waiting-for-capacity` and retry at `retry_after`.** Quiet hours land here (and,
+  as a metric, at intake's Gate 1); intake no longer carries a `not_before`.
+  Task 3 Step 8 has a shared table test asserting intake's `MayFire` and the
+  pack's pour rule agree on run/defer/deny; (d) the pack must **never**
   send an attempt count (meter owns ladder state; a caller-supplied attempt is a
-  forgery vector); (e) the session is what posts labels and comments — intake does
-  not.
-- **Plan 05 (chart):** the instance ladder must be non-empty and must contain the
-  onboarding template's rung (`qwen-local`, OD-B), or every newly-onboarded
+  forgery vector); (e) the session is what posts the triage labels and comments —
+  intake does not (its only labelling is the narrow Gate-1 `deny` case, where no
+  session exists to explain the refusal).
+- **Plan 05 (chart):** the chart's **default instance ladder must be non-empty**,
+  and it is the source the onboarding template renders its `ladder:` from (OD-B) —
+  intake writes the operator's instance ladder into a new project's `.gonk.yml`,
+  never a hardcoded rung. If the instance ladder is empty, every newly-onboarded
   project resolves to `disabled` (ADR-002). (`opercfg.Load` now refuses to start
   with an empty instance ladder, which closes the fail-open PLAN.md flagged.)
   Secrets are **file mounts from existingSecret refs** — **never env values**:

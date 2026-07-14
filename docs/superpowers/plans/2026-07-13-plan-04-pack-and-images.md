@@ -336,9 +336,22 @@ the Gas City facts available to this plan, and this plan will not invent one.**
 See "How HB-4 is satisfied" below for what is delivered instead, and what is
 handed to Plan 06.
 
-**OD-7 — How opencode attaches per-request metadata to LiteLLM.** This is the
-**highest-risk unknown in the plan**, because spec goal 4 (attribution at every
-granularity) rests on it. See "The attribution seam" below.
+**OD-7 — How opencode attaches metadata to LiteLLM. [ANSWERED — VERIFIED]**
+opencode sets a **static per-provider header** at spawn:
+`provider.<gonk>.options.headers["x-litellm-spend-logs-metadata"]` = the JSON of
+the seven `pkg/atags` keys. LiteLLM parses it into
+`data["metadata"]["spend_logs_metadata"]` and persists it to
+`LiteLLM_SpendLogs.metadata.spend_logs_metadata`. **All seven keys round-tripped
+intact on a live LiteLLM v1.92.0** (smoke-tested 2026-07-13; see
+`docs/environment.md`, "VERIFIED: the attribution chain works"). One session ==
+one pod, so the session's tags are baked into that pod's opencode config at spawn
+— no per-request plumbing, no per-session virtual keys. *Enterprise-gate caveat:*
+LiteLLM's docs claim per-k/v `spend_logs_metadata` is an enterprise feature; it
+was **not** enforced on v1.92.0. Documented fallback if a future upgrade starts
+enforcing it: the `x-litellm-tags` header → the `request_tags` column (also
+verified populated). Spec goal 4 (attribution at every granularity) rests on this;
+**Plan 06 owns the live proof against a real opencode + LiteLLM.** See "The
+attribution seam" below.
 
 ---
 
@@ -396,7 +409,7 @@ model answered, it classifies `infra-failed`. See the classifier below.
 
 ---
 
-## The attribution seam (OD-7) — the highest risk in this plan
+## The attribution seam (OD-7) — VERIFIED
 
 Every LiteLLM request from an agent pod must carry `atags.Metadata()` — the seven
 `gonk_*` keys — or **spend cannot be joined to a bead, and spec goal 4 is not met.**
@@ -404,25 +417,39 @@ Meter **mints** the metadata (it is the single charset-validation boundary,
 Plan 01 carry-forward) and returns it in `DecideResponse.Metadata`. The pack must
 **stamp it verbatim** onto every request.
 
-*How* opencode attaches per-request metadata to an OpenAI-compatible endpoint is
-**not a fact I have**, and this plan will not guess at a config key.
+**The mechanism is verified, not assumed** (smoke-tested against live LiteLLM
+v1.92.0, 2026-07-13; `docs/environment.md`, "VERIFIED: the attribution chain
+works"). opencode supports **static per-provider headers** via
+`provider.<id>.options.headers` (spread into the AI-SDK factory). Because one
+session == one pod, the session's tags are baked into that pod's config once, at
+spawn — no per-request plumbing.
 
-- **Assumed default (build this):** opencode's provider configuration supports
-  **custom HTTP headers**. The agent entrypoint renders `overlay/opencode.json`
-  from `GONK_METADATA_JSON` (the verbatim `DecideResponse.Metadata`, passed as an
-  order var) into LiteLLM's metadata headers. Task 5 Step 4 **verifies this against
-  the pinned opencode's own docs at execution time** — read them, do not assume.
-- **Fallback if opencode has no header seam:** `gonk-gate` asks meter for a
-  **short-lived, per-attempt LiteLLM virtual key whose LiteLLM key-metadata carries
-  the atags** (LiteLLM records key metadata on every spend row). Meter already owns
-  key provisioning (Plan 03, AD-1), so this is a **Plan 03 amendment**, not a new
-  component: `KeyRef` becomes per-attempt rather than per-project.
-- **If NEITHER works:** spend is attributable only to the **project**, not to
-  bead/session/rung/attempt. **Say so out loud rather than shipping a dashboard
-  that implies otherwise.** Spec goal 4 would be partially unmet, and that is a
-  finding for the owner, not something to paper over.
+- **The specified mechanism (build this):** the agent entrypoint renders
+  `overlay/opencode.json` setting
+  `provider.<gonk>.options.headers["x-litellm-spend-logs-metadata"]` to the
+  **verbatim `DecideResponse.Metadata` JSON** (the seven `pkg/atags` keys), passed
+  to the pod as an order var (`GC_WEBHOOK_ARG_METADATA_JSON`). LiteLLM parses that
+  header into `data["metadata"]["spend_logs_metadata"]` and persists it to
+  `LiteLLM_SpendLogs.metadata.spend_logs_metadata`; **all seven keys round-tripped
+  intact.** Per-key metadata (one virtual key per project) **merges** with the
+  per-session header (request wins, key fills gaps), so the two compose.
+- **Enterprise-gate fallback (documented contingency):** LiteLLM's docs claim
+  per-k/v `spend_logs_metadata` is an enterprise feature; it was **not** enforced
+  on v1.92.0. If a future upgrade starts enforcing it, switch the header to
+  `x-litellm-tags`, which populates the `request_tags` column (also verified). Plan
+  06 detects if an upgrade breaks the primary path.
+- **Deeper fallback, only if opencode's header seam ever disappears:** `gonk-gate`
+  asks meter for a **short-lived, per-attempt LiteLLM virtual key whose LiteLLM
+  key-metadata carries the atags** (LiteLLM records key metadata on every spend
+  row). Meter already owns key provisioning (Plan 03, AD-1), so this would be a
+  **Plan 03 amendment**, not a new component: `KeyRef` becomes per-attempt rather
+  than per-project. It is contingency-only — the header path is verified to work.
+- **Contingency, if attribution ever fully failed:** spend would be attributable
+  only to the **project**, not to bead/session/rung/attempt, and spec goal 4 would
+  be partially unmet — a finding for the owner, not something to paper over. The
+  mechanism is now verified, so this is the tail risk, not the expected case.
 
-**This is a Plan 06 verification item (new — see hand-offs).**
+**Plan 06 owns the live proof against a real opencode + LiteLLM (see hand-offs).**
 
 ---
 
@@ -466,7 +493,8 @@ pack/
   scripts/gonk-dispatch.sh          thin: exec gonk-gate dispatch
   scripts/gonk-sweep.sh             thin: exec gonk-gate sweep
   scripts/gonk-check.sh             thin: exec gonk-gate check
-  overlay/opencode.json.tmpl        rendered at session start (OD-7)
+  overlay/opencode.json.tmpl        rendered at session start; sets the verified
+                                    x-litellm-spend-logs-metadata provider header (OD-7)
 internal/packtest/
   pack_test.go      STRUCTURAL VALIDATION -- the 15-table allow-list, order XOR,
                     exec-no-pool, agent-dir contract, no model names, no secrets
@@ -2525,35 +2553,42 @@ It does exactly three things, in order:
    the **model from `GC_WEBHOOK_ARG_MODEL`** (meter's answer; never a literal), the
    virtual key read **from a file mount** (never an env value — env leaks into `ps`,
    `/proc/<pid>/environ`, crash dumps and every child process), and the **attribution
-   metadata from `GC_WEBHOOK_ARG_METADATA_JSON`, stamped verbatim** (see **OD-7**).
+   metadata** set as the static provider header
+   `provider.<gonk>.options.headers["x-litellm-spend-logs-metadata"]` from
+   **`GC_WEBHOOK_ARG_METADATA_JSON`, stamped verbatim** (see **OD-7 — VERIFIED**).
 3. `exec` opencode.
 
-- [ ] **Step 4: OD-7 — resolve the metadata seam, against opencode's real docs**
+- [ ] **Step 4: OD-7 — render the VERIFIED metadata seam**
 
-**Do not skip this and do not guess a config key.** Spec goal 4 (attribution at
-every granularity) rests entirely on it.
+The mechanism is **verified**, not open (live LiteLLM v1.92.0, 2026-07-13;
+`docs/environment.md`, "VERIFIED: the attribution chain works"). The config key is
+`provider.<id>.options.headers`; the header is `x-litellm-spend-logs-metadata`; its
+value is the verbatim seven-key `DecideResponse.Metadata` JSON. Spec goal 4
+(attribution at every granularity) rests on it.
 
 ```bash
-# Read the PINNED opencode's own provider/config documentation. Find the answer to
-# exactly one question:
+# The mechanism is settled. Two things to do here:
 #
-#   Can an opencode provider send CUSTOM HTTP HEADERS on every request?
+# 1. CONFIRM (version-sensitive) that the PINNED opencode still exposes
+#    `provider.<id>.options.headers` at that version -- read its own provider/config
+#    docs at the pin. The seam is verified on the smoke-tested build; a pin bump
+#    could move or rename it, so confirm before rendering.
+# 2. RENDER it in entrypoint.sh from GC_WEBHOOK_ARG_METADATA_JSON, stamped verbatim,
+#    and add a test that asserts a request reaching a FAKE LiteLLM carries all seven
+#    gonk_* keys under x-litellm-spend-logs-metadata.
 #
-# If YES  -> render them in entrypoint.sh from GC_WEBHOOK_ARG_METADATA_JSON and
-#            move on. Add a test that asserts a request reaching a fake LiteLLM
-#            carries all seven gonk_* keys.
-# If NO   -> DO NOT INVENT A CONFIG KEY. Take the fallback: gonk-gate asks meter
-#            for a SHORT-LIVED, PER-ATTEMPT LiteLLM virtual key whose LiteLLM
-#            key-metadata carries the atags (LiteLLM records key metadata on every
-#            spend row). Meter already owns key provisioning (Plan 03 AD-1), so
-#            KeyRef becomes per-attempt rather than per-project. THIS IS A PLAN 03
-#            AMENDMENT -- raise it, do not build it here.
-# If NEITHER works -> spend is attributable to the PROJECT and no further. Say so
-#            out loud to the owner. Spec goal 4 is then PARTIALLY UNMET, and a
-#            dashboard that implies otherwise is a lie. Do not ship the lie.
+# FALLBACK (enterprise-gate contingency): LiteLLM's docs call per-k/v
+# spend_logs_metadata an enterprise feature; it was NOT enforced on v1.92.0. If a
+# future upgrade starts enforcing it, switch the header to x-litellm-tags, which
+# populates the request_tags column (also verified). Plan 06 detects a break.
+#
+# DEEPER FALLBACK (only if the header seam is gone at the pin): gonk-gate asks meter
+# for a SHORT-LIVED, PER-ATTEMPT virtual key whose LiteLLM key-metadata carries the
+# atags -- KeyRef becomes per-attempt (Plan 03 AD-1). THIS IS A PLAN 03 AMENDMENT --
+# raise it, do not build it here. Contingency-only; the header path is verified.
 ```
 
-Whatever the answer, **write it into ADR-004** and hand the live verification to
+**Record the rendered config in ADR-004** and hand the live verification to
 Plan 06 (new item — see hand-offs).
 
 - [ ] **Step 5: Build it, and smoke-test it in a container**
@@ -3161,8 +3196,11 @@ It records the decisions a future maintainer will otherwise "simplify" away.
    all-rights-reserved and was not opened. Record this so an open-sourcing review
    can trust it.
 10. **OD-3 (the opencode pin) and OD-7 (the metadata seam)** — record what was
-    actually chosen, and if OD-7 fell through to "project-level attribution only",
-    **say so in bold**: spec goal 4 is then partially unmet.
+    actually chosen. OD-7 is **answered/verified in design**: the
+    `x-litellm-spend-logs-metadata` provider header, round-tripped on LiteLLM
+    v1.92.0 (`docs/environment.md`). Plan 06 owns the LIVE proof against a real
+    opencode + LiteLLM. Spec goal 4 rests on it; if the live proof ever fell
+    through to "project-level attribution only", **say so in bold**.
 
 - [ ] **Step 2: Update `PLAN.md`**
 
@@ -3321,7 +3359,9 @@ test goes mysteriously quiet, check HB-2 first.
 3. **OD-7's fallback, if it is taken:** if opencode cannot send custom headers, meter
    must mint a **short-lived, per-attempt** virtual key whose LiteLLM key-metadata
    carries the atags — i.e. `KeyRef` becomes per-attempt rather than per-project
-   (Plan 03's AD-1). **Do not build this speculatively.** Task 5 Step 4 decides it.
+   (Plan 03's AD-1). **Do not build this speculatively.** The primary header
+   mechanism (`x-litellm-spend-logs-metadata`) is now **VERIFIED** on LiteLLM
+   v1.92.0, so this per-attempt-key path is contingency-only. Task 5 Step 4 decides it.
 
 ### Plan 05 (chart) — REQUIRED
 
@@ -3366,11 +3406,16 @@ test goes mysteriously quiet, check HB-2 first.
    `POST /admin/spend/sync` is broken, every gate failure classifies as
    `infra-failed` and the ladder never climbs** — which will look exactly like "the
    ladder is broken". Check HB-2 first.
-3. **NEW hand-off — verify the attribution seam (OD-7).** Assert that a LiteLLM
-   spend row produced by a real agent pod carries **all seven** `gonk_*` metadata
-   keys. **Nothing before Plan 06 tests this against a real opencode**, and **spec
-   goal 4 rests on it.** If it fails, spend is attributable to the project and no
-   further, and that is a finding the owner must hear.
+3. **NEW hand-off — verify the attribution seam (OD-7) live.** The mechanism is
+   **answered/verified in design** (the `x-litellm-spend-logs-metadata` provider
+   header round-tripped on LiteLLM v1.92.0; `docs/environment.md`). Plan 06 owns the
+   LIVE proof: assert that a LiteLLM spend row produced by a **real agent pod**
+   carries **all seven** `gonk_*` metadata keys, and detect the enterprise-gate
+   regression (fall back to `x-litellm-tags` → `request_tags` if a LiteLLM upgrade
+   starts enforcing it). **Nothing before Plan 06 exercises this against a real
+   opencode**, and **spec goal 4 rests on it.** If the live proof fails, spend is
+   attributable to the project and no further, and that is a finding the owner must
+   hear.
 4. **NEW hand-off — pack validation, if `gc` has no offline path.** Task 6 tries hard
    to run the real loader in a container. If `gc` turns out to have no offline
    validate path at all, pack validation becomes a **first-class Plan 06 gate**, and
@@ -3397,7 +3442,7 @@ that admits the gap.
 | 1 | Gas City's controller fires `gonk-dispatch` when intake POSTs the order-run route | **Gas City is not deployed.** `pkg/gcapi` is tested against a fake supervisor. | Plan 06 (L3) |
 | 2 | A poured formula actually spawns an opencode pod, with our vars reaching the agent | ditto | Plan 06 (L3) |
 | 3 | `[steps.check]`'s exec runs where and how we think it does | ditto — and the exact `[steps.check]` keys are transcribed, not tested | Task 6 (loader), then Plan 06 |
-| 4 | **The attribution seam (OD-7)** — that every LiteLLM request carries all seven `gonk_*` tags | Depends on opencode's real config surface **and** a real LiteLLM. **Spec goal 4 rests on this.** | Task 5 Step 4 (design), **Plan 06 (proof)** |
+| 4 | **The attribution seam (OD-7)** — that every LiteLLM request carries all seven `gonk_*` tags | Mechanism **verified** on LiteLLM v1.92.0 (`x-litellm-spend-logs-metadata` header); the LIVE proof still needs a real agent pod + LiteLLM. **Spec goal 4 rests on this.** | Task 5 Step 4 (design, verified), **Plan 06 (live proof)** |
 | 5 | Session resume across pod recreation (spec §11.4 — a **named risk**) | Needs a real k8s session provider and real opencode | Plan 06 |
 | 6 | The classifier's false-positive rate (evicted-after-first-token) | Needs real pod evictions | Plan 06 (K-series) |
 | 7 | The event-bus publish API (OD-6) | **Not in the facts available.** Not invented. | Plan 06 |
