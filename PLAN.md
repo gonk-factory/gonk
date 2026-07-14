@@ -6,7 +6,7 @@ Spec: docs/superpowers/specs/2026-07-12-gonk-stack-design.md
 |---|---|---|
 | 01 foundation & config contract | scaffold, CI, gonkcfg, atags | done |
 | 02 gitlab-intake | webhooks, reconciliation, onboarding MR | done |
-| 03 gonk-meter | rung policy, key provisioning, ledger | not started |
+| 03 gonk-meter | rung policy, key provisioning, ledger | in progress (Task 0b spike done) |
 | 04 pack & images | agents/formulas/orders, docker images | not started |
 | 05 chart | Helm chart, BYO seams | not started |
 | 06 e2e harness | kind + gitlab-ce + stub model, kill tests | not started |
@@ -104,6 +104,28 @@ Update the Status column as tasks complete (house rule: progress lives here).
   adding an import fails the build with "import lookup disabled by
   -mod=vendor", not a proxy error, which is a good thing to recognize on
   sight.
+- **Plan 03 Task 0b (blocking spike, RUN, decisive FAIL):**
+  `docs/spikes/dolt-reservation-isolation.md` records that Dolt
+  `2.1.10` (`dolthub/dolt-sql-server:latest`) does **not** serialize the
+  concurrent-reservation race under any tested strategy — default isolation,
+  explicit `SERIALIZABLE`, and explicit `SELECT ... FOR UPDATE` all let all
+  32 racing writers win against headroom for 2, every one of 90 iterations,
+  zero variance. A direct check confirmed `SELECT ... FOR UPDATE` does not
+  block a concurrent holder at all (a second transaction acquired the
+  "locked" row in <1ms while the first held it, uncommitted).
+  **Decision (per the plan's own preference order): Fallback 1 — keep Dolt
+  for durability, run meter single-replica (AD-10), and let the in-process
+  `keyedMutex` be the actual atomicity for `ReserveIfFits`.** Fallback 2
+  (Postgres on the owner's CNPG cluster, owner-approved 2026-07-13) remains
+  available without further spike work if meter ever needs to scale
+  horizontally. **Task 6's `store/dolt.go` must not assume Dolt transactions
+  make `ReserveIfFits` atomic** — see the spike doc for the full mechanism
+  and raw numbers. `github.com/go-sql-driver/mysql` (+ `filippo.io/edwards25519`)
+  is now a direct dependency and vendored, for Task 6's use as well as this
+  spike's. **`ADR-004` (Task 10) must cite this document and state the
+  decision in as many words** — an unverified transactional guarantee under
+  a budget ceiling is exactly the thing that must not be quietly assumed,
+  and this one was checked, not assumed.
 
 ## Carried into later plans (plan 02)
 
