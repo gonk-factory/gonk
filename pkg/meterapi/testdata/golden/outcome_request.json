@@ -1,0 +1,9 @@
+{
+  "project": "group/repo",
+  "bead_id": "gonk:42:issue:7",
+  "session_key": "sess-1",
+  "attempt": 1,
+  "rung": "qwen-local",
+  "reservation_id": "resv-1",
+  "outcome": "success"
+}

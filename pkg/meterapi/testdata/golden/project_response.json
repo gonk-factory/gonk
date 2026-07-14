@@ -1,0 +1,42 @@
+{
+  "project": "group/repo",
+  "rig": "gitlab",
+  "state": "active",
+  "disabled_reason": "",
+  "effective": {
+    "enabled": true,
+    "actions": {
+      "triage": true,
+      "pipelines": true,
+      "features": false
+    },
+    "ladder": [
+      "qwen-local",
+      "gpt-4o"
+    ],
+    "continuity": "resume",
+    "triage": {
+      "label_prefix": "gonk::",
+      "respond_to_mentions": true
+    },
+    "provenance": {
+      "commit_trailers": true,
+      "include_usage": false
+    },
+    "schedule": {
+      "quiet_hours": "22:00-06:00",
+      "timezone": "UTC"
+    }
+  },
+  "budget": {
+    "monthly_cost_usd": 100,
+    "monthly_tokens": 5000000,
+    "per_task_tokens": 50000
+  },
+  "key_ref": {
+    "secret_name": "gonk-group-repo",
+    "secret_key": "litellm-key"
+  },
+  "config_hash": "sha256:deadbeef",
+  "updated_at": "2026-01-02T03:04:05Z"
+}
