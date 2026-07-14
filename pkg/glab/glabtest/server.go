@@ -25,11 +25,13 @@ import (
 
 // failure is one entry in the FailNext queue: the next `times` requests whose
 // method and path match are answered with `status` instead of being routed.
+// always makes the failure permanent (FailAlways), ignoring times.
 type failure struct {
 	method     string
 	pathPrefix string
 	status     int
 	times      int
+	always     bool
 }
 
 // Server is an in-memory GitLab. Zero value is not usable; construct with New.
@@ -84,6 +86,16 @@ func (s *Server) Client() *glab.Client {
 	c := glab.New(s.URL(), s.token)
 	c.RetryBackoff = func(int) time.Duration { return 0 }
 	return c
+}
+
+// RemoveProject deletes a project from the fake, as if the bot had been
+// removed from it (or the project deleted). The next ListMemberProjects call
+// will no longer return it, which is exactly the de-onboarding signal the
+// reconciler watches for.
+func (s *Server) RemoveProject(id int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.projects, id)
 }
 
 // AddProject registers a project with default_branch "main" and a bot member
@@ -151,6 +163,16 @@ func (s *Server) FailNext(method, pathPrefix string, status, times int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.fails = append(s.fails, failure{method: method, pathPrefix: pathPrefix, status: status, times: times})
+}
+
+// FailAlways queues a permanent failure of `status` for every future request
+// whose method and path (query string excluded) start with pathPrefix. Unlike
+// FailNext it never expires -- for a project that is durably broken (e.g. a
+// GitLab-side permission error) across an entire test.
+func (s *Server) FailAlways(method, pathPrefix string, status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fails = append(s.fails, failure{method: method, pathPrefix: pathPrefix, status: status, always: true})
 }
 
 // AddMember appends a member to a project's member list (GET
@@ -282,7 +304,13 @@ func (s *Server) consumeFailure(method, path string) (int, bool) {
 	defer s.mu.Unlock()
 	for i := range s.fails {
 		f := &s.fails[i]
-		if f.times > 0 && f.method == method && strings.HasPrefix(path, f.pathPrefix) {
+		if f.method != method || !strings.HasPrefix(path, f.pathPrefix) {
+			continue
+		}
+		if f.always {
+			return f.status, true
+		}
+		if f.times > 0 {
 			f.times--
 			return f.status, true
 		}

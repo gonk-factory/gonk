@@ -1,0 +1,100 @@
+package intake
+
+import (
+	"sync"
+	"time"
+
+	"gitlab.orac.local/agentic/gonk-project/pkg/glab"
+)
+
+// Entry is gonk's derived view of one project. DERIVED CACHE ONLY (spec goal 6):
+// nothing here is persisted, and a restart rebuilds all of it from GitLab and
+// gonk-meter in one reconcile pass. The project -- not gonk -- is the source of
+// truth for config; METER is the source of truth for what that config MEANS.
+type Entry struct {
+	Project        glab.Project
+	Classification Classification
+	LastReconcile  time.Time
+	// LastMeterSync is the last time this project was actually PUT to meter (not
+	// merely reconciled -- a pass that hits the config-hash short-circuit does
+	// not update this). It backs Reconciler.MeterResyncInterval: the reconciler
+	// skips re-registering an unchanged config, but must still resync
+	// periodically, because meter's answer can change WITHOUT the project's
+	// .gonk.yml moving (an operator flipping the instance kill switch, or
+	// tightening a group ceiling).
+	LastMeterSync time.Time
+	// ScaffoldFiredAt suppresses re-firing the .agent/ scaffold order every
+	// reconcile pass while the first one is still in flight. Best-effort only:
+	// the real idempotency guarantee is the deterministic bead anchor, which the
+	// Gas City controller must honour (see "Cross-plan contracts").
+	ScaffoldFiredAt time.Time
+}
+
+func (e Entry) State() State { return e.Classification.State }
+
+// Dispatchable: work is dispatched only for a project whose policy METER HAS
+// RESOLVED and whose virtual key EXISTS -- i.e. state `valid` or `pending`.
+// Unmetered work is the one thing this system must never do.
+//
+// Note this is deliberately a whitelist, not a blacklist. A new state added
+// later defaults to NOT dispatchable, which is the safe direction.
+func (e Entry) Dispatchable() bool {
+	switch e.Classification.State {
+	case StateValid, StatePending:
+		return true
+	}
+	return false
+}
+
+type Cache struct {
+	mu sync.RWMutex
+	m  map[int64]Entry
+}
+
+func NewCache() *Cache { return &Cache{m: make(map[int64]Entry)} }
+
+func (c *Cache) Get(id int64) (Entry, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	e, ok := c.m[id]
+	return e, ok
+}
+
+func (c *Cache) Put(id int64, e Entry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m[id] = e
+}
+
+func (c *Cache) Delete(id int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.m, id)
+}
+
+// IDs is a snapshot of every cached project ID, used to find projects that
+// vanished from the latest membership list (de-onboarding).
+func (c *Cache) IDs() []int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ids := make([]int64, 0, len(c.m))
+	for id := range c.m {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// CountByState powers the project-state gauge (spec 8). Pre-seed every state to
+// zero so a dashboard shows 0 rather than nothing.
+func (c *Cache) CountByState() map[State]int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	counts := make(map[State]int, len(AllStates))
+	for _, s := range AllStates {
+		counts[s] = 0
+	}
+	for _, e := range c.m {
+		counts[e.Classification.State]++
+	}
+	return counts
+}
