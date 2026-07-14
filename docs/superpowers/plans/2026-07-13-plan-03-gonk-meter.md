@@ -2942,7 +2942,7 @@ The month window is where clock skew becomes money. `Advance` is **monotone**: a
 
 **Files:** Create `pkg/spend/window.go`, `pkg/spend/window_test.go`, `pkg/spend/rows.go`, `pkg/spend/rows_test.go`
 
-- [ ] **Step 1: Write the failing window test**
+- [x] **Step 1: Write the failing window test**
 
 `pkg/spend/window_test.go`:
 
@@ -3029,9 +3029,9 @@ func TestSkewOK(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail.** Run: `go test ./pkg/spend/ -v` — FAIL, undefined `Window`/`MonthWindow`/`Advance`/`SkewOK`.
+- [x] **Step 2: Run it, watch it fail.** Run: `go test ./pkg/spend/ -v` — FAIL, undefined `Window`/`MonthWindow`/`Advance`/`SkewOK`.
 
-- [ ] **Step 3: Implement `pkg/spend/window.go`**
+- [x] **Step 3: Implement `pkg/spend/window.go`**
 
 ```go
 // Package spend is the ledger side of gonk-meter: the budget window that spend
@@ -3108,9 +3108,9 @@ func SkewOK(local, remote time.Time, max time.Duration) bool {
 }
 ```
 
-- [ ] **Step 4: Watch it pass.** Run: `go test ./pkg/spend/ -run 'Window|Advance|Skew' -v` — PASS.
+- [x] **Step 4: Watch it pass.** Run: `go test ./pkg/spend/ -run 'Window|Advance|Skew' -v` — PASS.
 
-- [ ] **Step 5: Write the failing rows test**
+- [x] **Step 5: Write the failing rows test**
 
 `pkg/spend/rows_test.go`:
 
@@ -3259,9 +3259,9 @@ func TestALateRowIsChargedToTheMonthItHappenedIn(t *testing.T) {
 }
 ```
 
-- [ ] **Step 6: Run it, watch it fail.** Run: `go test ./pkg/spend/ -run 'Totals|Dedupe|By' -v` — FAIL.
+- [x] **Step 6: Run it, watch it fail.** Run: `go test ./pkg/spend/ -run 'Totals|Dedupe|By' -v` — FAIL.
 
-- [ ] **Step 7: Implement `pkg/spend/rows.go`**
+- [x] **Step 7: Implement `pkg/spend/rows.go`**
 
 ```go
 package spend
@@ -3394,7 +3394,7 @@ func Dedupe(rows []Row) ([]Row, int) {
 }
 ```
 
-- [ ] **Step 8: Watch it pass, gate, commit**
+- [x] **Step 8: Watch it pass, gate, commit**
 
 ```bash
 go test ./pkg/spend/ -race -v
