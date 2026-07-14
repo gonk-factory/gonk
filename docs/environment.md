@@ -139,11 +139,57 @@ option* if app-level instance config outgrows the gitops repo; not needed now.
   which is a different thing. Plan 03 Task 0b is a blocking spike that must
   empirically prove Dolt (as deployed) can serialize the concurrent reservation
   race.
-- Fallback (owner-approved): **Postgres on the existing CNPG cluster** —
-  `databases-app/postgres`, healthy, 2 instances. Take it without hesitation if
-  the spike fails *or* is inconclusive; set `dolt.enabled: false` and point the
-  ledger at CNPG. (CNPG serves meter's ledger; the Gas City beads store still
-  needs a Dolt unless Gas City supports Postgres — verify.)
+- Fallback (owner-approved) for **gonk-meter's ledger only**: **Postgres on the
+  existing CNPG cluster** (`databases-app/postgres`, healthy, 2 instances). Take
+  it if the Task 0b spike fails or is inconclusive.
+- **The Gas City beads store is Dolt-ONLY — verified, no Postgres path exists**
+  (`[beads] backend` enum is `dolt`/`doltlite`; sqlite/coordstore were removed
+  and hard-error). So the `dolt.enabled: false` toggle means "point Gas City AND
+  the ledger at an **external** Dolt (e.g. self-hosted DoltLab) via host/port",
+  NOT "use Postgres for beads". CNPG can only ever replace the *ledger*, never
+  the beads store. External Dolt is a first-class prod mode
+  (`GC_DOLT_HOST`/`GC_DOLT_PORT`, or `[dolt] host`/`port`), but the shipped Dolt
+  auths as `root` / empty password / `--no-tls` — there is no user/password/DSN
+  key, so the chart must not pretend to configure credentials it can't.
+
+## Deploying the Gas City controller (chart templates it — no upstream chart)
+
+Verified from `gastownhall/gascity`:
+
+- **No Helm chart, no controller manifest upstream.** `contrib/k8s/` ships raw
+  manifests for the namespace, RBAC, a Dolt StatefulSet+Service, and a mail
+  sidecar — but the controller itself is deployed by an imperative bash script
+  (`contrib/session-scripts/gc-controller-k8s`) that creates a bare
+  `kind: Pod` (`restartPolicy: Never`) and `kubectl cp`s the city dir in. **Our
+  chart templates the controller as a proper workload.**
+- **Config:** the controller runs `gc start --foreground /city` and reads
+  `/city/city.toml` (`[workspace]`, `[session] provider="k8s"`, `[session.k8s]`,
+  `[beads]`, `[dolt]`, `[daemon]`), overridable by `GC_*` env. The **pack + city
+  config** are delivered at `/city` — upstream via `kubectl cp` into an emptyDir;
+  a declarative chart must instead bake them into the `gonk-controller` image
+  (`prebaked=true`) or mount a ConfigMap, and confirm the `gc init` → `.gc-start`
+  sentinel handshake still fires.
+- **RBAC (namespace-scoped Role, in-cluster ServiceAccount `gc-controller`):**
+  `pods` [get,list,watch,create,update,patch,delete], `pods/exec` [create],
+  `pods/log` [get], `configmaps` [get,list,watch,create,update,patch,delete].
+  Agent SA `gc-agent`: `pods` [get].
+- **Single replica, no leader election** — it is a reconcile loop; upstream runs
+  exactly one `restartPolicy: Never` Pod. Whether it tolerates a Deployment
+  (`restartPolicy: Always`) without duplicate-reconcile / Dolt-lock issues is
+  **unverified** (smoke-test below).
+- **Supervisor listener:** must set `bind=0.0.0.0` + `allow_mutations=true` for
+  in-container use (defaults to `127.0.0.1`). **Port is uncertain — config docs
+  say `9443`, earlier research assumed `8372`. Settle by smoke deploy before
+  wiring the Service/probes/NetworkPolicy.** No per-route auth by default
+  (network-position trust); optional ed25519 grant gates exist
+  (`GC_CITY_WRITE_PUBKEY`/`GC_CITY_READ_PUBKEY`) for an edge to mint grants.
+- **Health probes:** `/health`, `/v0/readiness`, `/v0/provider-readiness`
+  (unauthenticated). Upstream sets no k8s probes (greps logs); we wire these.
+- **THREE unknowns require a smoke deploy before the chart is trustworthy**, and
+  a smoke deploy needs the `gonk-controller` image (Plan 04): (a) the real
+  supervisor port; (b) the declarative pack/city delivery + sentinel handshake;
+  (c) Deployment vs bare-Pod tolerance. Plan 05 must gate on settling these, not
+  assume them.
 
 ## Gas City (deployed by the chart)
 
