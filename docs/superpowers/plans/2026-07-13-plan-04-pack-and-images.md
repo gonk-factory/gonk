@@ -29,15 +29,22 @@ deployment target. Read it before Task 5.
 
 ---
 
-## PREREQUISITE: Gas City is NOT DEPLOYED. Read this first.
+## Gas City is not RUNNING during this plan — and that is fine: the chart deploys it, from an image THIS plan builds
 
-`docs/environment.md`: **Gas City is not deployed** (owner, 2026-07-13).
-**Deploying it is a prerequisite for this plan** — specifically for Tasks 6 and 9,
-and for every claim this plan makes about a *running* city.
+**Correcting an earlier framing error.** Gas City is NOT a prerequisite the owner
+must stand up separately. Gonk ships **one umbrella Helm chart (Plan 05) that
+deploys Gas City** (the controller), a Dolt server, gonk-intake/meter, and this
+pack — there is no separate "deploy Gas City first" step. And the dependency runs
+*toward* this plan, not away from it: **this plan (Tasks 6/9) builds the
+`gonk-controller` image that the chart runs to bring Gas City up.**
 
-That does **not** block most of the work. The split:
+So during Plan 04's own execution Gas City is not yet running — not because
+anyone is waiting to deploy it, but because it comes up when Plan 05's chart is
+installed. Anything requiring a *live* city is therefore verified **downstream**:
+Plan 05's Task 0.5 smoke-deploy (which consumes this plan's controller image) and
+Plan 06's L3 e2e — NOT here. That does not block most of Plan 04. The split:
 
-| Buildable and testable **today**, with no Gas City | Genuinely needs a deployed Gas City |
+| Buildable and testable **today** (no running Gas City) | Verified downstream, once Plan 05's chart deploys Gas City |
 |---|---|
 | `pkg/gate` — the outcome classifier (pure function, exhaustive table tests) | That the controller actually *fires* `gonk-dispatch` when intake POSTs the order-run route |
 | `pkg/gcapi` — the typed supervisor client, against an `httptest` fake | That a poured formula actually spawns an opencode pod |
