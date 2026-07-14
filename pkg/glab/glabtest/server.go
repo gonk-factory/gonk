@@ -60,6 +60,14 @@ type Project struct {
 
 	hookTokens map[int64]string
 	srv        *Server
+	// nextMRIID/nextIssueIID: MR and Issue "IID" (internal ID) is scoped to the
+	// PROJECT in real GitLab, unlike every other ID here (project, commit, hook),
+	// which is instance-global. Numbering these from the shared s.nextID would
+	// make the first MR/issue in a project land on whatever id the counter had
+	// reached -- not 1 -- which would not match real GitLab and would make
+	// glabtest a bad double for tests that assert on a specific IID.
+	nextMRIID    int64
+	nextIssueIID int64
 }
 
 // New starts an httptest.Server backing a fresh, empty fake GitLab.
@@ -577,10 +585,10 @@ func (s *Server) handleCreateMR(w http.ResponseWriter, r *http.Request, idStr st
 	}
 
 	s.mu.Lock()
-	iid := s.nextID
-	s.nextID++
+	p.nextMRIID++
+	iid := p.nextMRIID
 	mr := glab.MergeRequest{
-		IID: iid, Title: opts.Title, State: "opened",
+		IID: iid, Title: opts.Title, Description: opts.Description, State: "opened",
 		SourceBranch: opts.SourceBranch, TargetBranch: opts.TargetBranch,
 		WebURL: fmt.Sprintf("%s/-/merge_requests/%d", p.WebURL, iid),
 	}
@@ -643,8 +651,8 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request, idStr
 	}
 
 	s.mu.Lock()
-	iid := s.nextID
-	s.nextID++
+	p.nextIssueIID++
+	iid := p.nextIssueIID
 	var labels []string
 	if opts.Labels != "" {
 		labels = strings.Split(opts.Labels, ",")

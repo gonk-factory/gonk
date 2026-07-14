@@ -82,6 +82,7 @@ type Member struct {
 type MergeRequest struct {
 	IID          int64      `json:"iid"`
 	Title        string     `json:"title"`
+	Description  string     `json:"description"`
 	State        string     `json:"state"` // opened | closed | merged | locked
 	SourceBranch string     `json:"source_branch"`
 	TargetBranch string     `json:"target_branch"`
