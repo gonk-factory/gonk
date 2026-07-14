@@ -10,11 +10,15 @@ import (
 
 type capture struct {
 	events   []*Event
+	labels   []string // the (sanitized) event label the observer was handed
 	outcomes []Outcome
 	full     bool
 }
 
-func (c *capture) WebhookOutcome(_ string, o Outcome) { c.outcomes = append(c.outcomes, o) }
+func (c *capture) WebhookOutcome(event string, o Outcome) {
+	c.labels = append(c.labels, event)
+	c.outcomes = append(c.outcomes, o)
+}
 func (c *capture) sink(e *Event) bool {
 	if c.full {
 		return false
@@ -29,7 +33,32 @@ func newHandler(t *testing.T, c *capture) *Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Handler{Verifier: v, Deduper: NewDeduper(time.Hour, 1024), BotUserID: 7, Sink: c.sink, Obs: c}
+	h, err := NewHandler(v, NewDeduper(time.Hour, 1024), 7, c.sink, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// The bot-loop guard protects money: if BotUserID is left at its zero value the
+// guard silently no-ops (no real GitLab user is id 0), so gonk would react to
+// its own comments and loop. Construction must fail closed, exactly as
+// NewVerifier does for the token.
+func TestNewHandlerRejectsUnsafeBotID(t *testing.T) {
+	v, err := NewVerifier(secretA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := func(*Event) bool { return true }
+	if _, err := NewHandler(v, NewDeduper(time.Hour, 8), 0, sink, nil); err == nil {
+		t.Error("BotUserID 0 must be rejected: the loop guard would silently no-op")
+	}
+	if _, err := NewHandler(v, NewDeduper(time.Hour, 8), -1, sink, nil); err == nil {
+		t.Error("negative BotUserID must be rejected")
+	}
+	if _, err := NewHandler(v, NewDeduper(time.Hour, 8), 7, sink, nil); err != nil {
+		t.Errorf("valid config rejected: %v", err)
+	}
 }
 
 func post(t *testing.T, h *Handler, event, token, ctype, body string) *httptest.ResponseRecorder {
@@ -68,6 +97,44 @@ func TestRejectsBadToken(t *testing.T) {
 	}
 	if c.outcomes[0] != OutcomeBadToken {
 		t.Fatalf("outcome = %q", c.outcomes[0])
+	}
+}
+
+// An unauthenticated attacker sets X-Gitlab-Event to anything. That header
+// becomes a Prometheus label (Task 10), so it must never reach the observer
+// verbatim — only a value from a closed set may, or an attacker drives unbounded
+// label cardinality until the metrics backend OOMs.
+func TestUnauthenticatedEventLabelIsSanitized(t *testing.T) {
+	c := &capture{}
+	h := newHandler(t, c)
+	// No token: this is the pre-authentication path where the header is fully
+	// attacker-controlled.
+	r := httptest.NewRequest("POST", "/hook/gitlab", nil)
+	r.Header.Set("X-Gitlab-Event", "GARBAGE-9999")
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("code = %d, want 401", w.Code)
+	}
+	if len(c.labels) != 1 {
+		t.Fatalf("observer calls = %d, want 1", len(c.labels))
+	}
+	if c.labels[0] == "GARBAGE-9999" {
+		t.Fatalf("raw attacker-controlled header leaked as a metric label: %q", c.labels[0])
+	}
+	if c.labels[0] != "other" {
+		t.Fatalf("label = %q, want sanitized %q", c.labels[0], "other")
+	}
+}
+
+// A handled event keeps its own (closed-set) label; only the unknown ones fold
+// into "other".
+func TestHandledEventLabelPreserved(t *testing.T) {
+	c := &capture{}
+	post(t, newHandler(t, c), "Issue Hook", secretA, "application/json", issueOpen)
+	if len(c.labels) != 1 || c.labels[0] != "Issue Hook" {
+		t.Fatalf("labels = %v, want [Issue Hook]", c.labels)
 	}
 }
 
@@ -145,6 +212,25 @@ func TestBotAuthoredEventDropped(t *testing.T) {
 	}
 	if c.outcomes[0] != OutcomeBotAuthored {
 		t.Fatalf("outcome = %q", c.outcomes[0])
+	}
+}
+
+// The real loop vector is not an issue event but a note: gonk posts a comment,
+// GitLab sends a Note Hook authored by the bot, and gonk must not react. This
+// drives the actual note-by-bot fixture through the full receiver and confirms
+// the guard keys on the numeric user.id (not a spoofable name).
+func TestBotAuthoredNoteDropped(t *testing.T) {
+	c := &capture{}
+	h := newHandler(t, c) // BotUserID = 7, which is note-by-bot.json's author id
+	w := post(t, h, "Note Hook", secretA, "application/json", string(fixture(t, "note-by-bot")))
+	if w.Code != 200 {
+		t.Fatalf("code = %d, want 200", w.Code)
+	}
+	if len(c.events) != 0 {
+		t.Fatal("bot-authored note reached the sink (loop guard failed on the realistic Note Hook path)")
+	}
+	if c.outcomes[0] != OutcomeBotAuthored {
+		t.Fatalf("outcome = %q, want bot_authored", c.outcomes[0])
 	}
 }
 

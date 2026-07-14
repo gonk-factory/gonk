@@ -2,6 +2,7 @@ package ghook
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -58,6 +59,30 @@ type Handler struct {
 	// returns false when its queue is full, which is a drop, not an error.
 	Sink func(*Event) bool
 	Obs  Observer
+}
+
+// NewHandler is the sanctioned way to build a Handler: it fails closed on a
+// configuration that would disable a safety property. In particular BotUserID
+// must be a positive GitLab user id — at its zero value the loop guard silently
+// no-ops (no real user is id 0), gonk reacts to its own comments, and spend runs
+// away. This mirrors NewVerifier's refusal to accept a weak token.
+func NewHandler(v *Verifier, d *Deduper, botUserID int64, sink func(*Event) bool, obs Observer) (*Handler, error) {
+	if v == nil {
+		return nil, errors.New("ghook: nil verifier")
+	}
+	if d == nil {
+		return nil, errors.New("ghook: nil deduper")
+	}
+	if botUserID <= 0 {
+		return nil, fmt.Errorf("ghook: BotUserID must be a positive GitLab user id, got %d (the loop guard cannot be disabled)", botUserID)
+	}
+	if sink == nil {
+		return nil, errors.New("ghook: nil sink")
+	}
+	if obs == nil {
+		obs = NopObserver{}
+	}
+	return &Handler{Verifier: v, Deduper: d, BotUserID: botUserID, Sink: sink, Obs: obs}, nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -120,11 +145,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) finish(w http.ResponseWriter, event string, o Outcome, code int) {
 	if h.Obs != nil {
-		h.Obs.WebhookOutcome(event, o)
+		// The raw X-Gitlab-Event header is attacker-controlled on every path,
+		// including the pre-authentication ones (bad_method, bad/missing_token).
+		// It must never reach the observer verbatim, or an unauthenticated flood
+		// of random header values explodes Prometheus label cardinality. Collapse
+		// anything outside the handled allow-list to a single fixed label.
+		h.Obs.WebhookOutcome(eventLabel(event), o)
 	}
 	w.WriteHeader(code)
 	// Body is deliberately terse: it is an error channel to an attacker.
 	_, _ = io.WriteString(w, string(o)+"\n")
+}
+
+// eventLabel maps the attacker-controlled X-Gitlab-Event header onto a closed
+// set of metric label values: the events we actually handle, or "other".
+func eventLabel(event string) string {
+	if handledEvents[event] {
+		return event
+	}
+	return "other"
 }
 
 func isJSON(ct string) bool {

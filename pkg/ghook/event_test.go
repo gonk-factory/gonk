@@ -7,6 +7,10 @@ import (
 	"testing"
 )
 
+// fixture loads a golden webhook payload from testdata/. Note: issue-update.json
+// and mr-onboard-closed.json are not consumed here — they exercise Task 9
+// (dispatch) behaviors (update-does-not-triage, onboarding-MR-closed) and are
+// wired up there; keep them in place.
 func fixture(t *testing.T, name string) []byte {
 	t.Helper()
 	b, err := os.ReadFile("testdata/" + name + ".json")
