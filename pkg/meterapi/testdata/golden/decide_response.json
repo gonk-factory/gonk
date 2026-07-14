@@ -1,0 +1,30 @@
+{
+  "decision": "run",
+  "rung": "qwen-local",
+  "model": "qwen2.5-coder-32b",
+  "attempt": 1,
+  "reason": "project-not-registered",
+  "detail": "ok",
+  "retry_after": "2026-01-02T03:04:05Z",
+  "metadata": {
+    "gonk_project": "group/repo",
+    "gonk_trigger": "issue-triage"
+  },
+  "key_ref": {
+    "secret_name": "gonk-group-repo",
+    "secret_key": "litellm-key"
+  },
+  "reservation_id": "resv-1",
+  "reservation_expires_at": "2026-01-03T03:04:05Z",
+  "budget": {
+    "monthly_cost_usd": 100,
+    "monthly_tokens": 5000000,
+    "per_task_tokens": 50000
+  },
+  "remaining": {
+    "monthly_cost_usd": 80.5,
+    "monthly_tokens": 4500000,
+    "per_task_tokens": 49000
+  },
+  "spend_as_of": "2026-01-02T03:04:05Z"
+}

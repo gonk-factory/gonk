@@ -1,0 +1,23 @@
+{
+  "object_kind": "issue",
+  "event_type": "issue",
+  "user": { "id": 9, "username": "human", "name": "A Human" },
+  "project": {
+    "id": 42,
+    "name": "repo",
+    "path_with_namespace": "group/repo",
+    "default_branch": "main",
+    "web_url": "https://gitlab.orac.local/group/repo"
+  },
+  "object_attributes": {
+    "id": 1001,
+    "iid": 3,
+    "title": "Login button does nothing",
+    "description": "Clicking it does nothing.",
+    "state": "opened",
+    "action": "open",
+    "updated_at": "2026-07-13 10:00:00 UTC"
+  },
+  "labels": [],
+  "changes": {}
+}

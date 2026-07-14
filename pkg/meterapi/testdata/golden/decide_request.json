@@ -1,0 +1,7 @@
+{
+  "project": "group/repo",
+  "rig": "gitlab",
+  "bead_id": "gonk:42:issue:7",
+  "session_key": "sess-1",
+  "trigger": "issue-triage"
+}

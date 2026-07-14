@@ -1,0 +1,6 @@
+{
+  "ok": true,
+  "recorded_attempt": 1,
+  "next": "escalate",
+  "next_rung": "gpt-4o"
+}

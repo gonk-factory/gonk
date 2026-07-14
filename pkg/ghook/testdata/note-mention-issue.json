@@ -1,0 +1,22 @@
+{
+  "object_kind": "note",
+  "event_type": "note",
+  "user": { "id": 9, "username": "human", "name": "A Human" },
+  "project": {
+    "id": 42,
+    "name": "repo",
+    "path_with_namespace": "group/repo",
+    "default_branch": "main",
+    "web_url": "https://gitlab.orac.local/group/repo"
+  },
+  "object_attributes": {
+    "id": 2001,
+    "note": "@gonk please re-triage this",
+    "noteable_type": "Issue",
+    "discussion_id": "d1"
+  },
+  "issue": {
+    "id": 1001,
+    "iid": 3
+  }
+}
