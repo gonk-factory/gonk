@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/ghook"
@@ -76,6 +77,16 @@ type Summary struct {
 	Projects int
 	Errors   int
 	Duration time.Duration
+	// MeterPushes and Dispatched are the counts Task 10's ReconcileSummary (the
+	// `?wait=true` wire type, server.go) reports; they are gathered here rather
+	// than re-derived from the Obs metric calls, which have no query API.
+	MeterPushes int
+	Dispatched  int
+	// ErrorMsgs is one line per failed project, "path: err". Never a token, never
+	// a secret: pkg/glab's APIError and MeterClient.do both refuse to put
+	// credential material in an error string, so echoing these here (they end up
+	// in ReconcileSummary.Errors, a test/operator surface) is safe.
+	ErrorMsgs []string
 }
 
 type Reconciler struct {
@@ -106,6 +117,165 @@ type Reconciler struct {
 	// NOTE what is NOT here: `Instance gonkcfg.Policy` and
 	// `GroupPolicy func(string) gonkcfg.Policy`. Intake does not hold operator
 	// policy and does not resolve. Meter does. (Conflict A.)
+
+	// The fields below back Loop/Kick/WaitForNextPass (Task 10, HB-1). They are
+	// zero-value-safe: every existing test that builds a Reconciler by literal
+	// keeps working, and initPass lazily wires them on first use.
+	loopInit sync.Once
+	kickCh   chan struct{}
+
+	passMu       sync.Mutex
+	startSeq     uint64 // seq of the pass currently running or most recently started
+	completedSeq uint64 // seq of the most recently COMPLETED pass
+	passDone     chan struct{}
+	lastSummary  ReconcileSummary
+	haveSummary  bool
+}
+
+// initPass lazily wires the Loop/Kick/WaitForNextPass machinery. Safe to call
+// from any of those methods, any number of times, from any goroutine.
+func (r *Reconciler) initPass() {
+	r.loopInit.Do(func() {
+		r.kickCh = make(chan struct{}, 1)
+		r.passDone = make(chan struct{})
+	})
+}
+
+// Kick requests an out-of-band reconcile pass. Concurrent kicks coalesce: the
+// channel is buffered to exactly 1, so no matter how many callers kick while a
+// pass is in flight (or already queued), at most ONE extra pass runs. This is
+// what makes /admin/reconcile (unauthenticated, private-listener-only, spec
+// 5.2) a bounded amount of free work rather than an amplifier.
+func (r *Reconciler) Kick() {
+	r.initPass()
+	select {
+	case r.kickCh <- struct{}{}:
+	default:
+	}
+}
+
+// Loop runs ReconcileOnce every interval (a zero or negative interval uses the
+// documented default of 10 minutes) and also whenever Kick is called, until ctx
+// is done. It is meant to run in its own goroutine for the lifetime of the
+// process.
+func (r *Reconciler) Loop(ctx context.Context, interval time.Duration) {
+	r.initPass()
+	if interval <= 0 {
+		interval = 10 * time.Minute
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			r.runPass(ctx)
+		case <-r.kickCh:
+			r.runPass(ctx)
+		}
+	}
+}
+
+// runPass runs one ReconcileOnce and records its ReconcileSummary under
+// passMu, bumping completedSeq and broadcasting passDone so WaitForNextPass
+// wakes up. Every pass gets a monotonically increasing start sequence number,
+// assigned BEFORE ReconcileOnce runs -- that is what lets WaitForNextPass tell
+// "a pass that started before my request" apart from "the pass I asked for".
+func (r *Reconciler) runPass(ctx context.Context) ReconcileSummary {
+	r.initPass()
+
+	r.passMu.Lock()
+	r.startSeq++
+	mySeq := r.startSeq
+	r.passMu.Unlock()
+
+	started := time.Now()
+	sum, err := r.ReconcileOnce(ctx)
+	finished := time.Now()
+
+	rs := ReconcileSummary{
+		StartedAt:   started,
+		FinishedAt:  finished,
+		Projects:    sum.Projects,
+		States:      stateCountsToWire(r.Cache.CountByState()),
+		MeterPushes: sum.MeterPushes,
+		Dispatched:  sum.Dispatched,
+		Errors:      sum.ErrorMsgs,
+		Result:      "ok",
+	}
+	switch {
+	case err != nil:
+		rs.Result = "error"
+		rs.Errors = append(rs.Errors, err.Error())
+	case sum.Errors > 0:
+		rs.Result = "partial"
+	}
+
+	r.passMu.Lock()
+	r.completedSeq = mySeq
+	r.lastSummary = rs
+	r.haveSummary = true
+	done := r.passDone
+	r.passDone = make(chan struct{})
+	r.passMu.Unlock()
+	close(done)
+
+	return rs
+}
+
+// WaitForNextPass kicks a pass and blocks until a pass that STARTED AT OR AFTER
+// this call has COMPLETED, then returns its summary. This is HB-1 (Plan 06):
+// the guarantee that makes `?wait=true` an "ask", not a "sleep and hope" --
+// without it, a pass already in flight when the request arrived could satisfy
+// the wait while reflecting a pre-request world.
+//
+// It requires Loop to be running (nothing else drains kickCh); if it is not,
+// this blocks until ctx is done. The caller (server.go) bounds ctx with a
+// server-side timeout, per spec.
+func (r *Reconciler) WaitForNextPass(ctx context.Context) (ReconcileSummary, error) {
+	r.initPass()
+
+	r.passMu.Lock()
+	baselineSeq := r.startSeq // any pass with seq <= this already started strictly before this call
+	ch := r.passDone
+	r.passMu.Unlock()
+
+	r.Kick()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ReconcileSummary{}, ctx.Err()
+		case <-ch:
+		}
+		r.passMu.Lock()
+		completed, rs, next := r.completedSeq, r.lastSummary, r.passDone
+		r.passMu.Unlock()
+		if completed > baselineSeq {
+			return rs, nil
+		}
+		ch = next
+	}
+}
+
+// LastSummary returns the most recently completed pass's summary, and whether
+// any pass has completed yet. Used for readiness (main.go): "first reconcile
+// completed" is exactly `ok == true` here.
+func (r *Reconciler) LastSummary() (ReconcileSummary, bool) {
+	r.passMu.Lock()
+	defer r.passMu.Unlock()
+	return r.lastSummary, r.haveSummary
+}
+
+// stateCountsToWire converts the State-keyed gauge map to the plain
+// map[string]int the wire ReconcileSummary carries.
+func stateCountsToWire(counts map[State]int) map[string]int {
+	out := make(map[string]int, len(counts))
+	for s, n := range counts {
+		out[string(s)] = n
+	}
+	return out
 }
 
 // log returns a non-nil logger: callers that build a Reconciler by literal (as
@@ -143,8 +313,16 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) (Summary, error) {
 	sum := Summary{Projects: len(projects)}
 	for _, p := range projects {
 		seen[p.ID] = true
-		if err := r.reconcileProject(ctx, p); err != nil {
+		out, err := r.reconcileProject(ctx, p)
+		if out.meterPushed {
+			sum.MeterPushes++
+		}
+		if out.scaffoldFired {
+			sum.Dispatched++
+		}
+		if err != nil {
 			sum.Errors++
+			sum.ErrorMsgs = append(sum.ErrorMsgs, fmt.Sprintf("%s: %s", p.PathWithNamespace, err))
 			r.log().Error("reconcile project failed", "project", p.PathWithNamespace, "err", err)
 		}
 	}
@@ -290,14 +468,24 @@ func (r *Reconciler) register(ctx context.Context, p glab.Project, obs Observati
 	})
 }
 
-func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) error {
+// projectOutcome is what one reconcileProject call actually DID, so
+// ReconcileOnce can build a ReconcileSummary without re-deriving counts from
+// the Obs metric calls (which have no query API -- Prometheus counters are
+// write-only from this package's side).
+type projectOutcome struct {
+	meterPushed   bool // a real PUT to meter succeeded (the config-hash short-circuit does not count)
+	scaffoldFired bool
+}
+
+func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) (projectOutcome, error) {
+	var out projectOutcome
 	if p.Archived {
 		r.Cache.Delete(p.ID)
-		return nil
+		return out, nil
 	}
 	obs, err := r.observe(ctx, p) // GitLab: membership, .gonk.yml bytes, .agent/, decline
 	if err != nil {
-		return err
+		return out, err
 	}
 
 	// The webhook is the latency path; failing to provision it is logged and
@@ -341,6 +529,7 @@ func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) error
 			} else {
 				r.Obs.MeterPush("ok")
 				lastSync = time.Now()
+				out.meterPushed = true
 			}
 		}
 	}
@@ -370,7 +559,8 @@ func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) error
 		} else {
 			entry.ScaffoldFiredAt = time.Now()
 			r.Cache.Put(p.ID, entry)
+			out.scaffoldFired = true
 		}
 	}
-	return nil
+	return out, nil
 }

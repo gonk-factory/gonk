@@ -5,7 +5,7 @@ Spec: docs/superpowers/specs/2026-07-12-gonk-stack-design.md
 | Plan | Scope | Status |
 |---|---|---|
 | 01 foundation & config contract | scaffold, CI, gonkcfg, atags | done |
-| 02 gitlab-intake | webhooks, reconciliation, onboarding MR | not started |
+| 02 gitlab-intake | webhooks, reconciliation, onboarding MR | done |
 | 03 gonk-meter | rung policy, key provisioning, ledger | not started |
 | 04 pack & images | agents/formulas/orders, docker images | not started |
 | 05 chart | Helm chart, BYO seams | not started |
@@ -21,6 +21,40 @@ Update the Status column as tasks complete (house rule: progress lives here).
   The literal key and trigger strings are the ledger contract (spec 10.1).
 - `docs/schemas/gonk-config.v1.schema.json` — published schema, gated against
   drift from the embedded canonical copy and against accidental change.
+
+## Contracts published by plan 02
+
+- `pkg/glab` (+ `pkg/glab/glabtest`) — a minimal typed GitLab REST client on
+  the trust boundary: its own size caps, retry policy, PAT rotation
+  (`SetPreviousToken` / `AuthFallback`, AD-4b), split-credential hook
+  management (`AdminToken`, AD-4), and an `APIError` that never carries the
+  token. `glabtest` is an in-memory fake GitLab good enough to drive every
+  test in this plan with no network. TLS verification is never disabled
+  (ADR-003.13) — trust the private CA via `SSL_CERT_FILE`, never
+  `InsecureSkipVerify`.
+- `pkg/ghook` — webhook trust boundary: `Verifier` (constant-time, multi-slot
+  token check), `NewHandler` (fails closed on a nil verifier/deduper/sink or a
+  zero `BotUserID` — never construct a bare `ghook.Handler{}`), `Deduper`,
+  event parsing (`ParseEvent`), and the sanitized `Observer.WebhookOutcome`
+  interface (the attacker-controlled `X-Gitlab-Event` header is collapsed to
+  the handled allow-list or `"other"` before it ever reaches an observer —
+  Prometheus labels are never attacker-controlled here).
+- `pkg/meterapi` — the wire contract between gonk-meter (server, Plan 03),
+  gitlab-intake (config + Gate-1 client, this plan), and the Gas City pack
+  (Gate-2 client, Plan 04). **Plan 03 must import this package as its
+  normative source and re-derive nothing** — its Task 0 is where the contract
+  is authoritative; this plan merely lands the file first and conforms to it.
+- `pkg/intake` — reconciliation (`Reconciler.ReconcileOnce`, `.Loop`, `.Kick`,
+  `.WaitForNextPass` — HB-1), the project state machine (`Classify`, `State`,
+  the `May*` predicates), deterministic onboarding (`GitLabOnboarder`,
+  `RenderDefaultConfig`'s empty-ladder backstop), Gate-1 dispatch (`Decide`,
+  `Dispatch.Handle`, `MayFire`, the staleness cutoff), the naming functions
+  every other plan joins on (`RigName`, `SessionKey`, `BeadAnchor`), the
+  Prometheus `Metrics` (spec 8's exact series names), and the two-listener
+  `Server` (`Public()` = hook only, `Private()` = health/metrics/admin).
+- `cmd/gonk-intake` — the binary: file-mounted secrets only (never an env
+  value), the bot-identity refusal (wrong token owner refuses to start), and
+  `ADR-003` (the trust-boundary decisions this plan locks in).
 
 ## Carried into later plans
 
@@ -62,3 +96,93 @@ Update the Status column as tasks complete (house rule: progress lives here).
   module). CI pins `golangci-lint:v2.12.2` (go1.26.2) and `golang:1.26`; v2.12.2
   is also the local gate's version, so local and CI cannot disagree. Keep them
   pinned together when bumping either.
+- **Dependency:** `github.com/prometheus/client_golang` (and its transitive
+  deps) is vendored under `vendor/` as of plan 02 — CI has no reach to the
+  module proxy, so `go mod vendor` after any `go get` is mandatory, not
+  optional. `go build`/`go test` in this repo run with the implicit
+  `-mod=vendor` a committed `vendor/` triggers; forgetting to re-vendor after
+  adding an import fails the build with "import lookup disabled by
+  -mod=vendor", not a proxy error, which is a good thing to recognize on
+  sight.
+
+## Carried into later plans (plan 02)
+
+- **Plan 03 (meter) — the shape is settled, not yet built:** meter **owns
+  `pkg/meterapi`** (see "Contracts published by plan 02" above) and
+  implements `PUT`/`GET`/`DELETE /v1/projects/{project}` + `GET /healthz`.
+  **Meter validates and resolves the raw `.gonk.yml`** intake sends —
+  `gonkcfg.Resolve` is called in exactly one place in the whole system, and it
+  is there (ADR-003.6). Meter **owns quiet hours**, surfaced to intake as a
+  `defer` (ADR-003.7). A `422` from `PUT /v1/projects/{project}` means *the
+  project's yaml is bad* (meter records it, deletes the key, echoes its error
+  to intake as `ErrInvalidConfig`); a `400` means *intake's request is bad* and
+  is a bug on intake's side, never retried blindly. `null` in a
+  `meterapi.Budget` field means *unlimited*; `meterapi.ZeroBudget()` is the
+  explicit fail-closed value, never an empty `Budget{}` (that is all-nil, i.e.
+  unlimited). Meter no-ops on an unchanged `config_hash`, **except** that
+  `Reconciler.MeterResyncInterval` forces a periodic re-`PUT` even then,
+  because meter's answer can change (an operator's instance/group policy
+  moving) without the project's file moving. **Intake calls
+  `POST /v1/policy/decide` as Gate 1** (before the first dispatch, and again
+  for the `.agent/` scaffold order); the pack's exec order is Gate 2 (spec
+  6.2.3) — the actual enforcement point, re-deciding on every pour.
+  `meterapi.DecideRequest` carries no attempt field on either gate, ever (a
+  caller-supplied attempt is a ladder-climb forgery vector — meter reads its
+  own store).
+- **Plan 04 (pack):** (a) the Gas City order API shape — **OD-A is RESOLVED**:
+  `POST /v0/city/{cityName}/order/gonk-dispatch/run`, body `{"vars":{...}}`,
+  no per-route auth (admission by network position). `intake.HTTPDispatcher`
+  (`pkg/intake/dispatch.go`) is a **minimal, interim client** for this shape —
+  it marshals `OrderRequest` through its own JSON tags into `vars` and posts
+  to a hardcoded `cityName` of `"gonk"` (there is exactly one Gas City
+  instance in this design). **Plan 04's `pkg/gcapi` does not exist yet**;
+  when it lands, either replace `HTTPDispatcher` with a thin wrapper over it,
+  or confirm `gcapi`'s wire shape is byte-identical to what `HTTPDispatcher`
+  already sends, so a swap is a no-op. (b) **the controller must treat
+  `OrderRequest.BeadAnchor` as an idempotency key** — intake can fire the same
+  order twice across a restart (duplicate delivery, crash mid-flight), and a
+  duplicate bead means duplicate spend. (c) **the pack is Gate 2**: it calls
+  `POST /v1/policy/decide` before every session spawn and never trusts
+  intake's order vars; a `defer` is a NORMAL answer (park the bead, retry at
+  `retry_after`). Quiet hours land here (and, as a metric only, at intake's
+  Gate 1); intake carries no `not_before`. Task 3 Step 8's shared decision
+  table (intake's `MayFire` vs. the pack's pour rule) still needs writing.
+  (d) the pack must **never** send an attempt count. (e) the session posts
+  every triage label/comment; intake's only GitLab write on the dispatch path
+  is the narrow Gate-1 `deny` label (`intake.GitLabDenyLabeler`, default
+  `gonk::denied`, via the new `glab.Client.AddIssueLabel`).
+- **Plan 05 (chart):** the chart's **default instance ladder must be
+  non-empty** — it is the source `GONK_INSTANCE_LADDER` sets from, which
+  `GitLabOnboarder`/`RenderDefaultConfig` render a new project's `ladder:`
+  from (OD-B). `cmd/gonk-intake`'s `loadConfig` refuses to start on an
+  empty/unset `GONK_INSTANCE_LADDER` (`TestLoadConfigRejectsEmptyInstanceLadder`),
+  and `RenderDefaultConfig` refuses to emit an empty `ladder:` even if that
+  guard were bypassed — belt and braces, because intake never runs `opercfg`
+  (a different process, `opercfg.Load`, separately refuses to start *meter*
+  on the same condition). Secrets are **file mounts from existingSecret
+  refs**, never env values: `GONK_GITLAB_TOKEN_FILE` +
+  `GONK_GITLAB_TOKEN_PREVIOUS_FILE` (AD-4b), `GONK_GITLAB_ADMIN_TOKEN_FILE`
+  (optional, no second slot), `GONK_WEBHOOK_SECRET_FILE` +
+  `GONK_WEBHOOK_SECRET_PREVIOUS_FILE`, and `GONK_METER_TOKEN_FILE` (intake
+  presents slot 1 only — `GONK_METER_TOKEN_PREVIOUS_FILE` is **meter's** env
+  var). Ship an **alert rule on `gonk_intake_projects{state="invalid"} > 0`**
+  and one on `gonk_intake_gitlab_auth_fallback_total > 0`. Two listeners: only
+  `GONK_LISTEN_ADDR` (`:8080`, the hook) goes behind the Ingress;
+  `GONK_PRIVATE_ADDR` (`:9090`: metrics/health/`POST /admin/reconcile`) must
+  not. The image needs no system tzdata for intake's own logic (quiet hours
+  moved to meter) but `cmd/gonk-intake/main.go` still imports `time/tzdata`
+  defensively; it **does** need the private CA — mount trust-manager's
+  `trust-bundle` ConfigMap (key `tls-ca-bundle.pem`) and set
+  `SSL_CERT_FILE=/etc/ssl/orac/ca.crt`. There is no config value anywhere
+  that disables TLS verification.
+- **Plan 06 (e2e):** **HB-1 is shipped**: `POST /admin/reconcile?wait=true`
+  (`pkg/intake/server.go`, backed by `Reconciler.WaitForNextPass`) blocks
+  until a pass that started at or after the request completes, then returns a
+  JSON `ReconcileSummary` — this is what lets the harness assert on
+  reconciliation without sleeping. The items in "Plan 06 e2e verification"
+  below (golden payloads, real-GitLab hook provisioning, the full onboarding
+  scenario, the kill test, the real-meter seam, quiet hours end to end) are
+  unchanged from the plan text and still need a live GitLab/meter to check —
+  nothing in plan 02's own test suite substitutes for them. Plan 06 also owns
+  the honest accounting of the NetworkPolicy gap: the egress-denial test is
+  written and skipped until Cilium lands.

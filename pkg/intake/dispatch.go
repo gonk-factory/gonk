@@ -9,10 +9,14 @@
 package intake
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -514,4 +518,133 @@ func attributionSafeOrder(o OrderRequest) error {
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------- Dispatcher implementations (Task 10)
+
+// LogDispatcher is the default Dispatcher, wired when GONK_SUPERVISOR_URL is
+// unset. It never contacts Gas City: it logs every order it would have fired,
+// which is safe (the log line names no secret -- OrderRequest has none) and
+// keeps intake runnable with no supervisor at all (local dev, or a
+// Plan-04-less environment).
+type LogDispatcher struct {
+	Log *slog.Logger
+}
+
+func NewLogDispatcher(log *slog.Logger) *LogDispatcher { return &LogDispatcher{Log: log} }
+
+func (d *LogDispatcher) log() *slog.Logger {
+	if d.Log != nil {
+		return d.Log
+	}
+	return slog.Default()
+}
+
+func (d *LogDispatcher) FireOrder(_ context.Context, o OrderRequest) error {
+	d.log().Info("dispatch: order (no GONK_SUPERVISOR_URL configured; logging only, not firing)",
+		"trigger", o.Trigger, "project", o.Project, "rig", o.Rig, "rung", o.Rung,
+		"bead_anchor", o.BeadAnchor, "session_key", o.SessionKey)
+	return nil
+}
+
+// defaultCityName is the one Gas City instance this whole deployment talks to
+// (spec: "the Gas City supervisor", singular -- there is no multi-city concept
+// in gonk today). HTTPDispatcher is a minimal client for OD-A; Plan 04's
+// pkg/gcapi is the fuller one, and a caller with access to it should prefer it.
+// This one exists so Task 10 does not have to wait on a package that has not
+// landed (Plan 04 is not started as of this plan).
+const defaultCityName = "gonk"
+
+// HTTPDispatcher fires orders at the Gas City supervisor's order API. OD-A is
+// RESOLVED (Plan 04, Task 2): POST /v0/city/{cityName}/order/gonk-dispatch/run,
+// body {"vars": {...}}, no per-route auth (admission is by network position,
+// not a bearer token). vars is OrderRequest marshaled through its own JSON
+// tags -- the single source of truth for the shape stays OrderRequest, not a
+// second hand-maintained map.
+type HTTPDispatcher struct {
+	BaseURL  string
+	CityName string // "" -> defaultCityName
+	HTTP     *http.Client
+}
+
+func NewHTTPDispatcher(baseURL string, hc *http.Client) *HTTPDispatcher {
+	if hc == nil {
+		hc = &http.Client{Timeout: 15 * time.Second}
+	}
+	return &HTTPDispatcher{BaseURL: strings.TrimSuffix(baseURL, "/"), CityName: defaultCityName, HTTP: hc}
+}
+
+func (d *HTTPDispatcher) FireOrder(ctx context.Context, o OrderRequest) error {
+	raw, err := json.Marshal(o)
+	if err != nil {
+		return fmt.Errorf("dispatch: encode order: %w", err)
+	}
+	var vars map[string]any
+	if err := json.Unmarshal(raw, &vars); err != nil {
+		return fmt.Errorf("dispatch: encode order: %w", err)
+	}
+	body, err := json.Marshal(map[string]any{"vars": vars})
+	if err != nil {
+		return fmt.Errorf("dispatch: encode order: %w", err)
+	}
+
+	city := d.CityName
+	if city == "" {
+		city = defaultCityName
+	}
+	path := fmt.Sprintf("/v0/city/%s/order/gonk-dispatch/run", url.PathEscape(city))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.BaseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("dispatch: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := d.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("dispatch: %s %s: %w", http.MethodPost, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("dispatch: %s %s: %d: %s", http.MethodPost, path, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------- DenyLabeler implementation (Task 10)
+
+// DefaultDenyLabel is what GitLabDenyLabeler applies on a Gate-1 deny, absent
+// an override. It matches the project's usual `gonk::` label prefix so a human
+// scanning labels sees it grouped with gonk's other labels.
+const DefaultDenyLabel = "gonk::denied"
+
+// DenyGitLab is the narrow API slice NewDenyLabeler needs.
+type DenyGitLab interface {
+	// AddIssueLabel idempotently adds a label to an issue. GitLab's add_labels
+	// parameter is itself idempotent (re-adding a present label is a no-op), so
+	// no read-before-write is required here.
+	AddIssueLabel(ctx context.Context, projectID, issueIID int64, label string) error
+}
+
+// GitLabDenyLabeler is the thin glab-backed DenyLabeler Task 10 wires into
+// Dispatch.Labeler: on a Gate-1 deny it applies Label to the issue. It is the
+// ONLY GitLab write intake makes on the dispatch path (spec 4.3 step 5 --
+// every other label/comment is the session's, not intake's).
+type GitLabDenyLabeler struct {
+	GL    DenyGitLab
+	Label string // "" -> DefaultDenyLabel
+}
+
+// NewDenyLabeler builds a GitLabDenyLabeler with the default label.
+func NewDenyLabeler(gl DenyGitLab) *GitLabDenyLabeler {
+	return &GitLabDenyLabeler{GL: gl}
+}
+
+func (l *GitLabDenyLabeler) ApplyDenyLabel(ctx context.Context, projectID, issueIID int64, _ string) error {
+	label := l.Label
+	if label == "" {
+		label = DefaultDenyLabel
+	}
+	return l.GL.AddIssueLabel(ctx, projectID, issueIID, label)
 }

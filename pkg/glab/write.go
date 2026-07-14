@@ -86,3 +86,15 @@ func (c *Client) CreateIssue(ctx context.Context, projectID int64, opts IssueOpt
 	}
 	return &is, nil
 }
+
+// AddIssueLabel idempotently adds one label to an issue via the `add_labels`
+// parameter of the issue-edit endpoint: GitLab treats re-adding a label
+// already present as a no-op, so no read-before-write is needed. Used by
+// intake's Gate-1 deny path (its ONLY GitLab write on the dispatch path).
+func (c *Client) AddIssueLabel(ctx context.Context, projectID, issueIID int64, label string) error {
+	return c.getJSON(ctx, request{
+		method: "PUT",
+		path:   fmt.Sprintf("/api/v4/projects/%d/issues/%d", projectID, issueIID),
+		query:  map[string]string{"add_labels": label},
+	}, nil)
+}
