@@ -7,11 +7,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/keysink"
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/litellm"
+	"gitlab.orac.local/agentic/gonk-project/internal/meter/metrics"
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/store"
 	"gitlab.orac.local/agentic/gonk-project/pkg/atags"
 	"gitlab.orac.local/agentic/gonk-project/pkg/budget"
@@ -1195,4 +1199,418 @@ func spendRow(callID, project string, costUSD float64, at time.Time) spend.Row {
 			Rung: "glm", Attempt: 1, Trigger: atags.TriggerIssueTriage,
 		},
 	}
+}
+
+// ==================================================================
+// Task 9: Prometheus metrics
+// ==================================================================
+
+// attachMetrics wires a fresh, private registry into f.svc, mirroring
+// cmd/gonk-meter/main.go's own wiring (never prometheus.DefaultRegisterer).
+func (f *fixture) attachMetrics() *prometheus.Registry {
+	reg := prometheus.NewRegistry()
+	f.svc.SetMetrics(metrics.New(reg))
+	return reg
+}
+
+// richSpendRow is spendRow plus the fields Task 9's counters need: tokens and
+// the real-vs-synthetic split (Decision 9).
+func richSpendRow(callID, project, rungName string, synthetic bool, costUSD float64, promptTok, completionTok int64, at time.Time) spend.Row {
+	return spend.Row{
+		CallID: callID, CostUSD: costUSD, PromptTokens: promptTok, CompletionTokens: completionTok,
+		At: at, Synthetic: synthetic,
+		Tags: atags.Tags{
+			Project: project, Rig: "rig", BeadID: "gk-1", SessionKey: "sess-1",
+			Rung: rungName, Attempt: 1, Trigger: atags.TriggerIssueTriage,
+		},
+	}
+}
+
+// gatherValue reads one series' float64 value out of reg by metric family
+// name and exact label set. It goes through the real exposition format
+// (reg.Gather()), not Metrics' private fields, so these tests exercise
+// exactly what a Prometheus scrape would see -- and Metrics' public API
+// stays limited to the recording/setting methods Task 9 specifies, with no
+// test-only accessors bolted on. A series that was never touched (no
+// WithLabelValues call yet) reads as 0, matching testutil.ToFloat64 on an
+// untouched vector child.
+func gatherValue(t *testing.T, reg *prometheus.Registry, family string, labels map[string]string) float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, fam := range families {
+		if fam.GetName() != family {
+			continue
+		}
+		for _, metric := range fam.Metric {
+			got := make(map[string]string, len(metric.Label))
+			for _, lbl := range metric.Label {
+				got[lbl.GetName()] = lbl.GetValue()
+			}
+			if len(got) != len(labels) {
+				continue
+			}
+			match := true
+			for k, v := range labels {
+				if got[k] != v {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+			switch {
+			case metric.Counter != nil:
+				return metric.Counter.GetValue()
+			case metric.Gauge != nil:
+				return metric.Gauge.GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// TestDecideRecordsPolicyDecisionsMetric confirms every /v1/policy/decide
+// kind (run and, via an unregistered project, deny) lands in
+// gonk_meter_policy_decisions_total with the bounded (project, decision,
+// reason) labels Task 9 specifies.
+func TestDecideRecordsPolicyDecisionsMetric(t *testing.T) {
+	f := newTestService(t)
+	reg := f.attachMetrics()
+	f.register("budgeted/repo", "budgeted-repo", simpleYAML("qwen-local, glm", 0.01))
+	f.syncOnce()
+
+	if _, _, err := f.svc.Decide(context.Background(), decideReq("budgeted/repo", "gk-1", "sess-1")); err != nil {
+		t.Fatal(err)
+	}
+	if got := gatherValue(t, reg, "gonk_meter_policy_decisions_total", map[string]string{
+		"project": "budgeted/repo", "decision": meterapi.DecisionRun, "reason": "",
+	}); got != 1 {
+		t.Fatalf("run decisions = %v, want 1", got)
+	}
+
+	if _, _, err := f.svc.Decide(context.Background(), decideReq("never/registered", "gk-1", "sess-1")); err != nil {
+		t.Fatal(err)
+	}
+	if got := gatherValue(t, reg, "gonk_meter_policy_decisions_total", map[string]string{
+		"project": "never/registered", "decision": meterapi.DecisionDeny, "reason": meterapi.ReasonNotRegistered,
+	}); got != 1 {
+		t.Fatalf("deny decisions = %v, want 1", got)
+	}
+}
+
+// TestOutcomeRecordsGateOutcomeAndEscalationMetrics confirms
+// gonk_meter_gate_outcomes_total is keyed on the STORE's reservation rung
+// (never a caller-supplied one -- Decision 2), and that
+// gonk_meter_ladder_escalations_total fires ONLY on a gate-failed outcome
+// that actually advances the ladder, never on a retried report of the same
+// outcome.
+func TestOutcomeRecordsGateOutcomeAndEscalationMetrics(t *testing.T) {
+	f := newTestService(t)
+	reg := f.attachMetrics()
+	f.register("budgeted/repo", "budgeted-repo", simpleYAML("qwen-local, glm", 50))
+	f.syncOnce()
+
+	d, extras, err := f.svc.Decide(context.Background(), decideReq("budgeted/repo", "gk-1", "sess-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Kind != rung.Run || d.Rung != "qwen-local" {
+		t.Fatalf("decide = %+v, want a run on qwen-local", d)
+	}
+	if _, err := f.svc.Outcome(context.Background(), meterapi.OutcomeRequest{
+		Project: "budgeted/repo", BeadID: "gk-1", SessionKey: "sess-1", Attempt: d.Attempt,
+		Rung:          "not-the-real-rung", // a caller lying about the rung must not reach the label
+		ReservationID: extras.Reservation.ID, Outcome: meterapi.OutcomeGateFailed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	gateOutcomes := func(rungName string) float64 {
+		return gatherValue(t, reg, "gonk_meter_gate_outcomes_total", map[string]string{
+			"project": "budgeted/repo", "rung": rungName, "outcome": meterapi.OutcomeGateFailed,
+		})
+	}
+	if got := gateOutcomes("qwen-local"); got != 1 {
+		t.Fatalf("gate outcomes (authoritative rung) = %v, want 1", got)
+	}
+	if got := gateOutcomes("not-the-real-rung"); got != 0 {
+		t.Fatalf("gate outcomes used the caller-supplied rung, want 0 for the forged label")
+	}
+	escalations := func() float64 {
+		return gatherValue(t, reg, "gonk_meter_ladder_escalations_total", map[string]string{
+			"project": "budgeted/repo", "from_rung": "qwen-local", "to_rung": "glm",
+		})
+	}
+	if got := escalations(); got != 1 {
+		t.Fatalf("ladder escalations qwen-local->glm = %v, want 1", got)
+	}
+
+	// A retried report of the SAME outcome must not double-count.
+	if _, err := f.svc.Outcome(context.Background(), meterapi.OutcomeRequest{
+		Project: "budgeted/repo", BeadID: "gk-1", SessionKey: "sess-1", Attempt: d.Attempt,
+		Rung: "qwen-local", ReservationID: extras.Reservation.ID, Outcome: meterapi.OutcomeGateFailed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := gateOutcomes("qwen-local"); got != 1 {
+		t.Fatalf("gate outcomes after a retried report = %v, want still 1 (no double count)", got)
+	}
+	if got := escalations(); got != 1 {
+		t.Fatalf("ladder escalations after a retried report = %v, want still 1 (no double count)", got)
+	}
+}
+
+// TestSyncSpendCountersAreNotDoubledByOverlapRefetch is the money-safety
+// property Task 9's own doc calls out: the poller deliberately re-fetches a
+// trailing spendPollOverlap window on EVERY tick, so the exact same row WILL
+// be returned by SpendSource.Since more than once. A Prometheus counter that
+// re-Add()s it every time is a wrong budget on every dashboard, silently.
+func TestSyncSpendCountersAreNotDoubledByOverlapRefetch(t *testing.T) {
+	f := newTestService(t)
+	reg := f.attachMetrics()
+
+	trig := string(atags.TriggerIssueTriage)
+	spendUSD := func() float64 {
+		return gatherValue(t, reg, "gonk_meter_spend_usd_total", map[string]string{
+			"project": "group/repo", "rung": "glm", "trigger": trig, "synthetic": "false",
+		})
+	}
+	promptTokens := func() float64 {
+		return gatherValue(t, reg, "gonk_meter_tokens_total", map[string]string{
+			"project": "group/repo", "rung": "glm", "trigger": trig, "kind": "prompt",
+		})
+	}
+
+	f.admin.AddRows(richSpendRow("call-1", "group/repo", "glm", false, 1.50, 100, 50, f.clock))
+	f.syncOnce()
+	if got := spendUSD(); got != 1.50 {
+		t.Fatalf("spend after first sync = %v, want 1.50", got)
+	}
+
+	// Advance well inside spendPollOverlap (2m) and sync again: Since()
+	// legitimately re-returns call-1 (that is the WHOLE POINT of the
+	// overlap), but the counter must still read 1.50, not 3.00.
+	f.advance(10 * time.Second)
+	f.syncOnce()
+	if got := spendUSD(); got != 1.50 {
+		t.Fatalf("spend after a re-fetching sync = %v, want still 1.50 (double-counted the overlap row)", got)
+	}
+	if got := promptTokens(); got != 100 {
+		t.Fatalf("prompt tokens after a re-fetching sync = %v, want still 100", got)
+	}
+
+	// A genuinely new row in the SAME poll must still be counted.
+	f.admin.AddRows(richSpendRow("call-2", "group/repo", "glm", false, 0.75, 20, 10, f.clock))
+	f.syncOnce()
+	if got := spendUSD(); got != 2.25 {
+		t.Fatalf("spend after a genuinely new row = %v, want 2.25 (1.50 + 0.75)", got)
+	}
+}
+
+// TestSyncSpendSeparatesSyntheticFromRealInMetrics is the end-to-end version
+// of the metrics package's own unit test: a local rung's LiteLLM-billed
+// dollars land under synthetic="true" and NEVER under synthetic="false"
+// (Decision 9), all the way through the real sync path, not just the
+// Metrics API in isolation.
+func TestSyncSpendSeparatesSyntheticFromRealInMetrics(t *testing.T) {
+	f := newTestService(t)
+	reg := f.attachMetrics()
+
+	f.admin.AddRows(
+		richSpendRow("call-local", "group/repo", "qwen-local", true, 0.02, 100, 50, f.clock),
+		richSpendRow("call-cloud", "group/repo", "glm", false, 1.50, 200, 100, f.clock),
+	)
+	f.syncOnce()
+
+	trig := string(atags.TriggerIssueTriage)
+	spendUSD := func(rungName string, synthetic bool) float64 {
+		syn := "false"
+		if synthetic {
+			syn = "true"
+		}
+		return gatherValue(t, reg, "gonk_meter_spend_usd_total", map[string]string{
+			"project": "group/repo", "rung": rungName, "trigger": trig, "synthetic": syn,
+		})
+	}
+	if got := spendUSD("qwen-local", true); got != 0.02 {
+		t.Fatalf("synthetic spend for qwen-local = %v, want 0.02", got)
+	}
+	if got := spendUSD("qwen-local", false); got != 0 {
+		t.Fatalf("REAL spend for qwen-local = %v, want 0 -- a synthetic dollar must never land under synthetic=false", got)
+	}
+	if got := spendUSD("glm", false); got != 1.50 {
+		t.Fatalf("real spend for glm = %v, want 1.50", got)
+	}
+	if got := spendUSD("glm", true); got != 0 {
+		t.Fatalf("synthetic spend for glm = %v, want 0", got)
+	}
+}
+
+// TestRefreshGaugesReportsBudgetRemainingProjectStateAndReservations exercises
+// the tick-refreshed gauges against a real registered, budgeted project with
+// an open reservation.
+func TestRefreshGaugesReportsBudgetRemainingProjectStateAndReservations(t *testing.T) {
+	f := newTestService(t)
+	reg := f.attachMetrics()
+	f.register("budgeted/repo", "budgeted-repo", simpleYAML("qwen-local, glm", 50))
+	f.syncOnce()
+
+	d, _, err := f.svc.Decide(context.Background(), decideReq("budgeted/repo", "gk-1", "sess-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Kind != rung.Run {
+		t.Fatalf("decide = %+v, want a run", d)
+	}
+
+	if err := f.svc.RefreshGauges(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := gatherValue(t, reg, "gonk_meter_project_state", map[string]string{"project": "budgeted/repo", "state": "active"}); got != 1 {
+		t.Fatalf("project_state{state=active} = %v, want 1", got)
+	}
+	if got := gatherValue(t, reg, "gonk_meter_project_state", map[string]string{"project": "budgeted/repo", "state": "invalid"}); got != 0 {
+		t.Fatalf("project_state{state=invalid} = %v, want 0 (only the current state is 1)", got)
+	}
+	if got := gatherValue(t, reg, "gonk_meter_reservations_open", map[string]string{"project": "budgeted/repo"}); got != 1 {
+		t.Fatalf("reservations_open = %v, want 1 (the run just decided)", got)
+	}
+	// $50 ceiling, no observed spend yet, one open qwen-local reservation
+	// (real-dollar cost 0 -- it is a local rung): remaining stays 50.
+	if got := gatherValue(t, reg, "gonk_meter_budget_remaining_usd", map[string]string{"project": "budgeted/repo"}); got != 50 {
+		t.Fatalf("budget_remaining_usd = %v, want 50", got)
+	}
+}
+
+// TestForceSpendSyncCoalescesConcurrentCallers is Task 9 Step 3b's
+// coalescing requirement: concurrent callers wait on the SAME pass, so a
+// burst of forced syncs never turns into a burst of LiteLLM calls. It proves
+// this by blocking the underlying SpendSource.Since inside the first call,
+// starting two more concurrently, and confirming Since was invoked exactly
+// once for all three -- with no sleep anywhere: the second and third callers
+// are started only once the first has PROVABLY already registered itself as
+// in-flight (signalled from inside its own blocked Since call).
+func TestForceSpendSyncCoalescesConcurrentCallers(t *testing.T) {
+	cfg, err := opercfg.Load([]byte(testOperatorYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := litellm.NewFake()
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	admin.Now = now
+	admin.AddRows(spendRow("call-1", "group/repo", 1.0, now))
+
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	var calls atomic.Int32
+	slow := &blockingSpendSource{inner: admin, entered: entered, proceed: proceed, calls: &calls}
+
+	svc := New(cfg, store.NewMemory(), admin, slow, keysink.NewMemory(), func() time.Time { return now })
+
+	type result struct {
+		asOf time.Time
+		rows int
+		err  error
+	}
+	results := make(chan result, 3)
+	go func() {
+		asOf, rows, _, err := svc.ForceSpendSync(context.Background())
+		results <- result{asOf, rows, err}
+	}()
+
+	<-entered // the first caller is DEFINITELY past the coalescing gate now
+
+	// Prove callers 2 and 3 have STARTED RUNNING (and so, with nothing else
+	// to do first, have taken the uncontended forceMu lock and observed the
+	// first caller's in-flight marker) before releasing caller 1: caller 1
+	// is PROVABLY still blocked in Since() until proceed closes, so it
+	// cannot have reset that marker out from under them. Without this
+	// WaitGroup, close(proceed) could unblock and let caller 1 finish (reset
+	// the marker) before callers 2/3 are even scheduled, and they would each
+	// start their OWN poll instead of coalescing -- which is the exact
+	// failure this test caught on the first run (see the report).
+	var started sync.WaitGroup
+	started.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			started.Done()
+			asOf, rows, _, err := svc.ForceSpendSync(context.Background())
+			results <- result{asOf, rows, err}
+		}()
+	}
+	started.Wait()
+	close(proceed)
+
+	var got [3]result
+	for i := range got {
+		got[i] = <-results
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("underlying SpendSource.Since was called %d times, want exactly 1 (concurrent callers must coalesce)", n)
+	}
+	for i, r := range got {
+		if r.err != nil {
+			t.Fatalf("caller %d: err = %v, want nil", i, r.err)
+		}
+		if !r.asOf.Equal(got[0].asOf) || r.rows != got[0].rows {
+			t.Fatalf("caller %d result = %+v, want the same pass's result as caller 0 = %+v", i, r, got[0])
+		}
+	}
+	if got[0].rows != 1 {
+		t.Fatalf("rows_ingested = %d, want 1", got[0].rows)
+	}
+}
+
+// TestForceSpendSyncReportsLastGoodSpendAsOfOnFailure confirms Step 3b's
+// "It forces a poll; it does not fabricate one" rule: on a failed forced
+// sync, spend_as_of is the last GOOD sync's timestamp, never zero.
+func TestForceSpendSyncReportsLastGoodSpendAsOfOnFailure(t *testing.T) {
+	f := newTestService(t)
+	f.attachMetrics()
+
+	goodAsOf, rows, _, err := f.svc.ForceSpendSync(context.Background())
+	if err != nil {
+		t.Fatalf("first (good) forced sync: %v", err)
+	}
+	if goodAsOf.IsZero() {
+		t.Fatal("a successful forced sync reported a zero spend_as_of")
+	}
+	if rows != 0 {
+		t.Fatalf("rows_ingested on an empty store = %d, want 0", rows)
+	}
+
+	f.admin.SpendErr = errors.New("litellm unreachable")
+	failAsOf, _, _, err := f.svc.ForceSpendSync(context.Background())
+	if err == nil {
+		t.Fatal("forced sync during a spend-source outage returned nil error, want one")
+	}
+	if !failAsOf.Equal(goodAsOf) {
+		t.Fatalf("failed forced sync spend_as_of = %v, want the last GOOD sync's %v (never zero just because this call failed)", failAsOf, goodAsOf)
+	}
+}
+
+// blockingSpendSource wraps a real SpendSource but blocks inside Since()
+// until proceed is closed, signalling on entered the first time it is
+// called, and counting every call -- so a test can prove ForceSpendSync's
+// coalescing without any sleep: the second and third callers are started
+// only after entered has fired, i.e. only after the first call has PROVABLY
+// already taken the coalescing lock.
+type blockingSpendSource struct {
+	inner   litellm.SpendSource
+	entered chan struct{}
+	proceed chan struct{}
+	calls   *atomic.Int32
+	once    sync.Once
+}
+
+func (b *blockingSpendSource) Since(ctx context.Context, t time.Time) ([]spend.Row, time.Time, error) {
+	b.calls.Add(1)
+	b.once.Do(func() { close(b.entered) })
+	<-b.proceed
+	return b.inner.Since(ctx, t)
 }

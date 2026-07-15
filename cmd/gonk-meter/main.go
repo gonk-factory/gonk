@@ -18,11 +18,14 @@ import (
 
 	_ "time/tzdata" // quiet_hours needs IANA data; the image has no /usr/share/zoneinfo
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/keysink"
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/litellm"
+	"gitlab.orac.local/agentic/gonk-project/internal/meter/metrics"
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/service"
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/store"
 	"gitlab.orac.local/agentic/gonk-project/pkg/opercfg"
@@ -61,6 +64,7 @@ type Config struct {
 	JanitorInterval       time.Duration // GONK_JANITOR_INTERVAL (default 1m)
 	ReconcileKeysInterval time.Duration // GONK_RECONCILE_KEYS_INTERVAL (default 1m)
 	ReresolveInterval     time.Duration // GONK_RERESOLVE_INTERVAL (default 5m)
+	RefreshGaugesInterval time.Duration // GONK_REFRESH_GAUGES_INTERVAL (default 15s)
 }
 
 func run(log *slog.Logger) error {
@@ -103,6 +107,13 @@ func run(log *slog.Logger) error {
 
 	svc := service.New(operCfg, st, admin, spendSource, keySink, Now)
 
+	// A PRIVATE registry (never prometheus.DefaultRegisterer): no default
+	// go_*/process_* series unless deliberately added, matching
+	// cmd/gonk-intake's house style (pkg/intake/metrics.go).
+	reg := prometheus.NewRegistry()
+	mtr := metrics.New(reg)
+	svc.SetMetrics(mtr)
+
 	token, err := readSecretFile(cfg.MeterTokenFile)
 	if err != nil {
 		return err
@@ -111,7 +122,7 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	mux, err := service.NewMux(svc, token, prevToken)
+	mux, err := service.NewMux(svc, token, prevToken, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	if err != nil {
 		return err
 	}
@@ -121,6 +132,7 @@ func run(log *slog.Logger) error {
 	go runLoop(ctx, log, "sync-spend", cfg.SyncSpendInterval, svc.SyncSpend)
 	go runLoop(ctx, log, "janitor", cfg.JanitorInterval, svc.Janitor)
 	go runLoop(ctx, log, "reconcile-keys", cfg.ReconcileKeysInterval, svc.ReconcileKeys)
+	go runLoop(ctx, log, "refresh-gauges", cfg.RefreshGaugesInterval, svc.RefreshGauges)
 	go runLoop(ctx, log, "reresolve", cfg.ReresolveInterval, func(rctx context.Context) error {
 		// The operator config is re-read from disk on every tick (the chart
 		// mounts it as a ConfigMap; a ConfigMap update is a file change, not a
@@ -267,6 +279,7 @@ func loadConfig() (Config, error) {
 	cfg.JanitorInterval = time.Minute
 	cfg.ReconcileKeysInterval = time.Minute
 	cfg.ReresolveInterval = 5 * time.Minute
+	cfg.RefreshGaugesInterval = 15 * time.Second
 	for _, d := range []struct {
 		env string
 		dst *time.Duration
@@ -275,6 +288,7 @@ func loadConfig() (Config, error) {
 		{"GONK_JANITOR_INTERVAL", &cfg.JanitorInterval},
 		{"GONK_RECONCILE_KEYS_INTERVAL", &cfg.ReconcileKeysInterval},
 		{"GONK_RERESOLVE_INTERVAL", &cfg.ReresolveInterval},
+		{"GONK_REFRESH_GAUGES_INTERVAL", &cfg.RefreshGaugesInterval},
 	} {
 		if v := os.Getenv(d.env); v != "" {
 			parsed, err := time.ParseDuration(v)

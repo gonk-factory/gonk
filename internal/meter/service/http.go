@@ -25,7 +25,16 @@ const maxBodyBytes = 1 << 20
 // slot, accepted equally (Decision 12). An empty token is a fatal
 // configuration error -- not an open door -- so it is refused here rather
 // than silently accepting every request.
-func NewMux(svc *Service, token, prevToken string) (http.Handler, error) {
+//
+// metricsHandler serves GET /metrics -- normally
+// promhttp.HandlerFor(reg, promhttp.HandlerOpts{}) against the same private
+// registry a metrics.Metrics was built with (see cmd/gonk-meter/main.go). It
+// is UNAUTHENTICATED, like /healthz and /readyz (meterapi.MetricsPath is
+// already exempt in bearerAuth below) -- that is standard Prometheus scrape
+// practice, and this endpoint carries no per-project secret, only aggregate
+// counters. A nil metricsHandler leaves the route unmounted (a 404), which is
+// fine for a test that does not care about metrics.
+func NewMux(svc *Service, token, prevToken string, metricsHandler http.Handler) (http.Handler, error) {
 	if token == "" {
 		return nil, errors.New("service: bearer token is empty; refusing to start with an open door")
 	}
@@ -45,8 +54,19 @@ func NewMux(svc *Service, token, prevToken string) (http.Handler, error) {
 	mux.HandleFunc("GET /v1/cost/session/{session_key}", h.costSession)
 	mux.HandleFunc("GET /v1/cost/project/{project}", h.costProject)
 	mux.HandleFunc("GET /v1/cost/instance", h.costInstance)
+	// POST /admin/spend/sync IS bearer-authenticated (unlike /healthz,
+	// /readyz, /metrics): it is on the same listener as everything else --
+	// meter has one port, unlike intake's public/private split -- and
+	// forcing a spend poll is not something an unauthenticated caller gets to
+	// do. Go 1.22+'s ServeMux answers a non-POST request to this path with
+	// 405 on its own (Task 9 Step 3b's "any other method -> 405"), so there
+	// is no manual method check here.
+	mux.HandleFunc("POST "+meterapi.AdminSpendSyncPath, h.adminSpendSync)
 	mux.HandleFunc(meterapi.HealthzPath, h.healthz)
 	mux.HandleFunc(meterapi.ReadyzPath, h.readyz)
+	if metricsHandler != nil {
+		mux.Handle(meterapi.MetricsPath, metricsHandler)
+	}
 
 	return bearerAuth(tokens, mux), nil
 }
@@ -301,6 +321,27 @@ func (h *handler) costInstance(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ---------------------------------------------------------------- admin
+
+// adminSpendSync forces one spend-log poll and blocks until it has completed
+// (Task 9 Step 3b, Plan 06 hand-back HB-2). The HTTP status is ALWAYS 200: a
+// poll failure is reported in the body (Synced: false, Error set), not as an
+// HTTP error, because the endpoint itself did its job -- it ran a sync
+// attempt and is honestly reporting what happened. This mirrors /v1/policy/
+// decide's own convention: defer and deny are 200s too, because they are
+// normal answers, not failures of the API surface.
+func (h *handler) adminSpendSync(w http.ResponseWriter, r *http.Request) {
+	asOf, rowsIngested, unattributed, err := h.svc.ForceSpendSync(r.Context())
+	resp := meterapi.SpendSyncResponse{SpendAsOf: asOf, Synced: err == nil}
+	if err != nil {
+		resp.Error = err.Error()
+	} else {
+		resp.RowsIngested = &rowsIngested
+		resp.Unattributed = &unattributed
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

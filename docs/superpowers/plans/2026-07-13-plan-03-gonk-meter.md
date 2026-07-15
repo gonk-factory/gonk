@@ -6866,7 +6866,7 @@ Spec 8's required series, plus the cost API of spec 6.2. **One cardinality rule:
 
 **Files:** Create `internal/meter/metrics/metrics.go`, `internal/meter/metrics/metrics_test.go`; extend `internal/meter/service/http.go`
 
-- [ ] **Step 1: Add the dependency, pinned**
+- [x] **Step 1: Add the dependency, pinned**
 
 Everything else in this repo is pinned to an exact version (`golang:1.26`, `golangci-lint:v2.12.2`). Do not float this one.
 
@@ -6877,7 +6877,7 @@ go mod tidy
 
 (If v1.20.5 is unavailable, pin whatever exact version resolves and record it — the point is an exact tag in `go.mod`, not that particular number.)
 
-- [ ] **Step 2: Write the failing metrics test**
+- [x] **Step 2: Write the failing metrics test**
 
 Use `prometheus/client_golang/prometheus/testutil` to assert exposition text exactly.
 
@@ -6920,7 +6920,7 @@ func TestDecisionCounterUsesTheBoundedReasonSet(t *testing.T)
 
 **Dashboard rule, carried to Plan 05.** The shipped Cost dashboard must default to `synthetic="false"` on every money panel, and show synthetic spend only on a separate panel titled so a human cannot mistake it for real money (e.g. "Local inference — synthetic pricing (not billed)"). **Presenting a synthetic dollar as spend is the one way this decision can do real harm.**
 
-- [ ] **Step 3: Implement the collectors**
+- [x] **Step 3: Implement the collectors**
 
 | Metric | Type | Labels |
 |---|---|---|
@@ -6956,7 +6956,7 @@ spend_as_of`) stays as the *alerting* series; an age is right for "is this
 stale?", an absolute timestamp is right for "has my call landed yet?". Both, and
 they are cheap.
 
-- [ ] **Step 3b: `POST /admin/spend/sync` — the forced sync (Plan 06 hand-back HB-2)**
+- [x] **Step 3b: `POST /admin/spend/sync` — the forced sync (Plan 06 hand-back HB-2)**
 
 **Why this exists.** Meter's view of spend is a **poll** of LiteLLM's
 `/spend/logs` (Decision 11). Every assertion of the form *"the ledger now says the
@@ -6986,13 +6986,13 @@ Rules, and they are the same rules as everything else here:
 - `harness.forceSpendSync` calls it. Nothing else does, in production or otherwise
   — but it is safe if it is, which is why it is not gated behind a build tag.
 
-- [ ] **Step 4: Implement the cost API handlers**
+- [x] **Step 4: Implement the cost API handlers**
 
 `GET /v1/cost/bead/{bead_id}`, `/v1/cost/session/{session_key}`, `/v1/cost/project/{project}`, `/v1/cost/instance`, exactly the shapes in the API section above. Every response carries `as_of` (the last successful sync) and `complete` (false iff an open reservation exists for that scope). `GET /v1/cost/project/{p}` also carries `budget`, `remaining`, `window`, and `stale`.
 
 Test that `complete: false` appears while a reservation is open and flips to `true` once the outcome is reported and the spend row has landed — this is the field that stops a commit trailer from claiming a cost it does not yet know (spec 6.1).
 
-- [ ] **Step 5: Gate and commit**
+- [x] **Step 5: Gate and commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run ./...

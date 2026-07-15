@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"gitlab.orac.local/agentic/gonk-project/internal/meter/metrics"
 	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
 )
 
@@ -17,20 +22,25 @@ import (
 // than calling Service methods directly.
 type httpFixture struct {
 	*fixture
-	srv   *httptest.Server
-	token string
+	srv     *httptest.Server
+	token   string
+	reg     *prometheus.Registry
+	metrics *metrics.Metrics
 }
 
 func newHTTPFixture(t *testing.T) *httpFixture {
 	t.Helper()
 	f := newTestService(t)
-	mux, err := NewMux(f.svc, "test-token", "prev-token")
+	reg := prometheus.NewRegistry()
+	mtr := metrics.New(reg)
+	f.svc.SetMetrics(mtr)
+	mux, err := NewMux(f.svc, "test-token", "prev-token", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	if err != nil {
 		t.Fatalf("NewMux: %v", err)
 	}
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &httpFixture{fixture: f, srv: srv, token: "test-token"}
+	return &httpFixture{fixture: f, srv: srv, token: "test-token", reg: reg, metrics: mtr}
 }
 
 func (h *httpFixture) do(method, path, bearer string, body any) (*http.Response, []byte) {
@@ -333,6 +343,84 @@ func TestHTTPCostBeadHasNoProjectInThePath(t *testing.T) {
 	}
 	if bc.Project != "group/repo" || len(bc.Attempts) != 1 {
 		t.Fatalf("bead cost = %+v, want project discovered as group/repo with 1 attempt", bc)
+	}
+}
+
+// ==================================================================
+// Task 9: /metrics and /admin/spend/sync
+// ==================================================================
+
+// TestHTTPMetricsIsUnauthenticatedAndServesPrometheusText confirms /metrics
+// joins /healthz and /readyz as the unauthenticated exceptions (meterapi.go's
+// own endpoint doc comment), and that the registry mounted is PRIVATE: no
+// default go_*/process_* collectors, matching cmd/gonk-intake's house style.
+func TestHTTPMetricsIsUnauthenticatedAndServesPrometheusText(t *testing.T) {
+	h := newHTTPFixture(t)
+	resp, body := h.do(http.MethodGet, meterapi.MetricsPath, "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/metrics without a token: status = %d, want 200", resp.StatusCode)
+	}
+	if !bytes.Contains(body, []byte("gonk_meter_")) {
+		t.Fatalf("/metrics body has no gonk_meter_ series: %s", body)
+	}
+	if bytes.Contains(body, []byte("go_goroutines")) {
+		t.Fatalf("/metrics exposes the default go_* collector -- the registry must be private")
+	}
+}
+
+// TestHTTPAdminSpendSyncIsAuthenticatedAndRejectsWrongMethod: unlike
+// /healthz, /readyz, and /metrics, /admin/spend/sync sits behind the same
+// bearer token as every other route (Task 9 Step 3b), and a non-POST request
+// gets Go 1.22+ ServeMux's automatic 405 rather than the handler's own 200.
+func TestHTTPAdminSpendSyncIsAuthenticatedAndRejectsWrongMethod(t *testing.T) {
+	h := newHTTPFixture(t)
+	resp, _ := h.do(http.MethodPost, meterapi.AdminSpendSyncPath, "", nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no bearer token: status = %d, want 401", resp.StatusCode)
+	}
+	resp, _ = h.do(http.MethodGet, meterapi.AdminSpendSyncPath, h.token, nil)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /admin/spend/sync: status = %d, want 405", resp.StatusCode)
+	}
+}
+
+// TestHTTPAdminSpendSyncReportsHonestSpendAsOf covers the two response
+// shapes in Task 9 Step 3b's table: a successful pass carries rows_ingested
+// and unattributed; a failed one carries synced:false and error, omits
+// rows_ingested/unattributed, and STILL reports the last GOOD spend_as_of --
+// never zero -- with HTTP 200 either way (the endpoint itself did its job).
+func TestHTTPAdminSpendSyncReportsHonestSpendAsOf(t *testing.T) {
+	h := newHTTPFixture(t)
+
+	resp, body := h.do(http.MethodPost, meterapi.AdminSpendSyncPath, h.token, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin spend sync: status = %d, body=%s", resp.StatusCode, body)
+	}
+	var sr meterapi.SpendSyncResponse
+	if err := json.Unmarshal(body, &sr); err != nil {
+		t.Fatal(err)
+	}
+	if !sr.Synced || sr.RowsIngested == nil || sr.SpendAsOf.IsZero() {
+		t.Fatalf("admin spend sync response = %+v, want synced with a non-zero spend_as_of and rows_ingested set", sr)
+	}
+
+	h.admin.SpendErr = errors.New("litellm unreachable")
+	resp, body = h.do(http.MethodPost, meterapi.AdminSpendSyncPath, h.token, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("failed sync: status = %d, want 200 (the endpoint itself did its job)", resp.StatusCode)
+	}
+	var sr2 meterapi.SpendSyncResponse
+	if err := json.Unmarshal(body, &sr2); err != nil {
+		t.Fatal(err)
+	}
+	if sr2.Synced || sr2.Error == "" {
+		t.Fatalf("failed sync response = %+v, want synced=false with an error", sr2)
+	}
+	if sr2.RowsIngested != nil || sr2.Unattributed != nil {
+		t.Fatalf("failed sync response = %+v, want rows_ingested/unattributed OMITTED (we do not know), not present as zero", sr2)
+	}
+	if !sr2.SpendAsOf.Equal(sr.SpendAsOf) {
+		t.Fatalf("failed sync spend_as_of = %v, want the last GOOD sync's %v (never zero just because this call failed)", sr2.SpendAsOf, sr.SpendAsOf)
 	}
 }
 

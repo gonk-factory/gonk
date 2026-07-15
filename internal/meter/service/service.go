@@ -22,6 +22,7 @@ import (
 
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/keysink"
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/litellm"
+	"gitlab.orac.local/agentic/gonk-project/internal/meter/metrics"
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/store"
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/tagmint"
 	"gitlab.orac.local/agentic/gonk-project/pkg/budget"
@@ -69,11 +70,104 @@ type Service struct {
 	cfg    *opercfg.OperatorConfig
 	synced bool // has a spend sync ever succeeded?
 	skewOK bool
+
+	// metrics is nil-safe throughout this package: every call site checks it
+	// before use, so a Service built without SetMetrics (every existing test,
+	// and any future caller that does not care) behaves exactly as before
+	// Task 9.
+	metrics *metrics.Metrics
+
+	// seenMu/seenCallIDs is a small, BOUNDED, in-process cache -- NOT the
+	// store's permanent CallID dedupe (store.AddSpendRows) -- that exists
+	// solely so the Prometheus spend/token counters see each row exactly
+	// once. The spend-log poller deliberately re-fetches a trailing overlap
+	// window every tick (spendPollOverlap) so a row committed a moment after
+	// the previous poll's window closed is not missed; the STORE dedupes
+	// that overlap forever by CallID, but a Prometheus counter must never
+	// re-Add() the same row, or it inflates money and token totals on every
+	// single tick. This cache remembers just enough (rows still inside the
+	// overlap window) to tell "genuinely new" from "re-fetched", and prunes
+	// entries once they age out of the window -- after which Since() will
+	// never return them again, so remembering them is unnecessary.
+	seenMu      sync.Mutex
+	seenCallIDs map[string]time.Time // CallID -> row.At
+
+	// lastUnattributed is the last value read from an optional
+	// Unattributed() int on the SpendSource, so the (cumulative) count can be
+	// turned into a (monotonic-safe) counter delta.
+	lastUnattributed int
+
+	// deferredMu/deferredBeads is an in-process ONLY tracker of which beads
+	// currently sit behind a defer decision, for gonk_meter_deferred_beads.
+	// There is no persisted "this bead is deferred" state anywhere in
+	// store.Store -- only Run decisions leave a reservation behind -- so this
+	// gauge is necessarily a live, this-process view: it resets on restart,
+	// same as every other in-memory-only signal this package already carries
+	// (e.g. the keyedMutex). That is an acceptable accuracy trade for a
+	// dashboard gauge, and it is never a policy input.
+	deferredMu    sync.Mutex
+	deferredBeads map[string]map[string]struct{} // project -> set of bead IDs
+
+	// forceMu/forceWait/forceRes coalesce concurrent ForceSpendSync callers
+	// onto one in-flight poll (Task 9 Step 3b).
+	forceMu   sync.Mutex
+	forceWait chan struct{}
+	forceRes  forceSyncResult
 }
 
 // New builds a Service. now is the service's only clock.
 func New(cfg *opercfg.OperatorConfig, st store.Store, admin litellm.Admin, spendSrc litellm.SpendSource, keys keysink.KeySink, now func() time.Time) *Service {
 	return &Service{cfg: cfg, store: st, admin: admin, spend: spendSrc, keys: keys, now: now}
+}
+
+// SetMetrics wires gonk-meter's Prometheus surface into the service. It is
+// optional and may be called at most once, before traffic starts; a Service
+// with no metrics set behaves exactly as it did before Task 9 (every call
+// site below is nil-checked).
+func (s *Service) SetMetrics(m *metrics.Metrics) {
+	s.metrics = m
+}
+
+// noteDecision records gonk_meter_policy_decisions_total for one finished
+// (non-error) /v1/policy/decide call, and updates the in-process
+// deferred-beads tracker. It is a no-op if metrics were never set.
+func (s *Service) noteDecision(project, beadID string, d rung.Decision) {
+	if s.metrics != nil {
+		s.metrics.RecordDecision(project, string(d.Kind), d.Reason)
+	}
+	s.setDeferred(project, beadID, d.Kind == rung.Defer)
+}
+
+// setDeferred marks (project, beadID) as currently waiting on a defer
+// decision, or clears it (a Run or a Deny both end the "waiting" state --
+// one because the work started, the other because it never will).
+func (s *Service) setDeferred(project, beadID string, deferred bool) {
+	s.deferredMu.Lock()
+	defer s.deferredMu.Unlock()
+	if deferred {
+		if s.deferredBeads == nil {
+			s.deferredBeads = map[string]map[string]struct{}{}
+		}
+		set := s.deferredBeads[project]
+		if set == nil {
+			set = map[string]struct{}{}
+			s.deferredBeads[project] = set
+		}
+		set[beadID] = struct{}{}
+		return
+	}
+	if set := s.deferredBeads[project]; set != nil {
+		delete(set, beadID)
+	}
+}
+
+// deferredCount reports how many beads are currently tracked as deferred for
+// a project (see the doc comment on Service.deferredBeads for what this
+// gauge does and does not guarantee).
+func (s *Service) deferredCount(project string) int {
+	s.deferredMu.Lock()
+	defer s.deferredMu.Unlock()
+	return len(s.deferredBeads[project])
 }
 
 // Config returns the operator config currently in force. Safe for concurrent
@@ -475,6 +569,7 @@ func (s *Service) Decide(ctx context.Context, req meterapi.DecideRequest) (rung.
 				return rung.Decision{}, DecideExtras{}, err
 			}
 			d := rung.Decision{Kind: rung.Run, Rung: r.Rung, Model: cfg.Catalog[r.Rung].Model, Attempt: r.Attempt}
+			s.noteDecision(req.Project, req.BeadID, d)
 			return d, DecideExtras{Metadata: tags.Metadata(), KeyRef: reg.KeyRef, Reservation: r}, nil
 		}
 	}
@@ -495,6 +590,7 @@ func (s *Service) Decide(ctx context.Context, req meterapi.DecideRequest) (rung.
 	d := rung.Decide(in)
 
 	if d.Kind != rung.Run {
+		s.noteDecision(req.Project, req.BeadID, d)
 		return d, DecideExtras{}, nil
 	}
 
@@ -540,12 +636,17 @@ func (s *Service) Decide(ctx context.Context, req meterapi.DecideRequest) (rung.
 		// We lost a race against a concurrent session. rung.Decide said yes on
 		// a snapshot that is now stale. This is a DEFER, not an error and not a
 		// deny: the budget is real, it is just spoken for right now.
-		return rung.Decision{
+		lost := rung.Decision{
 			Kind: rung.Defer, Attempt: d.Attempt,
 			Reason:     rung.ReasonMonthlyCostExhausted,
 			Detail:     "lost a concurrent reservation race for the remaining budget",
 			RetryAfter: now.Add(cfg.Meter.MaxSpendStaleness),
-		}, DecideExtras{}, nil
+		}
+		s.noteDecision(req.Project, req.BeadID, lost)
+		if s.metrics != nil {
+			s.metrics.RecordReservationRaceLost(req.Project)
+		}
+		return lost, DecideExtras{}, nil
 	}
 
 	// held is the reservation that actually holds budget for this work: the one
@@ -571,6 +672,7 @@ func (s *Service) Decide(ctx context.Context, req meterapi.DecideRequest) (rung.
 		return rung.Decision{}, DecideExtras{}, err // 400: a hostile tag never leaves the building
 	}
 
+	s.noteDecision(req.Project, req.BeadID, d)
 	return d, DecideExtras{Metadata: tags.Metadata(), KeyRef: reg.KeyRef, Reservation: held}, nil
 }
 
@@ -664,18 +766,26 @@ func (s *Service) Outcome(ctx context.Context, req meterapi.OutcomeRequest) (met
 	// An outcome may overwrite a previously recorded attempt for this
 	// reservation ONLY if the recorded one is infra-failed (the janitor's
 	// guess, or a genuine infra failure -- either way "we do not have
-	// confidence this attempt completed"). Otherwise a caller holding a valid
-	// reservation_id could keep re-POSTing to flip its own already-recorded
-	// outcome -- bounded (one rung per reservation) but still a vote it does
-	// not get. Attempt numbers are unique per bead (assigned by
-	// len(prior)+1), so matching on Attempt number finds the record tied to
-	// this reservation.
+	// confidence this attempt completed"). Otherwise this is a RETRY of an
+	// already-terminal report -- a caller holding a valid reservation_id
+	// keeps re-POSTing (a retried outcome call is exactly as expected as a
+	// retried /decide) -- and it is a no-op: it returns the SAME preview the
+	// original report produced, whether the retried outcome value matches the
+	// recorded one or (an attempted flip) does not. A caller does not get a
+	// second vote either way. This also keeps Settle and Task 9's
+	// gate-outcome/escalation METRICS from re-firing on every retry: without
+	// this branch a same-outcome retry fell through to the code below and
+	// re-recorded gonk_meter_gate_outcomes_total (and, on a gate-failed
+	// retry, gonk_meter_ladder_escalations_total) a second time for one real
+	// event. Attempt numbers are unique per bead (assigned by len(prior)+1),
+	// so matching on Attempt number finds the record tied to this
+	// reservation.
 	reg, _, regErr := s.store.GetRegistration(ctx, req.Project)
 	if regErr != nil {
 		return meterapi.OutcomeResponse{}, fmt.Errorf("service: outcome: get registration: %w", regErr)
 	}
 	for _, a := range prior {
-		if a.Attempt == res.Attempt && a.Outcome != rung.OutcomeInfraFailed && a.Outcome != outcome {
+		if a.Attempt == res.Attempt && a.Outcome != rung.OutcomeInfraFailed {
 			next, nextRung := previewNext(a.Outcome, res.Rung, reg.Effective, prior)
 			return meterapi.OutcomeResponse{OK: true, RecordedAttempt: a.Attempt, Next: next, NextRung: nextRung}, nil
 		}
@@ -698,6 +808,19 @@ func (s *Service) Outcome(ctx context.Context, req meterapi.OutcomeRequest) (met
 		return meterapi.OutcomeResponse{}, fmt.Errorf("service: outcome: attempts: %w", err)
 	}
 	next, nextRung := previewNext(outcome, res.Rung, reg.Effective, updated)
+
+	// Metrics are recorded ONLY on this, the newly-recorded path -- never on
+	// the early "already recorded" return above, or a retried outcome POST
+	// would double-count a gate outcome (and, worse, a ladder escalation)
+	// that only happened once. res.Rung is the STORE's reservation rung, not
+	// req.Rung: exactly the same "never trust caller input for the money
+	// path" rule Decision 2 applies to the outcome value itself.
+	if s.metrics != nil {
+		s.metrics.RecordGateOutcome(req.Project, res.Rung, string(outcome))
+		if next == "escalate" && nextRung != "" {
+			s.metrics.RecordEscalation(req.Project, res.Rung, nextRung)
+		}
+	}
 
 	return meterapi.OutcomeResponse{OK: true, RecordedAttempt: res.Attempt, Next: next, NextRung: nextRung}, nil
 }
@@ -729,12 +852,36 @@ func previewNext(outcome rung.Outcome, curRung string, eff gonkcfg.Effective, pr
 // failed poll -- SyncedAt goes stale on its own, and that staleness is what
 // Decide reads.
 func (s *Service) SyncSpend(ctx context.Context) error {
+	_, err := s.syncSpendOnce(ctx)
+	return err
+}
+
+// syncSpendResult is what one spend-log poll produced. SyncSpend (the
+// background loop) only cares about the error; ForceSpendSync (Task 9 Step
+// 3b, Plan 06 hand-back HB-2) reports these fields to its caller.
+type syncSpendResult struct {
+	rowsIngested int
+	unattributed int
+}
+
+// syncSpendOnce is SyncSpend's algorithm, split out so ForceSpendSync can
+// report exactly what ONE poll produced without a second, divergent
+// implementation of the poll itself.
+func (s *Service) syncSpendOnce(ctx context.Context) (res syncSpendResult, err error) {
+	if s.metrics != nil {
+		defer func() {
+			if err != nil {
+				s.metrics.RecordSpendSyncFailure()
+			}
+		}()
+	}
+
 	cfg := s.Config()
 	now := s.now()
 
 	cursor, err := s.store.SpendCursor(ctx)
 	if err != nil {
-		return fmt.Errorf("service: sync spend: cursor: %w", err)
+		return syncSpendResult{}, fmt.Errorf("service: sync spend: cursor: %w", err)
 	}
 	since := cursor
 	if !since.IsZero() {
@@ -743,13 +890,9 @@ func (s *Service) SyncSpend(ctx context.Context) error {
 
 	rows, sourceClock, err := s.spend.Since(ctx, since)
 	if err != nil {
-		return fmt.Errorf("service: sync spend: since: %w", err)
+		return syncSpendResult{}, fmt.Errorf("service: sync spend: since: %w", err)
 	}
 	skewOK := spend.SkewOK(now, sourceClock, cfg.Meter.MaxClockSkew)
-
-	if _, err := s.store.AddSpendRows(ctx, rows); err != nil {
-		return fmt.Errorf("service: sync spend: add rows: %w", err)
-	}
 
 	newCursor := cursor
 	for _, r := range rows {
@@ -757,28 +900,238 @@ func (s *Service) SyncSpend(ctx context.Context) error {
 			newCursor = r.At
 		}
 	}
+	res.unattributed = s.recordSpendMetrics(rows, newCursor, now, sourceClock)
+
+	n, err := s.store.AddSpendRows(ctx, rows)
+	if err != nil {
+		return syncSpendResult{}, fmt.Errorf("service: sync spend: add rows: %w", err)
+	}
+	res.rowsIngested = n
+
 	if newCursor.After(cursor) {
 		if err := s.store.SetSpendCursor(ctx, newCursor); err != nil {
-			return fmt.Errorf("service: sync spend: set cursor: %w", err)
+			return syncSpendResult{}, fmt.Errorf("service: sync spend: set cursor: %w", err)
 		}
 	}
 	if err := s.store.SetSyncedAt(ctx, now); err != nil {
-		return fmt.Errorf("service: sync spend: set synced at: %w", err)
+		return syncSpendResult{}, fmt.Errorf("service: sync spend: set synced at: %w", err)
 	}
 
 	s.mu.Lock()
+	wasSynced := s.synced
 	s.synced = true
 	s.skewOK = skewOK
 	s.mu.Unlock()
+	if s.metrics != nil {
+		s.metrics.SetSpendSyncedAt(now)
+		if !wasSynced {
+			// The FIRST successful sync after starting with no prior one: a
+			// fresh replica's expected staleness, not a genuine incident. See
+			// gonk_meter_cold_start_total's doc comment.
+			s.metrics.RecordColdStart()
+		}
+	}
 
 	prevWindow, err := s.store.Window(ctx)
 	if err != nil {
-		return fmt.Errorf("service: sync spend: window: %w", err)
+		return syncSpendResult{}, fmt.Errorf("service: sync spend: window: %w", err)
 	}
+	window := prevWindow
 	if nextWindow, advanced := spend.Advance(prevWindow, now); advanced {
 		if err := s.store.SetWindow(ctx, nextWindow); err != nil {
-			return fmt.Errorf("service: sync spend: set window: %w", err)
+			return syncSpendResult{}, fmt.Errorf("service: sync spend: set window: %w", err)
 		}
+		window = nextWindow
+	}
+	if s.metrics != nil && !window.Zero() {
+		s.metrics.SetBudgetWindowStart(window.Start)
+	}
+
+	return res, nil
+}
+
+// recordSpendMetrics folds freshly-fetched spend rows into the labelled
+// Prometheus counters EXACTLY ONCE PER CallID -- never from a full recompute,
+// because a Prometheus counter that goes backwards breaks rate() -- plus the
+// clock-skew and unattributed-rows series that ride along with a poll. It is
+// a no-op (returning 0) if metrics were never set.
+//
+// cursor is the NEW spend cursor this poll computed (max row.At, or the
+// unchanged old cursor if rows is empty): the poller always re-fetches a
+// trailing overlap window (spendPollOverlap) on every tick, on purpose, so a
+// row committed a moment after the previous poll's window closed is not
+// missed -- store.AddSpendRows dedupes that overlap FOREVER by CallID, but a
+// Prometheus counter must not re-Add() a row it already counted, or every
+// tick inflates money and token totals. seenCallIDs is a small, bounded,
+// in-process cache that remembers just enough (rows still inside the overlap
+// window behind the current cursor) to tell "genuinely new" from
+// "re-fetched", and prunes anything the cursor has moved past -- Since() can
+// never return that CallID again, because every future poll's `since` is
+// bounded below by cursor - spendPollOverlap, and cursor only moves forward.
+func (s *Service) recordSpendMetrics(rows []spend.Row, cursor, now, sourceClock time.Time) (unattributedDelta int) {
+	if s.metrics == nil {
+		return 0
+	}
+
+	if sourceClock.IsZero() {
+		s.metrics.RecordClockSkewUnknown()
+	} else {
+		s.metrics.SetClockSkew(now.Sub(sourceClock))
+	}
+
+	if u, ok := s.spend.(interface{ Unattributed() int }); ok {
+		cur := u.Unattributed()
+		s.seenMu.Lock()
+		unattributedDelta = cur - s.lastUnattributed
+		if unattributedDelta < 0 {
+			// The underlying source's cumulative counter went backwards (a
+			// process restart on ITS side resetting it) -- report nothing
+			// rather than a nonsense negative Add().
+			unattributedDelta = 0
+		}
+		s.lastUnattributed = cur
+		s.seenMu.Unlock()
+		s.metrics.AddSpendRowsUnattributed(unattributedDelta)
+	}
+
+	s.seenMu.Lock()
+	if s.seenCallIDs == nil {
+		s.seenCallIDs = map[string]time.Time{}
+	}
+	var newRows []spend.Row
+	for _, r := range rows {
+		if _, dup := s.seenCallIDs[r.CallID]; dup {
+			continue
+		}
+		s.seenCallIDs[r.CallID] = r.At
+		newRows = append(newRows, r)
+	}
+	if !cursor.IsZero() {
+		cutoff := cursor.Add(-spendPollOverlap)
+		for id, at := range s.seenCallIDs {
+			if at.Before(cutoff) {
+				delete(s.seenCallIDs, id)
+			}
+		}
+	}
+	s.seenMu.Unlock()
+
+	for _, r := range newRows {
+		s.metrics.RecordSpendRow(r.Tags.Project, r.Tags.Rung, r.Tags.Trigger, r.Synthetic, r.CostUSD, r.PromptTokens, r.CompletionTokens)
+	}
+	return unattributedDelta
+}
+
+// forceSyncResult is one coalesced ForceSpendSync pass's outcome, shared by
+// every caller that waited on it.
+type forceSyncResult struct {
+	asOf         time.Time
+	rowsIngested int
+	unattributed int
+	err          error
+}
+
+// ForceSpendSync runs ONE spend-log poll and blocks until it has completed
+// and its rows are committed (Task 9 Step 3b, Plan 06 hand-back HB-2): every
+// assertion of the form "the ledger now says the project spent $X" needs a
+// PREDICATE to wait on, not a sleep, and this is what a test harness forces.
+//
+// Concurrent callers COALESCE onto the same pass: only one poll runs at a
+// time, and every caller waiting on it receives that pass's result, so a
+// burst of forced syncs never turns into a burst of LiteLLM calls.
+//
+// It forces a poll; it does not fabricate one. asOf is always the store's
+// current SyncedAt: on success that is THIS pass's now (LiteLLM's truth,
+// just polled); on failure it is whatever the last GOOD sync left behind
+// ("<last good>" in the wire example) -- never zero just because this one
+// call failed.
+func (s *Service) ForceSpendSync(ctx context.Context) (asOf time.Time, rowsIngested, unattributed int, err error) {
+	s.forceMu.Lock()
+	if s.forceWait != nil {
+		w := s.forceWait
+		s.forceMu.Unlock()
+		select {
+		case <-w:
+		case <-ctx.Done():
+			return time.Time{}, 0, 0, ctx.Err()
+		}
+		s.forceMu.Lock()
+		res := s.forceRes
+		s.forceMu.Unlock()
+		return res.asOf, res.rowsIngested, res.unattributed, res.err
+	}
+	w := make(chan struct{})
+	s.forceWait = w
+	s.forceMu.Unlock()
+
+	result, syncErr := s.syncSpendOnce(ctx)
+	// Whatever the store now holds is exactly right on both outcomes: THIS
+	// pass's now on success, the last successful sync's timestamp -- unchanged
+	// -- on failure.
+	storeAsOf, storeErr := s.store.SyncedAt(ctx)
+	if storeErr != nil && syncErr == nil {
+		syncErr = storeErr
+	}
+
+	out := forceSyncResult{asOf: storeAsOf, rowsIngested: result.rowsIngested, unattributed: result.unattributed, err: syncErr}
+	s.forceMu.Lock()
+	s.forceRes = out
+	close(w)
+	s.forceWait = nil
+	s.forceMu.Unlock()
+
+	return out.asOf, out.rowsIngested, out.unattributed, out.err
+}
+
+// RefreshGauges recomputes every GAUGE metric from current store state (the
+// spend/token COUNTERS are updated incrementally by the sync loop instead --
+// see recordSpendMetrics -- because a counter that is periodically
+// recomputed from scratch can go backwards, which breaks rate()). It is a
+// no-op if metrics were never set. Call it on a ticker (main.go); it is safe
+// to call concurrently with everything else in this package.
+func (s *Service) RefreshGauges(ctx context.Context) error {
+	if s.metrics == nil {
+		return nil
+	}
+	regs, err := s.store.ListRegistrations(ctx)
+	if err != nil {
+		return fmt.Errorf("service: refresh gauges: list registrations: %w", err)
+	}
+
+	now := s.now()
+	var activeKeys, missingKeys int
+	for _, reg := range regs {
+		s.metrics.SetProjectState(reg.Project, string(reg.State))
+		switch reg.State {
+		case store.StateActive:
+			activeKeys++
+		case store.StateKeyMissing:
+			missingKeys++
+		}
+
+		s.metrics.SetDeferredBeads(reg.Project, s.deferredCount(reg.Project))
+
+		open, err := s.store.OpenReservations(ctx, reg.Project, now)
+		if err != nil {
+			return fmt.Errorf("service: refresh gauges: open reservations %q: %w", reg.Project, err)
+		}
+		s.metrics.SetReservationsOpen(reg.Project, len(open))
+
+		if reg.State == store.StateInvalid {
+			continue // BudgetSnapshot reports the zero budget for these anyway; skip the extra store reads.
+		}
+		_, rem, _, err := s.BudgetSnapshot(ctx, reg.Project, "")
+		if err != nil {
+			return fmt.Errorf("service: refresh gauges: budget snapshot %q: %w", reg.Project, err)
+		}
+		s.metrics.SetBudgetRemaining(reg.Project, rem.MonthlyCostUSD, rem.MonthlyTokens)
+	}
+	s.metrics.SetVirtualKeys(activeKeys, missingKeys)
+
+	if syncedAt, err := s.store.SyncedAt(ctx); err != nil {
+		return fmt.Errorf("service: refresh gauges: synced at: %w", err)
+	} else if !syncedAt.IsZero() {
+		s.metrics.SetSpendSyncAge(now.Sub(syncedAt))
 	}
 	return nil
 }
@@ -792,11 +1145,18 @@ func (s *Service) Janitor(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("service: janitor: expire reservations: %w", err)
 	}
+	byProject := map[string]int{}
 	for _, r := range expired {
 		if err := s.store.RecordAttempt(ctx, r.Project, r.BeadID, r.ID, rung.Attempt{
 			Attempt: r.Attempt, Rung: r.Rung, Outcome: rung.OutcomeInfraFailed,
 		}); err != nil {
 			return fmt.Errorf("service: janitor: record attempt: %w", err)
+		}
+		byProject[r.Project]++
+	}
+	if s.metrics != nil {
+		for project, n := range byProject {
+			s.metrics.RecordReservationsExpired(project, n)
 		}
 	}
 	return nil
