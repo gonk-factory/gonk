@@ -4876,7 +4876,7 @@ unlimited-budget project. **Pick ONE convention and state it in both `dolt.go` a
 
 **Files:** Create `internal/meter/store/store.go`, `internal/meter/store/memory.go`, `internal/meter/store/dolt.go` (**gated on Task 0b**), `internal/meter/store/postgres.go` (**the OWNER-APPROVED CNPG fallback**), `internal/meter/store/storetest/suite.go`, `internal/meter/store/memory_test.go`, `internal/meter/store/dolt_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `internal/meter/store/memory_test.go`:
 
@@ -5104,9 +5104,9 @@ func must(t *testing.T, err error) {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail.** Run: `go test ./internal/meter/store/ -v`
+- [x] **Step 2: Run it, watch it fail.** Run: `go test ./internal/meter/store/ -v`
 
-- [ ] **Step 3: Implement `internal/meter/store/store.go` (the interface + types)**
+- [x] **Step 3: Implement `internal/meter/store/store.go` (the interface + types)**
 
 ```go
 // Package store is gonk-meter's derived state: project registrations, ladder
@@ -5302,7 +5302,7 @@ type Store interface {
 }
 ```
 
-- [ ] **Step 4: Implement `internal/meter/store/memory.go`**
+- [x] **Step 4: Implement `internal/meter/store/memory.go`**
 
 A single `sync.RWMutex` guarding maps. Key points the implementer must not get wrong (each is covered by a test above):
 
@@ -5574,7 +5574,7 @@ func (m *Memory) SetWindow(_ context.Context, w spend.Window) error {
 var _ Store = (*Memory)(nil)
 ```
 
-- [ ] **Step 5: Watch it pass, gate, commit**
+- [x] **Step 5: Watch it pass, gate, commit**
 
 ```bash
 go test ./internal/meter/store/ -race -v
@@ -5582,6 +5582,19 @@ gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run 
 git add internal/meter/store
 git commit -m "feat(meter): store interface + in-memory ledger (registrations, attempts, reservations, deduped spend)"
 ```
+
+**Deviation from this plan text, per the dispatching agent's explicit instruction (owner decision
+2026-07-14, Task 0b's spike result): the durable backend is Postgres, not Dolt.**
+`internal/meter/store/dolt.go` was never written; `internal/meter/store/postgres.go` (with
+`internal/meter/store/postgres_wire.go` for the +Inf-safe JSON convention) is the shipping
+backend, using `github.com/jackc/pgx/v5` and `SELECT ... FOR UPDATE` inside a transaction for
+`ReserveIfFits`'s atomicity. It is proven against a real Postgres server by
+`TestReserveIfFitsRace` (`internal/meter/store/postgres_race_test.go`, build-tagged
+`integration` so it never runs in the normal gate): 10/10 iterations won exactly 2 of 32 racing
+writers, zero overspend. The `storetest` conformance suite runs against both `Memory`
+(`memory_test.go`, normal gate) and `Postgres` (`postgres_test.go`, `integration`-tagged). The
+mysql/dolt spike dependency (`github.com/go-sql-driver/mysql`, `filippo.io/edwards25519`) and
+`internal/meter/store/dolt_race_test.go` were removed; `go mod tidy` is a no-op.
 
 ---
 
