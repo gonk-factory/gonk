@@ -6284,7 +6284,7 @@ This is where the pure pieces become a program. The two things that must be righ
 
 **Files:** Create `internal/meter/service/service.go`, `internal/meter/service/http.go`, `internal/meter/service/service_test.go`, `internal/meter/service/http_test.go`, `cmd/gonk-meter/main.go`
 
-- [ ] **Step 1: Write the failing service test (registration + the fail-closed matrix)**
+- [x] **Step 1: Write the failing service test (registration + the fail-closed matrix)**
 
 `internal/meter/service/service_test.go`. Sketch of what each test asserts — write them all:
 
@@ -6444,9 +6444,9 @@ func TestColdStartDefersUntilTheFirstSync(t *testing.T)
 //   A brand-new service that has never synced: Ready() false, Decide defers.
 ```
 
-- [ ] **Step 2: Run them, watch them fail.** Run: `go test ./internal/meter/service/ -v`
+- [x] **Step 2: Run them, watch them fail.** Run: `go test ./internal/meter/service/ -v`
 
-- [ ] **Step 3: Implement `internal/meter/service/service.go`**
+- [x] **Step 3: Implement `internal/meter/service/service.go`**
 
 Structure (write the code; this is the shape it must have):
 
@@ -6647,7 +6647,7 @@ _ = s.store.RecordAttempt(ctx, req.Project, req.BeadID, res.ID, rung.Attempt{
 
 **`Ready()`**: `synced && skewOK`. `/readyz` returns 503 otherwise, so Kubernetes takes meter out of service rather than letting it answer with numbers it does not trust.
 
-- [ ] **Step 4: Implement `internal/meter/service/http.go`**
+- [x] **Step 4: Implement `internal/meter/service/http.go`**
 
 Go 1.22+ `ServeMux` patterns, wire types with explicit JSON tags matching the API section of this plan, and:
 
@@ -6661,7 +6661,7 @@ Go 1.22+ `ServeMux` patterns, wire types with explicit JSON tags matching the AP
 
 `http_test.go` drives the real mux with `httptest`: assert the JSON shapes character-for-character against golden files in `testdata/golden/*.json`, assert `401` without the bearer token, assert an unlimited budget renders `"monthly_cost_usd": null`, and assert that no response body anywhere contains the string `sk-` (the fake's token prefix).
 
-- [ ] **Step 5: Implement `cmd/gonk-meter/main.go`**
+- [x] **Step 5: Implement `cmd/gonk-meter/main.go`**
 
 ```go
 package main
@@ -6758,7 +6758,7 @@ func openStore(ctx context.Context) (store.Store, error) {
 
 **Both store implementations must pass `storetest.Suite` unchanged.** That suite is what makes `GONK_METER_STORE_BACKEND` a *switch* rather than a *fork*: if `ReserveIfFits` means something different on Postgres than on Dolt, the switch is a lie and the budget ceiling depends on which env var somebody set.
 
-- [ ] **Step 5b: The `testclock` seam (Plan 06 hand-back HB-3)**
+- [x] **Step 5b: The `testclock` seam (Plan 06 hand-back HB-3)**
 
 **Why this exists.** Month rollover, quiet-hours windows and `reservation_ttl`
 expiry are the three most important behaviours in this service, and **none of them
@@ -6836,7 +6836,7 @@ Ship it as an owner decision (**Plan 06's OD-7**), not silently. If it is refuse
 the rollover and quiet-hours behaviours are **L1-only forever**, and Plan 06 must
 say so in `docs/adr/ADR-006`.
 
-- [ ] **Step 6: Watch everything pass**
+- [x] **Step 6: Watch everything pass**
 
 ```bash
 go test ./internal/meter/... -race -count=1 -v
@@ -6844,7 +6844,7 @@ go test ./internal/meter/... -race -count=1 -v
 
 Expected: PASS, including `TestDecideIsSerializedPerProject` under `-race`.
 
-- [ ] **Step 7: Gate and commit**
+- [x] **Step 7: Gate and commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run ./...

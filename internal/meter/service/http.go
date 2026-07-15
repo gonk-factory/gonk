@@ -1,0 +1,641 @@
+package service
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"gitlab.orac.local/agentic/gonk-project/pkg/budget"
+	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
+	"gitlab.orac.local/agentic/gonk-project/pkg/opercfg"
+	"gitlab.orac.local/agentic/gonk-project/pkg/rung"
+	"gitlab.orac.local/agentic/gonk-project/pkg/spend"
+)
+
+// maxBodyBytes bounds every request body. A .gonk.yml is tiny; nothing on
+// this API legitimately needs more than 1 MiB.
+const maxBodyBytes = 1 << 20
+
+// NewMux builds gonk-meter's HTTP surface. token is the bearer credential
+// this API verifies (required); prevToken is an optional second rotation
+// slot, accepted equally (Decision 12). An empty token is a fatal
+// configuration error -- not an open door -- so it is refused here rather
+// than silently accepting every request.
+func NewMux(svc *Service, token, prevToken string) (http.Handler, error) {
+	if token == "" {
+		return nil, errors.New("service: bearer token is empty; refusing to start with an open door")
+	}
+	tokens := [][]byte{[]byte(token)}
+	if prevToken != "" {
+		tokens = append(tokens, []byte(prevToken))
+	}
+
+	h := &handler{svc: svc}
+	mux := http.NewServeMux()
+	mux.HandleFunc("PUT /v1/projects/{project}", h.putProject)
+	mux.HandleFunc("GET /v1/projects/{project}", h.getProject)
+	mux.HandleFunc("DELETE /v1/projects/{project}", h.deleteProject)
+	mux.HandleFunc("POST /v1/policy/decide", h.decide)
+	mux.HandleFunc("POST /v1/policy/outcome", h.outcome)
+	mux.HandleFunc("GET /v1/cost/bead/{bead_id}", h.costBead)
+	mux.HandleFunc("GET /v1/cost/session/{session_key}", h.costSession)
+	mux.HandleFunc("GET /v1/cost/project/{project}", h.costProject)
+	mux.HandleFunc("GET /v1/cost/instance", h.costInstance)
+	mux.HandleFunc(meterapi.HealthzPath, h.healthz)
+	mux.HandleFunc(meterapi.ReadyzPath, h.readyz)
+
+	return bearerAuth(tokens, mux), nil
+}
+
+// bearerAuth compares the presented token against every configured slot with
+// crypto/subtle.ConstantTimeCompare, ORING the results rather than
+// short-circuiting: a short-circuit would leak, via timing, which slot
+// matched and how many are configured. /healthz, /readyz, and /metrics are
+// exempt.
+func bearerAuth(tokens [][]byte, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case meterapi.HealthzPath, meterapi.ReadyzPath, meterapi.MetricsPath:
+			next.ServeHTTP(w, r)
+			return
+		}
+		presented := []byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		matched := 0
+		for _, t := range tokens {
+			matched |= subtle.ConstantTimeCompare(presented, t)
+		}
+		if matched != 1 {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type handler struct {
+	svc *Service
+}
+
+// ---------------------------------------------------------------- projects
+
+func (h *handler) putProject(w http.ResponseWriter, r *http.Request) {
+	project, ok := pathProject(w, r)
+	if !ok {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	var req meterapi.ProjectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed request body: "+err.Error())
+		return
+	}
+	// The request is malformed (intake's bug): nothing is recorded.
+	switch {
+	case req.Project != project:
+		writeError(w, http.StatusBadRequest, "project in body does not match the URL path")
+		return
+	case req.Project == "":
+		writeError(w, http.StatusBadRequest, "project is required")
+		return
+	case req.ProjectID == 0:
+		writeError(w, http.StatusBadRequest, "project_id is required")
+		return
+	case req.Rig == "":
+		writeError(w, http.StatusBadRequest, "rig is required")
+		return
+	case !validProjectPath(project):
+		writeError(w, http.StatusBadRequest, "project path contains unsafe characters")
+		return
+	}
+
+	resp, status, err := h.svc.Register(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, status, resp)
+}
+
+func (h *handler) getProject(w http.ResponseWriter, r *http.Request) {
+	project, ok := pathProject(w, r)
+	if !ok {
+		return
+	}
+	resp, found, err := h.svc.Get(r.Context(), project)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "project not registered")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *handler) deleteProject(w http.ResponseWriter, r *http.Request) {
+	project, ok := pathProject(w, r)
+	if !ok {
+		return
+	}
+	if err := h.svc.Delete(r.Context(), project); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	// Idempotent: deleting an unknown project is 204, not 404 -- intake retries.
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------- decide / outcome
+
+func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	var req meterapi.DecideRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed request body: "+err.Error())
+		return
+	}
+	switch {
+	case req.Project == "":
+		writeError(w, http.StatusBadRequest, "project is required")
+		return
+	case req.BeadID == "":
+		writeError(w, http.StatusBadRequest, "bead_id is required")
+		return
+	case req.SessionKey == "":
+		writeError(w, http.StatusBadRequest, "session_key is required")
+		return
+	case req.Trigger == "":
+		writeError(w, http.StatusBadRequest, "trigger is required")
+		return
+	case !validProjectPath(req.Project):
+		writeError(w, http.StatusBadRequest, "project contains unsafe characters")
+		return
+	}
+
+	d, extras, err := h.svc.Decide(r.Context(), req)
+	if err != nil {
+		// A hostile/invalid tag value (tagmint) is the caller's fault, not an
+		// internal failure -- everything else on this path is a store or
+		// LiteLLM failure and must fail closed as a 500 (no run, no reservation).
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	bud, rem, spendAsOf, err := h.svc.BudgetSnapshot(r.Context(), req.Project, req.BeadID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	resp := meterapi.DecideResponse{
+		Decision:   string(d.Kind),
+		Rung:       d.Rung,
+		Model:      d.Model,
+		Attempt:    d.Attempt,
+		Reason:     d.Reason,
+		Detail:     d.Detail,
+		RetryAfter: d.RetryAfter,
+		Metadata:   extras.Metadata,
+		KeyRef:     meterapi.KeyRef{SecretName: extras.KeyRef.SecretName, SecretKey: extras.KeyRef.SecretKey},
+		Budget:     wireBudget(bud.MonthlyCostUSD, bud.MonthlyTokens, bud.PerTaskTokens),
+		Remaining:  wireBudget(rem.MonthlyCostUSD, rem.MonthlyTokens, rem.PerTaskTokens),
+		SpendAsOf:  spendAsOf,
+	}
+	if resp.Metadata == nil {
+		resp.Metadata = map[string]string{}
+	}
+	if extras.Reservation.ID != "" {
+		resp.ReservationID = extras.Reservation.ID
+		resp.ReservationExpiresAt = extras.Reservation.ExpiresAt
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *handler) outcome(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	var req meterapi.OutcomeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed request body: "+err.Error())
+		return
+	}
+	switch {
+	case req.Project == "":
+		writeError(w, http.StatusBadRequest, "project is required")
+		return
+	case req.BeadID == "":
+		writeError(w, http.StatusBadRequest, "bead_id is required")
+		return
+	case req.ReservationID == "":
+		writeError(w, http.StatusBadRequest, "reservation_id is required")
+		return
+	}
+
+	resp, err := h.svc.Outcome(r.Context(), req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrUnknownReservation), errors.Is(err, ErrBadOutcome):
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ---------------------------------------------------------------- cost
+
+func (h *handler) costBead(w http.ResponseWriter, r *http.Request) {
+	beadID, err := url.PathUnescape(r.PathValue("bead_id"))
+	if err != nil || beadID == "" {
+		writeError(w, http.StatusBadRequest, "invalid bead_id")
+		return
+	}
+	resp, found, err := h.svc.BeadCost(r.Context(), beadID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no attempts recorded for this bead")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *handler) costSession(w http.ResponseWriter, r *http.Request) {
+	sessionKey, err := url.PathUnescape(r.PathValue("session_key"))
+	if err != nil || sessionKey == "" {
+		writeError(w, http.StatusBadRequest, "invalid session_key")
+		return
+	}
+	resp, err := h.svc.SessionCost(r.Context(), sessionKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *handler) costProject(w http.ResponseWriter, r *http.Request) {
+	project, ok := pathProject(w, r)
+	if !ok {
+		return
+	}
+	resp, err := h.svc.ProjectCost(r.Context(), project)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *handler) costInstance(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.svc.InstanceCost(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ---------------------------------------------------------------- health
+
+func (h *handler) healthz(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *handler) readyz(w http.ResponseWriter, _ *http.Request) {
+	if !h.svc.Ready() {
+		writeError(w, http.StatusServiceUnavailable, "not synced or clock skew exceeded")
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// ---------------------------------------------------------------- helpers
+
+// pathProject reads {project}, URL-path-unescaped -- a project name is
+// untrusted input from GitLab -- and validates it before it is handed
+// anywhere downstream (tagmint, the keysink slug, LiteLLM's key alias).
+func pathProject(w http.ResponseWriter, r *http.Request) (string, bool) {
+	raw := r.PathValue("project")
+	project, err := url.PathUnescape(raw)
+	if err != nil || project == "" || !validProjectPath(project) {
+		writeError(w, http.StatusBadRequest, "invalid project path")
+		return "", false
+	}
+	return project, true
+}
+
+// validProjectPath is the same charset gate tagmint applies to a project tag
+// value (segments of alnum/._- joined by /), checked again here so a
+// malformed path is a 400 at the door rather than a 500 surfacing from
+// tagmint deep inside Decide.
+func validProjectPath(project string) bool {
+	if project == "" || len(project) > 200 || strings.Contains(project, "..") {
+		return false
+	}
+	for _, seg := range strings.Split(project, "/") {
+		if seg == "" {
+			return false
+		}
+		for i, r := range seg {
+			alnum := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+			if i == 0 && !alnum {
+				return false
+			}
+			if !alnum && r != '.' && r != '_' && r != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, meterapi.ErrorResponse{Error: msg})
+}
+
+// wireBudget converts pkg/budget's ceiling types (which each know how to
+// marshal themselves as null-means-unlimited) into meterapi.Budget's
+// pointer-based wire shape.
+func wireBudget(cost budget.CostLimit, monthly, perTask budget.TokenLimit) meterapi.Budget {
+	out := meterapi.Budget{}
+	if !cost.Unlimited() {
+		v := float64(cost)
+		out.MonthlyCostUSD = &v
+	}
+	if !monthly.Unlimited() {
+		v := int64(monthly)
+		out.MonthlyTokens = &v
+	}
+	if !perTask.Unlimited() {
+		v := int64(perTask)
+		out.PerTaskTokens = &v
+	}
+	return out
+}
+
+// ---------------------------------------------------------------- cost (service side)
+
+// rungBreakdown groups rows matching `match` by rung, in first-seen order.
+func rungBreakdown(rows []spend.Row, catalog map[string]opercfg.RungSpec, match func(spend.Row) bool) []meterapi.RungCost {
+	var order []string
+	seen := map[string]bool{}
+	for _, r := range rows {
+		if match(r) && !seen[r.Tags.Rung] {
+			seen[r.Tags.Rung] = true
+			order = append(order, r.Tags.Rung)
+		}
+	}
+	out := make([]meterapi.RungCost, 0, len(order))
+	for _, rg := range order {
+		t := spend.Sum(rows, func(r spend.Row) bool { return match(r) && r.Tags.Rung == rg })
+		kind := "cloud"
+		if catalog[rg].Kind == opercfg.KindLocal {
+			kind = "local"
+		}
+		out = append(out, meterapi.RungCost{
+			Rung: rg, Kind: kind, CostUSD: t.CostUSD, SyntheticCostUSD: t.SyntheticCostUSD,
+			CostSynthetic: kind == "local", TotalTokens: t.TotalTokens(), Calls: t.Calls,
+		})
+	}
+	return out
+}
+
+// triggerBreakdown groups rows matching `match` by trigger, in first-seen order.
+func triggerBreakdown(rows []spend.Row, match func(spend.Row) bool) []meterapi.TriggerCost {
+	var order []string
+	seen := map[string]bool{}
+	for _, r := range rows {
+		if match(r) && !seen[r.Tags.Trigger] {
+			seen[r.Tags.Trigger] = true
+			order = append(order, r.Tags.Trigger)
+		}
+	}
+	out := make([]meterapi.TriggerCost, 0, len(order))
+	for _, tr := range order {
+		t := spend.Sum(rows, func(r spend.Row) bool { return match(r) && r.Tags.Trigger == tr })
+		out = append(out, meterapi.TriggerCost{
+			Trigger: tr, CostUSD: t.CostUSD, SyntheticCostUSD: t.SyntheticCostUSD,
+			TotalTokens: t.TotalTokens(), Calls: t.Calls,
+		})
+	}
+	return out
+}
+
+// BeadCost is lifetime, not windowed: the per-task ceiling is a property of
+// the work item, not of the calendar.
+// BeadCost's wire path (meterapi.CostBeadPath) carries ONLY bead_id, no
+// project -- the BeadAnchor is derived from the project id, so it is
+// effectively unique on its own. That means the project has to be
+// DISCOVERED, not supplied: scan registrations for one whose attempt history
+// mentions this bead. found is false if no project has ever recorded an
+// attempt for it (the caller maps that to 404).
+func (s *Service) BeadCost(ctx context.Context, beadID string) (meterapi.BeadCostResponse, bool, error) {
+	regs, err := s.store.ListRegistrations(ctx)
+	if err != nil {
+		return meterapi.BeadCostResponse{}, false, err
+	}
+	var project string
+	var prior []rung.Attempt
+	for _, reg := range regs {
+		attempts, err := s.store.Attempts(ctx, reg.Project, beadID)
+		if err != nil {
+			return meterapi.BeadCostResponse{}, false, err
+		}
+		if len(attempts) > 0 {
+			project, prior = reg.Project, attempts
+			break
+		}
+	}
+	if project == "" {
+		return meterapi.BeadCostResponse{}, false, nil
+	}
+
+	rows, err := s.store.SpendRows(ctx, project)
+	if err != nil {
+		return meterapi.BeadCostResponse{}, false, err
+	}
+	totals := spend.BeadTotals(rows, project, beadID)
+
+	attempts := make([]meterapi.AttemptView, len(prior))
+	for i, a := range prior {
+		attempts[i] = meterapi.AttemptView{Attempt: a.Attempt, Rung: a.Rung, Outcome: string(a.Outcome)}
+	}
+
+	now := s.now()
+	open, err := s.store.OpenReservations(ctx, project, now)
+	if err != nil {
+		return meterapi.BeadCostResponse{}, false, err
+	}
+	complete := true
+	for _, r := range open {
+		if r.BeadID == beadID {
+			complete = false
+			break
+		}
+	}
+
+	asOf, err := s.store.SyncedAt(ctx)
+	if err != nil {
+		return meterapi.BeadCostResponse{}, false, err
+	}
+
+	match := func(r spend.Row) bool { return r.Tags.Project == project && r.Tags.BeadID == beadID }
+	resp := meterapi.BeadCostResponse{
+		BeadID: beadID, Project: project,
+		CostUSD: totals.CostUSD, SyntheticCostUSD: totals.SyntheticCostUSD,
+		PromptTokens: totals.PromptTokens, CompletionTokens: totals.CompletionTokens,
+		TotalTokens: totals.TotalTokens(),
+		ByRung:      rungBreakdown(rows, s.Config().Catalog, match),
+		Attempts:    attempts,
+		AsOf:        asOf, Complete: complete,
+	}
+	return resp, true, nil
+}
+
+// SessionCost is what commit provenance trailers read, while the session is
+// still open -- so it will frequently report Complete: false.
+func (s *Service) SessionCost(ctx context.Context, sessionKey string) (meterapi.SessionCostResponse, error) {
+	rows, err := s.store.AllSpendRows(ctx)
+	if err != nil {
+		return meterapi.SessionCostResponse{}, err
+	}
+	totals := spend.SessionTotals(rows, sessionKey)
+
+	var project, beadID string
+	for _, r := range rows {
+		if r.Tags.SessionKey == sessionKey {
+			project, beadID = r.Tags.Project, r.Tags.BeadID
+			break
+		}
+	}
+
+	complete := true
+	if project != "" {
+		open, err := s.store.OpenReservations(ctx, project, s.now())
+		if err != nil {
+			return meterapi.SessionCostResponse{}, err
+		}
+		for _, r := range open {
+			if r.SessionKey == sessionKey {
+				complete = false
+				break
+			}
+		}
+	}
+
+	asOf, err := s.store.SyncedAt(ctx)
+	if err != nil {
+		return meterapi.SessionCostResponse{}, err
+	}
+
+	match := func(r spend.Row) bool { return r.Tags.SessionKey == sessionKey }
+	return meterapi.SessionCostResponse{
+		SessionKey: sessionKey, Project: project, BeadID: beadID,
+		CostUSD: totals.CostUSD, SyntheticCostUSD: totals.SyntheticCostUSD,
+		PromptTokens: totals.PromptTokens, CompletionTokens: totals.CompletionTokens,
+		TotalTokens: totals.TotalTokens(),
+		ByRung:      rungBreakdown(rows, s.Config().Catalog, match),
+		AsOf:        asOf, Complete: complete,
+	}, nil
+}
+
+// ProjectCost is windowed by the current budget window, and carries the
+// project's ceiling and remaining headroom.
+func (s *Service) ProjectCost(ctx context.Context, project string) (meterapi.ProjectCostResponse, error) {
+	rows, err := s.store.SpendRows(ctx, project)
+	if err != nil {
+		return meterapi.ProjectCostResponse{}, err
+	}
+	w, err := s.store.Window(ctx)
+	if err != nil {
+		return meterapi.ProjectCostResponse{}, err
+	}
+	totals := spend.ProjectTotals(rows, w, project)
+
+	match := func(r spend.Row) bool { return r.Tags.Project == project && w.Contains(r.At) }
+
+	now := s.now()
+	open, err := s.store.OpenReservations(ctx, project, now)
+	if err != nil {
+		return meterapi.ProjectCostResponse{}, err
+	}
+	complete := len(open) == 0
+
+	bud, rem, asOf, err := s.BudgetSnapshot(ctx, project, "")
+	if err != nil {
+		return meterapi.ProjectCostResponse{}, err
+	}
+	stale := !bud.AllUnlimited() && !asOf.IsZero() && now.Sub(asOf) > s.Config().Meter.MaxSpendStaleness
+	if asOf.IsZero() {
+		stale = !bud.AllUnlimited()
+	}
+
+	return meterapi.ProjectCostResponse{
+		Project: project,
+		Window:  meterapi.Window{Start: w.Start, End: w.End},
+		CostUSD: totals.CostUSD, SyntheticCostUSD: totals.SyntheticCostUSD,
+		PromptTokens: totals.PromptTokens, CompletionTokens: totals.CompletionTokens,
+		TotalTokens: totals.TotalTokens(),
+		ByRung:      rungBreakdown(rows, s.Config().Catalog, match),
+		ByTrigger:   triggerBreakdown(rows, match),
+		Budget:      wireBudget(bud.MonthlyCostUSD, bud.MonthlyTokens, bud.PerTaskTokens),
+		Remaining:   wireBudget(rem.MonthlyCostUSD, rem.MonthlyTokens, rem.PerTaskTokens),
+		AsOf:        asOf, Complete: complete, Stale: stale,
+	}, nil
+}
+
+// InstanceCost rolls up every registered project.
+func (s *Service) InstanceCost(ctx context.Context) (meterapi.InstanceCostResponse, error) {
+	regs, err := s.store.ListRegistrations(ctx)
+	if err != nil {
+		return meterapi.InstanceCostResponse{}, err
+	}
+	w, err := s.store.Window(ctx)
+	if err != nil {
+		return meterapi.InstanceCostResponse{}, err
+	}
+	asOf, err := s.store.SyncedAt(ctx)
+	if err != nil {
+		return meterapi.InstanceCostResponse{}, err
+	}
+
+	byProject := make([]meterapi.ProjectCostResponse, 0, len(regs))
+	var costUSD, syntheticUSD float64
+	var tokens int64
+	complete := true
+	for _, reg := range regs {
+		pc, err := s.ProjectCost(ctx, reg.Project)
+		if err != nil {
+			return meterapi.InstanceCostResponse{}, err
+		}
+		byProject = append(byProject, pc)
+		costUSD += pc.CostUSD
+		syntheticUSD += pc.SyntheticCostUSD
+		tokens += pc.TotalTokens
+		if !pc.Complete {
+			complete = false
+		}
+	}
+
+	return meterapi.InstanceCostResponse{
+		Window:  meterapi.Window{Start: w.Start, End: w.End},
+		CostUSD: costUSD, SyntheticCostUSD: syntheticUSD, TotalTokens: tokens,
+		ByProject: byProject, AsOf: asOf, Complete: complete,
+	}, nil
+}
