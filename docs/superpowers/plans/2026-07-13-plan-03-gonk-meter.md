@@ -5606,7 +5606,7 @@ Everything that touches LiteLLM sits behind two interfaces with fakes. **The int
 
 **Files:** Create `internal/meter/litellm/admin.go`, `internal/meter/litellm/spendsource.go`, `internal/meter/litellm/fake.go`, `internal/meter/litellm/litellm_test.go`, `internal/meter/keysink/keysink.go`
 
-- [ ] **Step 1: Write the interfaces + fakes first (every later test depends on them)**
+- [x] **Step 1: Write the interfaces + fakes first (every later test depends on them)**
 
 `internal/meter/litellm/admin.go`:
 
@@ -5845,7 +5845,7 @@ var (
 )
 ```
 
-- [ ] **Step 2: Write the failing HTTP-adapter test**
+- [x] **Step 2: Write the failing HTTP-adapter test**
 
 `internal/meter/litellm/litellm_test.go` — an `httptest.Server` standing in for LiteLLM. Assert: the admin key goes in the `Authorization` header and **never** appears in an error message; an unlimited budget sends **no** `max_budget` field (not `null`, not `+Inf`); spend rows are parsed back into `atags.Tags` via `atags.FromMetadata`; a row whose metadata is missing or malformed is **skipped with a counter, not fatal** (an un-attributable call must not stall the ledger, but it must be visible); and the `Date` header is returned as the source clock.
 
@@ -6013,7 +6013,7 @@ func TestHTTPSpendSourceParsesTagsAndClock(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Implement the two HTTP adapters**
+- [x] **Step 3: Implement the two HTTP adapters**
 
 Guidance for the implementer (write these in `admin.go` and `spendsource.go`):
 
@@ -6030,7 +6030,7 @@ Guidance for the implementer (write these in `admin.go` and `spendsource.go`):
 - **`Since` must set `Row.Synthetic`** from the rung catalog: `catalog[tags.Rung].Kind == opercfg.KindLocal`. A rung the catalog has never heard of is **NOT synthetic** — fail closed, so an unknown rung's dollars count against the real money ceiling instead of being waved through as accounting fiction. Give the source the catalog at construction; it is the only place the flag can be set correctly, because LiteLLM has a single `spend` column and does not know the difference (Decision 9).
 - Poll with an **overlap**: the service passes `cursor - 2 * pollInterval`. `store.AddSpendRows` dedupes by `CallID`, so overlap is free and it closes the window where a row is written with a timestamp slightly before one we already consumed.
 
-- [ ] **Step 4: Implement `internal/meter/keysink/keysink.go`**
+- [x] **Step 4: Implement `internal/meter/keysink/keysink.go`**
 
 ```go
 // Package keysink is where a provisioned LiteLLM virtual key is put so that an
@@ -6135,7 +6135,7 @@ Write a `keysink_test.go` covering:
 - The result is a legal DNS-1123 subdomain (lowercase alphanumeric and `-`, starts and ends alphanumeric, <= 63 chars) — it becomes a Kubernetes Secret name in Plan 05.
 - `Put` is idempotent and returns the same `KeyRef` for the same project.
 
-- [ ] **Step 4b: Implement `internal/meter/keysink/k8s.go` — THE KUBERNETES SINK**
+- [x] **Step 4b: Implement `internal/meter/keysink/k8s.go` — THE KUBERNETES SINK**
 
 **This step exists because the plan previously did not have one, and said so:**
 *"`keysink.KeySink` has no Kubernetes implementation… gonk-meter cannot deliver
@@ -6264,7 +6264,7 @@ standing gate):
 Plan 05's `Role` actually permits these writes on a real API server is **Plan 06's**
 (it is in Plan 05's "what `helm template` cannot prove" list, item 6).
 
-- [ ] **Step 5: Watch it pass, gate, commit**
+- [x] **Step 5: Watch it pass, gate, commit**
 
 ```bash
 go test ./internal/meter/... -race -v
