@@ -102,17 +102,29 @@ func (m *Memory) Attempts(_ context.Context, project, beadID string) ([]rung.Att
 	return out, nil
 }
 
-// ReserveIfFits: check-and-write under ONE lock. In the memory store this is
-// trivially atomic; in the Postgres store it is a transaction with
-// SELECT ... FOR UPDATE. Both must behave identically -- that is what
-// storetest exists for.
-func (m *Memory) ReserveIfFits(_ context.Context, project string, ceiling budget.Budget, want budget.Spend, r Reservation) (bool, error) {
+// ReserveIfFits: idempotent check-and-write under ONE lock. In the memory
+// store this is trivially atomic; in the Postgres store it is a transaction
+// with SELECT ... FOR UPDATE plus a partial unique index. Both must behave
+// identically -- that is what storetest exists for.
+func (m *Memory) ReserveIfFits(_ context.Context, project string, ceiling budget.Budget, want budget.Spend, r Reservation) (ReserveResult, error) {
 	if err := validateFiniteMoney(r.CostUSD, r.SyntheticCostUSD); err != nil {
-		return false, err
+		return ReserveResult{}, err
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// IDEMPOTENCY, mirroring Postgres's partial UNIQUE index on
+	// (project, bead_id, session_key) WHERE settled = false: an existing OPEN
+	// (unsettled) reservation for the same key means this exact work was already
+	// reserved. Return it, insert nothing -- otherwise one attempt would hold
+	// double the headroom. Settled (outcome-reported OR janitor-reclaimed)
+	// reservations are OUT of this check, so a legitimate re-sling reserves anew.
+	for _, o := range m.reservations {
+		if o.Project == project && o.BeadID == r.BeadID && o.SessionKey == r.SessionKey && !o.Settled {
+			return ReserveResult{Reservation: o, Fits: true, Existing: true}, nil
+		}
+	}
 
 	// Re-read open reservations INSIDE the lock and fold them into `want`, which
 	// already carries the observed spend. Reading them outside would be exactly
@@ -132,10 +144,10 @@ func (m *Memory) ReserveIfFits(_ context.Context, project string, ceiling budget
 	// NOTE the cost check is against REAL dollars only: r.SyntheticCostUSD is
 	// deliberately absent here (Decision 9).
 	if !rem.FitsCost(r.CostUSD) || !rem.FitsMonthTokens(r.Tokens) || !rem.FitsTaskTokens(r.Tokens) {
-		return false, nil // a lost race is a DEFER, not an error
+		return ReserveResult{}, nil // a lost race is a DEFER, not an error
 	}
 	m.reservations[r.ID] = r
-	return true, nil
+	return ReserveResult{Reservation: r, Fits: true}, nil
 }
 
 func (m *Memory) GetReservation(_ context.Context, id string) (Reservation, bool, error) {

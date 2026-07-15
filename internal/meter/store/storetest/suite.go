@@ -43,11 +43,11 @@ func must(t *testing.T, err error) {
 	}
 }
 
-func mustFit(t *testing.T, fits bool, err error) {
+func mustFit(t *testing.T, res store.ReserveResult, err error) {
 	t.Helper()
 	must(t, err)
-	if !fits {
-		t.Fatal("ReserveIfFits = false, want true")
+	if !res.Fits {
+		t.Fatal("ReserveIfFits.Fits = false, want true")
 	}
 }
 
@@ -59,6 +59,7 @@ func Run(t *testing.T, newStore func() store.Store) {
 	t.Run("RecordAttemptIsIdempotentPerReservation", testRecordAttemptIsIdempotentPerReservation(newStore))
 	t.Run("ATerminalOutcomeSupersedesTheJanitorsGuess", testATerminalOutcomeSupersedesTheJanitorsGuess(newStore))
 	t.Run("ReservationsHoldBudgetAndExpire", testReservationsHoldBudgetAndExpire(newStore))
+	t.Run("ReserveIsIdempotentPerOpenKey", testReserveIsIdempotentPerOpenKey(newStore))
 	t.Run("SettleHoldsBudgetUntilTheSpendCatchesUp", testSettleHoldsBudgetUntilTheSpendCatchesUp(newStore))
 	t.Run("SpendRowsAreDeduped", testSpendRowsAreDeduped(newStore))
 	t.Run("SpendCursorAndSyncedAtAndWindowRoundTrip", testSpendCursorAndSyncedAtAndWindowRoundTrip(newStore))
@@ -192,9 +193,9 @@ func testReservationsHoldBudgetAndExpire(newStore func() store.Store) func(t *te
 			Rung: "glm", Attempt: 2, CostUSD: 0.40, Tokens: 200_000,
 			CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 		}
-		fits, err := s.ReserveIfFits(ctx, "group/repo", unlimited(), budget.Spend{}, r)
-		if err != nil || !fits {
-			t.Fatalf("ReserveIfFits = %v, %v; an unlimited ceiling must always fit", fits, err)
+		res, err := s.ReserveIfFits(ctx, "group/repo", unlimited(), budget.Spend{}, r)
+		if err != nil || !res.Fits {
+			t.Fatalf("ReserveIfFits = %+v, %v; an unlimited ceiling must always fit", res, err)
 		}
 
 		open, err := s.OpenReservations(ctx, "group/repo", now.Add(30*time.Minute))
@@ -221,6 +222,80 @@ func testReservationsHoldBudgetAndExpire(newStore func() store.Store) func(t *te
 	}
 }
 
+// ReserveIfFits is idempotent on an OPEN reservation keyed by
+// (project, bead_id, session_key): the two /decide gates reserve the same work
+// before any outcome, and the second reserve must return the first, not mint a
+// duplicate holding double the headroom. This is the store half of FIX-A, and
+// in Postgres it is enforced by a partial UNIQUE index so it holds across
+// replicas -- proven under real concurrency by
+// TestReserveIsIdempotentAcrossReplicas (postgres_race_test.go).
+func testReserveIsIdempotentPerOpenKey(newStore func() store.Store) func(t *testing.T) {
+	return func(t *testing.T) {
+		ctx, s := context.Background(), newStore()
+		now := at("2026-07-13T10:00:00Z")
+		mk := func(id, bead, session string) store.Reservation {
+			return store.Reservation{
+				ID: id, Project: "group/repo", BeadID: bead, SessionKey: session,
+				Rung: "glm", Attempt: 1, CostUSD: 0.40, Tokens: 1000,
+				CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+			}
+		}
+
+		// First reserve for (gk-1, s1): a fresh insert.
+		first, err := s.ReserveIfFits(ctx, "group/repo", unlimited(), budget.Spend{}, mk("rsv-1", "gk-1", "s1"))
+		mustFit(t, first, err)
+		if first.Existing {
+			t.Fatal("the FIRST reserve for a key reported Existing = true")
+		}
+		if first.Reservation.ID != "rsv-1" {
+			t.Fatalf("first reserve returned id %q, want rsv-1", first.Reservation.ID)
+		}
+
+		// Second reserve for the SAME (gk-1, s1) with a DIFFERENT id: idempotent
+		// hit. It must return the FIRST reservation and insert nothing.
+		second, err := s.ReserveIfFits(ctx, "group/repo", unlimited(), budget.Spend{}, mk("rsv-2", "gk-1", "s1"))
+		mustFit(t, second, err)
+		if !second.Existing {
+			t.Fatal("the second reserve for the same open key reported Existing = false -- it minted a duplicate")
+		}
+		if second.Reservation.ID != "rsv-1" {
+			t.Fatalf("second reserve returned id %q, want the first reservation's id rsv-1", second.Reservation.ID)
+		}
+		if _, ok, _ := s.GetReservation(ctx, "rsv-2"); ok {
+			t.Fatal("the duplicate reservation rsv-2 was persisted; idempotency must insert nothing")
+		}
+		if open, _ := s.OpenReservations(ctx, "group/repo", now); len(open) != 1 {
+			t.Fatalf("OpenReservations = %d, want exactly 1 after two reserves of the same key", len(open))
+		}
+
+		// A DIFFERENT session_key for the same bead is genuinely different work.
+		diffSession, err := s.ReserveIfFits(ctx, "group/repo", unlimited(), budget.Spend{}, mk("rsv-3", "gk-1", "s2"))
+		mustFit(t, diffSession, err)
+		if diffSession.Existing || diffSession.Reservation.ID != "rsv-3" {
+			t.Fatalf("a different session_key was folded into an existing reservation: %+v", diffSession)
+		}
+
+		// A DIFFERENT bead for the same session is also genuinely different work.
+		diffBead, err := s.ReserveIfFits(ctx, "group/repo", unlimited(), budget.Spend{}, mk("rsv-4", "gk-2", "s1"))
+		mustFit(t, diffBead, err)
+		if diffBead.Existing || diffBead.Reservation.ID != "rsv-4" {
+			t.Fatalf("a different bead_id was folded into an existing reservation: %+v", diffBead)
+		}
+		if open, _ := s.OpenReservations(ctx, "group/repo", now); len(open) != 3 {
+			t.Fatalf("OpenReservations = %d, want 3 (gk-1/s1, gk-1/s2, gk-2/s1)", len(open))
+		}
+
+		// After the (gk-1, s1) reservation is SETTLED, it leaves the open-key
+		// index, so a legitimate re-sling of that exact key reserves anew.
+		must(t, s.Settle(ctx, "rsv-1", now.Add(5*time.Minute)))
+		resling, err := s.ReserveIfFits(ctx, "group/repo", unlimited(), budget.Spend{}, mk("rsv-5", "gk-1", "s1"))
+		mustFit(t, resling, err)
+		if resling.Existing || resling.Reservation.ID != "rsv-5" {
+			t.Fatalf("a re-sling after settle did not get a fresh reservation: %+v (a settled reservation must leave the open-key index)", resling)
+		}
+	}
+}
+
 // Settling does NOT free the budget immediately. The session's spend rows land
 // seconds-to-minutes after it ends; freeing the hold the moment the outcome
 // arrives would over-report headroom by the session's entire actual cost, on
@@ -229,10 +304,10 @@ func testSettleHoldsBudgetUntilTheSpendCatchesUp(newStore func() store.Store) fu
 	return func(t *testing.T) {
 		ctx, s := context.Background(), newStore()
 		now := at("2026-07-13T10:00:00Z")
-		fits, err := s.ReserveIfFits(ctx, "p", unlimited(), budget.Spend{}, store.Reservation{
+		res, err := s.ReserveIfFits(ctx, "p", unlimited(), budget.Spend{}, store.Reservation{
 			ID: "rsv-1", Project: "p", CostUSD: 1,
 			CreatedAt: now, ExpiresAt: now.Add(time.Hour)})
-		mustFit(t, fits, err)
+		mustFit(t, res, err)
 
 		holdUntil := now.Add(5 * time.Minute) // now + max_spend_staleness
 		must(t, s.Settle(ctx, "rsv-1", holdUntil))
@@ -365,11 +440,11 @@ func testNonFiniteReservationIsRejected(newStore func() store.Store) func(t *tes
 			ID: "rsv-nan", Project: "p", CostUSD: math.NaN(),
 			CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 		}
-		fits, err := s.ReserveIfFits(ctx, "p", unlimited(), budget.Spend{}, r)
+		res, err := s.ReserveIfFits(ctx, "p", unlimited(), budget.Spend{}, r)
 		if err == nil {
-			t.Fatalf("ReserveIfFits with a NaN CostUSD = (%v, nil), want an error", fits)
+			t.Fatalf("ReserveIfFits with a NaN CostUSD = (%+v, nil), want an error", res)
 		}
-		if fits {
+		if res.Fits {
 			t.Fatal("ReserveIfFits with a NaN CostUSD reported fits=true")
 		}
 		if _, ok, _ := s.GetReservation(ctx, "rsv-nan"); ok {

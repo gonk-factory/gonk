@@ -105,12 +105,20 @@ func (s *Service) Ready() bool {
 	return s.synced && s.skewOK
 }
 
-// keyedMutex serializes work per project. The whole point of /decide is that
-// the budget read and the reservation write are ONE step -- in-process. It is
-// cheap contention control and keeps Decide deterministic within one
-// process; it is NOT what makes the ceiling safe across replicas (that is
-// store.ReserveIfFits, backed by Postgres row locking). See AD-10: meter runs
-// single-replica precisely because this mutex does nothing across pods.
+// keyedMutex serializes Decide per project WITHIN one process. It is a
+// throughput/ordering optimization ONLY -- it cuts wasted work (two concurrent
+// decides for one project both computing budget and one losing the race) and
+// keeps Decide deterministic within a process. It is emphatically NOT a
+// correctness mechanism: it does nothing across pods, and neither money-safety
+// property depends on it.
+//
+// Both properties live in store.ReserveIfFits and hold ACROSS REPLICAS:
+// no overspend (Postgres SELECT ... FOR UPDATE on the project lock row) and no
+// double-reserve (partial UNIQUE index on the open (project, bead, session)
+// key). Removing this mutex breaks neither -- the store's cross-replica race
+// tests prove it by calling ReserveIfFits directly with no mutex in the way.
+// This is why AD-10's "meter runs single-replica" constraint is LIFTED (see
+// the store package doc and forthcoming ADR-004): meter is multi-replica-safe.
 type keyedMutex struct {
 	mu sync.Mutex
 	m  map[string]*sync.Mutex
@@ -441,14 +449,24 @@ func (s *Service) Decide(ctx context.Context, req meterapi.DecideRequest) (rung.
 		return rung.Decision{}, DecideExtras{}, fmt.Errorf("service: decide %q: open reservations: %w", req.Project, err)
 	}
 
-	// *** IDEMPOTENCY (FIX-A). *** An open reservation already covering this
-	// exact (bead, session) means the decision has already been made and the
-	// budget already reserved. Hand it back verbatim -- do not re-decide (the
-	// attempt/rung are stable anyway, since Prior has not changed) and do not
-	// call ReserveIfFits again (that would be a SECOND reservation for the
-	// same attempt: double headroom held for one attempt).
+	// *** IDEMPOTENCY (FIX-A) -- FAST PATH. *** An open (unsettled) reservation
+	// already covering this exact (bead, session) means the work was already
+	// decided and reserved. Hand it back verbatim: skip re-deciding (attempt and
+	// rung are stable, since Prior has not changed) AND skip the budget gate --
+	// which is the point, because that gate would otherwise see this work's OWN
+	// reservation as consumed headroom and spuriously defer the second gate.
+	//
+	// This reads the STORE (the shared DB in the Postgres deployment), so it is
+	// correct across replicas for the sequential Gate-1-then-Gate-2 case: a
+	// second replica sees the first's committed reservation here. It is NOT the
+	// correctness mechanism, though -- it is a fast path. The truly-concurrent
+	// case (two replicas both reach here before either commits) falls through to
+	// ReserveIfFits, whose partial unique index + FOR UPDATE lock is what
+	// actually prevents a duplicate. Removing this fast path would cost a
+	// spurious defer, never a double reservation. (Proven by the store's
+	// TestReserveIsIdempotentAcrossReplicas, which bypasses this path entirely.)
 	for _, r := range openRes {
-		if r.BeadID == req.BeadID && r.SessionKey == req.SessionKey {
+		if r.BeadID == req.BeadID && r.SessionKey == req.SessionKey && !r.Settled {
 			tags, err := tagmint.Mint(tagmint.Request{
 				Project: req.Project, Rig: req.Rig, BeadID: req.BeadID,
 				SessionKey: req.SessionKey, Rung: r.Rung, Attempt: r.Attempt, Trigger: req.Trigger,
@@ -495,28 +513,30 @@ func (s *Service) Decide(ctx context.Context, req meterapi.DecideRequest) (rung.
 		CreatedAt: now, ExpiresAt: now.Add(cfg.Meter.ReservationTTL),
 	}
 
-	// The reservation is written by an ATOMIC check-and-write IN THE STORE. We
-	// are inside the per-project mutex, but that mutex is contention control,
-	// not the safety property -- it does nothing across replicas.
-	// ReserveIfFits re-checks the ceiling against the data as it stands at
-	// write time, so the ceiling holds even if two pods get here at once.
+	// The reservation is written by an ATOMIC, IDEMPOTENT check-and-write IN THE
+	// STORE. The per-project keyedMutex we hold is contention control only; it
+	// does nothing across replicas and is NOT what makes this safe. ReserveIfFits
+	// enforces BOTH money-safety properties across replicas: no overspend (FOR
+	// UPDATE on the project lock) and no double-reserve (partial unique index on
+	// the open (project, bead, session) key). So even if the fast path above
+	// missed a concurrent sibling, the store returns that sibling's reservation
+	// here rather than minting a duplicate.
 	//
 	// *** want carries OBSERVED spend ONLY -- never the Reserved* fields. ***
 	// ReserveIfFits re-reads open reservations itself, atomically, inside its
-	// own lock (see store.Memory's doc: "want, which already carries the
-	// observed spend"). Passing in.Spend here (which spendFor already folded
-	// open reservations into, for rung.Decide's pre-check above) would COUNT
-	// EVERY OPEN RESERVATION TWICE -- once from this call's pre-fold, once
-	// from the store's own re-read -- silently halving effective headroom.
+	// own lock. Passing in.Spend here (which spendFor already folded open
+	// reservations into, for rung.Decide's pre-check above) would COUNT EVERY
+	// OPEN RESERVATION TWICE -- once from this call's pre-fold, once from the
+	// store's own re-read -- silently halving effective headroom.
 	observedOnly := budget.Spend{
 		CostUSD: in.Spend.CostUSD, SyntheticCostUSD: in.Spend.SyntheticCostUSD,
 		Tokens: in.Spend.Tokens, TaskTokens: in.Spend.TaskTokens,
 	}
-	fits, err := s.store.ReserveIfFits(ctx, req.Project, bud, observedOnly, res)
+	result, err := s.store.ReserveIfFits(ctx, req.Project, bud, observedOnly, res)
 	if err != nil {
 		return rung.Decision{}, DecideExtras{}, err // fail closed: no reservation, no run
 	}
-	if !fits {
+	if !result.Fits {
 		// We lost a race against a concurrent session. rung.Decide said yes on
 		// a snapshot that is now stale. This is a DEFER, not an error and not a
 		// deny: the budget is real, it is just spoken for right now.
@@ -528,19 +548,30 @@ func (s *Service) Decide(ctx context.Context, req meterapi.DecideRequest) (rung.
 		}, DecideExtras{}, nil
 	}
 
+	// held is the reservation that actually holds budget for this work: the one
+	// we just inserted, OR a pre-existing open one the store deduped us against
+	// (result.Existing -- a concurrent gate/replica beat us here). Its rung and
+	// attempt are authoritative; use them so both gates return the same run.
+	held := result.Reservation
+	d.Rung, d.Attempt = held.Rung, held.Attempt
+	d.Model = cfg.Catalog[held.Rung].Model
+
 	tags, err := tagmint.Mint(tagmint.Request{
 		Project: req.Project, Rig: req.Rig, BeadID: req.BeadID,
-		SessionKey: req.SessionKey, Rung: d.Rung, Attempt: d.Attempt, Trigger: req.Trigger,
+		SessionKey: req.SessionKey, Rung: held.Rung, Attempt: held.Attempt, Trigger: req.Trigger,
 	})
 	if err != nil {
-		// The session will never start, so drop the hold entirely: settle it
-		// into the past rather than holding budget for a session that does not
-		// exist.
-		_ = s.store.Settle(ctx, res.ID, now)
+		// The session will never start, so drop the hold -- but ONLY if WE
+		// created it. A pre-existing reservation belongs to a sibling gate/replica
+		// that already minted its tags successfully; settling it here would kill
+		// live work we did not create.
+		if !result.Existing {
+			_ = s.store.Settle(ctx, res.ID, now)
+		}
 		return rung.Decision{}, DecideExtras{}, err // 400: a hostile tag never leaves the building
 	}
 
-	return d, DecideExtras{Metadata: tags.Metadata(), KeyRef: reg.KeyRef, Reservation: res}, nil
+	return d, DecideExtras{Metadata: tags.Metadata(), KeyRef: reg.KeyRef, Reservation: held}, nil
 }
 
 // spendFor sums observed spend (windowed by project, lifetime by bead) and

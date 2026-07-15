@@ -14,6 +14,7 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/litellm"
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/store"
 	"gitlab.orac.local/agentic/gonk-project/pkg/atags"
+	"gitlab.orac.local/agentic/gonk-project/pkg/budget"
 	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
 	"gitlab.orac.local/agentic/gonk-project/pkg/opercfg"
 	"gitlab.orac.local/agentic/gonk-project/pkg/rung"
@@ -439,6 +440,36 @@ func TestDecideIsIdempotentOnlyForTheSameSessionKey(t *testing.T) {
 	}
 }
 
+// TestDecideIsIdempotentOnlyForTheSameBeadID is the BEAD half of the
+// idempotency key (the session half is above): same session_key, DIFFERENT
+// bead_id is genuinely different work and must get its OWN reservation, never
+// be deduped into the first. (Both halves matter; keying on session alone would
+// merge two unrelated beads that happened to share a session identifier.)
+func TestDecideIsIdempotentOnlyForTheSameBeadID(t *testing.T) {
+	f := newTestService(t)
+	f.register("group/repo", "group-repo", simpleYAML("glm", 5)) // headroom for many
+	f.syncOnce()
+
+	d1, e1, err := f.svc.Decide(context.Background(), decideReq("group/repo", "gk-A", "sess-shared"))
+	if err != nil || d1.Kind != rung.Run || e1.Reservation.ID == "" {
+		t.Fatalf("first decide = %+v %+v %v", d1, e1, err)
+	}
+	d2, e2, err := f.svc.Decide(context.Background(), decideReq("group/repo", "gk-B", "sess-shared"))
+	if err != nil || d2.Kind != rung.Run || e2.Reservation.ID == "" {
+		t.Fatalf("second decide (different bead) = %+v %+v %v", d2, e2, err)
+	}
+	if e2.Reservation.ID == e1.Reservation.ID {
+		t.Fatal("a different bead_id was folded into another bead's reservation (idempotency must key on bead_id too)")
+	}
+	open, err := f.store.OpenReservations(context.Background(), "group/repo", f.clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 2 {
+		t.Fatalf("open reservations = %d, want 2 (two distinct beads, same session)", len(open))
+	}
+}
+
 // TestDecideNeverTrustsACallerSuppliedAttempt confirms the attempt is derived
 // SOLELY from meter's own store (recorded prior attempts): meterapi.DecideRequest
 // carries no attempt field at all (Decision 2), and repeating /decide without
@@ -682,6 +713,90 @@ func TestDecideFailsClosedOnStoreError(t *testing.T) {
 	open, _ := mem.OpenReservations(context.Background(), "group/repo", now)
 	if len(open) != 0 {
 		t.Fatalf("open reservations = %d, want 0 after a fail-closed store error", len(open))
+	}
+}
+
+// notFitsStore forces ReserveIfFits to report a lost race (Fits=false, no
+// error), so a test can exercise the service's !fits branch deterministically
+// without staging a real budget race. This is the branch that becomes the SOLE
+// guard against an unbacked run if the in-process mutex is ever removed, so it
+// must be tested directly.
+type notFitsStore struct {
+	*store.Memory
+}
+
+func (n *notFitsStore) ReserveIfFits(_ context.Context, _ string, _ budget.Budget, _ budget.Spend, _ store.Reservation) (store.ReserveResult, error) {
+	return store.ReserveResult{}, nil // Fits=false, no error: a lost race
+}
+
+// TestDecideDefersWhenReserveDoesNotFit: when rung.Decide says run but the
+// atomic store reserve does NOT fit (a concurrent session took the last of the
+// headroom between the snapshot and the write), the decision MUST become a
+// defer -- never a run carrying a reservation the store refused. This is the
+// race-loser branch, and it is what protects the ceiling when the fast-path
+// snapshot is stale.
+func TestDecideDefersWhenReserveDoesNotFit(t *testing.T) {
+	mem := store.NewMemory()
+	ns := &notFitsStore{Memory: mem}
+	cfg, err := opercfg.Load([]byte(testOperatorYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	admin := litellm.NewFake()
+	admin.Now = now
+	svc := New(cfg, ns, admin, admin, keysink.NewMemory(), func() time.Time { return now })
+
+	if _, status, err := svc.Register(context.Background(), meterapi.ProjectRequest{
+		Project: "group/repo", ProjectID: 1, Rig: "group-repo", GonkYML: simpleYAML("glm", 5),
+	}); err != nil || status != 200 {
+		t.Fatalf("setup register: %d %v", status, err)
+	}
+	if err := svc.SyncSpend(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	d, extras, err := svc.Decide(context.Background(), decideReq("group/repo", "gk-1", "sess-1"))
+	if err != nil {
+		t.Fatalf("Decide = %v, want a defer with no error", err)
+	}
+	if d.Kind != rung.Defer || d.Reason != rung.ReasonMonthlyCostExhausted {
+		t.Fatalf("decision = %+v, want defer/monthly-cost-exhausted (a lost reserve must NOT become a run)", d)
+	}
+	if extras.Reservation.ID != "" || len(extras.Metadata) != 0 || extras.KeyRef != (store.KeyRef{}) {
+		t.Fatalf("a lost-reserve defer leaked extras: %+v", extras)
+	}
+}
+
+// TestDecideMintFailureReleasesTheReservation: a post-reservation tagmint.Mint
+// failure (a hostile bead_id/session_key/rig/trigger) must RELEASE the hold the
+// reserve just took -- the session will never start, so its budget must not
+// stay reserved until the TTL. The cleanup path (Settle into the past) is
+// otherwise untested.
+func TestDecideMintFailureReleasesTheReservation(t *testing.T) {
+	f := newTestService(t)
+	f.register("group/repo", "group-repo", simpleYAML("glm", 5))
+	f.syncOnce()
+
+	// A hostile rig (embedded newline) passes registration -- which validates
+	// the PROJECT path and the .gonk.yml, not the decide-time rig -- but trips
+	// tagmint.Mint's charset gate AFTER ReserveIfFits has written the hold.
+	req := meterapi.DecideRequest{
+		Project: "group/repo", Rig: "bad\nrig", BeadID: "gk-1", SessionKey: "sess-1", Trigger: trigger,
+	}
+	d, extras, err := f.svc.Decide(context.Background(), req)
+	if err == nil {
+		t.Fatalf("Decide with a hostile rig = (%+v, %+v, nil), want a tagmint failure", d, extras)
+	}
+	if extras.Reservation.ID != "" {
+		t.Fatal("a failed mint returned a reservation")
+	}
+	open, oerr := f.store.OpenReservations(context.Background(), "group/repo", f.clock)
+	if oerr != nil {
+		t.Fatal(oerr)
+	}
+	if len(open) != 0 {
+		t.Fatalf("open reservations after a mint failure = %+v, want none (the hold must be released, not left to age out over the TTL)", open)
 	}
 }
 

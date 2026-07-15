@@ -96,19 +96,20 @@ func TestReserveIfFitsRace(t *testing.T) {
 			go func(i int) {
 				defer wg.Done()
 				r := store.Reservation{
-					ID:        fmt.Sprintf("iter-%d-r-%d", iter, i),
-					Project:   project,
-					BeadID:    fmt.Sprintf("gk-%d", i), // distinct beads: this race is about the MONTHLY ceiling, not the per-task one
-					CostUSD:   raceEach,
-					CreatedAt: now,
-					ExpiresAt: now.Add(time.Hour),
+					ID:         fmt.Sprintf("iter-%d-r-%d", iter, i),
+					Project:    project,
+					BeadID:     fmt.Sprintf("gk-%d", i), // distinct beads: this race is about the MONTHLY ceiling, not the per-task one
+					SessionKey: fmt.Sprintf("s-%d", i),  // distinct sessions too, so idempotency never dedups these apart from the budget check
+					CostUSD:    raceEach,
+					CreatedAt:  now,
+					ExpiresAt:  now.Add(time.Hour),
 				}
-				fits, err := s.ReserveIfFits(ctx, project, ceiling, budget.Spend{}, r)
+				res, err := s.ReserveIfFits(ctx, project, ceiling, budget.Spend{}, r)
 				switch {
 				case err != nil:
 					errs.Add(1)
 					t.Logf("iter=%d writer=%d: unexpected error: %v", iter, i, err)
-				case fits:
+				case res.Fits:
 					wins.Add(1)
 				default:
 					losses.Add(1)
@@ -161,7 +162,10 @@ func TestReserveIfFitsRace(t *testing.T) {
 // against the PER-TASK token ceiling instead of the monthly cost ceiling, and
 // with all writers sharing ONE bead -- this is what actually protects a
 // single work item from spending twice its per-task budget across a race
-// (e.g. two retries of the same attempt firing concurrently).
+// (e.g. two retries of the same attempt firing concurrently). Each writer uses
+// a DISTINCT session_key: concurrent retries of one bead are distinct sessions,
+// so /decide idempotency (keyed on project+bead+session) must NOT collapse them
+// -- this race is about the token CEILING, not idempotency.
 func TestReserveIfFitsRacePerTaskTokenCeiling(t *testing.T) {
 	ctx := context.Background()
 	const (
@@ -188,19 +192,20 @@ func TestReserveIfFitsRacePerTaskTokenCeiling(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			r := store.Reservation{
-				ID:        fmt.Sprintf("tok-r-%d", i),
-				Project:   project,
-				BeadID:    beadID,
-				Tokens:    eachTokens,
-				CreatedAt: now,
-				ExpiresAt: now.Add(time.Hour),
+				ID:         fmt.Sprintf("tok-r-%d", i),
+				Project:    project,
+				BeadID:     beadID,
+				SessionKey: fmt.Sprintf("s-%d", i), // distinct sessions: concurrent retries of one bead, NOT the same /decide
+				Tokens:     eachTokens,
+				CreatedAt:  now,
+				ExpiresAt:  now.Add(time.Hour),
 			}
-			fits, err := s.ReserveIfFits(ctx, project, ceiling, budget.Spend{}, r)
+			res, err := s.ReserveIfFits(ctx, project, ceiling, budget.Spend{}, r)
 			switch {
 			case err != nil:
 				errs.Add(1)
 				t.Logf("writer=%d: unexpected error: %v", i, err)
-			case fits:
+			case res.Fits:
 				wins.Add(1)
 			default:
 				losses.Add(1)
@@ -229,5 +234,108 @@ func TestReserveIfFitsRacePerTaskTokenCeiling(t *testing.T) {
 	}
 	if totalTokens > perTaskTokens {
 		t.Fatalf("OVERSPEND: %d tokens persisted against a %d per-task ceiling", totalTokens, perTaskTokens)
+	}
+}
+
+// TestReserveIsIdempotentAcrossReplicas is FIX-A's cross-replica proof, the
+// double-reserve analogue of TestReserveIfFitsRace's overspend proof. It fires
+// idempotencyWriters goroutines ALL reserving the SAME
+// (project, bead_id, session_key) -- the exact shape of intake's Gate 1 and the
+// pack's Gate 2 racing, times N, with NO in-process service mutex to serialize
+// them (s.ReserveIfFits is called directly). It asserts, on real Postgres:
+//
+//  1. exactly ONE open reservation exists for that key (not N, not two);
+//  2. every caller got Fits == true (nobody is spuriously refused);
+//  3. every caller got the SAME reservation id back (the one winner's);
+//  4. exactly one caller inserted (Existing == false) and the rest were
+//     idempotent hits (Existing == true).
+//
+// This is what proves the partial UNIQUE index + FOR UPDATE lock -- NOT any
+// in-process mutex -- enforce idempotency, so meter is safe with >1 replica.
+func TestReserveIsIdempotentAcrossReplicas(t *testing.T) {
+	ctx := context.Background()
+	ceiling := budget.Budget{
+		MonthlyCostUSD: budget.CostLimit(100), // generous: this race is about idempotency, not the ceiling
+		MonthlyTokens:  budget.UnlimitedTokens,
+		PerTaskTokens:  budget.UnlimitedTokens,
+	}
+
+	const idempotencyWriters = 32
+	s := newTestDatabase(t)
+
+	for iter := 0; iter < raceIterations; iter++ {
+		project := fmt.Sprintf("idem/project/%d", iter)
+		const beadID, sessionKey = "gk-anchor", "sess-fixed"
+		now := time.Now().UTC()
+
+		var inserts, hits, refused, errs atomic.Int64
+		ids := make([]string, idempotencyWriters)
+		var wg sync.WaitGroup
+		for i := 0; i < idempotencyWriters; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				r := store.Reservation{
+					ID:         fmt.Sprintf("iter-%d-writer-%d", iter, i), // DISTINCT candidate ids: only one may win
+					Project:    project,
+					BeadID:     beadID,
+					SessionKey: sessionKey,
+					Rung:       "glm",
+					Attempt:    1,
+					CostUSD:    0.40,
+					CreatedAt:  now,
+					ExpiresAt:  now.Add(time.Hour),
+				}
+				res, err := s.ReserveIfFits(ctx, project, ceiling, budget.Spend{}, r)
+				switch {
+				case err != nil:
+					errs.Add(1)
+					t.Logf("iter=%d writer=%d: unexpected error: %v", iter, i, err)
+				case !res.Fits:
+					refused.Add(1)
+				case res.Existing:
+					hits.Add(1)
+					ids[i] = res.Reservation.ID
+				default:
+					inserts.Add(1)
+					ids[i] = res.Reservation.ID
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		open, err := s.OpenReservations(ctx, project, now)
+		if err != nil {
+			t.Fatalf("iter=%d: OpenReservations: %v", iter, err)
+		}
+
+		t.Logf("iter=%d inserts=%d idempotent_hits=%d refused=%d errs=%d open_reservation_count=%d",
+			iter, inserts.Load(), hits.Load(), refused.Load(), errs.Load(), len(open))
+
+		if errs.Load() > 0 {
+			t.Errorf("iter=%d: %d unexpected errors -- see log", iter, errs.Load())
+		}
+		if refused.Load() > 0 {
+			t.Errorf("iter=%d: %d callers were refused (Fits=false); idempotent reserves of one key must all succeed", iter, refused.Load())
+		}
+		if len(open) != 1 {
+			t.Errorf("iter=%d: %d open reservations for one (project,bead,session), want exactly 1 -- a duplicate was minted (this is the cross-replica double-reserve the partial unique index exists to prevent)", iter, len(open))
+		}
+		if inserts.Load() != 1 {
+			t.Errorf("iter=%d: %d inserts (Existing=false), want exactly 1", iter, inserts.Load())
+		}
+		if hits.Load() != idempotencyWriters-1 {
+			t.Errorf("iter=%d: %d idempotent hits, want %d", iter, hits.Load(), idempotencyWriters-1)
+		}
+		// Every caller that got a reservation must have gotten the SAME one.
+		var winner string
+		if len(open) == 1 {
+			winner = open[0].ID
+		}
+		for i, id := range ids {
+			if id != "" && winner != "" && id != winner {
+				t.Errorf("iter=%d writer=%d got reservation id %q but the single open reservation is %q", iter, i, id, winner)
+			}
+		}
 	}
 }

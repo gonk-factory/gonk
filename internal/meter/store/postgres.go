@@ -26,9 +26,20 @@ import (
 // (postgres_race_test.go, build-tagged `integration`) proves this against a
 // real server rather than assuming it.
 //
-// This is NOT single-replica-only: the lock lives in the database, not in an
+// ReserveIfFits also enforces /decide IDEMPOTENCY in the same transaction: a
+// partial UNIQUE index on the open (project, bead_id, session_key) key (plus an
+// in-transaction pre-check under the same FOR UPDATE lock) makes the second of
+// the two /decide gates return the FIRST reservation instead of minting a
+// duplicate that holds double the headroom.
+//
+// This is NOT single-replica-only, and it closes BOTH money-safety races
+// across pods: the lock and the unique index live in the database, not in an
 // in-process mutex, so N gonk-meter pods sharing one Postgres are exactly as
-// safe as one.
+// safe as one -- for overspend AND for double-reserve. AD-10's single-replica
+// constraint is therefore lifted (see the forthcoming ADR-004, finalized in
+// Task 10). Both properties are proven against a real server by
+// TestReserveIfFitsRace (overspend) and TestReserveIsIdempotentAcrossReplicas
+// (double-reserve), both build-tagged `integration`.
 type Postgres struct {
 	pool *pgxpool.Pool
 }
@@ -110,6 +121,21 @@ CREATE TABLE IF NOT EXISTS reservations (
 );
 CREATE INDEX IF NOT EXISTS reservations_project_expires_idx ON reservations (project, expires_at);
 CREATE INDEX IF NOT EXISTS reservations_settled_expires_idx ON reservations (settled, expires_at);
+
+-- reservations_open_key_idx is the DB-enforced idempotency of /decide, and it
+-- is what makes meter multi-replica-safe against DOUBLE-RESERVE (the FOR
+-- UPDATE project lock handles OVERSPEND). At most one OPEN (settled = false)
+-- reservation may exist for a given (project, bead_id, session_key): intake's
+-- Gate 1 and the pack's Gate 2 reserve the same work before any outcome, and
+-- the second reserve must return the first, not mint a duplicate that holds
+-- double the headroom. A settled reservation (outcome reported) OR an expired
+-- one the janitor has reclaimed both carry settled = true and so leave this
+-- index, letting a legitimate re-sling reserve the same key again. A partial
+-- index cannot reference now(), so "still holding budget" is not part of the
+-- predicate; settled = false is the durable proxy, and expiry is turned into
+-- settled = true by the janitor.
+CREATE UNIQUE INDEX IF NOT EXISTS reservations_open_key_idx
+    ON reservations (project, bead_id, session_key) WHERE settled = false;
 
 CREATE TABLE IF NOT EXISTS spend_rows (
 	call_id            TEXT PRIMARY KEY,
@@ -328,42 +354,54 @@ func (p *Postgres) Attempts(ctx context.Context, project, beadID string) ([]rung
 
 // ---------------------------------------------------------------- reservations
 
-// ReserveIfFits is the money-safety-critical operation. See the Postgres
-// package doc above and TestReserveIfFitsRace (postgres_race_test.go) for the
-// proof.
+// ReserveIfFits is the money-safety-critical operation, and it enforces BOTH
+// multi-replica guarantees. See the Postgres package doc above,
+// TestReserveIfFitsRace (overspend) and TestReserveIsIdempotentAcrossReplicas
+// (double-reserve) in postgres_race_test.go for the proofs.
 //
 // The transaction:
 //  1. Ensures a project_locks row exists for `project` (INSERT ... ON
-//     CONFLICT DO NOTHING). If two transactions race to create the FIRST-EVER
-//     lock row for a project, Postgres itself serializes them on the unique
-//     index -- the loser blocks until the winner commits, then sees the row
-//     and no-ops.
-//  2. SELECT ... FOR UPDATE on that row. This is what makes everything below
-//     it exclusive: a second transaction's FOR UPDATE on the same row blocks
-//     until this transaction commits or rolls back.
-//  3. Sums open reservations for the project (as of r.CreatedAt) -- INSIDE
-//     the lock, so no other transaction can be concurrently inserting one.
-//  4. Computes remaining budget and checks r fits.
-//  5. If it fits, inserts r and commits. If not, the transaction is rolled
-//     back (via the deferred Rollback) and (false, nil) is returned -- a lost
-//     race, not an error.
-func (p *Postgres) ReserveIfFits(ctx context.Context, project string, ceiling budget.Budget, want budget.Spend, r Reservation) (bool, error) {
+//     CONFLICT DO NOTHING) and takes SELECT ... FOR UPDATE on it. This is what
+//     makes everything below exclusive per project across replicas: a second
+//     transaction's FOR UPDATE on the same row blocks until this one commits.
+//  2. IDEMPOTENCY. Looks for an existing OPEN (settled = false) reservation
+//     for r's (project, bead_id, session_key). If one exists, returns it --
+//     {existing, Fits: true, Existing: true} -- and inserts nothing. This is
+//     what makes the two /decide gates safe: the second reserve returns the
+//     first reservation instead of a duplicate holding double the headroom.
+//  3. Otherwise sums open reservations (as of r.CreatedAt) INSIDE the lock,
+//     computes remaining budget, and checks r fits. If not, rolls back and
+//     returns Fits == false -- a lost race, not an error: the caller defers.
+//  4. Inserts r with ON CONFLICT on the partial unique index DO NOTHING as a
+//     hard backstop (the pre-check + lock already prevent a duplicate; this
+//     catches any lock-logic bug at the DB rather than in review), then
+//     commits.
+func (p *Postgres) ReserveIfFits(ctx context.Context, project string, ceiling budget.Budget, want budget.Spend, r Reservation) (ReserveResult, error) {
 	if err := validateFiniteMoney(r.CostUSD, r.SyntheticCostUSD); err != nil {
-		return false, err
+		return ReserveResult{}, err
 	}
 
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("store: reserve %q: begin: %w", r.ID, err)
+		return ReserveResult{}, fmt.Errorf("store: reserve %q: begin: %w", r.ID, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
 
 	if _, err := tx.Exec(ctx, `INSERT INTO project_locks (project) VALUES ($1) ON CONFLICT (project) DO NOTHING`, project); err != nil {
-		return false, fmt.Errorf("store: reserve %q: seed lock: %w", r.ID, err)
+		return ReserveResult{}, fmt.Errorf("store: reserve %q: seed lock: %w", r.ID, err)
 	}
 	var locked string
 	if err := tx.QueryRow(ctx, `SELECT project FROM project_locks WHERE project = $1 FOR UPDATE`, project).Scan(&locked); err != nil {
-		return false, fmt.Errorf("store: reserve %q: lock project: %w", r.ID, err)
+		return ReserveResult{}, fmt.Errorf("store: reserve %q: lock project: %w", r.ID, err)
+	}
+
+	// IDEMPOTENCY: an existing OPEN reservation for this key wins. Matches the
+	// partial unique index predicate exactly (settled = false), so Memory and
+	// Postgres agree.
+	if existing, found, err := reserveOpenForKey(ctx, tx, project, r.BeadID, r.SessionKey); err != nil {
+		return ReserveResult{}, fmt.Errorf("store: reserve %q: check idempotency: %w", r.ID, err)
+	} else if found {
+		return ReserveResult{Reservation: existing, Fits: true, Existing: true}, nil
 	}
 
 	var sumCost, sumSynthetic float64
@@ -378,7 +416,7 @@ func (p *Postgres) ReserveIfFits(ctx context.Context, project string, ceiling bu
 		WHERE project = $1 AND expires_at > $2
 	`, project, r.CreatedAt, r.BeadID).Scan(&sumCost, &sumSynthetic, &sumTokens, &sumTaskTokens)
 	if err != nil {
-		return false, fmt.Errorf("store: reserve %q: sum open reservations: %w", r.ID, err)
+		return ReserveResult{}, fmt.Errorf("store: reserve %q: sum open reservations: %w", r.ID, err)
 	}
 
 	want.ReservedCostUSD += sumCost
@@ -388,22 +426,58 @@ func (p *Postgres) ReserveIfFits(ctx context.Context, project string, ceiling bu
 
 	rem := budget.Remain(ceiling, want)
 	if !rem.FitsCost(r.CostUSD) || !rem.FitsMonthTokens(r.Tokens) || !rem.FitsTaskTokens(r.Tokens) {
-		return false, nil // lost race: rolled back by the deferred Rollback
+		return ReserveResult{}, nil // lost race: rolled back by the deferred Rollback
 	}
 
-	_, err = tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO reservations
 			(id, project, bead_id, session_key, rung, attempt, cost_usd, synthetic_cost_usd, tokens, created_at, expires_at, settled)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,FALSE)
+		ON CONFLICT (project, bead_id, session_key) WHERE settled = false DO NOTHING
 	`, r.ID, r.Project, r.BeadID, r.SessionKey, r.Rung, r.Attempt, r.CostUSD, r.SyntheticCostUSD, r.Tokens, r.CreatedAt, r.ExpiresAt)
 	if err != nil {
-		return false, fmt.Errorf("store: reserve %q: insert: %w", r.ID, err)
+		return ReserveResult{}, fmt.Errorf("store: reserve %q: insert: %w", r.ID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Hard backstop fired: a concurrent open reservation for this key exists
+		// despite the pre-check + lock (should be unreachable). Return it rather
+		// than the un-inserted r, so the caller never holds a reservation id the
+		// DB does not have.
+		existing, found, err := reserveOpenForKey(ctx, tx, project, r.BeadID, r.SessionKey)
+		if err != nil || !found {
+			return ReserveResult{}, fmt.Errorf("store: reserve %q: insert hit the open-key index but no open reservation was found (found=%v): %w", r.ID, found, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return ReserveResult{}, fmt.Errorf("store: reserve %q: commit: %w", r.ID, err)
+		}
+		return ReserveResult{Reservation: existing, Fits: true, Existing: true}, nil
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("store: reserve %q: commit: %w", r.ID, err)
+		return ReserveResult{}, fmt.Errorf("store: reserve %q: commit: %w", r.ID, err)
 	}
-	return true, nil
+	return ReserveResult{Reservation: r, Fits: true}, nil
+}
+
+// reserveOpenForKey returns the single OPEN (settled = false) reservation for
+// (project, bead_id, session_key), if any. The partial unique index
+// reservations_open_key_idx guarantees at most one, so LIMIT 1 is exact, not
+// arbitrary.
+func reserveOpenForKey(ctx context.Context, tx pgx.Tx, project, beadID, sessionKey string) (Reservation, bool, error) {
+	row := tx.QueryRow(ctx, `
+		SELECT id, project, bead_id, session_key, rung, attempt, cost_usd, synthetic_cost_usd, tokens, created_at, expires_at, settled
+		FROM reservations
+		WHERE project = $1 AND bead_id = $2 AND session_key = $3 AND settled = false
+		LIMIT 1
+	`, project, beadID, sessionKey)
+	res, err := scanReservation(row)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return Reservation{}, false, nil
+		}
+		return Reservation{}, false, err
+	}
+	return res, true, nil
 }
 
 func (p *Postgres) GetReservation(ctx context.Context, id string) (Reservation, bool, error) {

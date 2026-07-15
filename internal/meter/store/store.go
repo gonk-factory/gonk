@@ -101,6 +101,33 @@ type Reservation struct {
 	Settled bool
 }
 
+// ReserveResult is the outcome of an idempotent check-and-reserve.
+//
+// Idempotency is keyed on (project, bead_id, session_key) over reservations
+// that are still open (settled == false). Because the rung gate is checked in
+// TWO places (intake Gate 1, the pack's Gate 2), the same work is /decide'd
+// twice before any outcome is reported; the second reserve must return the
+// FIRST reservation, not mint a second, or one attempt holds double the
+// budget headroom. Postgres enforces this with a partial UNIQUE index and an
+// in-transaction check under the same row lock that prevents overspend, so it
+// holds ACROSS REPLICAS -- not only within one process.
+type ReserveResult struct {
+	// Reservation is the reservation that holds budget for
+	// (project, bead_id, session_key) after the call: the one just inserted,
+	// or the pre-existing open one an earlier call inserted (Existing == true).
+	// It is the zero value when Fits is false.
+	Reservation Reservation
+	// Fits is true when a reservation holds budget for this key after the call,
+	// whether newly inserted OR already present. It is false only when the
+	// ceiling could not accommodate a NEW reservation (a lost race / genuine
+	// exhaustion) -- the caller turns that into a defer.
+	Fits bool
+	// Existing is true when Reservation is a pre-existing open reservation
+	// rather than the r passed in (an idempotent no-op insert). The service
+	// returns the same run{} either way.
+	Existing bool
+}
+
 // Store is gonk-meter's ledger: project registrations, ladder attempt
 // history, budget reservations, and deduped spend rows.
 type Store interface {
@@ -123,30 +150,38 @@ type Store interface {
 	// recorded.
 	Attempts(ctx context.Context, project, beadID string) ([]rung.Attempt, error)
 
-	// ReserveIfFits ATOMICALLY re-reads the project's observed spend and open
-	// reservations, checks that r still fits under ceiling, and writes r -- or
-	// reports that it does not fit. It is the ONLY way a reservation may be
-	// created.
+	// ReserveIfFits ATOMICALLY, in ONE step where the DATA lives:
+	//
+	//  1. IDEMPOTENCY. If an open (settled == false) reservation already exists
+	//     for r's (project, bead_id, session_key), returns it -- ReserveResult
+	//     {Reservation: existing, Fits: true, Existing: true} -- and inserts
+	//     nothing. This is the money-path idempotency of /decide: intake's Gate
+	//     1 and the pack's Gate 2 both reserve the same work before any outcome,
+	//     and the second must NOT mint a second reservation.
+	//  2. Otherwise re-reads observed spend + open reservations, checks r fits
+	//     under ceiling, and writes r. Fits == false with no reservation is a
+	//     LOST RACE (or genuine exhaustion), NOT an error: the caller defers.
 	//
 	// *** THIS IS A STORE METHOD, NOT A SERVICE METHOD, AND THAT IS THE POINT. ***
 	//
-	// The check and the write have to be one atomic step, and the atomicity has
-	// to live where the DATA lives. A service-side "read totals, decide, write
-	// reservation" sandwiched in an in-process mutex is correct for exactly one
-	// replica and SILENTLY WRONG for two: the second pod's mutex knows nothing
-	// about the first pod's, both see the same headroom, and both spend it.
+	// Both guarantees -- no overspend AND no double-reserve -- have to be atomic
+	// where the DATA lives, or they are correct for exactly one replica and
+	// SILENTLY WRONG for two. A service-side "read, decide, write" in an
+	// in-process mutex is exactly that trap: the second pod's mutex knows
+	// nothing about the first pod's. The Postgres implementation makes both hold
+	// ACROSS REPLICAS: overspend via SELECT ... FOR UPDATE on the project lock
+	// row, double-reserve via a partial UNIQUE index on
+	// (project, bead_id, session_key) WHERE settled = false plus an
+	// in-transaction check under that same lock. The service's per-project
+	// keyedMutex is a throughput/ordering optimization ONLY; removing it breaks
+	// neither property (proven by TestReserveIfFitsRace and
+	// TestReserveIsIdempotentAcrossReplicas in postgres_race_test.go, both of
+	// which call this method directly with no service mutex in the way).
 	//
-	// The service's per-project keyedMutex stays -- it is cheap contention
-	// control and it keeps Decide deterministic within one process -- but it is
-	// NOT what makes the ceiling safe. This method is. The Postgres
-	// implementation enforces it with SELECT ... FOR UPDATE inside a
-	// transaction (verified against a real Postgres server by
-	// TestReserveIfFitsRace in postgres_race_test.go; see also Task 0b's spike,
-	// which measured the SAME shape failing under Dolt).
-	//
-	// Returning (false, nil) is a LOST RACE, not an error: the caller turns it
-	// into a defer.
-	ReserveIfFits(ctx context.Context, project string, ceiling budget.Budget, want budget.Spend, r Reservation) (bool, error)
+	// A settled OR expired-and-reclaimed reservation leaves the index (both flip
+	// settled = true), so a legitimate re-sling after settle/expiry reserves
+	// again.
+	ReserveIfFits(ctx context.Context, project string, ceiling budget.Budget, want budget.Spend, r Reservation) (ReserveResult, error)
 
 	// GetReservation is how /v1/policy/outcome binds a caller-supplied outcome
 	// to a reservation METER minted. Without it, `outcome: gate-failed` is a
