@@ -1232,7 +1232,7 @@ part of the pack's contract, not an implementation detail:
 (`meterapi`: *"defer and deny are HTTP 200"*). An order that "fails" on a `defer`
 would make quiet hours look like an outage on every dashboard in the building.
 
-- [ ] **Step 1: Write `pkg/beadstore` and its failing test**
+- [x] **Step 1: Write `pkg/beadstore` and its failing test**
 
 `pkg/beadstore/store_test.go`:
 
@@ -1323,7 +1323,7 @@ func TestPutIsIdempotentOnBeadAnchor(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Implement `pkg/beadstore`**
+- [x] **Step 2: Implement `pkg/beadstore`**
 
 ```go
 // Package beadstore is gonk-gate's per-bead work record: the small amount of
@@ -1417,7 +1417,7 @@ controller image and pins the exact invocations. Until then `bd.go` is written
 against `bd comment` / `bd label` / `bd list --label`, and **a wrong guess changes
 exactly this one file.**
 
-- [ ] **Step 3: Write the failing dispatch test** — `cmd/gonk-gate/dispatch_test.go`
+- [x] **Step 3: Write the failing dispatch test** — `cmd/gonk-gate/dispatch_test.go`
 
 ```go
 package main
@@ -1622,12 +1622,12 @@ func TestDispatchRefusesWithoutCity(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Run it and watch it fail**
+- [x] **Step 4: Run it and watch it fail**
 
 Run: `go test ./cmd/gonk-gate/ -run Dispatch -v`
 Expected: FAIL — undefined `runDispatch`, `dispatchDeps`, `dispatchArgs`.
 
-- [ ] **Step 5: Implement `cmd/gonk-gate/dispatch.go`**
+- [x] **Step 5: Implement `cmd/gonk-gate/dispatch.go`**
 
 ```go
 package main
@@ -1830,7 +1830,7 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 var errNoCity = errors.New("GONK_CITY is unset")
 ```
 
-- [ ] **Step 6: Write and implement `cmd/gonk-gate/sweep.go`** — the classifier's driver
+- [x] **Step 6: Write and implement `cmd/gonk-gate/sweep.go`** — the classifier's driver
 
 `sweep` is the **cooldown exec order's** body. It runs every 30 s and does three
 things, all deterministic:
@@ -1908,7 +1908,7 @@ func TestSweepIsIdempotentAcrossRuns(t *testing.T)
 every 30 seconds forever. A sweeper that re-reports an outcome each tick walks a
 project to the top of its ladder in a couple of minutes.
 
-- [ ] **Step 7: Write and implement `cmd/gonk-gate/check.go`** — the `[steps.check]` body
+- [x] **Step 7: Write and implement `cmd/gonk-gate/check.go`** — the `[steps.check]` body
 
 ```go
 // runCheck is what a formula's [steps.check] executes. It is PURE and IDEMPOTENT:
@@ -1931,7 +1931,7 @@ func runCheck(ctx context.Context, d checkDeps) int
 marker present → 3; a *human's* comment quoting the marker → 3 (author must be the
 bot); GitLab 500 → 1.
 
-- [ ] **Step 8: The shared-semantics test — Gate 1 and Gate 2 must mean the same thing**
+- [x] **Step 8: The shared-semantics test — Gate 1 and Gate 2 must mean the same thing**
 
 `cmd/gonk-gate/contract_test.go`:
 
@@ -2011,7 +2011,7 @@ This requires a tiny exported helper on each side (`gate.MayPour`,
 listed at the bottom of this plan — it is three lines, and it is what makes the
 drift mechanically detectable instead of a comment nobody reads.
 
-- [ ] **Step 9: Run everything**
+- [x] **Step 9: Run everything**
 
 ```bash
 go test ./pkg/beadstore/ ./cmd/gonk-gate/ -race -count=1 -v
@@ -2031,7 +2031,7 @@ grep -rn "RunOrder" cmd/gonk-gate/ | grep -v _test.go
 # NOT a formula-order). Any THIRD call site is a second pour path and a bug.
 ```
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./pkg/... ./cmd/... -race -count=1

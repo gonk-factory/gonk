@@ -90,6 +90,15 @@ func Classify(s Signals) string {
 // purpose.
 func Escalates(outcome string) bool { return outcome == meterapi.OutcomeGateFailed }
 
+// MayPour is Gate 2's verdict->action rule: cmd/gonk-gate pours the trigger's
+// formula IF AND ONLY IF meter's /decide answered `run`. It lives here, next to
+// meterapi's decision constants, so cmd/gonk-gate/contract_test.go can compare
+// it against pkg/intake.MayFire (Gate 1's identical rule) and catch drift
+// between the two gates MECHANICALLY instead of relying on a comment nobody
+// reads. Keep it three lines and literal -- see "The two call sites MUST
+// agree" in Plan 04.
+func MayPour(decision string) bool { return decision == meterapi.DecisionRun }
+
 // Known false positive -- record it, do not hide it.
 //
 // A pod evicted AFTER at least one successful completion but BEFORE posting its
