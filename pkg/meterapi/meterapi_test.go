@@ -331,8 +331,17 @@ func wireContractFixtures() map[string]any {
 			Complete:         true,
 		},
 		"error_response": ErrorResponse{Error: "boom"},
+		"spend_sync_response": SpendSyncResponse{
+			SpendAsOf:    t1,
+			RowsIngested: intp(14),
+			Unattributed: intp(0),
+			Synced:       true,
+			Error:        "",
+		},
 	}
 }
+
+func intp(v int) *int { return &v }
 
 func f64p(v float64) *float64 { return &v }
 func i64p(v int64) *int64     { return &v }

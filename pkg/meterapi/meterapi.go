@@ -19,10 +19,13 @@
 //	GET    /v1/cost/session/{session_key}                    -> SessionCostResponse
 //	GET    /v1/cost/project/{project}                        -> ProjectCostResponse
 //	GET    /v1/cost/instance                                 -> InstanceCostResponse
+//	POST   /admin/spend/sync                                 -> SpendSyncResponse (Plan 06's e2e harness only)
 //	GET    /healthz | /readyz | /metrics                     (unauthenticated)
 //
 // Everything except the health/metrics endpoints requires
-// `Authorization: Bearer <token>`.
+// `Authorization: Bearer <token>`. /admin/spend/sync IS authenticated -- it
+// is on the same listener and requires the same bearer token as every other
+// non-health route.
 package meterapi
 
 import (
@@ -53,12 +56,13 @@ func CostSessionPath(sessionKey string) string {
 func CostProjectPath(project string) string { return "/v1/cost/project/" + url.PathEscape(project) }
 
 const (
-	DecidePath       = "/v1/policy/decide"
-	OutcomePath      = "/v1/policy/outcome"
-	CostInstancePath = "/v1/cost/instance"
-	HealthzPath      = "/healthz"
-	ReadyzPath       = "/readyz"
-	MetricsPath      = "/metrics"
+	DecidePath         = "/v1/policy/decide"
+	OutcomePath        = "/v1/policy/outcome"
+	CostInstancePath   = "/v1/cost/instance"
+	AdminSpendSyncPath = "/admin/spend/sync"
+	HealthzPath        = "/healthz"
+	ReadyzPath         = "/readyz"
+	MetricsPath        = "/metrics"
 )
 
 // ---------------------------------------------------------------- budget
@@ -468,6 +472,31 @@ type InstanceCostResponse struct {
 	ByProject        []ProjectCostResponse `json:"by_project"`
 	AsOf             time.Time             `json:"as_of"`
 	Complete         bool                  `json:"complete"`
+}
+
+// ---------------------------------------------------------------- POST /admin/spend/sync
+
+// SpendSyncResponse is POST /admin/spend/sync's body: the forced-sync
+// endpoint (Plan 06 hand-back HB-2) that runs one spend-log poll and blocks
+// until it has completed and its rows are committed, so a test harness has a
+// predicate to wait on instead of a sleep.
+//
+// It forces a poll; it does not fabricate one -- SpendAsOf is always
+// LiteLLM's truth (the last successful sync's spend_as_of, whether or not
+// THIS call is the one that produced it), and a poll failure is reported
+// here, not swallowed: the HTTP status is always 200 (the endpoint itself
+// did its job -- it ran a sync attempt and is honestly reporting the
+// result), and Synced/Error carry the outcome.
+//
+// RowsIngested and Unattributed are pointers so they are OMITTED (not
+// present as 0) when a poll fails: "we do not know" and "we know it was
+// zero" are different facts, and only a completed pass can tell them apart.
+type SpendSyncResponse struct {
+	SpendAsOf    time.Time `json:"spend_as_of"`
+	RowsIngested *int      `json:"rows_ingested,omitempty"`
+	Unattributed *int      `json:"unattributed,omitempty"`
+	Synced       bool      `json:"synced"`
+	Error        string    `json:"error,omitempty"`
 }
 
 // ---------------------------------------------------------------- errors

@@ -269,7 +269,7 @@ Task 2's `TestGroupFor`, `TestGroupForCeilingsOnlyTighten`, and the nil-vs-empty
 | Session dies without reporting an outcome | Reservation expires at `reservation_ttl`; the janitor records an `infra-failed` attempt. | Budget stays held for the TTL; the rung does **not** escalate. |
 | Meter restarts | Cold start: `/readyz` false until the first spend sync completes. **Reservations survive** — they are in the durable store (Dolt, Decision 10). This is exactly why the in-memory store is not the shipping backend: losing reservations on restart is fail-open on headroom for the length of the spend-log lag. | Metric `gonk_meter_cold_start_total`. |
 | **Dolt does not actually provide the isolation the reservation race needs** | **Task 0b proves or disproves this before anything depends on it.** If the racing test overspends, the fallback is (a) keep meter single-replica so the in-process per-project lock *is* the serialization and Dolt supplies durability only, or (b) move the ledger to **Postgres on the owner's existing CNPG cluster** (owner-approved 2026-07-13 — not a new dependency; take it without hesitation if the spike fails OR is inconclusive). The plan does not proceed on the assumption. | An unverified transactional guarantee under a budget ceiling is exactly the thing that must not be assumed. |
-| Two meter **replicas** race the same ceiling | The per-project `keyedMutex` is **in-process**: it serializes decisions inside one meter, and does nothing across pods. **Assumed default: meter runs single-replica** (`replicas: 1`, `strategy: Recreate` — Plan 05). With >1 replica, correctness depends entirely on the store's isolation, which is what Task 0b measures. | Stated, not hidden. A silent second replica is a silent budget escape. |
+| Two meter **replicas** race the same ceiling | ~~The per-project `keyedMutex` is **in-process**~~ **RESOLVED (Task 8 re-review, 2026-07-14): meter is multi-replica-safe.** The store enforces both money-safety properties across pods: overspend via `SELECT ... FOR UPDATE` (Task 6), and double-reserve of `/decide` via a partial `UNIQUE` index on the open `(project, bead_id, session_key)` key + an in-transaction pre-check under the same lock. Proven by `TestReserveIfFitsRace` and `TestReserveIsIdempotentAcrossReplicas` (both call the store DIRECTLY, no service mutex). The `keyedMutex` is now a throughput optimization only; AD-10's single-replica pin is **lifted**. | Both races close in the database, not in an in-process lock, so N pods are exactly as safe as one. |
 | A local rung burns the whole token budget **through LiteLLM** | LiteLLM's USD `max_budget` now covers it: local models carry a **synthetic** per-token price, and meter folds the token ceiling into the dollar ceiling it provisions (Decision 9). Meter's reservation gate refuses first; LiteLLM refuses if meter is wrong. | The token budget has a hard door **on that path**. |
 | **An agent pod calls Ollama (`http://192.168.1.142:11434`) DIRECTLY, around LiteLLM** | **NOTHING IN THIS PLAN STOPS IT.** Ollama needs no credential, and the NetworkPolicy that would forbid the egress **is not enforced** (Flannel; Cilium suspended). Zero metering, no ceiling, no attribution. | **NOT CLOSED.** Owner decision: ship, document, do not gate. **Local-model budgets are advisory** until Cilium lands; cloud-rung budgets are hard **only when the project also sets a finite `monthly_tokens`** (else `MaxBudgetFor` provisions no `max_budget` and the key is unbudgeted — see the row below). Plan 05 ships the policy; Plan 06 skip-tests it; un-skipping that test is the gate. |
 | **A project sets `monthly_cost_usd` finite but leaves `monthly_tokens` unlimited** | `MaxBudgetFor` returns `nil` (LiteLLM omits `max_budget`): the virtual key has **no hard door at all**, not even on cost. The choice is deliberate (LiteLLM unifies real + synthetic USD, so a `max_budget = cost` alone would let synthetic local dollars close the door early on legitimate local work), but the consequence is real: only meter's soft reservation-estimate gate protects the cost ceiling, and a runaway session can overshoot it. | **Known limitation** (see the note below the matrix). The hard cloud door requires a finite `monthly_tokens` too. Set both dimensions for a hard backstop. |
@@ -593,6 +593,12 @@ Twelve months of dashboards plus the current window. Dolt makes this cheap and t
 **AD-10 — Meter runs single-replica** (`replicas: 1`, `strategy: Recreate`).
 The per-project `keyedMutex` that makes `read-spend → decide → reserve` atomic is **in-process**. It does nothing across pods. Until Task 0b proves the store's isolation is sufficient on its own, a second replica is a budget escape.
 *Blast radius if wrong:* meter is a small stateless-ish service on the decision path, not the request path; a single replica costs a few seconds of unavailability on a rolling update, during which `/decide` is unreachable and the pack retries. That is the correct trade. **Carried to Plan 05.**
+
+> **UPDATE — AD-10 is LIFTED (Task 8 re-review, owner decision 2026-07-14).** The store now enforces BOTH money-safety properties across replicas, so the single-replica constraint is no longer a correctness requirement:
+> - **Overspend** — prevented by `SELECT ... FOR UPDATE` on the per-project lock row (proven since Task 6 by `TestReserveIfFitsRace`).
+> - **Double-reserve of `/decide`** — prevented by a **partial `UNIQUE` index** on the open `(project, bead_id, session_key)` key (`WHERE settled = false`), plus an in-transaction pre-check under the same lock. `ReserveIfFits` returns the pre-existing reservation instead of minting a duplicate. Proven against real Postgres by **`TestReserveIsIdempotentAcrossReplicas`** (32 concurrent reserves of one key, called directly on the store with NO service mutex → exactly one reservation, every iteration).
+>
+> The in-process `keyedMutex` is now a **throughput/ordering optimization only**; removing it breaks neither property (both race tests call the store directly). **Plan 05's chart may still DEFAULT to `replicas: 1`, but MUST NOT ship a single-replica hard-guard** — it is safe to scale out. The `strategy: Recreate` pin is likewise no longer required for correctness. Task 10 finalizes this in `docs/adr/ADR-004`.
 
 ### Owner decision needed (a fact only you have)
 
@@ -1275,7 +1281,7 @@ git commit -m "spike(meter): verify Dolt's isolation for the concurrent-reservat
 - Create: `pkg/budget/limits.go`, `pkg/budget/limits_test.go`
 - Create: `pkg/budget/remaining.go`, `pkg/budget/remaining_test.go`, `pkg/budget/mutation_test.go`
 
-- [ ] **Step 1: Write the failing limits test**
+- [x] **Step 1: Write the failing limits test**
 
 `pkg/budget/limits_test.go`:
 
@@ -1372,12 +1378,12 @@ func TestUnmarshalRejectsGarbage(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail**
+- [x] **Step 2: Run it, watch it fail**
 
 Run: `go test ./pkg/budget/ -v`
 Expected: FAIL — `no Go files` / undefined `Budget`, `CostLimit`, `TokenLimit`, `FromEffective`.
 
-- [ ] **Step 3: Implement `pkg/budget/limits.go`**
+- [x] **Step 3: Implement `pkg/budget/limits.go`**
 
 ```go
 // Package budget is the JSON-safe money layer over gonkcfg.EffectiveBudget.
@@ -1496,12 +1502,12 @@ func (b Budget) AllUnlimited() bool {
 }
 ```
 
-- [ ] **Step 4: Watch it pass**
+- [x] **Step 4: Watch it pass**
 
 Run: `go test ./pkg/budget/ -run 'Marshal|RoundTrip|Unmarshal' -v`
 Expected: PASS (5 tests).
 
-- [ ] **Step 5: Write the failing remaining-math test**
+- [x] **Step 5: Write the failing remaining-math test**
 
 `pkg/budget/remaining_test.go`:
 
@@ -1654,12 +1660,12 @@ func TestFits(t *testing.T) {
 }
 ```
 
-- [ ] **Step 6: Run it, watch it fail**
+- [x] **Step 6: Run it, watch it fail**
 
 Run: `go test ./pkg/budget/ -run 'Remain|Fits' -v`
 Expected: FAIL — undefined `Spend`, `Remaining`, `Remain`.
 
-- [ ] **Step 7: Implement `pkg/budget/remaining.go`**
+- [x] **Step 7: Implement `pkg/budget/remaining.go`**
 
 ```go
 package budget
@@ -1800,12 +1806,12 @@ func fits(rem TokenLimit, est int64) bool {
 }
 ```
 
-- [ ] **Step 8: Watch it pass**
+- [x] **Step 8: Watch it pass**
 
 Run: `go test ./pkg/budget/ -race -v`
 Expected: PASS (all).
 
-- [ ] **Step 9: Hoist the table into `remainCases()` FIRST (the mutation test needs it)**
+- [x] **Step 9: Hoist the table into `remainCases()` FIRST (the mutation test needs it)**
 
 In `remaining_test.go`, move the table out of `TestRemain` into a package-level helper. Do this **before** writing `mutation_test.go`, or the package will not compile between the two steps.
 
@@ -1839,7 +1845,7 @@ func TestUnlimitedSentinelIsInf(t *testing.T) {
 
 **A note on float equality.** These cases compare `float64` exactly, and they are chosen so that they can: every expected value is exactly representable and every sum is exact in binary64 (`0.40 + 0.25 == 0.65` holds exactly; `10 - (4 + 1.5) == 4.5` holds exactly). That is deliberate, not luck — **if you add a case, verify the arithmetic is exact, or use an epsilon comparison for that case.** A money table that fails on the last bit teaches everyone to stop trusting it.
 
-- [ ] **Step 10: Write the mutation test — prove the table is not vacuous**
+- [x] **Step 10: Write the mutation test — prove the table is not vacuous**
 
 `pkg/budget/mutation_test.go`. This is the requirement that Plan 01's review earned: a resolver that ignored every config layer passed its tests because the expectations happened to equal the defaults. Here we *sabotage* the implementation and demand the table notice.
 
@@ -1933,12 +1939,12 @@ func TestSaboteursAreCaught(t *testing.T) {
 }
 ```
 
-- [ ] **Step 11: Run the mutation test, watch every saboteur get caught**
+- [x] **Step 11: Run the mutation test, watch every saboteur get caught**
 
 Run: `go test ./pkg/budget/ -run Saboteurs -v`
 Expected: PASS. If any saboteur "survived every table row", **add a table row that catches it** — do not weaken the saboteur.
 
-- [ ] **Step 12: Full gate and commit**
+- [x] **Step 12: Full gate and commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run ./...
@@ -1957,7 +1963,7 @@ It also carries the two things `rung.Decide` needs that `.gonk.yml` cannot suppl
 - Create: `pkg/opercfg/gonk-operator.v1.schema.json`, `pkg/opercfg/opercfg.go`, `pkg/opercfg/opercfg_test.go`, `pkg/opercfg/testdata/schema.v1.sha256`, `pkg/opercfg/drift_test.go`
 - Create: `docs/schemas/gonk-operator.v1.schema.json` (published copy)
 
-- [ ] **Step 1: Write the canonical schema**
+- [x] **Step 1: Write the canonical schema**
 
 `pkg/opercfg/gonk-operator.v1.schema.json`:
 
@@ -2080,7 +2086,7 @@ It also carries the two things `rung.Decide` needs that `.gonk.yml` cannot suppl
 
 Note `$defs/policy` mirrors `.gonk.yml`'s shape minus `version` — deliberately, so `gonkcfg.Policy` decodes both. The `ladder` here gets `uniqueItems: true` for the same reason Plan 01 added it to the project schema (a duplicated rung makes escalation retry the same rung).
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `pkg/opercfg/opercfg_test.go`:
 
@@ -2325,12 +2331,12 @@ func TestCheckLadderOrder(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run it, watch it fail**
+- [x] **Step 3: Run it, watch it fail**
 
 Run: `go test ./pkg/opercfg/ -v`
 Expected: FAIL — undefined `Load`, `OperatorConfig`, `CheckLadderOrder`.
 
-- [ ] **Step 4: Implement `pkg/opercfg/opercfg.go`**
+- [x] **Step 4: Implement `pkg/opercfg/opercfg.go`**
 
 ```go
 // Package opercfg is the contract for gonk's OPERATOR configuration: instance
@@ -2851,12 +2857,12 @@ func rejectNonFinite(v any) error {
 
 **Note for the implementer:** `gonkcfg.Policy`'s YAML tags already match this schema's `$defs/policy` (that is why the schema mirrors `.gonk.yml`'s shape), so `yaml.Unmarshal` into `gonkcfg.Policy` works directly — including `TokenQuantity.UnmarshalYAML`, which is what rejects `monthly_tokens: 1.5` at the *type* level even though the schema's `oneOf` would let `2.0` through as a zero-fraction integer. Both layers must run; do not skip the decode.
 
-- [ ] **Step 5: Watch the tests pass**
+- [x] **Step 5: Watch the tests pass**
 
 Run: `go test ./pkg/opercfg/ -race -v`
 Expected: PASS. If `unknown timezone` fails, confirm `time.LoadLocation` has a tzdata source — see Task 8, which imports `_ "time/tzdata"` in `main.go` so the container image needs no zoneinfo files.
 
-- [ ] **Step 6: Publish the schema and gate it against drift**
+- [x] **Step 6: Publish the schema and gate it against drift**
 
 Same pattern as `pkg/gonkcfg` (Plan 01 Task 6).
 
@@ -2921,12 +2927,12 @@ func TestSchemaVersionConstMatchesEmbeddedSchema(t *testing.T) {
 }
 ```
 
-- [ ] **Step 7: Prove the gate gates**
+- [x] **Step 7: Prove the gate gates**
 
 Run: `printf ' ' >> pkg/opercfg/gonk-operator.v1.schema.json && go test ./pkg/opercfg/ -run Schema ; git checkout pkg/opercfg/gonk-operator.v1.schema.json`
 Expected: FAIL (both drift tests) while modified, then restored.
 
-- [ ] **Step 8: Full gate and commit**
+- [x] **Step 8: Full gate and commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run ./...
@@ -2942,7 +2948,7 @@ The month window is where clock skew becomes money. `Advance` is **monotone**: a
 
 **Files:** Create `pkg/spend/window.go`, `pkg/spend/window_test.go`, `pkg/spend/rows.go`, `pkg/spend/rows_test.go`
 
-- [ ] **Step 1: Write the failing window test**
+- [x] **Step 1: Write the failing window test**
 
 `pkg/spend/window_test.go`:
 
@@ -3029,9 +3035,9 @@ func TestSkewOK(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail.** Run: `go test ./pkg/spend/ -v` — FAIL, undefined `Window`/`MonthWindow`/`Advance`/`SkewOK`.
+- [x] **Step 2: Run it, watch it fail.** Run: `go test ./pkg/spend/ -v` — FAIL, undefined `Window`/`MonthWindow`/`Advance`/`SkewOK`.
 
-- [ ] **Step 3: Implement `pkg/spend/window.go`**
+- [x] **Step 3: Implement `pkg/spend/window.go`**
 
 ```go
 // Package spend is the ledger side of gonk-meter: the budget window that spend
@@ -3108,9 +3114,9 @@ func SkewOK(local, remote time.Time, max time.Duration) bool {
 }
 ```
 
-- [ ] **Step 4: Watch it pass.** Run: `go test ./pkg/spend/ -run 'Window|Advance|Skew' -v` — PASS.
+- [x] **Step 4: Watch it pass.** Run: `go test ./pkg/spend/ -run 'Window|Advance|Skew' -v` — PASS.
 
-- [ ] **Step 5: Write the failing rows test**
+- [x] **Step 5: Write the failing rows test**
 
 `pkg/spend/rows_test.go`:
 
@@ -3259,9 +3265,9 @@ func TestALateRowIsChargedToTheMonthItHappenedIn(t *testing.T) {
 }
 ```
 
-- [ ] **Step 6: Run it, watch it fail.** Run: `go test ./pkg/spend/ -run 'Totals|Dedupe|By' -v` — FAIL.
+- [x] **Step 6: Run it, watch it fail.** Run: `go test ./pkg/spend/ -run 'Totals|Dedupe|By' -v` — FAIL.
 
-- [ ] **Step 7: Implement `pkg/spend/rows.go`**
+- [x] **Step 7: Implement `pkg/spend/rows.go`**
 
 ```go
 package spend
@@ -3394,7 +3400,7 @@ func Dedupe(rows []Row) ([]Row, int) {
 }
 ```
 
-- [ ] **Step 8: Watch it pass, gate, commit**
+- [x] **Step 8: Watch it pass, gate, commit**
 
 ```bash
 go test ./pkg/spend/ -race -v
@@ -3414,7 +3420,7 @@ Two rules do the most work:
 
 **Files:** Create `pkg/rung/outcome.go`, `pkg/rung/decide.go`, `pkg/rung/decide_test.go`, `pkg/rung/mutation_test.go`
 
-- [ ] **Step 1: Write `pkg/rung/outcome.go` first (it is pure data, and the test needs it)**
+- [x] **Step 1: Write `pkg/rung/outcome.go` first (it is pure data, and the test needs it)**
 
 ```go
 package rung
@@ -3489,7 +3495,7 @@ func ConsecutiveInfraFailures(prior []Attempt, at string) int {
 }
 ```
 
-- [ ] **Step 2: Write the failing decision test**
+- [x] **Step 2: Write the failing decision test**
 
 `pkg/rung/decide_test.go`. Note the two rules this file obeys, both earned by Plan 01's review:
 
@@ -4059,9 +4065,9 @@ func TestDecideTableCoversTheContract(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run it, watch it fail.** Run: `go test ./pkg/rung/ -v` — FAIL, undefined `Decide`/`Input`/`Decision`.
+- [x] **Step 3: Run it, watch it fail.** Run: `go test ./pkg/rung/ -v` — FAIL, undefined `Decide`/`Input`/`Decision`.
 
-- [ ] **Step 4: Implement `pkg/rung/decide.go`**
+- [x] **Step 4: Implement `pkg/rung/decide.go`**
 
 ```go
 // Package rung is gonk's wait-vs-spend brain: given a project's resolved
@@ -4349,7 +4355,7 @@ func costStr(c budget.CostLimit) string {
 }
 ```
 
-- [ ] **Step 5: Implement `QuietHours` (append to `pkg/rung/outcome.go`)**
+- [x] **Step 5: Implement `QuietHours` (append to `pkg/rung/outcome.go`)**
 
 ```go
 // QuietHours is a resolved schedule.quiet_hours window (spec 5.4). It is
@@ -4423,9 +4429,9 @@ func (q *QuietHours) EndAfter(now time.Time) (time.Time, bool) {
 
 Add `"time"` to `outcome.go`'s imports (and `"fmt"`).
 
-- [ ] **Step 6: Watch the table pass.** Run: `go test ./pkg/rung/ -race -v` — PASS (all rows + both invariant tests).
+- [x] **Step 6: Watch the table pass.** Run: `go test ./pkg/rung/ -race -v` — PASS (all rows + both invariant tests).
 
-- [ ] **Step 7: Write the mutation test — prove the table cannot pass vacuously**
+- [x] **Step 7: Write the mutation test — prove the table cannot pass vacuously**
 
 `pkg/rung/mutation_test.go`. Same technique as Task 1, aimed at the money: each saboteur is a *plausible bug* someone will actually write. If the table lets one through, the table is the problem.
 
@@ -4596,12 +4602,12 @@ func TestSaboteursAreCaught(t *testing.T) {
 }
 ```
 
-- [ ] **Step 8: Run the mutation test**
+- [x] **Step 8: Run the mutation test**
 
 Run: `go test ./pkg/rung/ -run Saboteurs -v`
 Expected: PASS. Every saboteur must be caught. If one survives, **add a table row**.
 
-- [ ] **Step 9: Full gate and commit**
+- [x] **Step 9: Full gate and commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run ./...
@@ -4618,7 +4624,7 @@ git add pkg/rung && git commit -m "feat(rung): deterministic outcome-gated ladde
 
 **Files:** Create `internal/meter/tagmint/tagmint.go`, `internal/meter/tagmint/tagmint_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `internal/meter/tagmint/tagmint_test.go`:
 
@@ -4705,9 +4711,9 @@ func TestMintAcceptsRealisticValues(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail.** Run: `go test ./internal/meter/tagmint/ -v`
+- [x] **Step 2: Run it, watch it fail.** Run: `go test ./internal/meter/tagmint/ -v`
 
-- [ ] **Step 3: Implement `internal/meter/tagmint/tagmint.go`**
+- [x] **Step 3: Implement `internal/meter/tagmint/tagmint.go`**
 
 ```go
 // Package tagmint is the boundary where gonk's attribution tags are created.
@@ -4812,7 +4818,7 @@ func check(name, value string, pattern *regexp.Regexp) error {
 }
 ```
 
-- [ ] **Step 4: Watch it pass, gate, commit**
+- [x] **Step 4: Watch it pass, gate, commit**
 
 ```bash
 go test ./internal/meter/tagmint/ -race -v
@@ -4876,7 +4882,7 @@ unlimited-budget project. **Pick ONE convention and state it in both `dolt.go` a
 
 **Files:** Create `internal/meter/store/store.go`, `internal/meter/store/memory.go`, `internal/meter/store/dolt.go` (**gated on Task 0b**), `internal/meter/store/postgres.go` (**the OWNER-APPROVED CNPG fallback**), `internal/meter/store/storetest/suite.go`, `internal/meter/store/memory_test.go`, `internal/meter/store/dolt_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `internal/meter/store/memory_test.go`:
 
@@ -5104,9 +5110,9 @@ func must(t *testing.T, err error) {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail.** Run: `go test ./internal/meter/store/ -v`
+- [x] **Step 2: Run it, watch it fail.** Run: `go test ./internal/meter/store/ -v`
 
-- [ ] **Step 3: Implement `internal/meter/store/store.go` (the interface + types)**
+- [x] **Step 3: Implement `internal/meter/store/store.go` (the interface + types)**
 
 ```go
 // Package store is gonk-meter's derived state: project registrations, ladder
@@ -5302,7 +5308,7 @@ type Store interface {
 }
 ```
 
-- [ ] **Step 4: Implement `internal/meter/store/memory.go`**
+- [x] **Step 4: Implement `internal/meter/store/memory.go`**
 
 A single `sync.RWMutex` guarding maps. Key points the implementer must not get wrong (each is covered by a test above):
 
@@ -5574,7 +5580,7 @@ func (m *Memory) SetWindow(_ context.Context, w spend.Window) error {
 var _ Store = (*Memory)(nil)
 ```
 
-- [ ] **Step 5: Watch it pass, gate, commit**
+- [x] **Step 5: Watch it pass, gate, commit**
 
 ```bash
 go test ./internal/meter/store/ -race -v
@@ -5582,6 +5588,19 @@ gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run 
 git add internal/meter/store
 git commit -m "feat(meter): store interface + in-memory ledger (registrations, attempts, reservations, deduped spend)"
 ```
+
+**Deviation from this plan text, per the dispatching agent's explicit instruction (owner decision
+2026-07-14, Task 0b's spike result): the durable backend is Postgres, not Dolt.**
+`internal/meter/store/dolt.go` was never written; `internal/meter/store/postgres.go` (with
+`internal/meter/store/postgres_wire.go` for the +Inf-safe JSON convention) is the shipping
+backend, using `github.com/jackc/pgx/v5` and `SELECT ... FOR UPDATE` inside a transaction for
+`ReserveIfFits`'s atomicity. It is proven against a real Postgres server by
+`TestReserveIfFitsRace` (`internal/meter/store/postgres_race_test.go`, build-tagged
+`integration` so it never runs in the normal gate): 10/10 iterations won exactly 2 of 32 racing
+writers, zero overspend. The `storetest` conformance suite runs against both `Memory`
+(`memory_test.go`, normal gate) and `Postgres` (`postgres_test.go`, `integration`-tagged). The
+mysql/dolt spike dependency (`github.com/go-sql-driver/mysql`, `filippo.io/edwards25519`) and
+`internal/meter/store/dolt_race_test.go` were removed; `go mod tidy` is a no-op.
 
 ---
 
@@ -5593,7 +5612,7 @@ Everything that touches LiteLLM sits behind two interfaces with fakes. **The int
 
 **Files:** Create `internal/meter/litellm/admin.go`, `internal/meter/litellm/spendsource.go`, `internal/meter/litellm/fake.go`, `internal/meter/litellm/litellm_test.go`, `internal/meter/keysink/keysink.go`
 
-- [ ] **Step 1: Write the interfaces + fakes first (every later test depends on them)**
+- [x] **Step 1: Write the interfaces + fakes first (every later test depends on them)**
 
 `internal/meter/litellm/admin.go`:
 
@@ -5832,7 +5851,7 @@ var (
 )
 ```
 
-- [ ] **Step 2: Write the failing HTTP-adapter test**
+- [x] **Step 2: Write the failing HTTP-adapter test**
 
 `internal/meter/litellm/litellm_test.go` — an `httptest.Server` standing in for LiteLLM. Assert: the admin key goes in the `Authorization` header and **never** appears in an error message; an unlimited budget sends **no** `max_budget` field (not `null`, not `+Inf`); spend rows are parsed back into `atags.Tags` via `atags.FromMetadata`; a row whose metadata is missing or malformed is **skipped with a counter, not fatal** (an un-attributable call must not stall the ledger, but it must be visible); and the `Date` header is returned as the source clock.
 
@@ -6000,7 +6019,7 @@ func TestHTTPSpendSourceParsesTagsAndClock(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Implement the two HTTP adapters**
+- [x] **Step 3: Implement the two HTTP adapters**
 
 Guidance for the implementer (write these in `admin.go` and `spendsource.go`):
 
@@ -6017,7 +6036,7 @@ Guidance for the implementer (write these in `admin.go` and `spendsource.go`):
 - **`Since` must set `Row.Synthetic`** from the rung catalog: `catalog[tags.Rung].Kind == opercfg.KindLocal`. A rung the catalog has never heard of is **NOT synthetic** — fail closed, so an unknown rung's dollars count against the real money ceiling instead of being waved through as accounting fiction. Give the source the catalog at construction; it is the only place the flag can be set correctly, because LiteLLM has a single `spend` column and does not know the difference (Decision 9).
 - Poll with an **overlap**: the service passes `cursor - 2 * pollInterval`. `store.AddSpendRows` dedupes by `CallID`, so overlap is free and it closes the window where a row is written with a timestamp slightly before one we already consumed.
 
-- [ ] **Step 4: Implement `internal/meter/keysink/keysink.go`**
+- [x] **Step 4: Implement `internal/meter/keysink/keysink.go`**
 
 ```go
 // Package keysink is where a provisioned LiteLLM virtual key is put so that an
@@ -6122,7 +6141,7 @@ Write a `keysink_test.go` covering:
 - The result is a legal DNS-1123 subdomain (lowercase alphanumeric and `-`, starts and ends alphanumeric, <= 63 chars) — it becomes a Kubernetes Secret name in Plan 05.
 - `Put` is idempotent and returns the same `KeyRef` for the same project.
 
-- [ ] **Step 4b: Implement `internal/meter/keysink/k8s.go` — THE KUBERNETES SINK**
+- [x] **Step 4b: Implement `internal/meter/keysink/k8s.go` — THE KUBERNETES SINK**
 
 **This step exists because the plan previously did not have one, and said so:**
 *"`keysink.KeySink` has no Kubernetes implementation… gonk-meter cannot deliver
@@ -6251,7 +6270,7 @@ standing gate):
 Plan 05's `Role` actually permits these writes on a real API server is **Plan 06's**
 (it is in Plan 05's "what `helm template` cannot prove" list, item 6).
 
-- [ ] **Step 5: Watch it pass, gate, commit**
+- [x] **Step 5: Watch it pass, gate, commit**
 
 ```bash
 go test ./internal/meter/... -race -v
@@ -6271,7 +6290,7 @@ This is where the pure pieces become a program. The two things that must be righ
 
 **Files:** Create `internal/meter/service/service.go`, `internal/meter/service/http.go`, `internal/meter/service/service_test.go`, `internal/meter/service/http_test.go`, `cmd/gonk-meter/main.go`
 
-- [ ] **Step 1: Write the failing service test (registration + the fail-closed matrix)**
+- [x] **Step 1: Write the failing service test (registration + the fail-closed matrix)**
 
 `internal/meter/service/service_test.go`. Sketch of what each test asserts — write them all:
 
@@ -6431,9 +6450,9 @@ func TestColdStartDefersUntilTheFirstSync(t *testing.T)
 //   A brand-new service that has never synced: Ready() false, Decide defers.
 ```
 
-- [ ] **Step 2: Run them, watch them fail.** Run: `go test ./internal/meter/service/ -v`
+- [x] **Step 2: Run them, watch them fail.** Run: `go test ./internal/meter/service/ -v`
 
-- [ ] **Step 3: Implement `internal/meter/service/service.go`**
+- [x] **Step 3: Implement `internal/meter/service/service.go`**
 
 Structure (write the code; this is the shape it must have):
 
@@ -6634,7 +6653,7 @@ _ = s.store.RecordAttempt(ctx, req.Project, req.BeadID, res.ID, rung.Attempt{
 
 **`Ready()`**: `synced && skewOK`. `/readyz` returns 503 otherwise, so Kubernetes takes meter out of service rather than letting it answer with numbers it does not trust.
 
-- [ ] **Step 4: Implement `internal/meter/service/http.go`**
+- [x] **Step 4: Implement `internal/meter/service/http.go`**
 
 Go 1.22+ `ServeMux` patterns, wire types with explicit JSON tags matching the API section of this plan, and:
 
@@ -6648,7 +6667,7 @@ Go 1.22+ `ServeMux` patterns, wire types with explicit JSON tags matching the AP
 
 `http_test.go` drives the real mux with `httptest`: assert the JSON shapes character-for-character against golden files in `testdata/golden/*.json`, assert `401` without the bearer token, assert an unlimited budget renders `"monthly_cost_usd": null`, and assert that no response body anywhere contains the string `sk-` (the fake's token prefix).
 
-- [ ] **Step 5: Implement `cmd/gonk-meter/main.go`**
+- [x] **Step 5: Implement `cmd/gonk-meter/main.go`**
 
 ```go
 package main
@@ -6745,7 +6764,7 @@ func openStore(ctx context.Context) (store.Store, error) {
 
 **Both store implementations must pass `storetest.Suite` unchanged.** That suite is what makes `GONK_METER_STORE_BACKEND` a *switch* rather than a *fork*: if `ReserveIfFits` means something different on Postgres than on Dolt, the switch is a lie and the budget ceiling depends on which env var somebody set.
 
-- [ ] **Step 5b: The `testclock` seam (Plan 06 hand-back HB-3)**
+- [x] **Step 5b: The `testclock` seam (Plan 06 hand-back HB-3)**
 
 **Why this exists.** Month rollover, quiet-hours windows and `reservation_ttl`
 expiry are the three most important behaviours in this service, and **none of them
@@ -6823,7 +6842,7 @@ Ship it as an owner decision (**Plan 06's OD-7**), not silently. If it is refuse
 the rollover and quiet-hours behaviours are **L1-only forever**, and Plan 06 must
 say so in `docs/adr/ADR-006`.
 
-- [ ] **Step 6: Watch everything pass**
+- [x] **Step 6: Watch everything pass**
 
 ```bash
 go test ./internal/meter/... -race -count=1 -v
@@ -6831,7 +6850,7 @@ go test ./internal/meter/... -race -count=1 -v
 
 Expected: PASS, including `TestDecideIsSerializedPerProject` under `-race`.
 
-- [ ] **Step 7: Gate and commit**
+- [x] **Step 7: Gate and commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run ./...
@@ -6847,7 +6866,7 @@ Spec 8's required series, plus the cost API of spec 6.2. **One cardinality rule:
 
 **Files:** Create `internal/meter/metrics/metrics.go`, `internal/meter/metrics/metrics_test.go`; extend `internal/meter/service/http.go`
 
-- [ ] **Step 1: Add the dependency, pinned**
+- [x] **Step 1: Add the dependency, pinned**
 
 Everything else in this repo is pinned to an exact version (`golang:1.26`, `golangci-lint:v2.12.2`). Do not float this one.
 
@@ -6858,7 +6877,7 @@ go mod tidy
 
 (If v1.20.5 is unavailable, pin whatever exact version resolves and record it — the point is an exact tag in `go.mod`, not that particular number.)
 
-- [ ] **Step 2: Write the failing metrics test**
+- [x] **Step 2: Write the failing metrics test**
 
 Use `prometheus/client_golang/prometheus/testutil` to assert exposition text exactly.
 
@@ -6901,7 +6920,7 @@ func TestDecisionCounterUsesTheBoundedReasonSet(t *testing.T)
 
 **Dashboard rule, carried to Plan 05.** The shipped Cost dashboard must default to `synthetic="false"` on every money panel, and show synthetic spend only on a separate panel titled so a human cannot mistake it for real money (e.g. "Local inference — synthetic pricing (not billed)"). **Presenting a synthetic dollar as spend is the one way this decision can do real harm.**
 
-- [ ] **Step 3: Implement the collectors**
+- [x] **Step 3: Implement the collectors**
 
 | Metric | Type | Labels |
 |---|---|---|
@@ -6937,7 +6956,7 @@ spend_as_of`) stays as the *alerting* series; an age is right for "is this
 stale?", an absolute timestamp is right for "has my call landed yet?". Both, and
 they are cheap.
 
-- [ ] **Step 3b: `POST /admin/spend/sync` — the forced sync (Plan 06 hand-back HB-2)**
+- [x] **Step 3b: `POST /admin/spend/sync` — the forced sync (Plan 06 hand-back HB-2)**
 
 **Why this exists.** Meter's view of spend is a **poll** of LiteLLM's
 `/spend/logs` (Decision 11). Every assertion of the form *"the ledger now says the
@@ -6967,13 +6986,13 @@ Rules, and they are the same rules as everything else here:
 - `harness.forceSpendSync` calls it. Nothing else does, in production or otherwise
   — but it is safe if it is, which is why it is not gated behind a build tag.
 
-- [ ] **Step 4: Implement the cost API handlers**
+- [x] **Step 4: Implement the cost API handlers**
 
 `GET /v1/cost/bead/{bead_id}`, `/v1/cost/session/{session_key}`, `/v1/cost/project/{project}`, `/v1/cost/instance`, exactly the shapes in the API section above. Every response carries `as_of` (the last successful sync) and `complete` (false iff an open reservation exists for that scope). `GET /v1/cost/project/{p}` also carries `budget`, `remaining`, `window`, and `stale`.
 
 Test that `complete: false` appears while a reservation is open and flips to `true` once the outcome is reported and the spend row has landed — this is the field that stops a commit trailer from claiming a cost it does not yet know (spec 6.1).
 
-- [ ] **Step 5: Gate and commit**
+- [x] **Step 5: Gate and commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./... -race -count=1 && golangci-lint run ./...
@@ -7037,7 +7056,7 @@ And add to "Carried into later plans":
 
 - **Plan 02 (intake) — already reconciled, but restate it:** intake pushes **raw** `.gonk.yml` to `PUT /v1/projects/{project}` and **never calls `gonkcfg.Resolve`**. Anything requiring an `Effective` (enabled? ladder? budget?) comes from meter's response. Intake has **no quiet-hours code**. Intake **does** call `/policy/decide` as **Gate 1** (it gates the first dispatch and fires the order only on `run`); the pack's `gonk-dispatch` exec order calls it again as **Gate 2**, the enforcement point. `/decide` is idempotent on an open reservation so the two callers never double-reserve.
 - **Plan 04 (pack):** (a) the `gonk-dispatch` **exec order** (Gate 2, not the formula — a formula cannot make the call) must call `POST /v1/policy/decide` before every pour, **re-deciding every time and never trusting a rung/reservation passed in order vars** (a controller re-sling that trusted them would spend unmetered), and stamp the returned `metadata` **verbatim** as opencode's `x-litellm-spend-logs-metadata` header on every LiteLLM request; intake calls the same endpoint as Gate 1, and `/decide` is idempotent on an open reservation so the two never double-reserve; (b) it must **never** send an attempt count — meter owns ladder state; (c) a `defer` is a **normal answer**: park the bead in `waiting-for-capacity` and retry at `retry_after` (**this is where quiet hours land**, and it is the only place a deferral is handled); (d) a `deny`/`ladder-exhausted` labels the bead `gonk::needs-human` and stops (AD-6); (e) the gate step must call `POST /v1/policy/outcome` with a **strictly classified** outcome — if it reports an infra failure as `gate-failed`, it buys an escalation the project did not earn, and **that classification is the single most important thing the pack gets right**; (f) with `provenance.include_usage`, the session must **not write a cost trailer when the cost API returns `complete: false`** (AD-7) — it would publish a wrong number into permanent git history.
-- **Plan 05 (chart):** `internal/meter/keysink.K8s` is **this plan's** (Task 7 Step 4b); **the chart owns the `Role`, `RoleBinding` and `ServiceAccount` that make its writes legal, and the values that set `GONK_KEYSINK_NAMESPACE` / `GONK_KEYSINK_PREFIX`** (AD-1's ownership table). Without the Role, every `Put` is a `403`, every project sits in `key-missing`, and `/decide` defers forever — fail-closed, loud, and still broken. The chart must also set **`GONK_METER_STORE_BACKEND`** (`dolt`|`postgres`, no default) and **`GONK_METER_STORE_DSN_FILE`** (a file, from a Secret — the DSN carries a password), from `ledger.backend` and `secrets.ledger`. **Meter runs single-replica** (`replicas: 1`, `strategy: Recreate`) unless Task 0b proved the store's isolation is sufficient without it (AD-10). Secrets are **file mounts with two rotation slots** — `LITELLM_ADMIN_KEY_FILE`, `LITELLM_ADMIN_KEY_PREVIOUS_FILE`, `GONK_METER_TOKEN_FILE`, `GONK_METER_TOKEN_PREVIOUS_FILE` — from `existingSecret` refs, **never env values** (Decision 12). The operator config is a mounted ConfigMap, and **LiteLLM's price map must carry the same synthetic prices for local models as the rung catalog does** (Decision 9) — in the deployed instance that map is `clusters/orac/apps/litellm/litellm.yaml` → `spec.values.litellm_settings.model_cost_map` in the **gitops** repo, where **local models are priced at zero today**. The instance ladder must be non-empty (`opercfg.Load` refuses to start otherwise). The **Cost dashboard must default to `synthetic="false"`** and never present synthetic dollars as spend. And the chart must ship the egress NetworkPolicy **with the honest caveat that it is not enforced on this cluster** — see "What the hard door actually covers".
+- **Plan 05 (chart):** `internal/meter/keysink.K8s` is **this plan's** (Task 7 Step 4b); **the chart owns the `Role`, `RoleBinding` and `ServiceAccount` that make its writes legal, and the values that set `GONK_KEYSINK_NAMESPACE` / `GONK_KEYSINK_PREFIX`** (AD-1's ownership table). Without the Role, every `Put` is a `403`, every project sits in `key-missing`, and `/decide` defers forever — fail-closed, loud, and still broken. The chart must also set **`GONK_METER_STORE_BACKEND`** (`dolt`|`postgres`, no default) and **`GONK_METER_STORE_DSN_FILE`** (a file, from a Secret — the DSN carries a password), from `ledger.backend` and `secrets.ledger`. **Meter is multi-replica-safe (AD-10 LIFTED, Task 8 re-review 2026-07-14): the chart may DEFAULT to `replicas: 1` but MUST NOT hard-guard it, and `strategy: Recreate` is no longer a correctness requirement.** The store enforces overspend AND `/decide` double-reserve safety across pods (Postgres `SELECT ... FOR UPDATE` + a partial `UNIQUE` index on the open `(project, bead_id, session_key)` key), proven by `TestReserveIfFitsRace` and `TestReserveIsIdempotentAcrossReplicas`. Secrets are **file mounts with two rotation slots** — `LITELLM_ADMIN_KEY_FILE`, `LITELLM_ADMIN_KEY_PREVIOUS_FILE`, `GONK_METER_TOKEN_FILE`, `GONK_METER_TOKEN_PREVIOUS_FILE` — from `existingSecret` refs, **never env values** (Decision 12). The operator config is a mounted ConfigMap, and **LiteLLM's price map must carry the same synthetic prices for local models as the rung catalog does** (Decision 9) — in the deployed instance that map is `clusters/orac/apps/litellm/litellm.yaml` → `spec.values.litellm_settings.model_cost_map` in the **gitops** repo, where **local models are priced at zero today**. The instance ladder must be non-empty (`opercfg.Load` refuses to start otherwise). The **Cost dashboard must default to `synthetic="false"`** and never present synthetic dollars as spend. And the chart must ship the egress NetworkPolicy **with the honest caveat that it is not enforced on this cluster** — see "What the hard door actually covers".
 - **Plan 06 (e2e) — the hand-backs this plan now SATISFIES, so the harness never sleeps:** **HB-2** = `POST /admin/spend/sync` + the `gonk_meter_spend_synced_at_seconds` gauge (Task 9 Step 3b). **HB-3** = the `//go:build testclock` clock seam reading `GONK_TESTCLOCK_FILE` (Task 8 Step 5b) — and Plan 06 Task 9 Step 2 must assert the **production** image contains neither the symbol nor the literal, because a meter whose clock can be moved by a file is a meter whose budget window can be reset by anyone who can write that file.
 - **Plan 06 (e2e) — and it must ALSO verify:** none of the LiteLLM HTTP adapters have ever spoken to a real LiteLLM. Verify `/key/generate`, `/key/update`, `/key/delete`, and `/spend/logs` against the pinned version. Verify that a LiteLLM key's `budget_duration: "1mo"` resets on the **same boundary** as meter's UTC calendar month (AD-9) — if it is a rolling 30 days, the soft and hard doors reset on different days and that is a real defect. **Measure LiteLLM's actual spend-log lag** and confirm `max_spend_staleness` is set above it (Decision 11). **Verify a local model's synthetic price is configured identically in LiteLLM and in the rung catalog, and that the USD door actually closes on a local-only project that exhausts its token budget** — that is Decision 9's whole claim, and nothing before Plan 06 tests it against a real proxy. Confirm a dedicated (non-master) LiteLLM admin key can perform every admin call (OD-A). Also verify spec 11.5: budget exhaustion demonstrably blocks cloud rungs and produces `defer`.
 
