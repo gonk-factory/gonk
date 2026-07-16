@@ -6,7 +6,7 @@ Spec: docs/superpowers/specs/2026-07-12-gonk-stack-design.md
 |---|---|---|
 | 01 foundation & config contract | scaffold, CI, gonkcfg, atags | done |
 | 02 gitlab-intake | webhooks, reconciliation, onboarding MR | done |
-| 03 gonk-meter | rung policy, key provisioning, ledger | in progress (Task 0b spike done) |
+| 03 gonk-meter | rung policy, key provisioning, ledger | done |
 | 04 pack & images | agents/formulas/orders, docker images | not started |
 | 05 chart | Helm chart, BYO seams | not started |
 | 06 e2e harness | kind + gitlab-ce + stub model, kill tests | not started |
