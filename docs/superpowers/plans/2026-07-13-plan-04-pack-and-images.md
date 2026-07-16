@@ -872,7 +872,7 @@ Ingress exposes only `/hook/gitlab`).
 - Create: `pkg/gcapi/client.go`, `pkg/gcapi/gcapitest/server.go`
 - Test: `pkg/gcapi/client_test.go`
 
-- [ ] **Step 1: Write the failing test** — `pkg/gcapi/client_test.go`
+- [x] **Step 1: Write the failing test** — `pkg/gcapi/client_test.go`
 
 ```go
 package gcapi
@@ -1000,12 +1000,12 @@ func TestNilVarsSendsEmptyObject(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `go test ./pkg/gcapi/ -v`
 Expected: FAIL — undefined `New`, `Client`, `RunOrder`, `IsNotFound`.
 
-- [ ] **Step 3: Implement `pkg/gcapi/client.go`**
+- [x] **Step 3: Implement `pkg/gcapi/client.go`**
 
 ```go
 // Package gcapi is a minimal typed client for the ONE Gas City supervisor route
@@ -1163,7 +1163,7 @@ Add the two helpers (`readCapped`, `truncate`) with the same semantics as
 `pkg/glab/client.go` (Plan 02, Task 1) — cap the body, error rather than
 truncate, never embed a credential in an error string.
 
-- [ ] **Step 4: Implement `pkg/gcapi/gcapitest/server.go`**
+- [x] **Step 4: Implement `pkg/gcapi/gcapitest/server.go`**
 
 An in-memory supervisor for the rest of the plan's tests. Behaviour contract:
 
@@ -1190,12 +1190,12 @@ func (s *Server) Client(city string) *gcapi.Client
 func (s *Server) PouredNames() []string  // convenience for assertions
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `go test ./pkg/gcapi/... -race -count=1 -v`
 Expected: PASS (6 tests).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 gofmt -l . && go vet ./pkg/gcapi/... && go test ./pkg/gcapi/... -race -count=1

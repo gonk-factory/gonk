@@ -7,7 +7,7 @@ Spec: docs/superpowers/specs/2026-07-12-gonk-stack-design.md
 | 01 foundation & config contract | scaffold, CI, gonkcfg, atags | done |
 | 02 gitlab-intake | webhooks, reconciliation, onboarding MR | done |
 | 03 gonk-meter | rung policy, key provisioning, ledger | done |
-| 04 pack & images | agents/formulas/orders, docker images | not started |
+| 04 pack & images | agents/formulas/orders, docker images | in progress (Task 2 done) |
 | 05 chart | Helm chart, BYO seams | not started |
 | 06 e2e harness | kind + gitlab-ce + stub model, kill tests | not started |
 
@@ -55,6 +55,29 @@ Update the Status column as tasks complete (house rule: progress lives here).
 - `cmd/gonk-intake` — the binary: file-mounted secrets only (never an env
   value), the bot-identity refusal (wrong token owner refuses to start), and
   `ADR-003` (the trust-boundary decisions this plan locks in).
+
+## Contracts published by plan 04 (Task 2, in progress)
+
+- `pkg/gcapi` (+ `pkg/gcapi/gcapitest`) — the real Gas City supervisor
+  order-run client, closing Plan 02's OD-A: `POST
+  /v0/city/{cityName}/order/{name}/run`, body `{"vars":{...}}`, response
+  `{status, scoped_name, tracking_id}`. Bounded retry (`MaxRetries`, default
+  3) on 429/5xx only, a 64 KiB response cap (`readCapped`, error not
+  truncate), `APIError`/`IsNotFound`, and an empty `City` refused at call
+  time rather than silently building `/v0/city//order/...`. Order name and
+  city are `url.PathEscape`d, never concatenated. `APIError` carries only the
+  RESPONSE status/path/body — never the request's `vars` — so a `key_ref`
+  (a Secret NAME, never key material) cannot leak into a log line via
+  `err.Error()`. `gcapitest.Server` is an in-memory fake recording every
+  `Pour` (order + vars) for Task 3's dispatch/re-sling tests, with an
+  injectable `Fail` count per order name to drive the retry path. **Not yet
+  wired in**: `pkg/intake.HTTPDispatcher` (the Plan 02 interim client) still
+  exists unchanged — Task 2's brief was `pkg/gcapi` itself, not swapping
+  callers. The wire shape is verified byte-identical to `HTTPDispatcher`'s
+  (same route, same `{"vars":{...}}` envelope), so a later swap (or a thin
+  wrapper) is a no-op; whichever plan/task wires it into `cmd/gonk-gate`
+  (Task 3) or replaces `HTTPDispatcher` should do so deliberately, not by
+  accident of import order.
 
 ## Carried into later plans
 
