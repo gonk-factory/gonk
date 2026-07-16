@@ -1,0 +1,32 @@
+#!/bin/sh
+# git prepare-commit-msg hook: installed into the rig clone's .git/hooks/ at
+# session start by images/agent/entrypoint.sh (AD-4 -- commit provenance is a
+# git hook, not agent prose, because a trailer the agent is ASKED to write is
+# a trailer the agent will sometimes forget, reword, or hallucinate a cost
+# into).
+#
+# *** PROVISIONAL STUB. Task 8 ("commit provenance trailers") owns this file
+# and cmd/gonk-gate/trailers.go, which does not exist yet at Task 5 time
+# (confirmed: cmd/gonk-gate/main.go has no `trailers` subcommand as of
+# 2026-07-16). Task 5's own Dockerfile.agent COPIES this path, so it must
+# exist for the image to build -- this stub is a harmless passthrough (it
+# never modifies the commit message) so the image is buildable and no commit
+# is ever blocked on a missing feature. Task 8 replaces the body with a call
+# to `gonk-gate trailers` (spec 6.1: Generated-By/Gonk-Bead/Gonk-Session/
+# Gonk-Rung/Gonk-Attempt, and Gonk-Usage: pending|<number> per AD-5). ***
+#
+# git's own contract: $1 = path to the commit message file, $2 = source
+# (message|template|merge|squash|commit, optional), $3 = a commit SHA1 (only
+# when $2 is "commit"). A prepare-commit-msg hook edits $1 in place; it must
+# never fail the commit over a metadata footer.
+set -eu
+
+if command -v gonk-gate >/dev/null 2>&1 && gonk-gate trailers --help >/dev/null 2>&1; then
+	# Task 8 has landed in this image; defer to it entirely.
+	exec gonk-gate trailers "$@"
+fi
+
+# No trailers subcommand yet -- leave the message untouched. Losing a commit
+# over an unimplemented footer would be a far worse trade than a commit with
+# no trailers.
+exit 0

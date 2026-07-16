@@ -7,7 +7,7 @@ Spec: docs/superpowers/specs/2026-07-12-gonk-stack-design.md
 | 01 foundation & config contract | scaffold, CI, gonkcfg, atags | done |
 | 02 gitlab-intake | webhooks, reconciliation, onboarding MR | done |
 | 03 gonk-meter | rung policy, key provisioning, ledger | done |
-| 04 pack & images | agents/formulas/orders, docker images | in progress (Tasks 2, 4 done) |
+| 04 pack & images | agents/formulas/orders, docker images | in progress (Tasks 2, 4, 5 done) |
 | 05 chart | Helm chart, BYO seams | not started |
 | 06 e2e harness | kind + gitlab-ce + stub model, kill tests | not started |
 
@@ -156,6 +156,89 @@ Update the Status column as tasks complete (house rule: progress lives here).
      but the agent will not know which thread to answer in until this is
      added (a `dispatchArgs.DiscussionID` field, an `envArg("discussion_id")`
      read in `main.go`, and a `vars["discussion_id"]` entry in the pour).
+
+## Contracts published by plan 04 (Task 5)
+
+- `images/versions.env` — the ONE file every image pin lives in. Real,
+  verified pins (not guessed): `OPENCODE_VERSION=1.18.3` (OD-3 settled —
+  npm `opencode-ai`'s `latest` dist-tag as of 2026-07-16; the matching
+  `github.com/anomalyco/opencode` release ships a self-contained
+  `opencode-linux-x64.tar.gz`, sha256-verified in the Dockerfile — note
+  upstream `sst/opencode` release URLs redirect to `anomalyco/opencode`),
+  `GLAB_VERSION=1.108.0` / `BD_VERSION=1.0.3` (match the `glab`/`bd` already
+  on this box; fetched from their real release artifacts with sha256
+  checksums verified in-Dockerfile — a mismatch fails the build), `GASCITY_REF`
+  carried over from Task 4, and `DEBIAN_BASE` / the `golang` build stage
+  pinned by **digest** (`Docker-Content-Digest` header, resolved live, not
+  guessed) ahead of Task 7's own digest-pinning gate.
+- `images/Dockerfile.agent` — multi-stage (gonk-gate build stage; a `fetch`
+  stage for opencode/glab/bd so `curl`/`tar` never ship in the runtime image
+  and a checksum mismatch fails the BUILD; the runtime stage). Runs as
+  `65532:65532`, `SSL_CERT_FILE`/`GIT_SSL_CAINFO` point at the private-CA
+  mount, no `InsecureSkipVerify` anywhere. Builds clean with `make images`
+  (podman, `--network=host`) — verified for real, ~2m8s, image then removed
+  to avoid leaving ~560MB of cruft on this sandbox.
+- `images/agent/entrypoint.sh` — the attribution seam (OD-7), VERIFIED against
+  opencode's own source at the pinned tag (not assumed): `@ai-sdk/openai-compatible`
+  is compiled into the opencode binary (no npm-registry egress at session
+  start — matters for spec 9's "agent pods reach only GitLab and LiteLLM"),
+  `provider.gonk.options.headers["x-litellm-spend-logs-metadata"]` is
+  rendered with `jq` (not string concatenation, so an embedded quote in the
+  metadata JSON cannot corrupt the config) from `GC_WEBHOOK_ARG_METADATA_JSON`
+  stamped verbatim, and the virtual key is opencode's own `{file:<path>}`
+  config substitution — `entrypoint.sh` never reads the key into its own
+  process at all. Proven in a running container
+  (`test/images/agent_smoke_test.go`'s
+  `TestAgentImageAttributionOverlayCarriesAllSevenAtags`, which round-trips
+  the rendered header through `pkg/atags.FromMetadata` itself, not a
+  hand-copied key list).
+- `images/agent/prepare-commit-msg` — a **provisional passthrough stub**
+  (Task 8 owns the real body; Task 5's own Dockerfile COPIES this path, so it
+  has to exist to build). Defers to `gonk-gate trailers` the moment that
+  subcommand exists; never blocks a commit.
+- `Makefile` targets `images` (agent only for now — Task 6/7 each add their
+  own Dockerfile's build line), `push` (correct, not run — no LAN reach to
+  `registry.orac.local` from this sandbox), `no-latest` (Task 7's exact gate,
+  working today; note the banned substring is assembled via `$(empty)` so the
+  check's OWN source line does not trip itself), and `pack-validate` (fails
+  loud with a named reason — Task 6's real-loader validation does not exist
+  yet; this is deliberately NOT a silent no-op).
+- `test/images/agent_smoke_test.go` (build tag `images`) — 5 tests, all real,
+  all run against a live built container: pinned-version assertions
+  (opencode/glab/bd), git works, non-root (`65532`), gonk-gate binary present
+  with its documented exit-code contract, and the attribution overlay test
+  above. One named skip: `gonk-gate --version`/`trailers --help` (see gaps
+  below).
+- **Two gaps found and flagged, not silently patched:**
+  1. **`cmd/gonk-gate` has no `--version` flag and no `trailers` subcommand**
+     (confirmed against `main.go`, 2026-07-16). `trailers` is Task 8's own
+     file — out of Task 5's remit. `--version` is a smaller, cross-task gap:
+     both this task's own smoke-test wishlist AND Task 6's controller smoke
+     test want it, so it is not exclusively Task 8's problem — whichever
+     task adds `var version string` + a `--version`/`-v` check to
+     `cmd/gonk-gate/main.go` closes it for everyone. Until then,
+     `images/Dockerfile.agent`'s `-ldflags -X main.version=...` is a
+     harmless no-op linker directive (confirmed: `-X` on a nonexistent
+     symbol does not fail a Go build).
+  2. **The virtual key's file-mount path has no owner yet.**
+     `cmd/gonk-gate/dispatch.go` hands the pack `key_secret_name` +
+     `key_secret_key` — a Kubernetes Secret name + key — as order vars.
+     Turning that into an actual Secret volume mount on the agent POD is a
+     Gas City session-provider / chart concern Task 5 cannot reach (it owns
+     the image and its entrypoint, not the pod spec). `entrypoint.sh` reads
+     the key's path from `GONK_LITELLM_KEY_FILE` (one more `*_FILE` env var,
+     matching every other secret in this repo) and refuses to start if it is
+     unset or missing — but nothing yet sets `GONK_LITELLM_KEY_FILE` to
+     wherever the Secret named by `key_secret_name`/`key_secret_key` actually
+     lands. **Flagged for Plan 05 (chart / session-provider pod spec) or
+     Plan 06 (live wiring) to close.**
+- **Plan 06 must live-verify**: the attribution overlay is confirmed against
+  opencode's own source at the pin (compiled code, not documentation), but
+  NOT against a real request reaching a real LiteLLM through a real running
+  opencode process — `docs/environment.md`'s own smoke test used a hand-built
+  HTTP request, not opencode itself. A future opencode version bump must
+  re-confirm `provider.<id>.options.headers` still exists at the new pin
+  before trusting it (Task 5 Step 4's own instruction).
 
 ## Carried into later plans
 

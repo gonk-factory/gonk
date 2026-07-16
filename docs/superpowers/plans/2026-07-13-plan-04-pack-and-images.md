@@ -2524,7 +2524,7 @@ Renovate autodiscovers and bumps them).
 - Create: `Makefile` (targets: `images`, `push`, `pack-validate`, `no-latest`, `lint-pack`)
 - Test: `test/images/agent_smoke_test.go` (build tag `images`)
 
-- [ ] **Step 1: Write `images/versions.env` — one file, every pin**
+- [x] **Step 1: Write `images/versions.env` — one file, every pin**
 
 ```sh
 # EVERY pin lives here. Renovate bumps this file. NOTHING may say `latest`.
@@ -2553,7 +2553,7 @@ GASCITY_REF=           # the SHA recorded in Task 4 Step 1
 DEBIAN_BASE=          # e.g. debian:trixie-slim@sha256:...  -- pin the DIGEST
 ```
 
-- [ ] **Step 2: Write `images/Dockerfile.agent`**
+- [x] **Step 2: Write `images/Dockerfile.agent`**
 
 Derive the base layout from gascity's own `contrib/k8s/Dockerfile.agent` (**MIT — a
 legitimate basis**). Do **not** look at any pack repo.
@@ -2612,7 +2612,7 @@ USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/gonk-agent-entrypoint"]
 ```
 
-- [ ] **Step 3: Write `images/agent/entrypoint.sh`**
+- [x] **Step 3: Write `images/agent/entrypoint.sh`**
 
 It does exactly three things, in order:
 
@@ -2627,7 +2627,7 @@ It does exactly three things, in order:
    **`GC_WEBHOOK_ARG_METADATA_JSON`, stamped verbatim** (see **OD-7 — VERIFIED**).
 3. `exec` opencode.
 
-- [ ] **Step 4: OD-7 — render the VERIFIED metadata seam**
+- [x] **Step 4: OD-7 — render the VERIFIED metadata seam**
 
 The mechanism is **verified**, not open (live LiteLLM v1.92.0, 2026-07-13;
 `docs/environment.md`, "VERIFIED: the attribution chain works"). The config key is
@@ -2660,7 +2660,7 @@ value is the verbatim seven-key `DecideResponse.Metadata` JSON. Spec goal 4
 **Record the rendered config in ADR-004** and hand the live verification to
 Plan 06 (new item — see hand-offs).
 
-- [ ] **Step 5: Build it, and smoke-test it in a container**
+- [x] **Step 5: Build it, and smoke-test it in a container**
 
 House rule: *if an app runs in a container, test it in a container.*
 
@@ -2689,12 +2689,80 @@ id -u                == 65532             (not root)
 
 Run: `go test ./test/images/ -tags images -run Agent -v`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add images Makefile test/images
 git commit -m "feat(images): pinned opencode agent image with git, glab, bd and gonk-gate"
 ```
+
+**Done (2026-07-16). Real, verified pins, not guessed:**
+- **OD-3 settled**: `OPENCODE_VERSION=1.18.3` (npm `opencode-ai` dist-tag `latest`
+  as of 2026-07-16; `github.com/anomalyco/opencode` release `v1.18.3` — note the
+  upstream `sst/opencode` release redirects there — ships a self-contained
+  `opencode-linux-x64.tar.gz`, sha256 verified and pinned in the Dockerfile).
+  `GLAB_VERSION=1.108.0` and `BD_VERSION=1.0.3` match the `glab`/`bd` already
+  installed on this box; both fetched from their real release artifacts
+  (gitlab.com generic package registry; `github.com/gastownhall/beads`) with
+  sha256 checksums verified in-Dockerfile (a mismatch fails the BUILD, not a
+  running pod). `DEBIAN_BASE` and the `golang` build-stage base are pinned by
+  **digest** (`Docker-Content-Digest` header, not guessed), ahead of Task 7's
+  own `TestBaseImagesArePinnedByDigest`.
+- **The attribution overlay is real, not assumed**: cloned
+  `github.com/anomalyco/opencode` at the pinned tag and confirmed
+  `provider.<id>.options.headers` (packages/opencode/src/session/llm/native-runtime.ts,
+  packages/opencode/src/provider/provider.ts's `BUNDLED_PROVIDERS` map — `@ai-sdk/openai-compatible`
+  is COMPILED IN, no npm-registry fetch at session start, so spec 9's
+  "agent pods reach only GitLab and LiteLLM" holds) and opencode's own
+  `{file:<path>}` config-variable substitution
+  (packages/opencode/src/config/variable.ts) for the virtual key — the
+  entrypoint never reads the key into its own env or a shell variable at all.
+  `entrypoint.sh` renders `overlay/opencode.json` with `jq` (not string
+  concatenation, so an embedded quote in the metadata JSON cannot corrupt the
+  config) and was proven, in a running container, to carry all seven
+  `pkg/atags` keys round-tripped through `atags.FromMetadata` itself
+  (`test/images/agent_smoke_test.go`'s
+  `TestAgentImageAttributionOverlayCarriesAllSevenAtags`). **Still Plan
+  06's to verify live**: this is opencode's own source at the pin, not a
+  request that actually reached LiteLLM through opencode itself (the
+  environment.md smoke test used a hand-built HTTP request).
+- **Two gaps found and flagged, not silently patched**:
+  1. `cmd/gonk-gate` has **no `--version` flag and no `trailers` subcommand**
+     (confirmed against `main.go`). `trailers` is squarely Task 8's own file
+     (`cmd/gonk-gate/trailers.go`) — out of this task's remit. `--version` is
+     smaller and wanted by **both** this task's own smoke-test wishlist and
+     Task 6's controller smoke test, so it is a cross-task gap, not a
+     Task-8-only one; `images/Dockerfile.agent`'s `-ldflags -X main.version=`
+     is a harmless no-op linker directive until some task adds `var version
+     string`. `images/agent/prepare-commit-msg` is a **provisional
+     passthrough stub** (Task 5's own Dockerfile step COPIES a file Task 8's
+     file list says Task 8 creates — an ordering wrinkle in the plan itself)
+     that defers to `gonk-gate trailers` the moment it exists and otherwise
+     never blocks a commit. `test/images/agent_smoke_test.go` skips the
+     `--version`/`trailers --help` assertions with a named reason rather than
+     asserting something false.
+  2. **The virtual key's file-mount path has no owner yet.**
+     `cmd/gonk-gate/dispatch.go` hands the pack `key_secret_name` +
+     `key_secret_key` (a Kubernetes Secret name + key) as order vars; turning
+     that into an actual Secret volume mount on the agent POD is a Gas City
+     session-provider / chart concern this task cannot reach (Task 5 is the
+     image and its entrypoint, not the pod spec). `entrypoint.sh` reads the
+     key's path from `GONK_LITELLM_KEY_FILE` (one more `*_FILE` env var,
+     matching every other secret in this repo) and refuses to start if it is
+     unset or the file is missing — but **something in Plan 05/06 must set
+     `GONK_LITELLM_KEY_FILE` to wherever the Secret named by
+     `key_secret_name`/`key_secret_key` actually lands**, and nothing does
+     that yet. Flagged for whichever of Plan 05 (chart / session-provider
+     pod spec) or Plan 06 (live wiring) owns it.
+- **Push deferred, not blocked on**: `make push` exists and is correct, but
+  this sandbox has no LAN reach to `registry.orac.local`
+  (docs/environment.md) — not run this session. `make images` (agent only;
+  Task 6/7 extend it to controller/intake/meter) was run for real:
+  `podman build --network=host ...` succeeded in ~2m8s, and
+  `go test ./test/images/ -tags images -run Agent -v` passed (5 tests, 1
+  named skip) against the real, running container. The built image was
+  removed afterward (`podman rmi` + `system prune`) to avoid leaving ~560MB
+  of cruft on this box.
 
 ---
 
