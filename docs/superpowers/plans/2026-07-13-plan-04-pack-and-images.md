@@ -545,7 +545,7 @@ expensive rung. There is no LLM in this function and there never will be.
 - Create: `pkg/gate/outcome.go`, `pkg/gate/marker.go`
 - Test: `pkg/gate/outcome_test.go`, `pkg/gate/marker_test.go`
 
-- [ ] **Step 1: Write the failing test** — `pkg/gate/outcome_test.go`
+- [x] **Step 1: Write the failing test** — `pkg/gate/outcome_test.go`
 
 ```go
 package gate
@@ -683,12 +683,12 @@ func TestMarkerRoundTrip(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `go test ./pkg/gate/ -v`
 Expected: FAIL — no Go files / undefined `Classify`, `Signals`, `Escalates`, `BeadMarker`.
 
-- [ ] **Step 3: Implement `pkg/gate/outcome.go`**
+- [x] **Step 3: Implement `pkg/gate/outcome.go`**
 
 ```go
 // Package gate is gonk's deterministic outcome classifier: the pure function
@@ -794,7 +794,7 @@ session provider**, which is not in the facts available to this plan.
 already evict pods); if it is common, it becomes an upstream ask. Put this
 paragraph in ADR-004 verbatim.
 
-- [ ] **Step 4: Implement `pkg/gate/marker.go`**
+- [x] **Step 4: Implement `pkg/gate/marker.go`**
 
 ```go
 package gate
@@ -821,7 +821,7 @@ func MarkerPresent(body, beadID string) bool {
 }
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `go test ./pkg/gate/ -race -count=1 -v`
 Expected: PASS (5 tests, ~30 subtests).
@@ -834,7 +834,7 @@ grep -rniE "openai|litellm|prompt|llm|model\." pkg/gate/ && echo "FAIL: a judge 
 
 Expected: `ok`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 gofmt -l . && go vet ./pkg/gate/ && go test ./pkg/gate/ -race -count=1

@@ -358,6 +358,15 @@ dashboarded as though that day has already come.
 
 ## Known limits
 
+- **`pkg/gate.Classify`'s one known false positive — record it, do not hide
+  it.** A pod evicted *after* at least one successful completion but
+  *before* posting its comment classifies as `gate-failed` and buys **one**
+  unearned escalation. It is bounded (one rung, one attempt) and the
+  escalated attempt still passes `/decide`, so it cannot exceed budget.
+  Closing it properly needs a **pod-termination signal from Gas City's
+  session provider**, which is not in the facts available to this plan.
+  Hand-off: Plan 06 should measure how often it fires (K-series kill tests
+  already evict pods); if it is common, it becomes an upstream ask.
 - **The network-layer bypass, above** — restated here for emphasis: this
   is not a corner case, it is the honest current state of the strongest
   claim this system makes, and grepping the diff for "cannot be bypassed"
