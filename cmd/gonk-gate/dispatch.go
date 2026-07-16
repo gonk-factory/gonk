@@ -164,10 +164,18 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 		"rig":         a.Rig,
 		"issue_iid":   fmt.Sprint(a.IssueIID),
 		"bead_anchor": a.BeadAnchor,
-		"bead_id":     a.BeadID,
-		"session_key": a.SessionKey,
-		"trigger":     a.Trigger,
-		"config_hash": a.ConfigHash,
+		// NOT "bead_id": formulas v2 reserves that exact key (alongside
+		// convoy_id and the deprecated issue alias) and Gas City's
+		// graphv2.PrepareInvocation rejects ANY caller-supplied vars map that
+		// contains it -- "formulas v2 reserved variable \"bead_id\" cannot be
+		// supplied by the caller" -- regardless of whether the formula
+		// declares it. Every pour here targets a formula order
+		// (orderForTrigger's values), so this map IS that caller-supplied
+		// vars map. See pack/formulas/*.toml's matching comment.
+		"city_bead_id": a.BeadID,
+		"session_key":  a.SessionKey,
+		"trigger":      a.Trigger,
+		"config_hash":  a.ConfigHash,
 
 		// From meter, verbatim. The pack does not choose a rung, does not choose a
 		// model, and does not mint a tag.

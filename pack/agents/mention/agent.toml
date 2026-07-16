@@ -1,0 +1,10 @@
+# agents/mention/agent.toml -- THE DIRECTORY NAME ("mention") IS THE AGENT
+# NAME. A `name` field here would be ignored by the loader (pack-spec.md
+# 1.2.4). Do not add one and believe it.
+
+description = "Replies, in-thread, to an @gonk mention on a GitLab issue or MR."
+
+# No model name here -- see agents/triage/agent.toml's comment; the same
+# reasoning applies verbatim to every agent in this pack.
+
+min_active_sessions = 0

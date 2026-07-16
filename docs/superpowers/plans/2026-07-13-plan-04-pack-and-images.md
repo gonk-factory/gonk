@@ -2056,7 +2056,7 @@ git commit -m "feat(gonk-gate): deterministic dispatch gate, outcome sweeper, an
    A guess here is caught by Task 6 (the real loader), but only after you have
    written it wrong.
 
-- [ ] **Step 1: Pin gascity and transcribe the exact key names — do not guess**
+- [x] **Step 1: Pin gascity and transcribe the exact key names — do not guess**
 
 ```bash
 mkdir -p /tmp/gonk-upstream && cd /tmp/gonk-upstream
@@ -2082,7 +2082,7 @@ Read, and write the exact key names into a scratch note before writing any TOML:
 **Confirm the licence:** `LICENSE` in `gascity` says MIT. `gascity-packs` has none.
 If that has changed, stop and tell the owner.
 
-- [ ] **Step 2: Write `pack/pack.toml`**
+- [x] **Step 2: Write `pack/pack.toml`**
 
 ```toml
 # gonk -- a Gas City pack. Clean-room from the MIT gascity specs
@@ -2163,7 +2163,7 @@ command = "gonk-gate doctor --no-model-names"
 is not the exact shape `pack-spec.md` gives, use the shape it gives — this plan is
 authoritative about *what the checks are for*, not about the loader's grammar.
 
-- [ ] **Step 3: Write the agents** — `agents/<name>/agent.toml` + `prompt.template.md`
+- [x] **Step 3: Write the agents** — `agents/<name>/agent.toml` + `prompt.template.md`
 
 **The directory name IS the agent name.** A `name` field inside `agent.toml` is
 ignored — do not put one there and then believe it.
@@ -2237,7 +2237,7 @@ same marker.
 **One rule across all three prompts, and it is the only one with teeth:**
 *the agent must emit the marker, and the gate reads nothing else.*
 
-- [ ] **Step 4: Write the formulas** — `pack/formulas/*.toml`
+- [x] **Step 4: Write the formulas** — `pack/formulas/*.toml`
 
 ```toml
 # pack/formulas/gonk-triage.toml
@@ -2286,7 +2286,7 @@ command = "scripts/gonk-check.sh"
 `gonk-scaffold.toml` and `gonk-mention.toml` are the same shape with their own
 agent and their own `check` arguments.
 
-- [ ] **Step 5: Write the orders** — `pack/orders/*.toml`
+- [x] **Step 5: Write the orders** — `pack/orders/*.toml`
 
 **The rule: an order is `formula` XOR `exec`. Never both. And an EXEC ORDER MAY
 NOT HAVE A POOL.**
@@ -2398,7 +2398,7 @@ exec gonk-gate dispatch
 **Keep them at four lines.** Logic that creeps into a shell script is logic with
 no tests. If you find yourself writing an `if` here, it belongs in `dispatch.go`.
 
-- [ ] **Step 6: Write the structural validation test** — `internal/packtest/pack_test.go`
+- [x] **Step 6: Write the structural validation test** — `internal/packtest/pack_test.go`
 
 This is the "test" for the declarative artifacts, and it runs with **no Gas City,
 no containers, and no network**. It is not a substitute for the real loader
@@ -2473,7 +2473,7 @@ func TestEveryPromptEmitsTheBeadMarker(t *testing.T) {
 }
 ```
 
-- [ ] **Step 7: The anti-drift greps — and they go in the standing gate**
+- [x] **Step 7: The anti-drift greps — and they go in the standing gate**
 
 ```bash
 # AD-1: THE PACK NAMES NO MODEL. Rungs map to models in the OPERATOR's catalog
@@ -2495,7 +2495,7 @@ grep -rn "gonk-gate" pack/scripts/ | grep -c "" # each script is a one-line exec
 Wire all three into `make lint-pack`, and call `make lint-pack` from the standing
 gate.
 
-- [ ] **Step 8: Run and commit**
+- [x] **Step 8: Run and commit**
 
 ```bash
 go test ./internal/packtest/ -race -count=1 -v      # PASS

@@ -1,0 +1,63 @@
+# pack/orders/gonk-dispatch.toml
+#
+# *** THIS IS GATE 2. IT IS THE ONLY PATH IN GONK THAT POURS A FORMULA. ***
+#
+# It asks gonk-meter /v1/policy/decide immediately before pouring -- on the
+# first dispatch, on a re-sling after a gate failure, on an unpark after a
+# defer, on every single pour without exception.
+#
+# WHY THIS EXISTS AT ALL: spec 6.2.3 said "the dispatch FORMULA asks meter for
+# the rung". A FORMULA CANNOT DO THAT -- per formula-spec-v2 a formula is a
+# DAG of steps handed to AGENTS, and the only code it can run is
+# [steps.check]. There is no HTTP verb in a formula. If the rung decision
+# lived in a formula it would be made by an LLM, which violates spec 6.3's
+# "no LLM judges" at the exact point where money is spent. So it lives HERE,
+# in an exec order, with no model in it.
+#
+# A ladder escalation is CONTROLLER-INITIATED and never passes gonk-intake. If
+# this order ever trusts the rung in its vars instead of re-deciding,
+# escalations spend UNMETERED. See
+# TestDispatchAlwaysDecidesEvenWhenVarsCarryARung in cmd/gonk-gate.
+[order]
+description = "THE BUDGET GATE. Ask gonk-meter for a rung, then pour the trigger's formula -- or park, or stop."
+exec = "scripts/gonk-dispatch.sh"     # XOR `formula`. NEVER BOTH.
+trigger = "manual"                    # fired by gonk-intake and by gonk-sweep, via
+                                       # POST /v0/city/{city}/order/gonk-dispatch/run
+timeout = "120s"
+# NO `pool` -- exec orders may not have one (internal/orders/order.go's
+# Validate rejects exec+pool together).
+
+[order.params]
+# internal/orders/order.go's OrderParam has exactly one field: `required`
+# (bool). There is no `description` field on the real struct -- comments
+# below carry the human-readable explanation instead of an invented TOML key.
+
+# GitLab path_with_namespace.
+project = { required = true }
+# GitLab numeric project id.
+project_id = { required = true }
+# Gas City rig name.
+rig = { required = true }
+# GitLab issue IID. Absent for triggers that are not issue-scoped.
+issue_iid = { required = false }
+# IDEMPOTENCY KEY. The controller must dedupe on it: a duplicate bead is
+# duplicate spend.
+bead_anchor = { required = true }
+# The Gas City-internal bead id, used for the comment/MR marker and the bead
+# store record. Never sent to meter (see formulas/gonk-triage.toml's comment
+# on why it is renamed to city_bead_id once it reaches a formula's vars).
+bead_id = { required = true }
+# Stable across triage and every follow-up on the same issue.
+session_key = { required = true }
+# issue-triage | scaffold | mention-reply.
+trigger = { required = true }
+# The .gonk.yml that authorized this work.
+config_hash = { required = false }
+# For mention-reply: the thread to answer in.
+discussion_id = { required = false }
+# rung / model / reservation_id may arrive from gonk-intake's own /decide
+# (Gate 1). THEY ARE A HINT FOR LOGS. This order RE-DECIDES and uses meter's
+# live answer -- never trusted.
+rung = { required = false }
+model = { required = false }
+reservation_id = { required = false }

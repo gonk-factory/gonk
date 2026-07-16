@@ -97,6 +97,44 @@ func TestDispatchPoursOnRun(t *testing.T) {
 	}
 }
 
+// Every pour targets a formula order (gonk-triage/gonk-scaffold/gonk-mention).
+// Gas City's graphv2.PrepareInvocation hard-rejects a caller-supplied vars map
+// that contains the key "bead_id" (or "convoy_id", or the deprecated alias
+// "issue") with "formulas v2 reserved variable ... cannot be supplied by the
+// caller" -- REGARDLESS of whether the formula itself declares that var. If
+// this map ever regains a "bead_id" key (it carries the Gas City bead id
+// under "city_bead_id" instead -- see the comment beside its construction),
+// every single dispatch fails the instant it reaches the real loader. See
+// pack/formulas/gonk-triage.toml's matching comment.
+func TestDispatchNeverSendsAReservedFormulaVarName(t *testing.T) {
+	gc := gcapitest.New(t)
+	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "some-model", Attempt: 1,
+		ReservationID: "rsv-1",
+	}}
+
+	code := runDispatch(context.Background(), dispatchDeps{
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
+		Args: baseDispatchArgs(),
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if len(gc.Poured) != 1 {
+		t.Fatalf("poured = %+v, want exactly one", gc.Poured)
+	}
+	v := gc.Poured[0].Vars
+	for _, reserved := range []string{"bead_id", "convoy_id", "issue"} {
+		if _, ok := v[reserved]; ok {
+			t.Fatalf("vars carried reserved formulas v2 key %q -- Gas City's real loader "+
+				"rejects this pour outright: %+v", reserved, v)
+		}
+	}
+	if v["city_bead_id"] != "gk-1a2b" {
+		t.Fatalf("city_bead_id = %q, want the Gas City bead id", v["city_bead_id"])
+	}
+}
+
 // A `defer` is a NORMAL ANSWER. It parks the bead and exits 0. If it exited
 // non-zero, every project's quiet hours would light up the dashboards as an
 // outage, and people would learn to ignore red.

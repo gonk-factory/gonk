@@ -1,0 +1,27 @@
+# agents/triage/agent.toml -- THE DIRECTORY NAME ("triage") IS THE AGENT NAME.
+# A `name` field in this file would be ignored by the loader (pack-spec.md
+# 1.2.4: "If agent.toml contains a name field, the loader ignores it for
+# identity and uses the directory name"). Do not add one and believe it.
+
+description = "Reads a GitLab issue and posts exactly one triage comment plus labels."
+
+# The model is NOT named here, anywhere in this pack, or on any agent. The
+# model arrives per-session from gonk-meter's /v1/policy/decide response,
+# which reads the OPERATOR's rung catalog (pkg/opercfg). The pack is
+# model-agnostic BY CONSTRUCTION: naming a model here would hardcode one
+# site's inference topology into an open-source pack and would silently
+# disagree with the rung the budget was checked against.
+
+# Pools scale to zero (spec 4.2): an idle gonk installation runs no agent
+# pods. min_active_sessions is an AGENT-level field (internal/config's Agent
+# struct) -- there is no such field on [agent_defaults], so it is set here,
+# per agent, rather than once at the pack level.
+min_active_sessions = 0
+
+# NOTE ON TURN/TOKEN CAPS: there is no [limits]/max_turns table on Gas City's
+# Agent (verified against internal/config/config.go -- no such field exists,
+# and inventing one here would be silently ignored by the loader, which is
+# worse than not writing it: a cap nobody enforces). The deterministic caps
+# the gate signal (spec 6.3) depends on -- "completed and posted required
+# artifacts WITHIN TURN/TOKEN CAPS" -- are gonk-meter's PerTaskTokens budget
+# (pkg/budget, Plan 03), enforced independently of this pack.

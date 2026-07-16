@@ -7,7 +7,7 @@ Spec: docs/superpowers/specs/2026-07-12-gonk-stack-design.md
 | 01 foundation & config contract | scaffold, CI, gonkcfg, atags | done |
 | 02 gitlab-intake | webhooks, reconciliation, onboarding MR | done |
 | 03 gonk-meter | rung policy, key provisioning, ledger | done |
-| 04 pack & images | agents/formulas/orders, docker images | in progress (Task 2 done) |
+| 04 pack & images | agents/formulas/orders, docker images | in progress (Tasks 2, 4 done) |
 | 05 chart | Helm chart, BYO seams | not started |
 | 06 e2e harness | kind + gitlab-ce + stub model, kill tests | not started |
 
@@ -78,6 +78,84 @@ Update the Status column as tasks complete (house rule: progress lives here).
   wrapper) is a no-op; whichever plan/task wires it into `cmd/gonk-gate`
   (Task 3) or replaces `HTTPDispatcher` should do so deliberately, not by
   accident of import order.
+
+## Contracts published by plan 04 (Task 4)
+
+- `pack/` — the gonk Gas City pack: `pack.toml` (schema 2, `[pack]` +
+  `[agent_defaults]` only — every other legal table is unused), three agents
+  (`agents/{triage,scaffold,mention}/agent.toml` + `prompt.template.md`),
+  three formulas (`formulas/gonk-{triage,scaffold,mention}.toml`, each a
+  single `[[steps]]` with a `[steps.check]` exec verification loop), and five
+  orders (`orders/gonk-dispatch.toml` and `orders/gonk-sweep.toml`, both
+  exec/no-pool; `orders/gonk-{triage,scaffold,mention}.toml`, formula
+  orders). No `[[webhook]]`, no `[[service]]` (see pack.toml's own comments
+  on both). `internal/packtest` is the offline structural-validation gate (17
+  tests) — it is not a substitute for Task 6's real loader in a container,
+  but it does prove (with a permanent regression test,
+  `TestPackTOMLUsesOnlyKnownTopLevelTablesCatchesABadKey`) that an invented
+  `pack.toml` key is caught before Task 6 ever runs.
+- **Step 1's research turned up three corrections to this plan's own Task 4
+  worked examples** (verified against the MIT `gascity` source at
+  `4fda5a28445f42d6e789fc7f5751645ac4fecd19`, not guessed):
+  1. **`schema` lives at `[pack].schema`, not as a bare top-level key.**
+     `PackConfig` (`internal/config/pack.go`) has no top-level `Schema`
+     field; `PackMeta.Schema` (`internal/config/config.go`) is what the
+     loader reads. A bare `schema = 2` above `[pack]` is exactly the kind of
+     stray key the undecoded-key check is built to catch.
+  2. **`[[steps]]` has no `agent` field.** Routing to a specific agent is via
+     the *order's* `pool` (a pool can be a single agent's own name — Gas
+     City's tutorial 07 confirms this is a supported target). This pack
+     gives each of the three agents its **own** order-level pool
+     (`pool = "triage"` / `"scaffold"` / `"mention"`), superseding this
+     plan's OD-2 "one shared pool" assumption: Gas City routes a pool's
+     ready work to *any* agent whose work query matches that pool label
+     (`docs/tutorials/06-beads.md`), so one shared pool across three agents
+     with three different prompts would let any of them pick up any other's
+     bead. OD-2 itself flagged this as revisable with trivial blast radius.
+  3. **`bead_id` is a formulas-v2 *reserved* variable name.**
+     `internal/graphv2/invocation.go`'s `ValidateNoReservedUserVars` rejects
+     ANY caller-supplied vars map containing a `bead_id` key —
+     `"formulas v2 reserved variable \"bead_id\" cannot be supplied by the
+     caller"` — regardless of whether the formula declares it. Every pour in
+     `cmd/gonk-gate/dispatch.go`'s `runDispatch` targets a formula order, and
+     its vars map had a literal `"bead_id"` key (from Task 3). **Fixed**:
+     renamed to `"city_bead_id"` in the vars map (dispatch.go) and in every
+     formula (`pack/formulas/*.toml`); regression test
+     `TestDispatchNeverSendsAReservedFormulaVarName`
+     (`cmd/gonk-gate/dispatch_test.go`) and
+     `TestFormulaVarsNeverDeclareAReservedFormulasV2Name`
+     (`internal/packtest`) pin it from both sides. Nothing else about the
+     wire (meterapi's own `bead_id` field, `GC_WEBHOOK_ARG_BEAD_ID` on the
+     *exec* orders) changed — the reservation is graph.v2-formula-vars-only.
+- **Two known gaps, flagged rather than silently patched over (both need a
+  decision/implementation this task's remit does not cover):**
+  1. **`[steps.check]`'s real exec environment does not match
+     `cmd/gonk-gate check`'s input contract.** Confirmed from
+     `internal/convergence/condition.go`: Gas City sets `GC_BEAD_ID` /
+     `GC_ITERATION` / `GC_WORK_DIR` / `GC_STORE_PATH` / `GC_ARTIFACT_DIR` /
+     `GC_MOLECULE_DIR` for a check script — **never** `GC_WEBHOOK_ARG_*`
+     (that convention is exec-*order*-only:
+     `internal/webhookmatch/extract.go`). `cmd/gonk-gate check`
+     (`cmd/gonk-gate/main.go`) currently reads
+     `project_id`/`issue_iid`/`bead_id`/`trigger` exclusively via
+     `GC_WEBHOOK_ARG_*`, which will be **unset** at real invocation time.
+     Each formula step now stamps `project_id`/`issue_iid`/`city_bead_id`/
+     `trigger` onto the checked bead's own metadata
+     (`[steps.metadata]`) so a fix has somewhere to read them *from* — but
+     the read-back itself is not implemented, because it needs the `bd` CLI's
+     exact invocation surface, which `pkg/beadstore`'s own doc comment says
+     is confirmed in Task 6's container smoke test, not here. **Task 6 must
+     close this before `[steps.check]` can pass against the real loader** —
+     see `pack/scripts/gonk-check.sh`'s comment for the full trail.
+  2. **`discussion_id` (mention-reply's thread target) is declared in
+     `orders/gonk-dispatch.toml`'s `[order.params]` and in
+     `formulas/gonk-mention.toml`'s `[vars]`, but `cmd/gonk-gate/dispatch.go`
+     does not actually plumb it through**: `dispatchArgs` has no
+     `DiscussionID` field, and the pour step's `vars` map has no
+     `discussion_id` entry. Mention-reply will load and dispatch correctly,
+     but the agent will not know which thread to answer in until this is
+     added (a `dispatchArgs.DiscussionID` field, an `envArg("discussion_id")`
+     read in `main.go`, and a `vars["discussion_id"]` entry in the pour).
 
 ## Carried into later plans
 
