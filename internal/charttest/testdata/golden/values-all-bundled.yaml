@@ -1,0 +1,1532 @@
+---
+# Source: gonk/templates/networkpolicy-default-deny.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-default-deny
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+  annotations:
+    gonk.orac.local/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/orac/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+spec:
+  # ==========================================================================
+  # !!! NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13) !!!
+  # Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that
+  # would is SUSPENDED (gitops:clusters/orac/foundation/kustomization.yaml).
+  # THIS OBJECT BLOCKS NOTHING TODAY. It is documentation-as-code: it is
+  # correct, it ships, and it starts enforcing the day Cilium is unsuspended --
+  # with no further work. Do not read it as a guarantee.
+  # See docs/environment.md ("KNOWN LIMITATION") and chart/gonk/README.md.
+  # ==========================================================================
+  #
+  # Deny everything, in both directions, for every pod in this namespace. The
+  # policies that follow ADD back exactly what each component needs. Without this
+  # one, they add permissions to pods that already had all of them, and the whole
+  # exercise is theatre.
+  #
+  # THIS APPLIES TO AGENT SESSION PODS TOO -- as long as they are in this
+  # namespace. If Gas City's session provider puts them somewhere else, this
+  # policy does not touch them and spec 9's guarantee does not exist. (OD-5.)
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Source: gonk/templates/networkpolicy-gonk-agent.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-agent
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: agent-session
+  annotations:
+    gonk.orac.local/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/orac/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+spec:
+  # ==========================================================================
+  # *** THE POLICY SPEC 9's CENTRAL CLAIM RESTS ON -- AND IT IS NOT ENFORCED. ***
+  #
+  # "Cloud access exists only through the metered proxy, so budgets cannot be
+  # bypassed" is TRUE ONLY IF (a) this selector matches the pods Gas City's k8s
+  # session provider actually creates (OD-5 -- Gas City is not even deployed yet,
+  # so nobody knows the labels), AND (b) the CNI actually enforces policy.
+  #
+  # (b) IS FALSE TODAY. Flannel does not implement NetworkPolicy and the Cilium
+  # HelmRelease is SUSPENDED. So RIGHT NOW an agent pod can reach anything --
+  # including Ollama at http://192.168.1.142:11434, WHICH NEEDS NO CREDENTIAL --
+  # skip LiteLLM entirely, and burn local GPU with ZERO METERING.
+  #
+  # Owner decision 2026-07-13: SHIP IT, DOCUMENT THE GAP, DO NOT GATE ON IT.
+  # Therefore:
+  #   * CLOUD-rung budgets ARE hard: a cloud call needs an API key, and the pod's
+  #     only route to one is LiteLLM's virtual key, which refuses at the ceiling.
+  #   * LOCAL-model budgets are ADVISORY until Cilium lands.
+  # Say it that way in every README, dashboard and demo. Not "budgets cannot be
+  # bypassed".
+  #
+  # Plan 06 writes the egress-denial test and SKIPS it, naming Cilium. UN-SKIPPING
+  # THAT TEST IS THE GATE -- and note that a WRONG selector renders fine and
+  # enforces nothing, so the test, not this template, is what proves it.
+  # ==========================================================================
+  podSelector:
+    matchLabels:
+      app: gc-agent
+  policyTypes: [Egress]
+  egress:
+    # DNS. Without it the pod resolves nothing and reaches nothing.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # LiteLLM: THE ONLY DOOR TO A MODEL. Every token an agent spends passes
+    # through it, tagged, budgeted, and hard-refusable.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: litellm
+      ports:
+        - protocol: TCP
+          port: 4000
+    # GitLab: the agent clones the rig and posts comments as the bot.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gitlab
+    # gonk-meter: the agent reads its own session cost for the commit trailers
+    # (GET /v1/cost/session/{key}).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: meter
+      ports:
+        - protocol: TCP
+          port: 8080
+    # AND NOTHING ELSE. No 0.0.0.0/0. No "just for pip". An agent pod that can
+    # reach the internet can reach api.anthropic.com directly, with a key from
+    # anywhere, and every budget in this system becomes a suggestion.
+---
+# Source: gonk/templates/networkpolicy-gonk-controller.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-controller
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+  annotations:
+    gonk.orac.local/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/orac/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/orac/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: controller
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: intake
+      ports:
+        - protocol: TCP
+          port: 9443
+  egress:
+    # DNS, GitLab, Dolt (beads), and the API server (spawn agent pods). The API
+    # server cannot be named by a NetworkPolicy selector -- left to the cluster's
+    # own allowance; if your CNI blocks it, NO SESSION SPAWNS. Plan 06 confirms.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: dolt
+      ports:
+        - protocol: TCP
+          port: 3306
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gitlab
+---
+# Source: gonk/templates/networkpolicy-gonk-dolt.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-dolt
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: dolt
+  annotations:
+    gonk.orac.local/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/orac/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/orac/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: dolt
+  policyTypes: [Ingress]
+  ingress:
+    # RECONCILED, Task 0: the Gas City controller (beads) ONLY. gonk-meter is
+    # NOT admitted -- its ledger is Postgres/CNPG, never a Dolt database, so it
+    # never needs to reach this Service at all (ADR-004 Decision 10).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: controller
+      ports:
+        - protocol: TCP
+          port: 3306
+---
+# Source: gonk/templates/networkpolicy-gonk-intake.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-intake
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: intake
+  annotations:
+    gonk.orac.local/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/orac/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/orac/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: intake
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # The webhook, from the ingress controller only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 8080
+    # The private listener (metrics, health, and an UNAUTHENTICATED
+    # POST /admin/reconcile), from Prometheus only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # GitLab.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gitlab
+    # gonk-meter (register projects, read state).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: meter
+      ports:
+        - protocol: TCP
+          port: 8080
+    # The Gas City supervisor (fire orders).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gascity
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Source: gonk/templates/networkpolicy-gonk-meter.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-meter
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+  annotations:
+    gonk.orac.local/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/orac/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/orac/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: meter
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # intake (project registration) and the agent pods (session cost, for commit
+    # trailers). Both are in this namespace.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: intake
+        - podSelector:
+            matchLabels:
+              app: gc-agent
+      ports:
+        - protocol: TCP
+          port: 8080
+    # The PACK's dispatch formula (POST /v1/policy/decide) and gate step
+    # (POST /v1/policy/outcome) run inside the Gas City controller.
+    # WITHOUT THIS RULE, NO SESSION CAN EVER SPAWN.
+    #   * bundled controller  -> in THIS namespace (component: controller)
+    #   * BYO controller      -> the gascity namespaceSelector
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: controller
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Prometheus (/metrics is unauthenticated; the rest of the API is not).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # LiteLLM's ADMIN API: provision virtual keys, read /spend/logs. This is a
+    # different door from the agents' -- same host, admin credential.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: litellm
+      ports:
+        - protocol: TCP
+          port: 4000
+    # The ledger. RECONCILED, Task 0: the OLD `ledger.backend == "dolt"` branch is
+    # DELETED -- that state does not exist any more (ADR-004 Decision 10), and
+    # meter never has a legitimate reason to egress to the Dolt Service (it backs
+    # beads only). The `cnpg` branch below is unchanged. A gap this reconciliation
+    # ALSO closes: the DEFAULT ledger.postgres.mode is `shared` (the existing
+    # databases-app/postgres CNPG cluster), and the original text had NO egress
+    # rule for that mode at all -- meter's own default profile would have had no
+    # NetworkPolicy path to its own ledger. `external` has the same gap. Both now
+    # get a namespaceSelector egress, matching the litellm/dns pattern above.
+    
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: databases-app
+      ports:
+        - protocol: TCP
+          port: 5432
+    # The Kubernetes API server (the KeySink writes per-project Secrets). A
+    # NetworkPolicy cannot name the API server by service, so this is left to the
+    # cluster's own allowance -- and if your CNI blocks it, meter cannot deliver
+    # keys and NOTHING RUNS. Plan 06 must confirm.
+---
+# Source: gonk/templates/serviceaccount-gc-agent.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gc-agent
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: agent
+# The identity the controller assigns to the agent SESSION pods it spawns
+# (agent_service_account = gc-agent). Its Role is pods:[get] ONLY -- an agent must
+# never create/exec/delete pods. THE CHART DOES NOT CREATE THE AGENT PODS; it
+# provisions the SA/Role they run under so their footprint is least-privilege.
+---
+# Source: gonk/templates/serviceaccount-gc-controller.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gc-controller
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+# The controller's k8s session provider creates/execs/logs agent SESSION pods and
+# reads/writes ConfigMaps, so it needs an API token (Role: role-gc-controller.yaml).
+automountServiceAccountToken: true
+---
+# Source: gonk/templates/serviceaccount-gonk-meter.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gonk-meter
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+# gonk-meter needs an API token: it WRITES per-project LiteLLM virtual keys as
+# Secrets (the KeySink, Task 4). This is the one component in the chart that
+# talks to the API server.
+automountServiceAccountToken: true
+---
+# Source: gonk/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gonk
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+---
+# Source: gonk/templates/configmap-litellm-model-prices.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gonk-litellm-model-prices
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: litellm-advisory
+data:
+  # ADVISORY. Nothing in this chart applies this to LiteLLM -- LiteLLM is BYO
+  # (OD-3). Paste these into LiteLLM's model_list.
+  #
+  # THIS IS NOT COSMETIC. Local inference is free, so without a SYNTHETIC price
+  # configured in LiteLLM, a local rung moves LiteLLM's USD counter by $0 -- and
+  # the USD virtual-key budget is the ONLY HARD DOOR gonk has. A project's
+  # monthly_tokens ceiling is converted into that USD ceiling using exactly these
+  # numbers. If LiteLLM and this file disagree, the hard door is in the wrong
+  # place, and nothing will tell you. Plan 06 diffs LiteLLM's /model/info against
+  # this. (Cloud models are ABSENT on purpose: their prices are real and already
+  # live in LiteLLM.)
+  model-prices.yaml: |
+    model_list:
+      - model_name: stub-local
+        litellm_params:
+          model: stub-local
+          input_cost_per_token: 2e-07
+          output_cost_per_token: 2e-07
+---
+# Source: gonk/templates/configmap-operator-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gonk-operator-config
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+data:
+  # Consumed by gonk-meter via --operator-config. pkg/opercfg validates this and
+  # gonk-meter REFUSES TO START if it does not validate -- every budget decision
+  # flows from this file. Meter re-reads it from disk on each tick (a ConfigMap
+  # update is a file change, not a restart), and keeps the PREVIOUS config if the
+  # new one fails to validate. It never falls back to no config at all.
+  operator-config.yaml: |
+    groups: {}
+    instance:
+      budget:
+        monthly_cost_usd: 0
+        monthly_tokens: 5G
+        per_task_tokens: 2M
+      enabled: true
+      ladder:
+      - qwen-local
+    meter:
+      enforce_ladder_order: true
+      key_retry_backoff: 5m
+      max_clock_skew: 5m
+      max_infra_retries: 5
+      max_spend_staleness: 5m
+      reservation_ttl: 60m
+    rungs:
+    - est_cost_usd: 0
+      est_tokens: 200K
+      kind: local
+      model: stub-local
+      name: qwen-local
+      synthetic_usd_per_1m_tokens: 0.2
+    version: 1
+---
+# Source: gonk/templates/role-gc-agent.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+# NAMESPACED, and pods:[get] ONLY (docs/environment.md). An agent session pod reads
+# its own pod object and NOTHING else -- no list/watch, no create/exec/delete, no
+# configmaps. If this ever grows a verb, a compromised agent gains reach; keep it
+# to the single grant Gas City's source actually needs.
+kind: Role
+metadata:
+  name: gc-agent
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: agent
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get]
+---
+# Source: gonk/templates/role-gc-controller.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+# NAMESPACED Role, NEVER a ClusterRole. A ClusterRole would let a compromised
+# controller reach agent pods in EVERY namespace -- exactly the blast radius this
+# must not have. Verbs transcribed from docs/environment.md (read off Gas City's
+# source): the k8s session provider creates/execs/logs agent SESSION pods and
+# reads/writes the ConfigMaps that carry per-session state. Least privilege --
+# nothing beyond pods, pods/exec, pods/log, configmaps.
+kind: Role
+metadata:
+  name: gc-controller
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+# Source: gonk/templates/role-gonk-meter.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gonk-meter
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+rules:
+  # The KeySink (internal/meter/keysink/k8s.go): one Secret per project, holding
+  # that project's LiteLLM virtual key. NAMESPACED (this Role, not a
+  # ClusterRole), and no `get`/`list`/`watch` on Secrets -- meter creates,
+  # updates and deletes the keys IT provisions, and has no business reading
+  # anyone else's (its own credentials arrive as FILE MOUNTS, Task 3, never as
+  # an API read).
+  #
+  # The verbs below are EXACTLY the client-go calls k8s.go makes on Secrets:
+  # Create (new project), Update (rotation / idempotent re-Put -- the sink
+  # falls back to Update on an AlreadyExists from Create), and Delete
+  # (de-onboarding). No `patch`: the sink never calls Patch. This is asserted
+  # against the source, not just this comment
+  # (internal/charttest/secrets_test.go, TestKeySinkRoleVerbsMatchK8sSink) --
+  # a future keysink change that starts calling a new verb fails THAT test
+  # until this Role is updated to match, instead of failing silently as a 403
+  # on a real cluster.
+  #
+  # resourceNames cannot be used here: the names are derived from project paths
+  # that do not exist at install time (keysink.Slug). This is a
+  # namespace-scoped write grant on Secrets, and it is the reason gonk-meter's
+  # namespace (GONK_KEYSINK_NAMESPACE, Task 3) should hold nothing else.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, update, delete]
+---
+# Source: gonk/templates/rolebinding-gc-agent.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gc-agent
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gc-agent
+subjects:
+  - kind: ServiceAccount
+    name: gc-agent
+    namespace: gonk
+---
+# Source: gonk/templates/rolebinding-gc-controller.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gc-controller
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gc-controller
+subjects:
+  # Bound in .Release.Namespace -- the controller acts only in its own namespace.
+  - kind: ServiceAccount
+    name: gc-controller
+    namespace: gonk
+---
+# Source: gonk/templates/rolebinding-gonk-meter.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gonk-meter
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gonk-meter
+subjects:
+  # gonk-meter's own ServiceAccount (Task 3, serviceaccount-gonk-meter.yaml).
+  # GONK_KEYSINK_NAMESPACE (Task 3's deployment env) is set to the Release
+  # namespace -- the SAME namespace this Release installs into -- so the
+  # subject namespace below matches where the Role actually lives and where
+  # the sink actually writes. If keysink is ever pointed at a DIFFERENT
+  # namespace than the release, this binding (and the Role) must move there
+  # too; nothing in this chart currently does that.
+  - kind: ServiceAccount
+    name: gonk-meter
+    namespace: gonk
+---
+# Source: gonk/templates/service-gonk-controller.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-controller
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  # The per-city [api] listener ONLY (smoke U1). Port 8372 -- the machine-wide
+  # supervisor admin/dashboard API -- binds 127.0.0.1 LOOPBACK ONLY and is
+  # DELIBERATELY absent here: a Service cannot reach it (a peer pod gets
+  # "connection refused"), so exposing it would be a lie in the object graph.
+  ports:
+    - name: supervisor
+      port: 9443   # 9443, SETTLED (Task 0.5)
+      targetPort: supervisor
+  selector:
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/component: controller
+---
+# Source: gonk/templates/service-gonk-dolt.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-dolt
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: dolt
+spec:
+  # Headless: a StatefulSet's stable network identity (gonk-dolt-0.gonk-dolt).
+  clusterIP: None
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+  selector:
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/component: dolt
+---
+# Source: gonk/templates/service-gonk-intake-internal.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-intake-internal
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: intake
+    gonk.orac.local/exposure: internal
+spec:
+  type: ClusterIP
+  # /healthz, /readyz, /metrics, POST /admin/reconcile. Cluster-internal ONLY:
+  # /admin/reconcile has no authentication. The Ingress must never reference this
+  # Service (a chart test asserts it does not).
+  ports:
+    - name: http-private
+      port: 9090
+      targetPort: http-private
+  selector:
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/component: intake
+---
+# Source: gonk/templates/service-gonk-intake-public.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-intake
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: intake
+    gonk.orac.local/exposure: public
+spec:
+  type: ClusterIP
+  # ONE PORT. This is the Service the Ingress points at, and the listener behind
+  # it serves POST /hook/gitlab and 404s everything else. Adding a port here is
+  # how you would accidentally expose /metrics and POST /admin/reconcile to the
+  # internet. Do not.
+  ports:
+    - name: http-hook
+      port: 8080
+      targetPort: http-hook
+  selector:
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/component: intake
+---
+# Source: gonk/templates/service-gonk-meter.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-meter
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+spec:
+  type: ClusterIP
+  # One port. /healthz, /readyz and /metrics are unauthenticated on it; every
+  # other path requires the bearer token. This service is NEVER ingressed --
+  # spec 9: the webhook is the only ingress.
+  ports:
+    - name: http-api
+      port: 8080
+      targetPort: http-api
+  selector:
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/component: meter
+---
+# Source: gonk/templates/deployment-gonk-intake.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gonk-intake
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: intake
+spec:
+  replicas: 2
+  # Intake IS safe to roll and to scale: it holds no persistent state, its project
+  # cache is derived from GitLab on every pass, and its writes (the onboarding MR,
+  # the hook) are idempotent. The controller dedupes orders on BeadAnchor.
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: intake
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: gonk-0.1.0
+        app.kubernetes.io/name: gonk
+        app.kubernetes.io/instance: gonk
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: gonk
+        app.kubernetes.io/component: intake
+    spec:
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: gitlab-registry-pull-creds
+      containers:
+        - name: intake
+          image: registry.orac.local/agentic/gonk-project/gonk-intake:v0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GONK_GITLAB_URL
+              value: "https://gitlab.orac.local"
+            - name: GONK_BOT_USERNAME
+              value: "gonk"
+            # *** PATHS, NOT VALUES. ***
+            - name: GONK_GITLAB_TOKEN_FILE
+              value: "/etc/gonk/secrets/gitlab/token"
+            # THE PRIVATE CA. trust-manager publishes `trust-bundle` into every
+            # namespace; Go's crypto/x509 reads SSL_CERT_FILE with no code change.
+            # *** THIS IS HOW WE TRUST https://gitlab.orac.local. *** Belt-and-
+            # braces: images/Dockerfile.intake's own ENV already sets this; this
+            # entry is what makes the file the env var names actually EXIST on
+            # disk (the volume mount below), and it is the reason no code in this
+            # repo ever sets InsecureSkipVerify -- there is no value that disables
+            # TLS verification, and there never will be.
+            - name: SSL_CERT_FILE
+              value: "/etc/ssl/orac/ca.crt"
+            - name: GONK_WEBHOOK_SECRET_FILE
+              value: "/etc/gonk/secrets/webhook/token"
+            - name: GONK_WEBHOOK_TOKEN_GEN
+              value: "1"
+            - name: GONK_WEBHOOK_PUBLIC_URL
+              value: "https://gonk.example.test/hook/gitlab"
+            - name: GONK_WEBHOOK_SSL_VERIFY
+              value: "true"
+            - name: GONK_METER_URL
+              value: "http://gonk-meter:8080"
+            - name: GONK_METER_TOKEN_FILE
+              value: "/etc/gonk/secrets/meter-api/token"
+            # Empty -> the LogDispatcher: orders are LOGGED and never fired. It is
+            # set explicitly (not omitted) so a stale env cannot resurrect the HTTP
+            # dispatcher on a rolling update. When dispatch=http the URL is DERIVED
+            # from the in-chart controller Service (gascity.enabled) or from
+            # gascity.supervisorURL (BYO controller) -- see `gonk.supervisorURL`.
+            - name: GONK_SUPERVISOR_URL
+              value: "http://gonk-controller.gonk.svc:9443"
+            # RECONCILED, Task 0: intake carries its OWN copy of the operator
+            # ladder (main.go's loadConfig fails closed if this is unset/empty --
+            # ADR-002). It MUST be the same ladder gonk-meter resolves rungs
+            # against (operatorConfig.instance.ladder), never a separate value
+            # that could drift from it. Comma-separated; the schema's minItems:1
+            # on operatorConfig.instance.ladder is what already guards "empty".
+            - name: GONK_INSTANCE_LADDER
+              value: "qwen-local"
+            - name: GONK_RECONCILE_INTERVAL
+              value: "10m"
+            - name: GONK_LISTEN_ADDR
+              value: ":8080"
+            - name: GONK_PRIVATE_ADDR
+              value: ":9090"
+            - name: GONK_VERSION
+              value: "0.1.0"
+          ports:
+            # The PUBLIC listener: POST /hook/gitlab, and 404 for everything else.
+            - name: http-hook
+              containerPort: 8080
+            # The PRIVATE listener: /healthz, /readyz, /metrics, POST /admin/reconcile.
+            # NEVER INGRESSED. /admin/reconcile is unauthenticated.
+            - name: http-private
+              containerPort: 9090
+          livenessProbe:
+            httpGet: {path: /healthz, port: http-private}
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          # /readyz is true only when the bot identity resolved, the first
+          # reconcile completed, AND gonk-meter's /healthz is OK. So a meter
+          # outage takes intake OUT of the Service -- the webhook 502s and GitLab
+          # retries. That is fail-closed (no unmetered dispatch), but GitLab
+          # auto-disables hooks that fail repeatedly: Plan 06 must test the
+          # recovery path.
+          readinessProbe:
+            httpGet: {path: /readyz, port: http-private}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: secret-gitlab
+              mountPath: /etc/gonk/secrets/gitlab
+              readOnly: true
+            - name: secret-webhook
+              mountPath: /etc/gonk/secrets/webhook
+              readOnly: true
+            - name: secret-meter-api
+              mountPath: /etc/gonk/secrets/meter-api
+              readOnly: true
+            # The private-CA bundle, mounted at exactly the path SSL_CERT_FILE names.
+            # subPath so the file lands at /etc/ssl/orac/ca.crt and not in a dir.
+            - name: orac-ca
+              mountPath: /etc/ssl/orac/ca.crt
+              subPath: tls-ca-bundle.pem
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: secret-gitlab
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-gitlab
+                  items:
+                    - key: token
+                      path: token
+        - name: secret-webhook
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-webhook
+                  items:
+                    - key: token
+                      path: token
+        - name: secret-meter-api
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-meter-api
+                  items:
+                    - key: token
+                      path: token
+        # trust-manager publishes `trust-bundle` (key tls-ca-bundle.pem) into EVERY
+        # namespace, so this ConfigMap is a NAME, not something you have to create.
+        # It is how a Go service trusts https://gitlab.orac.local's private CA --
+        # and it is the reason no code in this repo ever sets InsecureSkipVerify.
+        - name: orac-ca
+          configMap:
+            name: trust-bundle
+            items:
+              - key: tls-ca-bundle.pem
+                path: tls-ca-bundle.pem
+        - name: tmp
+          emptyDir: {}
+---
+# Source: gonk/templates/deployment-gonk-meter.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gonk-meter
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+spec:
+  replicas: 1
+  strategy:
+    # Recreate, NOT RollingUpdate. A rolling update runs the old and the new pod
+    # at the same time, and gonk-meter's per-project budget lock is IN-PROCESS:
+    # two meters, briefly, is the exact state that can grant the last of a budget
+    # twice. The cost is a few seconds where /policy/decide is unreachable -- and
+    # a decide that fails is a session that does not spawn, which is fail-closed.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: meter
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: gonk-0.1.0
+        app.kubernetes.io/name: gonk
+        app.kubernetes.io/instance: gonk
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: gonk
+        app.kubernetes.io/component: meter
+      annotations:
+        # Roll the pod when the operator config changes. (Meter also re-reads it
+        # from disk on each tick, so this is belt-and-braces -- but a config that
+        # fails to validate should surface as a failed rollout, not a quiet
+        # "kept the previous config" log line.)
+        checksum/operator-config: 9abb3f36d476a11bb760634faaf3b61b7b90336a55b737c91e02cdcad4fde663
+    spec:
+      serviceAccountName: gonk-meter
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: gitlab-registry-pull-creds
+      containers:
+        - name: meter
+          image: registry.orac.local/agentic/gonk-project/gonk-meter:v0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --operator-config=/etc/gonk/operator/operator-config.yaml
+            - --listen=:8080
+          env:
+            # *** NO SECRET VALUE IS AN ENV VAR. These are PATHS. ***
+            - name: LITELLM_URL
+              value: "http://litellm.litellm.svc:4000"
+            - name: LITELLM_ADMIN_KEY_FILE
+              value: "/etc/gonk/secrets/litellm/admin-key"
+            - name: GONK_METER_TOKEN_FILE
+              value: "/etc/gonk/secrets/meter-api/token"
+            # THE STORE. Both are REQUIRED and neither has a default: defaulting
+            # to the in-memory store would lose reservations on every restart,
+            # which is fail-OPEN on budget headroom. `memory` is not selectable
+            # at all (values.schema.json + G15). An unknown backend, an empty
+            # DSN file, or a store that will not connect is a FATAL startup error.
+            - name: GONK_METER_STORE_BACKEND
+              value: "postgres"
+            - name: GONK_METER_STORE_DSN_FILE
+              value: "/etc/gonk/secrets/ledger/dsn"
+            # The KeySink (Task 4) writes per-project Secrets into this namespace.
+            - name: GONK_KEYSINK_NAMESPACE
+              value: "gonk"
+            - name: GONK_KEYSINK_PREFIX
+              value: "gonk-key-"
+            # THE PRIVATE CA, for symmetry with intake (design table: "Private CA
+            # everywhere"). `SSL_CERT_FILE` is ALREADY set by the image's own ENV
+            # line (images/Dockerfile.meter) -- this is belt-and-braces, and it is
+            # what makes the file the env var names actually EXIST on disk.
+            - name: SSL_CERT_FILE
+              value: "/etc/ssl/orac/ca.crt"
+          ports:
+            - name: http-api
+              containerPort: 8080
+          # /healthz = the process is alive.
+          livenessProbe:
+            httpGet: {path: /healthz, port: http-api}
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          # /readyz = the FIRST SPEND SYNC has completed. Until then meter's view
+          # of what has been spent is empty, and an empty view is fail-OPEN on
+          # headroom -- so it must not serve /policy/decide. A long cold start is
+          # correct behaviour; give it room.
+          readinessProbe:
+            httpGet: {path: /readyz, port: http-api}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          startupProbe:
+            httpGet: {path: /healthz, port: http-api}
+            periodSeconds: 3
+            failureThreshold: 20
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: operator-config
+              mountPath: /etc/gonk/operator
+              readOnly: true
+            - name: secret-litellm
+              mountPath: /etc/gonk/secrets/litellm
+              readOnly: true
+            - name: secret-meter-api
+              mountPath: /etc/gonk/secrets/meter-api
+              readOnly: true
+            - name: secret-ledger
+              mountPath: /etc/gonk/secrets/ledger
+              readOnly: true
+            # The private-CA bundle, mounted at exactly the path SSL_CERT_FILE
+            # names. subPath so the file lands at /etc/ssl/orac/ca.crt and not
+            # in a dir (mirrors gonk-intake's own mount, Task 5).
+            - name: orac-ca
+              mountPath: /etc/ssl/orac/ca.crt
+              subPath: tls-ca-bundle.pem
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: operator-config
+          configMap:
+            name: gonk-operator-config
+        - name: secret-litellm
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-litellm
+                  items:
+                    - key: admin-key
+                      path: admin-key
+        - name: secret-meter-api
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-meter-api
+                  items:
+                    - key: token
+                      path: token
+        - name: secret-ledger
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-ledger
+                  items:
+                    - key: dsn
+                      path: dsn
+        # trust-manager publishes `trust-bundle` (key tls-ca-bundle.pem) into
+        # EVERY namespace, so this ConfigMap is a NAME, not something you have
+        # to create.
+        - name: orac-ca
+          configMap:
+            name: trust-bundle
+            items:
+              - key: tls-ca-bundle.pem
+                path: tls-ca-bundle.pem
+        - name: tmp
+          emptyDir: {}
+---
+# Source: gonk/templates/workload-gonk-controller.yaml
+# The bundled Gas City controller. SETTLED by Task 0.5 (smoke/gc-controller-smoke.md),
+# overriding the plan's provisional draft:
+#   - `gc supervisor run` as PID 1 (NOT `gc start --foreground /city`, a flag that
+#     does not exist; NEVER `gc register`, which daemonizes a second supervisor and
+#     crashes PID 1 -- smoke U1/U3);
+#   - prebaked delivery: an initContainer copies the baked pack into a WRITABLE
+#     emptyDir /city and runs `gc init --preserve-existing --bootstrap-profile
+#     k8s-cell` (a read-only ConfigMap at /city is not viable -- smoke U2);
+#   - Deployment, replicas 1, strategy Recreate (StatefulSet is the single-instance
+#     alternative). No leader election exists, so EXACTLY ONE controller runs.
+#
+# IMAGE-GATED (bead gonk-fsl): the Plan 04 image is missing dolt/tmux/jq/lsof/pgrep
+# and bundles bd<1.0.4, so `gc init` cannot finish and the 9443 [api] listener is
+# config-derived, not socket-confirmed. This template encodes the settled SHAPE; the
+# charttest gate asserts it RENDERS, not that the pod boots.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gonk-controller
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+spec:
+  # EXACTLY ONE. No leader election (smoke U3): two reconcile loops would race the
+  # Dolt beads store. Pinned to 1 and deliberately NOT exposed as a knob.
+  replicas: 1
+  # Recreate, never RollingUpdate: maxSurge could briefly run two controllers
+  # during a rollout (smoke U3). Recreate terminates the old pod before the new one
+  # starts -- the exactly-one guarantee in the absence of leader election.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: gonk-0.1.0
+        app.kubernetes.io/name: gonk
+        app.kubernetes.io/instance: gonk
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: gonk
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: gc-controller
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: gitlab-registry-pull-creds
+      # PREBAKED DELIVERY (smoke U2). The gonk pack is baked into the image at
+      # /opt/gonk/pack. This initContainer copies it into the writable emptyDir
+      # /city and runs `gc init --preserve-existing` (which keeps the gonk pack.toml
+      # -- `gc init --template gascity` would DISCARD it and pull remote GitHub
+      # imports) with `--bootstrap-profile k8s-cell` (which writes the
+      # [api] bind=0.0.0.0/allow_mutations=true/port=9443 block). The exact command
+      # is the one the smoke recorded as working.
+      initContainers:
+        - name: bootstrap-city
+          image: registry.orac.local/agentic/gonk-project/gonk-controller:v0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              cp -r /opt/gonk/pack/. /city/
+              gc init --preserve-existing --bootstrap-profile k8s-cell \
+                --default-provider claude --skip-provider-readiness \
+                --dolt-host "$GC_DOLT_HOST" --dolt-port "$GC_DOLT_PORT" \
+                --dolt-database "bd_gonk" \
+                --dolt-project-id "gonk" \
+                --no-start /city
+              mkdir -p "$HOME/.gc"
+              printf '[[cities]]\n  path = "/city"\n  name = "gonk"\n' > "$HOME/.gc/cities.toml"
+          env:
+            - name: HOME
+              value: /home/gonk
+            - name: GC_DOLT_HOST
+              value: "gonk-dolt.gonk.svc"
+            - name: GC_DOLT_PORT
+              value: "3306"
+            - name: GC_SESSION_PROVIDER
+              value: k8s
+            - name: SSL_CERT_FILE
+              value: "/etc/ssl/orac/ca.crt"
+          volumeMounts:
+            - name: city
+              mountPath: /city
+            - name: home
+              mountPath: /home/gonk
+            - name: tmp
+              mountPath: /tmp
+            - name: orac-ca
+              mountPath: /etc/ssl/orac/ca.crt
+              subPath: tls-ca-bundle.pem
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+      containers:
+        - name: controller
+          image: registry.orac.local/agentic/gonk-project/gonk-controller:v0.1.0
+          imagePullPolicy: IfNotPresent
+          # `gc supervisor run` as PID 1 via `exec` (smoke U1/U3). The initContainer
+          # already wrote ~/.gc/cities.toml, so registration is NOT needed here --
+          # and `gc register` MUST NOT be used, it daemonizes a second supervisor
+          # after which the foreground one exits "supervisor already running" and
+          # kills PID 1.
+          command: ["/bin/sh", "-c", "exec gc supervisor run"]
+          env:
+            - name: HOME
+              value: /home/gonk
+            - name: GC_DOLT_HOST
+              value: "gonk-dolt.gonk.svc"
+            - name: GC_DOLT_PORT
+              value: "3306"
+            - name: GC_SESSION_PROVIDER
+              value: k8s
+            - name: SSL_CERT_FILE
+              value: "/etc/ssl/orac/ca.crt"
+          ports:
+            # The per-city [api] listener (0.0.0.0:9443). This is what intake
+            # dispatches to and what the Service targets. Port 8372 (the machine-wide
+            # supervisor admin API) binds 127.0.0.1 LOOPBACK ONLY and MUST NEVER be
+            # exposed by a Service/Ingress/NetworkPolicy (smoke U1).
+            - name: supervisor
+              containerPort: 9443
+          # TCP probe on 9443: the unauthenticated HTTP health endpoints (/health,
+          # /v0/readiness) live on the 8372 LOOPBACK admin API, which a kubelet
+          # httpGet against the pod IP cannot reach (smoke U1). The only cross-pod
+          # liveness signal is the 9443 city-API socket. IMAGE-GATED (gonk-fsl):
+          # 9443 does not bind until the image can finish init -- the probe SHAPE is
+          # settled, the boot is not.
+          livenessProbe:
+            tcpSocket: {port: supervisor}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            tcpSocket: {port: supervisor}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            limits:
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: city
+              mountPath: /city
+            - name: home
+              mountPath: /home/gonk
+            - name: tmp
+              mountPath: /tmp
+            - name: orac-ca
+              mountPath: /etc/ssl/orac/ca.crt
+              subPath: tls-ca-bundle.pem
+              readOnly: true
+      volumes:
+        # /city and /home/gonk MUST be writable by uid 65532 (smoke U2): gc init
+        # writes the city into /city and gc writes ~/.gc under HOME. emptyDir, shared
+        # between the bootstrap initContainer and the supervisor. NEVER a read-only
+        # configMap at /city -- gc init cannot write into it.
+        - name: city
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        # The private-CA bundle (trust-manager publishes `trust-bundle` into every
+        # namespace). gc clones the city's git remote from https://gitlab.orac.local,
+        # whose cert is signed by the cluster CA; SSL_CERT_FILE names this path.
+        - name: orac-ca
+          configMap:
+            name: trust-bundle
+            items:
+              - key: tls-ca-bundle.pem
+                path: tls-ca-bundle.pem
+---
+# Source: gonk/templates/statefulset-gonk-dolt.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gonk-dolt
+  labels:
+    helm.sh/chart: gonk-0.1.0
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: dolt
+spec:
+  # ONE replica, ALWAYS. dolt sql-server is not clustered here; the Gas City
+  # beads store needs ONE writer with real transactions. RECONCILED, Task 0:
+  # this server hosts the beads database ONLY -- gonk-meter's reservation path
+  # (the ledger) is Postgres/CNPG, never a database on this server (ADR-004
+  # Decision 10; docs/spikes/dolt-reservation-isolation.md).
+  replicas: 1
+  serviceName: gonk-dolt
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: dolt
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: gonk-0.1.0
+        app.kubernetes.io/name: gonk
+        app.kubernetes.io/instance: gonk
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: gonk
+        app.kubernetes.io/component: dolt
+    spec:
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: gitlab-registry-pull-creds
+      containers:
+        - name: dolt
+          image: docker.io/dolthub/dolt-sql-server:v1.43.0
+          imagePullPolicy: IfNotPresent
+          # Auth is root / empty password / --no-tls, host+port only. There is no
+          # credential to configure, so the chart does not pretend to (env doc).
+          args:
+            - sql-server
+            - --host=0.0.0.0
+            - --port=3306
+            - --no-tls
+            - --data-dir=/var/lib/dolt
+          ports:
+            - name: mysql
+              containerPort: 3306
+          # A TCP probe only: authenticating a real query would need a client, and
+          # this server has no credential to authenticate anyway.
+          livenessProbe:
+            tcpSocket: {port: mysql}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            tcpSocket: {port: mysql}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            limits:
+              memory: 2Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/dolt
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 20Gi

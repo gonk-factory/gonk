@@ -1,0 +1,167 @@
+{{- if .Values.meter.enabled }}
+{{- $root := .Values.secrets.mountRoot }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gonk-meter
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: meter
+spec:
+  replicas: {{ .Values.meter.replicaCount }}
+  strategy:
+    # Recreate, NOT RollingUpdate. A rolling update runs the old and the new pod
+    # at the same time, and gonk-meter's per-project budget lock is IN-PROCESS:
+    # two meters, briefly, is the exact state that can grant the last of a budget
+    # twice. The cost is a few seconds where /policy/decide is unreachable -- and
+    # a decide that fails is a session that does not spawn, which is fail-closed.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "gonk.selectorLabels" (dict "ctx" . "component" "meter") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gonk.labels" . | nindent 8 }}
+        app.kubernetes.io/component: meter
+      annotations:
+        # Roll the pod when the operator config changes. (Meter also re-reads it
+        # from disk on each tick, so this is belt-and-braces -- but a config that
+        # fails to validate should surface as a failed rollout, not a quiet
+        # "kept the previous config" log line.)
+        checksum/operator-config: {{ include (print $.Template.BasePath "/configmap-operator-config.yaml") . | sha256sum }}
+        {{- with .Values.meter.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: gonk-meter
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: meter
+          image: {{ include "gonk.image" (dict "ctx" . "image" .Values.meter.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --operator-config=/etc/gonk/operator/operator-config.yaml
+            - --listen=:{{ .Values.meter.port }}
+          env:
+            # *** NO SECRET VALUE IS AN ENV VAR. These are PATHS. ***
+            - name: LITELLM_URL
+              value: {{ .Values.litellm.externalURL | quote }}
+            - name: LITELLM_ADMIN_KEY_FILE
+              value: {{ include "gonk.secretPath" (dict "root" $root "name" "litellm" "key" .Values.secrets.litellm.keys.adminKey) | quote }}
+            {{- if .Values.secrets.rotation.litellmAdminPrevious }}
+            - name: LITELLM_ADMIN_KEY_PREVIOUS_FILE
+              value: {{ include "gonk.secretPath" (dict "root" $root "name" "litellm" "key" .Values.secrets.litellm.keys.adminKeyPrevious) | quote }}
+            {{- end }}
+            - name: GONK_METER_TOKEN_FILE
+              value: {{ include "gonk.secretPath" (dict "root" $root "name" "meter-api" "key" .Values.secrets.meterAPI.keys.token) | quote }}
+            {{- if .Values.secrets.rotation.meterAPIPrevious }}
+            - name: GONK_METER_TOKEN_PREVIOUS_FILE
+              value: {{ include "gonk.secretPath" (dict "root" $root "name" "meter-api" "key" .Values.secrets.meterAPI.keys.tokenPrevious) | quote }}
+            {{- end }}
+            # THE STORE. Both are REQUIRED and neither has a default: defaulting
+            # to the in-memory store would lose reservations on every restart,
+            # which is fail-OPEN on budget headroom. `memory` is not selectable
+            # at all (values.schema.json + G15). An unknown backend, an empty
+            # DSN file, or a store that will not connect is a FATAL startup error.
+            - name: GONK_METER_STORE_BACKEND
+              value: {{ .Values.ledger.backend | quote }}
+            - name: GONK_METER_STORE_DSN_FILE
+              value: {{ include "gonk.secretPath" (dict "root" $root "name" "ledger" "key" .Values.secrets.ledger.keys.dsn) | quote }}
+            # The KeySink (Task 4) writes per-project Secrets into this namespace.
+            - name: GONK_KEYSINK_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: GONK_KEYSINK_PREFIX
+              value: {{ .Values.secrets.keySink.namePrefix | quote }}
+            {{- if .Values.gitlab.caCert.existingConfigMap }}
+            # THE PRIVATE CA, for symmetry with intake (design table: "Private CA
+            # everywhere"). `SSL_CERT_FILE` is ALREADY set by the image's own ENV
+            # line (images/Dockerfile.meter) -- this is belt-and-braces, and it is
+            # what makes the file the env var names actually EXIST on disk.
+            - name: SSL_CERT_FILE
+              value: {{ .Values.gitlab.caCert.mountPath | quote }}
+            {{- end }}
+            {{- if .Values.monitoring.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.monitoring.otlpEndpoint | quote }}
+            {{- end }}
+          ports:
+            - name: http-api
+              containerPort: {{ .Values.meter.port }}
+          # /healthz = the process is alive.
+          livenessProbe:
+            httpGet: {path: /healthz, port: http-api}
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          # /readyz = the FIRST SPEND SYNC has completed. Until then meter's view
+          # of what has been spent is empty, and an empty view is fail-OPEN on
+          # headroom -- so it must not serve /policy/decide. A long cold start is
+          # correct behaviour; give it room.
+          readinessProbe:
+            httpGet: {path: /readyz, port: http-api}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          startupProbe:
+            httpGet: {path: /healthz, port: http-api}
+            periodSeconds: 3
+            failureThreshold: 20
+          resources:
+            {{- toYaml .Values.meter.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: operator-config
+              mountPath: /etc/gonk/operator
+              readOnly: true
+            {{- include "gonk.secretMount" (dict "root" $root "name" "litellm") | nindent 12 }}
+            {{- include "gonk.secretMount" (dict "root" $root "name" "meter-api") | nindent 12 }}
+            {{- include "gonk.secretMount" (dict "root" $root "name" "ledger") | nindent 12 }}
+            {{- if .Values.gitlab.caCert.existingConfigMap }}
+            # The private-CA bundle, mounted at exactly the path SSL_CERT_FILE
+            # names. subPath so the file lands at /etc/ssl/orac/ca.crt and not
+            # in a dir (mirrors gonk-intake's own mount, Task 5).
+            - name: orac-ca
+              mountPath: {{ .Values.gitlab.caCert.mountPath }}
+              subPath: {{ .Values.gitlab.caCert.key }}
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: operator-config
+          configMap:
+            name: gonk-operator-config
+        {{- $llKeys := list .Values.secrets.litellm.keys.adminKey }}
+        {{- if .Values.secrets.rotation.litellmAdminPrevious }}{{- $llKeys = append $llKeys .Values.secrets.litellm.keys.adminKeyPrevious }}{{- end }}
+        {{- include "gonk.secretVolume" (dict "name" "litellm" "secret" .Values.secrets.litellm.existingSecret "keys" $llKeys) | nindent 8 }}
+        {{- $mKeys := list .Values.secrets.meterAPI.keys.token }}
+        {{- if .Values.secrets.rotation.meterAPIPrevious }}{{- $mKeys = append $mKeys .Values.secrets.meterAPI.keys.tokenPrevious }}{{- end }}
+        {{- include "gonk.secretVolume" (dict "name" "meter-api" "secret" .Values.secrets.meterAPI.existingSecret "keys" $mKeys) | nindent 8 }}
+        {{- include "gonk.secretVolume" (dict "name" "ledger" "secret" .Values.secrets.ledger.existingSecret "keys" (list .Values.secrets.ledger.keys.dsn)) | nindent 8 }}
+        {{- if .Values.gitlab.caCert.existingConfigMap }}
+        # trust-manager publishes `trust-bundle` (key tls-ca-bundle.pem) into
+        # EVERY namespace, so this ConfigMap is a NAME, not something you have
+        # to create.
+        - name: orac-ca
+          configMap:
+            name: {{ .Values.gitlab.caCert.existingConfigMap }}
+            items:
+              - key: {{ .Values.gitlab.caCert.key }}
+                path: {{ .Values.gitlab.caCert.key }}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.meter.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.meter.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.meter.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

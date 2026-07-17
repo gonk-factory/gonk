@@ -1,0 +1,38 @@
+{{- if and .Values.intake.enabled .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gonk-intake
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: intake
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts: [{{ .Values.ingress.host | quote }}]
+      {{- if .Values.ingress.tls.secretName }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+      {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # THE ONLY THING GONK EXPOSES (spec 9). Exact, not Prefix: exactly one
+          # endpoint exists behind it. The backend is the PUBLIC service and its
+          # single port -- the private listener (metrics, health, and an
+          # UNAUTHENTICATED POST /admin/reconcile) is on a different Service that
+          # nothing here references.
+          - path: {{ .Values.ingress.path }}
+            pathType: {{ .Values.ingress.pathType }}
+            backend:
+              service:
+                name: gonk-intake
+                port:
+                  name: http-hook
+{{- end }}

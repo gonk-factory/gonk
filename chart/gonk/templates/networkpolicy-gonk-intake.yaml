@@ -1,0 +1,89 @@
+{{- if and .Values.networkPolicy.enabled .Values.intake.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-intake
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: intake
+  annotations:
+    {{- include "gonk.networkPolicyBanner" . | nindent 4 }}
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/orac/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      {{- include "gonk.selectorLabels" (dict "ctx" . "component" "intake") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # The webhook, from the ingress controller only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressController.namespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.intake.ports.public }}
+    # The private listener (metrics, health, and an UNAUTHENTICATED
+    # POST /admin/reconcile), from Prometheus only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.prometheus.namespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.intake.ports.private }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 14 }}
+      ports:
+        {{- range .Values.networkPolicy.dns.ports }}
+        - protocol: UDP
+          port: {{ . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    # GitLab.
+    {{- if .Values.networkPolicy.gitlabInCluster.enabled }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.gitlabInCluster.namespaceSelector | nindent 14 }}
+    {{- else }}
+    - to:
+        {{- range .Values.networkPolicy.gitlab.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.gitlab.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- end }}
+    # gonk-meter (register projects, read state).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "meter") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.meter.port }}
+    # The Gas City supervisor (fire orders).
+    {{- if eq .Values.gascity.dispatch "http" }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.gascity.namespaceSelector | nindent 14 }}
+      ports:
+        {{- range .Values.networkPolicy.gascity.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- end }}
+{{- end }}

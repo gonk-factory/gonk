@@ -1,0 +1,57 @@
+{{- if and .Values.networkPolicy.enabled .Values.gascity.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-controller
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+  annotations:
+    {{- include "gonk.networkPolicyBanner" . | nindent 4 }}
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/orac/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      {{- include "gonk.selectorLabels" (dict "ctx" . "component" "controller") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "intake") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.gascity.supervisorPort }}
+  egress:
+    # DNS, GitLab, Dolt (beads), and the API server (spawn agent pods). The API
+    # server cannot be named by a NetworkPolicy selector -- left to the cluster's
+    # own allowance; if your CNI blocks it, NO SESSION SPAWNS. Plan 06 confirms.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 14 }}
+      ports:
+        {{- range .Values.networkPolicy.dns.ports }}
+        - protocol: UDP
+          port: {{ . }}
+        {{- end }}
+    {{- if .Values.dolt.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "dolt") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.dolt.port }}
+    {{- end }}
+    {{- if .Values.networkPolicy.gitlabInCluster.enabled }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.gitlabInCluster.namespaceSelector | nindent 14 }}
+    {{- end }}
+{{- end }}

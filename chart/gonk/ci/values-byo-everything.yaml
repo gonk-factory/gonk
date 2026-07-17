@@ -1,0 +1,110 @@
+# =============================================================================
+# ci/values-byo-everything.yaml -- EVERY component disabled or pointed elsewhere.
+#
+# If this profile renders, an operator can bring literally all of their own
+# infrastructure: external beads Dolt, external Gas City controller, external
+# GitLab (with a private CA), external LiteLLM, and an external Postgres ledger
+# (a DSN they own). No StatefulSet, no controller workload, no CNPG Cluster, no
+# Ingress, and no monitoring are rendered.
+#
+# The fail-closed rule is exercised here in the affirmative: turning a component
+# OFF makes its external replacement REQUIRED, and every replacement is supplied.
+#   * dolt.enabled: false  -> dolt.external.host       (G16; BYO beads Dolt)
+#   * gascity.enabled: false -> gascity.supervisorURL  (G17; BYO controller)
+#   * ledger.postgres.mode: external -> a DSN Secret (G19) the operator owns.
+#
+# Note: dolt.image.tag and gascity.image.tag are OMITTED on purpose -- they are
+# required ONLY when the component is enabled (G20), and values.schema.json uses
+# $defs.imageOptional for both for exactly this reason.
+#
+# NO SECRET VALUE APPEARS HERE. Only Secret NAMES change (secrets.*.existingSecret).
+# =============================================================================
+intake:
+  image:
+    tag: v0.1.0
+  webhookPublicURL: https://gonk.example.test/hook/gitlab
+
+meter:
+  image:
+    tag: v0.1.0
+
+# BYO GitLab, genuinely outside the cluster, with its own private CA delivered
+# by trust-manager's cluster-wide trust-bundle. split-credential: a low-privilege
+# bot token plus a separate admin token used only for webhook management. TLS
+# verification is NEVER disabled -- the CA is trusted the supported way.
+gitlab:
+  url: https://gitlab.corp.example
+  mode: split-credential
+  caCert:
+    existingConfigMap: trust-bundle
+    key: tls-ca-bundle.pem
+
+litellm:
+  mode: external
+  externalURL: http://litellm.platform.svc.cluster.local:4000
+
+# BYO Gas City controller: no controller workload / ServiceAccount / RBAC render;
+# intake dispatches orders to the external supervisor.
+gascity:
+  enabled: false
+  supervisorURL: http://gc.platform.svc.cluster.local:9443
+
+# BYO beads Dolt: no gonk-dolt StatefulSet renders; the controller and beads use
+# the external server. (Here the controller is also external, so nothing in-chart
+# consumes it -- but the seam is proven to render.)
+dolt:
+  enabled: false
+  external:
+    host: dolt.platform.svc.cluster.local
+    port: 3306
+
+# BYO ledger: an external Postgres the operator owns; the chart renders nothing
+# and meter just reads the DSN from the named Secret below.
+ledger:
+  backend: postgres
+  postgres:
+    mode: external
+
+ingress:
+  enabled: false
+
+networkPolicy:
+  enabled: false
+
+monitoring:
+  serviceMonitor:
+    enabled: false
+  prometheusRule:
+    enabled: false
+  dashboards:
+    enabled: false
+
+# Every credential comes from an operator-named Secret. The chart still creates
+# NONE of these; it references them by name.
+secrets:
+  gitlab:
+    existingSecret: corp-gonk-gitlab
+  webhook:
+    existingSecret: corp-gonk-webhook
+  meterAPI:
+    existingSecret: corp-gonk-meter-api
+  litellm:
+    existingSecret: corp-gonk-litellm
+  ledger:
+    existingSecret: corp-gonk-ledger
+
+operatorConfig:
+  instance:
+    ladder: [local-only]
+    budget:
+      monthly_cost_usd: 0
+  rungs:
+    - name: local-only
+      kind: local
+      model: local-model
+      est_cost_usd: 0
+      est_tokens: 200K
+      synthetic_usd_per_1m_tokens: 0.15
+
+onboarding:
+  defaultRung: local-only

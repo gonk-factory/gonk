@@ -1,0 +1,24 @@
+{{- if .Values.meter.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gonk-meter
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: meter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gonk-meter
+subjects:
+  # gonk-meter's own ServiceAccount (Task 3, serviceaccount-gonk-meter.yaml).
+  # GONK_KEYSINK_NAMESPACE (Task 3's deployment env) is set to the Release
+  # namespace -- the SAME namespace this Release installs into -- so the
+  # subject namespace below matches where the Role actually lives and where
+  # the sink actually writes. If keysink is ever pointed at a DIFFERENT
+  # namespace than the release, this binding (and the Role) must move there
+  # too; nothing in this chart currently does that.
+  - kind: ServiceAccount
+    name: gonk-meter
+    namespace: {{ .Release.Namespace }}
+{{- end }}

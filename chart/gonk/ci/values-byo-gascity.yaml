@@ -1,0 +1,46 @@
+# Task 8.5 toggle-matrix profile: the bundled Gas City controller is disabled
+# and replaced by an external supervisor. No gonk-controller
+# Deployment/ServiceAccount/Role/RoleBinding render; gonk-intake dispatches
+# orders to the external supervisorURL instead. Dolt (beads) and gonk-meter
+# are unaffected -- they have no relationship to the controller toggle.
+#
+# gascity.image.tag is deliberately OMITTED: it is only required when
+# gascity.enabled=true (G20/_guards.tpl), and values.schema.json's
+# gascity.image uses $defs.imageOptional, not $defs.image, for exactly this
+# reason.
+intake:
+  image:
+    tag: v0.1.0
+  webhookPublicURL: https://gonk.example.test/hook/gitlab
+
+meter:
+  image:
+    tag: v0.1.0
+
+dolt:
+  image:
+    tag: v1.43.0
+
+gascity:
+  enabled: false
+  # The per-city [api] listener port (9443), NOT the machine-wide supervisor
+  # admin API (8372, which binds 127.0.0.1 only). A BYO supervisor must expose
+  # the 9443-equivalent dispatch endpoint. See chart/gonk/smoke/gc-controller-smoke.md.
+  supervisorURL: http://gc.external.svc:9443
+
+litellm:
+  externalURL: http://litellm.litellm.svc:4000
+
+operatorConfig:
+  instance:
+    ladder: [qwen-local]
+  rungs:
+    - name: qwen-local
+      kind: local
+      model: stub-local
+      est_cost_usd: 0
+      est_tokens: 200K
+      synthetic_usd_per_1m_tokens: 0.20
+
+onboarding:
+  defaultRung: qwen-local

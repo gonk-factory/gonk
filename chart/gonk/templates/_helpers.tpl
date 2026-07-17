@@ -1,0 +1,180 @@
+{{/* Standard names. */}}
+{{- define "gonk.name" -}}
+{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "gonk.fullname" -}}
+{{- if .Values.fullnameOverride -}}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- .Chart.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "gonk.labels" -}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+app.kubernetes.io/name: {{ include "gonk.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: gonk
+{{- end -}}
+
+{{/* selectorLabels COMPONENT -- must be stable across upgrades. */}}
+{{- define "gonk.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "gonk.name" .ctx }}
+app.kubernetes.io/instance: {{ .ctx.Release.Name }}
+app.kubernetes.io/component: {{ .component }}
+{{- end -}}
+
+{{/*
+  gonk.networkPolicyBanner -- the "NOT ENFORCED" disclaimer, as a real
+  ANNOTATION, not just a spec-block comment.
+
+  Helm comments never reach the API server (they are stripped at template
+  render time, long before `kubectl apply`), so `kubectl get networkpolicy -o
+  yaml` on the real cluster would show NONE of the surrounding spec comments
+  -- an operator inspecting the live object would see nothing warning them
+  that it blocks nothing. An annotation is real object data: it survives all
+  the way to etcd and back out through `kubectl get/describe`. Every
+  NetworkPolicy template carries this AND keeps its own spec-block prose
+  comment for anyone reading the chart source or a `helm template` dry run.
+*/}}
+{{- define "gonk.networkPolicyBanner" -}}
+gonk.orac.local/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/orac/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+{{- end -}}
+
+{{/*
+  image DICT{ctx,image} -> registry-qualified reference.
+
+  RECONCILED, Task 0: `.image.registry`, if set on the SPECIFIC image dict,
+  overrides the global `.Values.image.registry` default. This is required for
+  `dolt.image` (docker.io/dolthub/dolt-sql-server) — Dolt is a third-party
+  upstream image, never rebuilt into registry.orac.local/agentic/gonk-project,
+  so it must NOT inherit the four first-party images' in-cluster registry.
+  Without this override the helper previously produced
+  `registry.orac.local/agentic/gonk-project/dolthub/dolt-sql-server:<tag>`,
+  which the in-cluster registry can never serve. gonk's own four images
+  (gonk-agent, gonk-intake, gonk-meter, gonk-controller) leave `.image.registry`
+  unset and fall through to the global default, exactly as before.
+*/}}
+{{- define "gonk.image" -}}
+{{- $reg := .ctx.Values.image.registry -}}
+{{- if .image.registry -}}{{ $reg = .image.registry }}{{- end -}}
+{{- if $reg -}}{{ printf "%s/%s:%s" (trimSuffix "/" $reg) .image.repository .image.tag }}
+{{- else -}}{{ printf "%s:%s" .image.repository .image.tag }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+  gonk.secretVolume DICT{name, secret, keys}
+  A projected volume, mode 0400. optional is FALSE everywhere on purpose: a
+  missing Secret or a missing key must make the pod fail to start LOUDLY, not
+  start with an empty credential file.
+*/}}
+{{- define "gonk.secretVolume" -}}
+- name: secret-{{ .name }}
+  projected:
+    defaultMode: 0400
+    sources:
+      - secret:
+          name: {{ .secret }}
+          items:
+{{- range .keys }}
+            - key: {{ . }}
+              path: {{ . }}
+{{- end }}
+{{- end -}}
+
+{{- define "gonk.secretMount" -}}
+- name: secret-{{ .name }}
+  mountPath: {{ .root }}/{{ .name }}
+  readOnly: true
+{{- end -}}
+
+{{/* Where a given secret key lands on disk. NEVER an env VALUE -- only a PATH. */}}
+{{- define "gonk.secretPath" -}}
+{{ .root }}/{{ .name }}/{{ .key }}
+{{- end -}}
+
+{{/* ---- umbrella component wiring helpers (Tasks 5, 6, 6.5) ---- */}}
+
+{{/*
+  gonk.supervisorURL -- where intake POSTs orders. DERIVED from the in-chart
+  controller Service when the controller is bundled, else the operator-supplied
+  external URL. The port is SETTLED at 9443 (gascity.supervisorPort, smoke U1).
+
+  IMAGE-GATED (bead gonk-fsl): the http-vs-https scheme on 9443 was NOT
+  socket-confirmed -- the image cannot finish city init yet, so the 9443 listener
+  never bound during the Task 0.5 smoke. `http` is the smoke doc's default; re-check
+  the scheme once the image can boot a city.
+*/}}
+{{- define "gonk.supervisorURL" -}}
+{{- if .Values.gascity.enabled -}}
+http://gonk-controller.{{ .Release.Namespace }}.svc:{{ .Values.gascity.supervisorPort }}
+{{- else -}}
+{{ .Values.gascity.supervisorURL }}
+{{- end -}}
+{{- end -}}
+
+{{/* gonk.doltHost / gonk.doltPort -- the bundled Dolt Service, or the external one.
+     Consumed by the controller (beads) and, via the DSN, by meter (ledger). */}}
+{{- define "gonk.doltHost" -}}
+{{- if .Values.dolt.enabled -}}
+gonk-dolt.{{ .Release.Namespace }}.svc
+{{- else -}}
+{{ .Values.dolt.external.host }}
+{{- end -}}
+{{- end -}}
+
+{{- define "gonk.doltPort" -}}
+{{- if .Values.dolt.enabled -}}{{ .Values.dolt.port }}{{- else -}}{{ .Values.dolt.external.port }}{{- end -}}
+{{- end -}}
+
+{{/*
+  gonk.controllerEnv CTX -- the env SHARED by the controller's bootstrap
+  initContainer and its `gc supervisor run` main container.
+
+  SETTLED by Task 0.5 (smoke/gc-controller-smoke.md), NOT the plan draft:
+  - HOME=/home/gonk on a writable volume -- the image's passwd home for uid 65532
+    is `/` (read-only), so gc cannot write ~/.gc without this (smoke U2).
+  - GC_DOLT_HOST/PORT point beads at the bundled/external Dolt.
+  - GC_SESSION_PROVIDER=k8s so the supervisor spawns agent SESSION pods.
+  - The draft's GC_DAEMON_SUPERVISOR_BIND / _ALLOW_MUTATIONS are OMITTED on
+    purpose: smoke U1 proved no env moves the bind. The 0.0.0.0:9443 [api] bind and
+    allow_mutations=true come from `gc init --bootstrap-profile k8s-cell`, never env.
+*/}}
+{{- define "gonk.controllerEnv" -}}
+- name: HOME
+  value: /home/gonk
+- name: GC_DOLT_HOST
+  value: {{ include "gonk.doltHost" . | quote }}
+- name: GC_DOLT_PORT
+  value: {{ include "gonk.doltPort" . | quote }}
+- name: GC_SESSION_PROVIDER
+  value: k8s
+{{- if .Values.gitlab.caCert.existingConfigMap }}
+- name: SSL_CERT_FILE
+  value: {{ .Values.gitlab.caCert.mountPath | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
+  gonk.controllerMounts CTX -- the volumeMounts SHARED by the bootstrap
+  initContainer and the supervisor. /city and /home/gonk are WRITABLE emptyDirs
+  (smoke U2: gc init writes the city into /city, gc writes ~/.gc under HOME).
+*/}}
+{{- define "gonk.controllerMounts" -}}
+- name: city
+  mountPath: /city
+- name: home
+  mountPath: /home/gonk
+- name: tmp
+  mountPath: /tmp
+{{- if .Values.gitlab.caCert.existingConfigMap }}
+- name: orac-ca
+  mountPath: {{ .Values.gitlab.caCert.mountPath }}
+  subPath: {{ .Values.gitlab.caCert.key }}
+  readOnly: true
+{{- end }}
+{{- end -}}

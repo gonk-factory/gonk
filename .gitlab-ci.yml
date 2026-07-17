@@ -1,5 +1,34 @@
-stages: [lint, test]
+# =============================================================================
+# gonk CI.
+#
+# RUNNER REALITY (docs/environment.md): every GitLab runner on this cluster is
+# OFFLINE, and no runner has ever executed a job for this repo -- the first
+# images are built and pushed BY HAND (Makefile `push`). So this pipeline is
+# written to be TRUE the day a runner lands, not to invent reach it does not
+# have. Two consequences are baked in here:
+#
+#   * The Go gate is VENDORED + OFFLINE. GOFLAGS=-mod=vendor and GOPROXY=off are
+#     global, so no job ever reaches a module proxy. `vendor/` is committed.
+#   * Every job that needs podman, a network, or the registry (image build,
+#     push, trivy scan, chart publish) is DOCUMENTED-MANUAL: `rules: when: never`
+#     (or manual), with the real Makefile target it maps to. It does not run in
+#     CI today; it is here so the mapping is not lost and so it turns on with a
+#     single rule edit once a runner + registry credentials exist.
+# =============================================================================
 
+stages: [lint, test, chart, images]
+
+variables:
+  # Vendored + offline: the standing local gate is exactly
+  #   GOFLAGS=-mod=vendor GOPROXY=off go test ./... -race
+  # (plan 01). Setting them globally makes every Go job identical to it and
+  # guarantees no job silently reaches out to a proxy the runner cannot see.
+  GOFLAGS: "-mod=vendor"
+  GOPROXY: "off"
+
+# -----------------------------------------------------------------------------
+# The Go gate (plan 01). Unchanged in intent; now explicitly offline/vendored.
+# -----------------------------------------------------------------------------
 lint:
   stage: lint
   # Pin the full tag. Must be v2.x to match .golangci.yml, and must be built
@@ -15,3 +44,100 @@ test:
   script:
     - go vet ./...
     - go test ./... -race -count=1
+
+# -----------------------------------------------------------------------------
+# The chart gate.
+# -----------------------------------------------------------------------------
+chart-lint:
+  stage: chart
+  # Only needs helm. Pin the tag: helm's schema validation has changed behaviour
+  # across minors before. Lints ALL EIGHT ci/ profiles (the four Task 9 plus the
+  # four Task 8.5 toggle-matrix profiles), because the golden gate snapshots all
+  # eight and a profile that renders but does not lint is a profile that ships broken.
+  image: alpine/helm:3.19.0
+  script:
+    - for p in default byo-everything cnpg full-monitoring all-bundled external-dolt byo-gascity ledger-cnpg; do
+        echo "== helm lint --strict ci/values-$p.yaml ==";
+        helm lint --strict chart/gonk --values chart/gonk/ci/values-$p.yaml;
+      done
+
+chart-test:
+  stage: chart
+  # OWNER DECISION (OD-7): this image needs go + helm + kubeconform. Until it
+  # exists, this job does not run and the chart gate is LOCAL -- which is where
+  # plan 01's gate already lives (PLAN.md: no runner has ever executed a job).
+  # The gate itself, run locally, is:
+  #   go test -tags chart ./internal/charttest/... -count=1
+  # It re-renders every profile, diffs the golden manifests, helm-lints, and
+  # kubeconform -strict validates (CRDs against chart/gonk/tests/crd-schemas,
+  # NOT -ignore-missing-schemas).
+  image: $GONK_CHART_TOOLS_IMAGE
+  rules:
+    - if: $GONK_CHART_TOOLS_IMAGE
+  script:
+    - go test -tags chart ./internal/charttest/... -count=1
+
+# -----------------------------------------------------------------------------
+# The no-latest gate. This one CAN run in an offline runner: it is a pure-shell
+# grep (Makefile `no-latest`), no podman, no network, no registry. `latest` is
+# banned everywhere (docs/environment.md); Renovate cannot bump a floating tag.
+# -----------------------------------------------------------------------------
+no-latest:
+  stage: images
+  image: alpine:3.20
+  script:
+    - apk add --no-cache make grep
+    - make no-latest
+
+# -----------------------------------------------------------------------------
+# DOCUMENTED-MANUAL: image build / push / scan.
+#
+# These need podman (--network=host on WSL), network reach to the upstream
+# release servers the Dockerfiles fetch from, and push credentials to
+# registry.orac.local. NONE of that exists on an offline runner, and the first
+# images are built + pushed BY HAND (Makefile `push`). `rules: when: never`
+# keeps them out of every pipeline while preserving the exact target mapping; a
+# single rule edit turns them on once a runner + registry creds exist. DO NOT
+# "fix" these by inventing reach the runner lacks.
+# -----------------------------------------------------------------------------
+image-build:
+  stage: images
+  rules:
+    - when: never
+  script:
+    # `make images` runs the no-latest gate first, then builds all four images
+    # (agent, controller, intake, meter) plus the e2e-only testclock meter.
+    - make images
+
+image-push:
+  stage: images
+  rules:
+    - when: never
+  script:
+    # Pushes $(GONK_TAG) (never `latest`) to registry.orac.local. Needs push
+    # credentials this pipeline does not carry.
+    - make push
+
+image-scan:
+  stage: images
+  rules:
+    - when: never
+  script:
+    # Trivy HIGH,CRITICAL, --ignore-unfixed (spec 10.3). Needs the trivy binary
+    # and its vuln DB, neither present on an offline runner.
+    - make scan
+
+# -----------------------------------------------------------------------------
+# DOCUMENTED-MANUAL: publish the chart as an OCI artifact.
+#
+# OWNER DECISION (OD-8): which OCI registry, and with what credentials. Spec 7.1
+# says CI publishes the chart as OCI; nothing says where. Off until answered.
+# -----------------------------------------------------------------------------
+chart-publish:
+  stage: chart
+  image: alpine/helm:3.19.0
+  rules:
+    - when: never
+  script:
+    - helm package chart/gonk
+    - helm push gonk-*.tgz oci://$CHART_REGISTRY

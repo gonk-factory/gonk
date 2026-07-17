@@ -1,0 +1,105 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-agent
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-session
+  annotations:
+    {{- include "gonk.networkPolicyBanner" . | nindent 4 }}
+spec:
+  # ==========================================================================
+  # *** THE POLICY SPEC 9's CENTRAL CLAIM RESTS ON -- AND IT IS NOT ENFORCED. ***
+  #
+  # "Cloud access exists only through the metered proxy, so budgets cannot be
+  # bypassed" is TRUE ONLY IF (a) this selector matches the pods Gas City's k8s
+  # session provider actually creates (OD-5 -- Gas City is not even deployed yet,
+  # so nobody knows the labels), AND (b) the CNI actually enforces policy.
+  #
+  # (b) IS FALSE TODAY. Flannel does not implement NetworkPolicy and the Cilium
+  # HelmRelease is SUSPENDED. So RIGHT NOW an agent pod can reach anything --
+  # including Ollama at http://192.168.1.142:11434, WHICH NEEDS NO CREDENTIAL --
+  # skip LiteLLM entirely, and burn local GPU with ZERO METERING.
+  #
+  # Owner decision 2026-07-13: SHIP IT, DOCUMENT THE GAP, DO NOT GATE ON IT.
+  # Therefore:
+  #   * CLOUD-rung budgets ARE hard: a cloud call needs an API key, and the pod's
+  #     only route to one is LiteLLM's virtual key, which refuses at the ceiling.
+  #   * LOCAL-model budgets are ADVISORY until Cilium lands.
+  # Say it that way in every README, dashboard and demo. Not "budgets cannot be
+  # bypassed".
+  #
+  # Plan 06 writes the egress-denial test and SKIPS it, naming Cilium. UN-SKIPPING
+  # THAT TEST IS THE GATE -- and note that a WRONG selector renders fine and
+  # enforces nothing, so the test, not this template, is what proves it.
+  # ==========================================================================
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.networkPolicy.agentPodSelector | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    # DNS. Without it the pod resolves nothing and reaches nothing.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 14 }}
+      ports:
+        {{- range .Values.networkPolicy.dns.ports }}
+        - protocol: UDP
+          port: {{ . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    # LiteLLM: THE ONLY DOOR TO A MODEL. Every token an agent spends passes
+    # through it, tagged, budgeted, and hard-refusable.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.litellm.namespaceSelector | nindent 14 }}
+          {{- with .Values.networkPolicy.litellm.podSelector }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.litellm.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    # GitLab: the agent clones the rig and posts comments as the bot.
+    {{- if .Values.networkPolicy.gitlabInCluster.enabled }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.gitlabInCluster.namespaceSelector | nindent 14 }}
+          {{- with .Values.networkPolicy.gitlabInCluster.podSelector }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+    {{- else }}
+    - to:
+        {{- range .Values.networkPolicy.gitlab.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.gitlab.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- end }}
+    # gonk-meter: the agent reads its own session cost for the commit trailers
+    # (GET /v1/cost/session/{key}).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "meter") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.meter.port }}
+    # AND NOTHING ELSE. No 0.0.0.0/0. No "just for pip". An agent pod that can
+    # reach the internet can reach api.anthropic.com directly, with a key from
+    # anywhere, and every budget in this system becomes a suggestion.
+{{- end }}

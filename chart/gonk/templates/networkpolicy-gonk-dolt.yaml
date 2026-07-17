@@ -1,0 +1,32 @@
+{{- if and .Values.networkPolicy.enabled .Values.dolt.enabled .Values.gascity.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-dolt
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dolt
+  annotations:
+    {{- include "gonk.networkPolicyBanner" . | nindent 4 }}
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/orac/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      {{- include "gonk.selectorLabels" (dict "ctx" . "component" "dolt") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # RECONCILED, Task 0: the Gas City controller (beads) ONLY. gonk-meter is
+    # NOT admitted -- its ledger is Postgres/CNPG, never a Dolt database, so it
+    # never needs to reach this Service at all (ADR-004 Decision 10).
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "controller") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.dolt.port }}
+{{- end }}

@@ -1,0 +1,31 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-default-deny
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+  annotations:
+    {{- include "gonk.networkPolicyBanner" . | nindent 4 }}
+spec:
+  # ==========================================================================
+  # !!! NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13) !!!
+  # Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that
+  # would is SUSPENDED (gitops:clusters/orac/foundation/kustomization.yaml).
+  # THIS OBJECT BLOCKS NOTHING TODAY. It is documentation-as-code: it is
+  # correct, it ships, and it starts enforcing the day Cilium is unsuspended --
+  # with no further work. Do not read it as a guarantee.
+  # See docs/environment.md ("KNOWN LIMITATION") and chart/gonk/README.md.
+  # ==========================================================================
+  #
+  # Deny everything, in both directions, for every pod in this namespace. The
+  # policies that follow ADD back exactly what each component needs. Without this
+  # one, they add permissions to pods that already had all of them, and the whole
+  # exercise is theatre.
+  #
+  # THIS APPLIES TO AGENT SESSION PODS TOO -- as long as they are in this
+  # namespace. If Gas City's session provider puts them somewhere else, this
+  # policy does not touch them and spec 9's guarantee does not exist. (OD-5.)
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+{{- end }}

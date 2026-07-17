@@ -1,0 +1,40 @@
+# Task 8.5 toggle-matrix profile: everything ENABLED, the whole bundled
+# factory. This is the values-file equivalent of internal/charttest.Minimum()
+# -- every required value with no safe default, and nothing else. It renders
+# the controller + Dolt (beads) + intake + meter + the operator config
+# together. ledger.backend stays at its only value (postgres) and
+# ledger.postgres.mode stays at its default (shared), per the matrix in
+# docs/superpowers/plans/2026-07-13-plan-05-chart.md Task 8.5.
+intake:
+  image:
+    tag: v0.1.0
+  webhookPublicURL: https://gonk.example.test/hook/gitlab
+
+meter:
+  image:
+    tag: v0.1.0
+
+gascity:
+  image:
+    tag: v0.1.0
+
+dolt:
+  image:
+    tag: v1.43.0
+
+litellm:
+  externalURL: http://litellm.litellm.svc:4000
+
+operatorConfig:
+  instance:
+    ladder: [qwen-local]
+  rungs:
+    - name: qwen-local
+      kind: local
+      model: stub-local
+      est_cost_usd: 0
+      est_tokens: 200K
+      synthetic_usd_per_1m_tokens: 0.20
+
+onboarding:
+  defaultRung: qwen-local

@@ -1,0 +1,21 @@
+{{- if .Values.intake.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-intake-internal
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: intake
+    gonk.orac.local/exposure: internal
+spec:
+  type: ClusterIP
+  # /healthz, /readyz, /metrics, POST /admin/reconcile. Cluster-internal ONLY:
+  # /admin/reconcile has no authentication. The Ingress must never reference this
+  # Service (a chart test asserts it does not).
+  ports:
+    - name: http-private
+      port: {{ .Values.intake.ports.private }}
+      targetPort: http-private
+  selector:
+    {{- include "gonk.selectorLabels" (dict "ctx" . "component" "intake") | nindent 4 }}
+{{- end }}

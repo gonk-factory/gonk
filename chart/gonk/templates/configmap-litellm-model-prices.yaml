@@ -1,0 +1,32 @@
+{{- if .Values.litellm.emitModelPricesConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gonk-litellm-model-prices
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: litellm-advisory
+data:
+  # ADVISORY. Nothing in this chart applies this to LiteLLM -- LiteLLM is BYO
+  # (OD-3). Paste these into LiteLLM's model_list.
+  #
+  # THIS IS NOT COSMETIC. Local inference is free, so without a SYNTHETIC price
+  # configured in LiteLLM, a local rung moves LiteLLM's USD counter by $0 -- and
+  # the USD virtual-key budget is the ONLY HARD DOOR gonk has. A project's
+  # monthly_tokens ceiling is converted into that USD ceiling using exactly these
+  # numbers. If LiteLLM and this file disagree, the hard door is in the wrong
+  # place, and nothing will tell you. Plan 06 diffs LiteLLM's /model/info against
+  # this. (Cloud models are ABSENT on purpose: their prices are real and already
+  # live in LiteLLM.)
+  model-prices.yaml: |
+    model_list:
+    {{- range .Values.operatorConfig.rungs }}
+    {{- if eq .kind "local" }}
+      - model_name: {{ .model }}
+        litellm_params:
+          model: {{ .model }}
+          input_cost_per_token: {{ divf (float64 .synthetic_usd_per_1m_tokens) 1e6 }}
+          output_cost_per_token: {{ divf (float64 .synthetic_usd_per_1m_tokens) 1e6 }}
+    {{- end }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,130 @@
+{
+  "uid": "gonk-factory",
+  "title": "gonk / Factory",
+  "description": "Work in flight: webhooks, reconciliation, dispatch, and policy outcomes (spec 8).",
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      },
+      {
+        "name": "project",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": "label_values(gonk_meter_project_state, project)",
+        "multi": true,
+        "includeAll": true,
+        "current": {}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Webhooks received",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {"expr": "sum by (result) (rate(gonk_intake_webhook_total[5m]))", "legendFormat": "{{result}}"}
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Reconcile outcomes",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {"expr": "sum by (result) (rate(gonk_intake_reconcile_total[15m]))", "legendFormat": "{{result}}"}
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Projects by state",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "sum by (state) (gonk_intake_projects)", "legendFormat": "{{state}}"}
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Orders dispatched",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "sum by (trigger) (rate(gonk_intake_dispatched_total[5m]))", "legendFormat": "{{trigger}}"}
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Orders dropped",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "sum by (reason) (rate(gonk_intake_dispatch_dropped_total[5m]))", "legendFormat": "{{reason}}"}
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Policy decisions",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {"expr": "sum by (decision) (rate(gonk_meter_policy_decisions_total[5m]))", "legendFormat": "{{decision}}"}
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Gate outcomes",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "targets": [
+        {"expr": "sum by (outcome) (rate(gonk_meter_gate_outcomes_total[15m]))", "legendFormat": "{{outcome}}"}
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Ladder escalations",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "targets": [
+        {"expr": "sum by (from_rung, to_rung) (rate(gonk_meter_ladder_escalations_total[1h]))", "legendFormat": "{{from_rung}} -> {{to_rung}}"}
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Deferred beads",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "targets": [
+        {"expr": "gonk_meter_deferred_beads", "legendFormat": "{{project}}"}
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Onboarding",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "targets": [
+        {"expr": "sum by (result) (rate(gonk_intake_onboarding_total[1h]))", "legendFormat": "{{result}}"}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gonk chart values",
+  "type": "object",
+  "required": ["image", "intake", "meter", "gitlab", "litellm", "gascity", "dolt", "ledger", "secrets", "operatorConfig", "onboarding"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "registry": {"type": "string"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]},
+        "pullSecrets": {"type": "array"}
+      }
+    },
+    "intake": {
+      "type": "object",
+      "required": ["enabled", "image", "replicaCount", "ports", "webhookPublicURL"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"$ref": "#/$defs/image"},
+        "replicaCount": {"type": "integer", "minimum": 1},
+        "ports": {
+          "type": "object",
+          "required": ["public", "private"],
+          "properties": {
+            "public": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "private": {"type": "integer", "minimum": 1, "maximum": 65535}
+          }
+        },
+        "webhookPublicURL": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^https?://",
+          "description": "REQUIRED. Intake writes this into every GitLab hook it provisions."
+        },
+        "webhookTokenGen": {"type": "string", "minLength": 1},
+        "webhookSSLVerify": {"type": "boolean"},
+        "reconcileInterval": {"type": "string", "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"},
+        "dispatchStalenessWindow": {
+          "type": "string",
+          "pattern": "^$|^[0-9]+(ns|us|ms|s|m|h)$",
+          "description": "GONK_DISPATCH_STALENESS_WINDOW. Optional; empty resolves to intake's own default (30m)."
+        }
+      }
+    },
+    "meter": {
+      "type": "object",
+      "required": ["enabled", "image", "replicaCount", "port"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"$ref": "#/$defs/image"},
+        "replicaCount": {"type": "integer", "minimum": 1},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    },
+    "gitlab": {
+      "type": "object",
+      "required": ["url", "botUsername", "mode"],
+      "properties": {
+        "url": {"type": "string", "pattern": "^https?://", "minLength": 1},
+        "botUsername": {"type": "string", "minLength": 1},
+        "mode": {"enum": ["bot-does-everything", "split-credential"]}
+      }
+    },
+    "litellm": {
+      "type": "object",
+      "required": ["mode", "externalURL"],
+      "properties": {
+        "mode": {"enum": ["external"]},
+        "externalURL": {"type": "string", "minLength": 1, "pattern": "^https?://"},
+        "emitModelPricesConfigMap": {"type": "boolean"}
+      }
+    },
+    "gascity": {
+      "type": "object",
+      "required": ["enabled", "dispatch"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Deploy the bundled Gas City controller. false => BYO controller; supervisorURL becomes required (G17)."
+        },
+        "dispatch": {"enum": ["http", "log"]},
+        "supervisorURL": {"type": "string"},
+        "supervisorPort": {
+          "type": "integer", "minimum": 1, "maximum": 65535,
+          "description": "SETTLED (Task 0.5, smoke U1): the per-city [api] listener (0.0.0.0:9443). NOT 8372, the loopback-only supervisor admin API that must never be exposed."
+        },
+        "delivery": {
+          "enum": ["prebaked"],
+          "description": "SETTLED (Task 0.5, smoke U2): prebaked ONLY. The pack is baked into the image and an initContainer copies it into a writable /city. A read-only ConfigMap at /city is not viable (gc init must write there). Single-value enum, future-proof."
+        },
+        "workload": {
+          "enum": ["deployment", "statefulset"],
+          "description": "SETTLED (Task 0.5, smoke U3): Deployment (strategy Recreate) is the default; StatefulSet is the single-instance alternative. Both are exactly one replica; the upstream bare-Pod hack is dropped."
+        },
+        "image": {"$ref": "#/$defs/imageOptional"}
+      }
+    },
+    "dolt": {
+      "type": "object",
+      "required": ["enabled"],
+      "description": "The bundled Dolt SQL server. RECONCILED, Task 0: backs the Gas City beads store ONLY -- the meter ledger is always Postgres/CNPG (ADR-004 Decision 10; there is no ledger.backend=dolt). Beads is Dolt-only; there is no Postgres path for beads.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Deploy the bundled Dolt StatefulSet. false => external Dolt; dolt.external.host becomes required (G16)."
+        },
+        "database": {"type": "string", "minLength": 1},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "image": {"$ref": "#/$defs/imageOptional"},
+        "external": {
+          "type": "object",
+          "properties": {
+            "host": {"type": "string"},
+            "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+          }
+        }
+      }
+    },
+    "ledger": {
+      "type": "object",
+      "required": ["backend"],
+      "description": "The METER ledger backend. RECONCILED, Task 0: Postgres/CNPG is the ONLY backend (ADR-004 Decision 10; docs/spikes/dolt-reservation-isolation.md -- Dolt measured, and failed, the reservation-race isolation test). It is LEDGER-ONLY -- it never replaces the beads store, which stays on the top-level `dolt` component regardless of this value.",
+      "properties": {
+        "backend": {
+          "enum": ["postgres"],
+          "description": "A single-value enum, not a switch: `dolt` is deliberately absent (there is no store.OpenDolt for the ledger -- see the spike). `memory` is also absent: it loses reservations on restart, which is fail-open on budget headroom."
+        },
+        "postgres": {
+          "type": "object",
+          "properties": {
+            "mode": {"enum": ["shared", "cnpg", "external"]},
+            "database": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "required": ["mountRoot", "gitlab", "webhook", "meterAPI", "litellm", "ledger"],
+      "properties": {
+        "mountRoot": {"type": "string", "pattern": "^/"},
+        "gitlab": {"$ref": "#/$defs/secretRef"},
+        "webhook": {"$ref": "#/$defs/secretRef"},
+        "meterAPI": {"$ref": "#/$defs/secretRef"},
+        "litellm": {"$ref": "#/$defs/secretRef"},
+        "ledger": {"$ref": "#/$defs/secretRef"},
+        "keySink": {
+          "type": "object",
+          "properties": {"namePrefix": {"type": "string", "minLength": 1}}
+        },
+        "rotation": {"type": "object"}
+      }
+    },
+    "operatorConfig": {
+      "type": "object",
+      "required": ["version", "instance", "rungs"],
+      "properties": {
+        "version": {"const": 1},
+        "instance": {
+          "type": "object",
+          "required": ["ladder"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "ladder": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1},
+              "description": "G1. An empty instance ladder imposes NO constraint, so a project could name any rung. gonk-meter also refuses to start without one."
+            },
+            "budget": {"$ref": "#/$defs/budget"}
+          }
+        },
+        "groups": {"type": "object"},
+        "rungs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/rung"}
+        },
+        "meter": {"type": "object"}
+      }
+    },
+    "onboarding": {
+      "type": "object",
+      "required": ["defaultRung"],
+      "properties": {"defaultRung": {"type": "string", "minLength": 1}}
+    },
+    "ingress": {"type": "object"},
+    "networkPolicy": {"type": "object"},
+    "monitoring": {"type": "object"}
+  },
+  "$defs": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {
+          "type": "string",
+          "minLength": 1,
+          "not": {"const": "latest"},
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]{0,126}$",
+          "description": "G11. No default, and `latest` is rejected: a deploy of the budget enforcer must be reproducible."
+        }
+      }
+    },
+    "imageOptional": {
+      "type": "object",
+      "properties": {
+        "repository": {"type": "string"},
+        "tag": {"type": "string", "not": {"const": "latest"}}
+      }
+    },
+    "secretRef": {
+      "type": "object",
+      "required": ["existingSecret", "keys"],
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The NAME of a Secret provisioned outside this chart. G7/G14: there is no way to inline a value, and no way to disable verification."
+        },
+        "keys": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}}
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "monthly_cost_usd": {"type": "number", "minimum": 0},
+        "monthly_tokens": {"type": "string", "pattern": "^[0-9]+[KMG]?$"},
+        "per_task_tokens": {"type": "string", "pattern": "^[0-9]+[KMG]?$"}
+      }
+    },
+    "rung": {
+      "type": "object",
+      "required": ["name", "kind", "model", "est_tokens"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["local", "cloud"]},
+        "model": {"type": "string", "minLength": 1},
+        "est_cost_usd": {"type": "number", "minimum": 0},
+        "est_tokens": {"type": "string", "pattern": "^[0-9]+[KMG]?$"},
+        "synthetic_usd_per_1m_tokens": {"type": "number", "exclusiveMinimum": 0}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "cloud"}}, "required": ["kind"]},
+          "then": {
+            "required": ["est_cost_usd"],
+            "properties": {
+              "est_cost_usd": {"exclusiveMinimum": 0},
+              "synthetic_usd_per_1m_tokens": false
+            },
+            "description": "G4. An unpriced cloud rung sails past the cost gate. A synthetic price on a cloud rung is a lie: its price is real and lives in LiteLLM."
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "local"}}, "required": ["kind"]},
+          "then": {
+            "required": ["synthetic_usd_per_1m_tokens"],
+            "properties": {"est_cost_usd": {"const": 0}},
+            "description": "G3. Without a synthetic price, LiteLLM's USD ceiling never closes on tokens."
+          }
+        }
+      ]
+    }
+  }
+}

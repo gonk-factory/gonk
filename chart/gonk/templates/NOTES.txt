@@ -1,0 +1,41 @@
+gonk {{ .Chart.AppVersion }} installed into namespace {{ .Release.Namespace }}.
+
+  Gas City controller   : {{ if .Values.gascity.enabled }}BUNDLED (supervisor :{{ .Values.gascity.supervisorPort }}, delivery={{ .Values.gascity.delivery }}, workload={{ .Values.gascity.workload }}){{ else }}EXTERNAL {{ .Values.gascity.supervisorURL }}{{ end }}
+  Dolt (beads ONLY)     : {{ if .Values.dolt.enabled }}BUNDLED (gonk-dolt:{{ .Values.dolt.port }}){{ else }}EXTERNAL {{ .Values.dolt.external.host }}:{{ .Values.dolt.external.port }}{{ end }}
+  ledger (Postgres/CNPG): mode={{ .Values.ledger.postgres.mode }} (never Dolt -- ADR-004)
+  GitLab                : {{ .Values.gitlab.url }} as @{{ .Values.gitlab.botUsername }} ({{ .Values.gitlab.mode }})
+  LiteLLM               : {{ .Values.litellm.externalURL }} (external)
+  order dispatch        : {{ if eq .Values.gascity.dispatch "log" }}*** DRY RUN -- orders are LOGGED, not fired ***{{ else }}http -> supervisor{{ end }}
+  instance ladder       : {{ join ", " .Values.operatorConfig.instance.ladder }}
+  instance cost ceiling : ${{ .Values.operatorConfig.instance.budget.monthly_cost_usd }}/month
+{{- if eq (float64 .Values.operatorConfig.instance.budget.monthly_cost_usd) 0.0 }}
+
+  NOTE: the instance cost ceiling is $0. NO PROJECT CAN SPEND A DOLLAR, whatever
+  its .gonk.yml says (ceilings only tighten downward). Local rungs still run.
+{{- end }}
+
+The chart renders NO Secrets. These must exist in {{ .Release.Namespace }} or the
+pods will not start:
+
+  {{ .Values.secrets.gitlab.existingSecret }}    ({{ .Values.secrets.gitlab.keys.token }})
+  {{ .Values.secrets.webhook.existingSecret }}   ({{ .Values.secrets.webhook.keys.token }})
+  {{ .Values.secrets.meterAPI.existingSecret }}  ({{ .Values.secrets.meterAPI.keys.token }})
+  {{ .Values.secrets.litellm.existingSecret }}   ({{ .Values.secrets.litellm.keys.adminKey }})
+  {{ .Values.secrets.ledger.existingSecret }}    ({{ .Values.secrets.ledger.keys.dsn }})
+
+Webhook endpoint: {{ .Values.intake.webhookPublicURL }}
+{{- if not .Values.ingress.enabled }}
+  (ingress.enabled is false -- you are fronting this yourself)
+{{- end }}
+{{- if .Values.ingress.enabled }}
+
+Ingress: {{ .Values.ingress.className }}, host {{ .Values.ingress.host }}, path {{ .Values.ingress.path }} ONLY
+  (the private listener -- /metrics, /healthz, POST /admin/reconcile -- is on
+  Service gonk-intake-internal and is never routed here).
+
+  *** ACTION REQUIRED, OUTSIDE THIS CHART ***: add {{ .Values.ingress.host }} to
+  the CoreDNS hosts block (gitops:clusters/orac/foundation/coredns/
+  configmap-coredns.yaml) or in-cluster DNS resolution for this host FAILS
+  SILENTLY -- the symptom is a GitLab webhook that simply never arrives. This
+  chart cannot make that change; it lives in the gitops repo, not here.
+{{- end }}

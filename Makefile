@@ -133,10 +133,22 @@ BANNED_TAG := :late$(empty)st
 # same grep with `chart/` dropped from the argument list correctly reports
 # exit 0 (match found). The fix: only pass paths that exist to grep, so a
 # missing Plan-05 directory can never again mask a real hit.
+#
+# SECOND FALSE-POSITIVE SOURCE FIXED (Plan 05, Task 9): once `chart/` exists it
+# carries VENDORED UPSTREAM CRD schemas under chart/gonk/tests/crd-schemas/
+# (CNPG, prometheus-operator). Those JSON files legitimately contain the banned
+# token inside Kubernetes' own imagePullPolicy documentation (the sentence about
+# the default pull policy when that tag is specified). That is upstream API
+# prose, not one of OUR image tags, so the scan excludes that one vendored
+# directory by name -- every file we actually author (Dockerfiles, values.yaml,
+# ci/ profiles) is still scanned. Uses GNU grep's --exclude-dir (present in the
+# alpine CI image via `apk add grep`, and locally). NOTE: like BANNED_TAG's own
+# $(empty) trick, this comment must never spell the token as one contiguous
+# string, or `grep -rn ... Makefile` would trip on the comment itself.
 no-latest:
 	@paths="images Makefile test"; \
 	  [ -d chart ] && paths="$$paths chart"; \
-	  ! grep -rn '$(BANNED_TAG)' $$paths 2>/dev/null || \
+	  ! grep -rn --exclude-dir=crd-schemas '$(BANNED_TAG)' $$paths 2>/dev/null || \
 	  (echo "FAIL: a floating image tag was found. Pin an exact tag (docs/environment.md)." && exit 1)
 
 # lint-pack runs the pack's anti-drift greps (Plan 04, Task 4, Step 7). The
