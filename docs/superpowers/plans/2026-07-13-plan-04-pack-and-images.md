@@ -3114,7 +3114,7 @@ git history**, where it cannot be corrected.
 - Create: `cmd/gonk-gate/trailers.go`, `images/agent/prepare-commit-msg`
 - Test: `cmd/gonk-gate/trailers_test.go`
 
-- [ ] **Step 1: Write the failing test** — `cmd/gonk-gate/trailers_test.go`
+- [x] **Step 1: Write the failing test** — `cmd/gonk-gate/trailers_test.go`
 
 ```go
 package main
@@ -3218,12 +3218,12 @@ func TestTrailerBlockIsWellFormed(t *testing.T)
 func TestValuesWithNewlinesAreRefused(t *testing.T)
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `go test ./cmd/gonk-gate/ -run Trailer -v`
 Expected: FAIL — undefined `renderTrailers`, `trailerInput`.
 
-- [ ] **Step 3: Implement `cmd/gonk-gate/trailers.go`**
+- [x] **Step 3: Implement `cmd/gonk-gate/trailers.go`**
 
 ```go
 // `gonk-gate trailers` renders the commit-provenance trailer block (spec 6.1). It
@@ -3246,7 +3246,7 @@ Expected: FAIL — undefined `renderTrailers`, `trailerInput`.
 func renderTrailers(in trailerInput) string
 ```
 
-- [ ] **Step 4: Write `images/agent/prepare-commit-msg`**
+- [x] **Step 4: Write `images/agent/prepare-commit-msg`**
 
 ```sh
 #!/bin/sh
@@ -3264,11 +3264,11 @@ gonk-gate trailers --commit-msg-file "$1" || true
 exit 0
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `go test ./cmd/gonk-gate/ -race -count=1 -v` → PASS.
 
-- [ ] **Step 6: Prove it end to end in a real git repo**
+- [x] **Step 6: Prove it end to end in a real git repo**
 
 A unit test on a string formatter does not prove that `git` will actually attach
 these. Add `TestHookAttachesTrailersToARealCommit` (build tag `images`): in a temp
@@ -3283,7 +3283,7 @@ If `git interpret-trailers` cannot see them, they are not trailers — they are 
 text at the bottom of a commit message, and every tool that consumes them will
 disagree with us.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./cmd/gonk-gate/ -race -count=1

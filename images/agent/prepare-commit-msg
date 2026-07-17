@@ -5,28 +5,26 @@
 # a trailer the agent will sometimes forget, reword, or hallucinate a cost
 # into).
 #
-# *** PROVISIONAL STUB. Task 8 ("commit provenance trailers") owns this file
-# and cmd/gonk-gate/trailers.go, which does not exist yet at Task 5 time
-# (confirmed: cmd/gonk-gate/main.go has no `trailers` subcommand as of
-# 2026-07-16). Task 5's own Dockerfile.agent COPIES this path, so it must
-# exist for the image to build -- this stub is a harmless passthrough (it
-# never modifies the commit message) so the image is buildable and no commit
-# is ever blocked on a missing feature. Task 8 replaces the body with a call
-# to `gonk-gate trailers` (spec 6.1: Generated-By/Gonk-Bead/Gonk-Session/
-# Gonk-Rung/Gonk-Attempt, and Gonk-Usage: pending|<number> per AD-5). ***
+# Task 8 landed `gonk-gate trailers` (cmd/gonk-gate/trailers.go): it reads
+# this session's attribution identity from GC_WEBHOOK_ARG_METADATA_JSON/
+# GC_WEBHOOK_ARG_MODEL (the same env the agent pod already carries for the
+# OTHER attribution seam, OD-7), asks gonk-meter for this project's
+# provenance policy (commit_trailers/include_usage) and, if asked, the
+# session's cost, and splices the resulting trailer block into the commit
+# message file -- IDEMPOTENTLY (re-running it, e.g. on `commit --amend`,
+# never duplicates the block).
 #
 # git's own contract: $1 = path to the commit message file, $2 = source
 # (message|template|merge|squash|commit, optional), $3 = a commit SHA1 (only
-# when $2 is "commit"). A prepare-commit-msg hook edits $1 in place; it must
-# never fail the commit over a metadata footer.
-set -eu
-
-if command -v gonk-gate >/dev/null 2>&1 && gonk-gate trailers --help >/dev/null 2>&1; then
-	# Task 8 has landed in this image; defer to it entirely.
-	exec gonk-gate trailers "$@"
-fi
-
-# No trailers subcommand yet -- leave the message untouched. Losing a commit
-# over an unimplemented footer would be a far worse trade than a commit with
-# no trailers.
+# when $2 is "commit"). A prepare-commit-msg hook edits $1 in place.
+#
+# IT MUST NEVER FAIL A COMMIT. gonk-gate trailers itself already degrades
+# every failure (no attribution identity, meter unreachable, an incomplete
+# session cost) to "leave the message alone" or `Gonk-Usage: pending` and
+# always exits 0 -- the `|| true` and explicit `exit 0` below are a second,
+# belt-and-suspenders layer: losing the agent's real work over a metadata
+# footer is a trade this hook never makes, even if gonk-gate itself changes
+# its own exit-code contract later.
+set -u
+gonk-gate trailers --commit-msg-file "$1" || true
 exit 0

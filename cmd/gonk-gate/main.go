@@ -9,6 +9,8 @@
 //	gonk-gate dispatch   GATE 2. Re-decides via meter, pours/parks/denies.
 //	gonk-gate sweep      Classify finished sessions, report outcomes, re-sling.
 //	gonk-gate check      [steps.check]'s body: is the marker on the artifact?
+//	gonk-gate trailers   The prepare-commit-msg hook's body (Task 8): renders
+//	                     and splices the commit-provenance trailer block.
 //
 // The exit-code contract (part of the pack's contract, not an implementation
 // detail -- the orders' shell wrappers depend on it):
@@ -57,6 +59,31 @@ func main() {
 	if os.Args[1] == "--version" || os.Args[1] == "-version" {
 		fmt.Println(version)
 		os.Exit(0)
+	}
+
+	// trailers is answered BEFORE loadGateConfig, deliberately -- unlike every
+	// other subcommand it is invoked directly by a git hook inside the agent
+	// pod (not as a Gas City exec order), and it needs neither GONK_CITY nor
+	// GONK_SUPERVISOR_URL (it never calls gcapi). Task 8's own contract, named
+	// three separate times in the spec that added it: a trailer lookup must
+	// NEVER fail a commit. Routing it through loadGateConfig's hard
+	// requirements would mean a plain `git commit` in a pod that has not yet
+	// been given GONK_CITY exits 2 and (absent the hook's own `|| true`)
+	// blocks the commit -- exactly the failure mode this subcommand exists to
+	// rule out. It still WANTS a meter URL/token (to look up the project's
+	// provenance policy and, if asked, its session cost), so it builds its
+	// own minimal meter client straight from env, best-effort.
+	if os.Args[1] == "trailers" {
+		meterTok, _ := readSecretFile(os.Getenv("GONK_METER_TOKEN_FILE")) // "" is fine -- a 401 degrades to the shipped default
+		os.Exit(runTrailers(context.Background(), trailersDeps{
+			Meter:   newMeterAPI(os.Getenv("GONK_METER_URL"), meterTok),
+			Log:     log,
+			Version: version,
+		}, trailersArgs{
+			CommitMsgFile: trailersCommitMsgFile(os.Args[2:]),
+			Model:         envArg("model"),
+			MetadataJSON:  os.Getenv("GC_WEBHOOK_ARG_METADATA_JSON"),
+		}))
 	}
 
 	cfg, err := loadGateConfig()

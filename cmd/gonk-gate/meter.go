@@ -77,6 +77,23 @@ func (m *meterAPI) SpendSync(ctx context.Context) (*meterapi.SpendSyncResponse, 
 	return &out, nil
 }
 
+// Project reads GET /v1/projects/{project} -- the `trailers` subcommand's
+// ONLY source of a project's resolved provenance policy
+// (commit_trailers/include_usage). gonk-gate never re-derives
+// gonkcfg.Effective itself; per ADR-002, meter's Resolve is the only
+// legitimate resolver, and this is that answer, read off the wire.
+func (m *meterAPI) Project(ctx context.Context, project string) (*meterapi.ProjectResponse, error) {
+	var out meterapi.ProjectResponse
+	code, err := m.do(ctx, http.MethodGet, meterapi.ProjectPath(project), nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("meter: GET %s: %d", meterapi.ProjectPath(project), code)
+	}
+	return &out, nil
+}
+
 // CostSession reads GET /v1/cost/session/{key} -- the sweeper polls this
 // after SpendSync until SpendAsOf catches up past the session's end.
 func (m *meterAPI) CostSession(ctx context.Context, sessionKey string) (*meterapi.SessionCostResponse, error) {
