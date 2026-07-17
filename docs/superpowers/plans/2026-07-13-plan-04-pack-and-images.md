@@ -2940,7 +2940,7 @@ git commit -m "feat(images): controller image; validate the pack against Gas Cit
 - Modify: `Makefile`
 - Test: `test/images/servers_smoke_test.go`, `test/images/nolatest_test.go`
 
-- [ ] **Step 1: Write both Dockerfiles**
+- [x] **Step 1: Write both Dockerfiles**
 
 Both are the same shape: a `golang:${GO_VERSION}` build stage producing a static
 binary, then a minimal runtime.
@@ -2977,7 +2977,7 @@ podman build --network=host --build-arg BUILD_TAGS=testclock \
   -f images/Dockerfile.meter -t "${REGISTRY}/gonk-meter:${GONK_TAG}-testclock" .
 ```
 
-- [ ] **Step 2: Write the guard that keeps the testclock out of production**
+- [x] **Step 2: Write the guard that keeps the testclock out of production**
 
 Plan 06's Task 9 Step 2 asserts *"the production binary contains neither the symbol
 nor the literal."* **Make that a test in THIS repo**, at image-build time, where it
@@ -3005,7 +3005,7 @@ func TestProductionMeterImageHasNoTestClock(t *testing.T) {
 func TestTestclockMeterImageHasTheSeam(t *testing.T)
 ```
 
-- [ ] **Step 3: The `no-latest` gate**
+- [x] **Step 3: The `no-latest` gate**
 
 `docs/environment.md` is unambiguous: *"Pin exact tags — never `latest`."*
 
@@ -3025,7 +3025,7 @@ func TestNothingSaysLatest(t *testing.T) {
 func TestBaseImagesArePinnedByDigest(t *testing.T)
 ```
 
-- [ ] **Step 4: `make images` and `make push` — exact tags, never `latest`**
+- [x] **Step 4: `make images` and `make push` — exact tags, never `latest`**
 
 ```makefile
 GONK_TAG ?= $(GONK_VERSION)-$(shell git rev-parse --short=12 HEAD)
@@ -3060,7 +3060,7 @@ no-latest:
 	  (echo "FAIL: ':latest' found. Pin an exact tag (docs/environment.md)." && exit 1)
 ```
 
-- [ ] **Step 5: Trivy-scan every image** (spec §10.3: *"image builds smoke-tested and
+- [x] **Step 5: Trivy-scan every image** (spec §10.3: *"image builds smoke-tested and
 trivy-scanned"*)
 
 ```makefile
@@ -3074,7 +3074,7 @@ scan:
 `--ignore-unfixed` is deliberate: failing the build on a CVE with no fix available
 teaches people to pass `--skip`, and then the scan is worthless.
 
-- [ ] **Step 6: Build, scan, push, verify the tags landed**
+- [x] **Step 6: Build, scan, push, verify the tags landed**
 
 ```bash
 make images scan
@@ -3082,7 +3082,7 @@ make push
 glab api "projects/69/registry/repositories?tags=true" | grep "${GONK_TAG}"
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 go test ./test/images/ -tags images -race -count=1 -v

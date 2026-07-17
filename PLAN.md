@@ -7,7 +7,7 @@ Spec: docs/superpowers/specs/2026-07-12-gonk-stack-design.md
 | 01 foundation & config contract | scaffold, CI, gonkcfg, atags | done |
 | 02 gitlab-intake | webhooks, reconciliation, onboarding MR | done |
 | 03 gonk-meter | rung policy, key provisioning, ledger | done |
-| 04 pack & images | agents/formulas/orders, docker images | in progress (Tasks 2, 4, 5, 6 done) |
+| 04 pack & images | agents/formulas/orders, docker images | in progress (Tasks 2, 4, 5, 6, 7 done) |
 | 05 chart | Helm chart, BYO seams | not started |
 | 06 e2e harness | kind + gitlab-ce + stub model, kill tests | not started |
 
@@ -345,6 +345,113 @@ Update the Status column as tasks complete (house rule: progress lives here).
   rushing it in. **Whoever runs a formula through a real `[steps.check]`
   next (Plan 06, or an earlier owner of this gap) must close it before
   that formula's check step can pass against a real running city.**
+
+## Contracts published by plan 04 (Task 7)
+
+- `images/Dockerfile.intake` / `images/Dockerfile.meter` — the two Plan
+  02/03 service binaries, each a vendored offline Go build
+  (`-mod=vendor`, no `go mod download` — CI/this box cannot reach
+  proxy.golang.org, same as Dockerfile.agent/.controller) onto a
+  distroless `nonroot` runtime (`65532:65532`, no shell, no apt
+  packages). `SSL_CERT_FILE` points at the private-CA mount; NEITHER
+  Dockerfile bakes a secret or sets one as an ENV value — gonk-meter's
+  LiteLLM admin key, meter bearer token(s), and store DSN are all FILE
+  MOUNTS the chart wires at runtime (Plan 05), matching
+  `cmd/gonk-meter/main.go`'s own Config doc comment. Both built clean with
+  `make intake-image` / `make meter-image` (podman, `--network=host`) —
+  verified for real (~76s / ~106s cold), and smoke-run inside the
+  container: each binary's own fail-closed startup error surfaced
+  correctly on distroless (`GONK_INSTANCE_LADDER is unset` /
+  `LITELLM_URL is required`), proving the static binary executes on a
+  base with no libc assumptions beyond what `CGO_ENABLED=0` already
+  buys. Both confirmed running as uid/gid `65532:65532`
+  (`podman inspect --format '{{.Config.User}}'` — distroless has no
+  `id` binary to shell out to). Images removed after testing, per house
+  rule.
+- **The `testclock` variant** (`make meter-testclock-image`,
+  `--build-arg BUILD_TAGS=testclock`) — the e2e-only meter whose clock
+  can be moved by `cmd/gonk-meter/clock_testclock.go`'s
+  `GONK_TESTCLOCK_FILE` seam (Plan 03's HB-3, Plan 06's gate). Tagged
+  `$(GONK_TAG)-testclock`, never the production tag. Built clean
+  (~106s cold).
+- `images/versions.env` — added `DISTROLESS_BASE`
+  (`gcr.io/distroless/static-debian12:nonroot`), pinned by digest the
+  same way as `DEBIAN_BASE` (`Docker-Content-Digest` on the tag's
+  manifest-list, resolved 2026-07-16, confirmed pullable with `podman
+  pull` from this box — gcr.io is not blocked here).
+- `Makefile` — `intake-image` / `meter-image` / `meter-testclock-image`
+  targets; `images` now builds the full four-image list (was
+  agent+controller only); `push` pushes all four plus the testclock
+  tag; a new `scan` target (Trivy, `--ignore-unfixed`, spec 10.3 — not
+  run this task, no `trivy` binary on this sandbox, flagged not
+  silently skipped).
+- **REAL BUG FOUND AND FIXED in the `no-latest` gate itself** (inherited
+  from Task 5, exposed by this task's own required "verify it has
+  teeth" step): `chart/` does not exist yet (it is Plan 05's own
+  deliverable). GNU grep exits **2** — an ERROR, not "no match" (1) —
+  when *any* path argument passed to it is missing, regardless of what
+  it finds in the paths that *do* exist. The old recipe was
+  `! grep -rn ... images/ Makefile chart/ || (echo FAIL; exit 1)`; `!`
+  only distinguishes zero from nonzero, so exit 2 (error, because
+  `chart/` is absent) and exit 1 (no match) both flip to a silent pass
+  — **a real planted `:late$(empty)st` in `images/Dockerfile.intake`
+  did NOT fail `make no-latest`** until this was fixed. Verified both
+  ways: `grep -rn ... chart/` alone reports exit 2 while still printing
+  the matched line; the same grep with `chart/` dropped from the
+  argument list correctly reports exit 0 (match found, `!` then trips
+  the FAIL branch). Fixed by only passing paths that currently exist to
+  grep. **This means Task 5's `no-latest` target has had zero teeth on
+  this box since it landed** — flagging it here rather than treating
+  it as already covered by the earlier task's own "verified" claim.
+- `test/images/nolatest_test.go` (build tag `images`, but PURE STATIC
+  ANALYSIS — no podman needed to run it, unlike every other test in
+  this package) — `TestNothingSaysLatest` (walks `images/**`,
+  `Makefile`, `chart/**` — skipped, not failed, while absent —
+  `test/**`; catches a floating tag, an untagged `FROM`, an untagged
+  `image:`) and `TestBaseImagesArePinnedByDigest` (resolves every
+  `${VAR}` FROM-line against `images/versions.env` and asserts the
+  result carries `@sha256:`). **Verified RED then GREEN for real**: a
+  planted `FROM debian:latest AS planted-test` line in
+  `images/Dockerfile.intake` failed both `make no-latest` and
+  `go test ./test/images/... -tags images -run TestNothingSaysLatest`
+  before being reverted, confirmed clean again after.
+- `test/images/servers_smoke_test.go` (build tag `images`) —
+  pinned-image-exists smoke tests for intake and the production meter
+  (each proves the real binary runs on distroless via its own
+  fail-closed startup error), non-root checks for both, and the
+  testclock guard Task 7 Step 2 calls for:
+  `TestProductionMeterImageHasNoTestClock` (extracts
+  `/usr/local/bin/gonk-meter` from the production image via
+  `podman create` + `podman cp` — distroless has no shell to `cat`
+  with — and asserts neither the `GONK_TESTCLOCK_FILE` literal nor the
+  `testclock` string appears in the binary) and its converse,
+  `TestTestclockMeterImageHasTheSeam`, against the testclock image.
+- **REAL FINDING, non-blocking**: `cmd/gonk-meter/main.go`'s
+  `loadConfig` checks its five required env vars via
+  `for name, v := range map[string]string{...}` — Go map iteration
+  order is randomized, so *which* one gonk-meter reports first when
+  several are missing is not deterministic across runs (confirmed: an
+  early version of `TestMeterImagePinsMatchVersionsEnv` asserting the
+  message named `LITELLM_URL` specifically flaked across repeated
+  runs). Not a correctness bug (every branch still fails closed,
+  `exit 1`) but an operator-facing rough edge — a real deployment
+  missing two secrets gets a different first error message each
+  restart. The test here was corrected to assert only what is actually
+  guaranteed (`exit 1`, the generic "is required" shape); the
+  underlying nondeterminism in `main.go` is flagged, not fixed, as
+  outside this task's remit.
+- **`neither cmd/gonk-intake nor cmd/gonk-meter declares `var version
+  string``** (confirmed against both `main.go` files, 2026-07-16) —
+  unlike `cmd/gonk-gate` (Task 6 added `--version`), the two service
+  binaries have no linkable version symbol yet. Both Dockerfiles still
+  pass `-ldflags -X main.version=$(GONK_TAG)` (harmless no-op, same
+  precedent as Task 5's note about gonk-gate before Task 6 closed it)
+  so adding the symbol later needs no Dockerfile change. gonk-intake's
+  own version string (used in onboarding MR templates) already comes
+  from the `GONK_VERSION` env var at runtime (`main.go`'s
+  `Config.Version`), which is a distinct thing from a `--version` flag.
+  Flagged, not fixed — outside this task's four Dockerfiles-and-gate
+  scope.
 
 ## Carried into later plans
 

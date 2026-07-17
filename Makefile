@@ -10,13 +10,13 @@ GONK_TAG ?= $(GONK_VERSION)-$(shell git rev-parse --short=12 HEAD)
 PODMAN := podman
 BUILD  := $(PODMAN) build --network=host
 
-.PHONY: images agent-image controller-image push pack-validate no-latest lint-pack
+.PHONY: images agent-image controller-image intake-image meter-image meter-testclock-image push pack-validate no-latest lint-pack scan
 
-# images: gonk-agent (Task 5) and gonk-controller (Task 6). Task 7 (intake,
-# meter) adds its own two lines here when their Dockerfiles land -- this
-# target is NOT the final four-image list Task 7 formalizes, it is what
-# Plan 04 can honestly build today.
-images: no-latest agent-image controller-image
+# images: the full four-image list Task 7 formalizes -- gonk-agent (Task 5),
+# gonk-controller (Task 6), gonk-intake and gonk-meter (Task 7) -- plus the
+# meter's separate testclock variant (e2e-only, never pushed as
+# gonk-meter:$(GONK_TAG)).
+images: no-latest agent-image controller-image intake-image meter-image meter-testclock-image
 
 agent-image:
 	$(BUILD) \
@@ -42,6 +42,38 @@ controller-image:
 	  --build-arg GASCITY_REF=$(GASCITY_REF) \
 	  -f images/Dockerfile.controller -t $(REGISTRY)/gonk-controller:$(GONK_TAG) .
 
+# intake-image / meter-image: the two Plan 02/03 service binaries (Task 7).
+# Both are pure vendored Go builds (no fetch stage, no apt packages at
+# runtime, unlike agent/controller) onto a distroless nonroot base.
+intake-image:
+	$(BUILD) \
+	  --build-arg GONK_TAG=$(GONK_TAG) \
+	  --build-arg GO_VERSION=$(GO_VERSION) \
+	  --build-arg DISTROLESS_BASE=$(DISTROLESS_BASE) \
+	  -f images/Dockerfile.intake -t $(REGISTRY)/gonk-intake:$(GONK_TAG) .
+
+meter-image:
+	$(BUILD) \
+	  --build-arg GONK_TAG=$(GONK_TAG) \
+	  --build-arg GO_VERSION=$(GO_VERSION) \
+	  --build-arg DISTROLESS_BASE=$(DISTROLESS_BASE) \
+	  -f images/Dockerfile.meter -t $(REGISTRY)/gonk-meter:$(GONK_TAG) .
+
+# meter-testclock-image: the e2e-only meter whose clock can be MOVED BY A
+# FILE (cmd/gonk-meter/clock_testclock.go). Tagged $(GONK_TAG)-testclock, NEVER
+# $(GONK_TAG) -- a clock that can be moved by a file is a budget window that
+# can be reset by a file, and that must never ship as the production tag.
+# test/images/servers_smoke_test.go's TestProductionMeterImageHasNoTestClock /
+# TestTestclockMeterImageHasTheSeam assert the two images differ exactly this
+# way.
+meter-testclock-image:
+	$(BUILD) \
+	  --build-arg GONK_TAG=$(GONK_TAG) \
+	  --build-arg GO_VERSION=$(GO_VERSION) \
+	  --build-arg DISTROLESS_BASE=$(DISTROLESS_BASE) \
+	  --build-arg BUILD_TAGS=testclock \
+	  -f images/Dockerfile.meter -t $(REGISTRY)/gonk-meter:$(GONK_TAG)-testclock .
+
 # push: EVERY GITLAB RUNNER IS OFFLINE (docs/environment.md). CI has never
 # executed for this repo, so the first images are pushed BY HAND from a box
 # with LAN reach to registry.orac.local -- expected, not a workaround to be
@@ -49,8 +81,20 @@ controller-image:
 # from this sandbox); Plan 05/CI formalizes it.
 push: images
 	@echo "pushing $(GONK_TAG) to $(REGISTRY)"
-	$(PODMAN) push $(REGISTRY)/gonk-agent:$(GONK_TAG)
-	$(PODMAN) push $(REGISTRY)/gonk-controller:$(GONK_TAG)
+	for i in gonk-agent gonk-controller gonk-intake gonk-meter; do \
+	  $(PODMAN) push $(REGISTRY)/$$i:$(GONK_TAG); done
+	$(PODMAN) push $(REGISTRY)/gonk-meter:$(GONK_TAG)-testclock
+
+# scan: Trivy every built image (spec 10.3: "image builds smoke-tested and
+# trivy-scanned"). --ignore-unfixed is deliberate: failing the build on a CVE
+# with no fix available teaches people to pass --skip, and then the scan is
+# worthless. Not run as part of this task (no trivy binary on this sandbox,
+# and this task's own scope is the images + the no-latest gate) -- Plan 05/CI
+# formalizes actually running it.
+scan:
+	for i in gonk-agent gonk-controller gonk-intake gonk-meter; do \
+	  trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
+	    $(REGISTRY)/$$i:$(GONK_TAG) || exit 1; done
 
 # pack-validate: Gas City's REAL loader (internal/config's pack parser, via
 # `gc lint`), offline, in the controller image -- no cluster, no deployed
@@ -78,8 +122,21 @@ pack-validate: controller-image
 empty :=
 BANNED_TAG := :late$(empty)st
 
+# REAL BUG FOUND AND FIXED HERE (Task 7): `chart/` does not exist yet (it is
+# Plan 05's own deliverable). GNU grep exits 2 -- not "no match" (1), an ERROR
+# -- when ANY path argument is missing, REGARDLESS of what it found in the
+# paths that DO exist. `! grep ... || (echo FAIL; exit 1)` therefore turned a
+# REAL planted `:late$(empty)st` in images/Dockerfile.intake into a silent
+# PASS: `!` only distinguishes zero from nonzero, so exit 2 (error) and exit 1
+# (no match) both flip to 0. Verified two ways: (1) `grep -rn ... chart/`
+# alone, piped through `echo $?`, prints the match AND reports exit 2; (2) the
+# same grep with `chart/` dropped from the argument list correctly reports
+# exit 0 (match found). The fix: only pass paths that exist to grep, so a
+# missing Plan-05 directory can never again mask a real hit.
 no-latest:
-	@! grep -rn '$(BANNED_TAG)' images/ Makefile chart/ 2>/dev/null || \
+	@paths="images Makefile test"; \
+	  [ -d chart ] && paths="$$paths chart"; \
+	  ! grep -rn '$(BANNED_TAG)' $$paths 2>/dev/null || \
 	  (echo "FAIL: a floating image tag was found. Pin an exact tag (docs/environment.md)." && exit 1)
 
 # lint-pack runs the pack's anti-drift greps (Plan 04, Task 4, Step 7). The
