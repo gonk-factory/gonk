@@ -8,7 +8,7 @@ Spec: docs/superpowers/specs/2026-07-12-gonk-stack-design.md
 | 02 gitlab-intake | webhooks, reconciliation, onboarding MR | done |
 | 03 gonk-meter | rung policy, key provisioning, ledger | done |
 | 04 pack & images | agents/formulas/orders, docker images | done |
-| 05 chart | Helm chart, BYO seams | not started |
+| 05 chart | Helm chart, BYO seams | done |
 | 06 e2e harness | kind + gitlab-ce + stub model, kill tests | not started |
 
 Update the Status column as tasks complete (house rule: progress lives here).
@@ -863,3 +863,75 @@ where the code already does it.
   `main.go`.
 - **The bead marker `<!-- gonk:bead:<id> -->` is a contract**, not a prompt
   detail.
+
+## Contracts published by plan 05
+
+- **`chart/gonk` — the UMBRELLA deployment contract.** It deploys Gas City +
+  Dolt (beads) + intake + meter + the pack, each `<component>.enabled`, wiring to
+  a BYO GitLab / LiteLLM / CNPG operator. `values.schema.json` is the layer-A
+  gate; `_guards.tpl` (G1–G20) is the layer-B fail-closed set. The default render
+  is the WHOLE FACTORY and cannot spend a dollar (AD-4).
+- **The component-toggle contract.** Disabling a component requires its external
+  replacement: G16 external Dolt host (beads is Dolt-only), G17 BYO supervisor
+  URL, G19 ledger DSN Secret for ANY Postgres mode. Beads is Dolt-only; CNPG is
+  the ledger only. Exercised by the eight `ci/` profiles and the toggle matrix
+  (`internal/charttest/toggle_test.go`).
+- **The Gas City controller deploy contract** (no upstream chart): supervisor
+  port 9443, prebaked pack/city delivery + `gc init`→`.gc-start` sentinel, and
+  workload = Deployment/Recreate — the three formerly-smoke-gated unknowns
+  SETTLED in `chart/gonk/smoke/gc-controller-smoke.md` (Task 0.5). IMAGE-GATED on
+  Plan 04's `gonk-controller` image (bead `gonk-fsl`): shape renders; a re-smoke
+  is owed once the image can finish `gc init`.
+- **The secret provisioning contract** (the table in `chart/gonk/README.md`).
+  Changing a key name in Plans 02/03 breaks the chart, and
+  `internal/charttest/secrets_test.go` catches it. The chart renders NO `Secret`
+  and uses no `secretKeyRef` anywhere; secrets are file mounts, two rotation slots.
+- **Two namespaced RBAC sets:** `gonk-meter`'s (makes Plan 03's `keysink.K8s`
+  legal — the Go sink itself is Plan 03's), and `gc-controller` + `gc-agent`'s
+  (the bundled controller spawns/execs/logs agent pods). All namespaced, never
+  `Cluster*`.
+- **`chart/values-e2e.yaml`** — Plan 06's HB-5. The harness installs THIS chart,
+  not a deployment it invented; points at a harness-owned LiteLLM (never the real
+  `litellm.litellm.svc`) and contains no credential.
+- **Golden manifests + CI.** `internal/charttest/testdata/golden/*.yaml` snapshot
+  every profile's whole render (drift gate, regen with `-update`).
+  `.gitlab-ci.yml` adds the offline/vendored chart gate; image build/push/scan and
+  chart-publish are DOCUMENTED-MANUAL (`when: never`) because no runner/registry
+  reach exists. The `no-latest` gate now excludes vendored CRD schemas (whose
+  upstream K8s docs legitimately contain the banned token).
+
+## Carried into later plans (plan 05)
+
+- **Plan 03 — RECONCILED, not outstanding.** `GONK_METER_STORE_BACKEND` /
+  `GONK_METER_STORE_DSN_FILE` (`openStore`) and `keysink.K8s` +
+  `GONK_KEYSINK_NAMESPACE` are specified in Plan 03; Task 0 VERIFIED them (see the
+  deleted `chart/RECONCILIATION.md`, folded here). If missing at execution time,
+  that is a Plan 03 bug — fix it there.
+- **Plan 04 (images + pack) — a HARD, PARTIALLY-PRECEDING dependency.** The
+  umbrella deploys the `gonk-controller` image (`gascity.image`); Task 0.5's smoke
+  could not finish a city because that image is missing `dolt`/`tmux`/`jq`/`lsof`/
+  `pgrep` and bundles `bd < 1.0.4` (**bead `gonk-fsl`**). The chart also needs the
+  labels the controller puts on agent pods (`networkPolicy.agentPodSelector`,
+  OD-5 = `app: gc-agent`, unverified live) — a wrong selector renders fine and
+  enforces nothing even after Cilium lands.
+- **Plan 06 (e2e):** the whole "what `helm template` cannot prove" list
+  (`chart/gonk/README.md` §7) — especially **(a)** agent egress actually blocked
+  (WRITTEN AND SKIPPED until Cilium lands; un-skipping is the gate), **(b)**
+  Secrets actually mount with those key names, **(c)** probes pass, **(d)** LiteLLM
+  prices match the catalog's synthetic prices AND land in a spend row for a locally
+  routed model, **(e)** the KeySink Role actually permits the writes on a real API
+  server. Plus: the ledger has no PDB/backup schedule (spec §4.2) and nothing
+  creates the ledger schema — confirm meter migrates on startup.
+- **Owner — the three still open:** OD-3 (bundle LiteLLM? assumed no), **OD-5
+  (agent pod labels — the most dangerous unknown)**, OD-7 (CI tools image — moot
+  until a runner exists). **Answered and struck: OD-1 (registry), OD-2
+  (ingress/TLS), OD-4 (chart DEPLOYS Gas City — umbrella scope), OD-6 (GitLab
+  in-cluster), OD-8 (chart OCI registry).**
+- **Owner — the three smoke-gated unknowns (Task 0.5), now SETTLED with defaults
+  encoded** but re-smoke owed on the image fix: supervisor port 9443, delivery
+  prebaked, workload deployment/Recreate.
+- **Owner — the standing gap (already decided, not an OD):** NetworkPolicy is
+  unenforced (Cilium suspended). Ship, document, do not gate. Re-open only by
+  unsuspending Cilium or credentialing Ollama. **No document produced by Plan 05
+  claims budgets cannot be bypassed:** cloud-rung budgets are hard; local-model
+  budgets are advisory.

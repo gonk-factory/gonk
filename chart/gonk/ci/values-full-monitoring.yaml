@@ -1,0 +1,90 @@
+# =============================================================================
+# ci/values-full-monitoring.yaml -- "this is a working installation": EVERYTHING on.
+#
+# All four components bundled, Ingress on, ServiceMonitors on, PrometheusRule on,
+# dashboards on, NetworkPolicy on (rendered -- NOT enforced on this cluster; see
+# README section 0 and every networkpolicy-*.yaml banner), a CLOUD rung in both
+# the catalog and the instance ladder, and a NON-ZERO instance cost ceiling.
+#
+# This is the ONLY profile where a dollar can be spent: it has a cloud rung whose
+# est_cost_usd > 0 AND an instance budget monthly_cost_usd > 0. Enabling cloud
+# spend is the deliberate three-part edit the README documents -- add the rung to
+# the catalog, add it to instance.ladder, and raise the ceiling -- and this
+# profile makes all three at once, on purpose.
+#
+# NO SECRET VALUE APPEARS HERE.
+# =============================================================================
+intake:
+  image:
+    tag: v0.1.0
+  webhookPublicURL: https://gonk.orac.local/hook/gitlab
+
+meter:
+  image:
+    tag: v0.1.0
+
+gascity:
+  image:
+    tag: v0.1.0
+
+dolt:
+  image:
+    tag: v1.43.0
+
+litellm:
+  externalURL: http://litellm.litellm.svc.cluster.local:4000
+
+ingress:
+  enabled: true
+  className: traefik
+  host: gonk.orac.local
+
+networkPolicy:
+  enabled: true
+  # The agent-session pod selector. RENDERED, not enforced (Flannel; Cilium
+  # suspended). A right selector on an unenforced policy still blocks nothing --
+  # Plan 06's egress-denial test, SKIPPED until Cilium lands, is the only proof.
+  agentPodSelector:
+    app: gc-agent
+  gitlabInCluster:
+    enabled: true
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+  prometheusRule:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+  dashboards:
+    enabled: true
+
+operatorConfig:
+  instance:
+    # A cloud rung is only reachable if it is BOTH in the catalog AND the ladder.
+    ladder: [qwen-local, glm]
+    budget:
+      # The non-zero ceiling: the ONLY profile where spend is possible.
+      monthly_cost_usd: 50
+      monthly_tokens: "5G"
+      per_task_tokens: "2M"
+  rungs:
+    - name: qwen-local
+      kind: local
+      model: qwen3-14b
+      est_cost_usd: 0
+      est_tokens: 200K
+      synthetic_usd_per_1m_tokens: 0.20
+    # A CLOUD rung: est_cost_usd > 0, and NO synthetic price (its real price
+    # lives in LiteLLM's own model config -- declaring a synthetic one would be
+    # a lie, and G4 fails the render if you do).
+    - name: glm
+      kind: cloud
+      model: glm-5
+      est_cost_usd: 0.40
+      est_tokens: 200K
+
+onboarding:
+  defaultRung: qwen-local

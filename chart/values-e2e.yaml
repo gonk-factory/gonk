@@ -1,0 +1,111 @@
+# Plan 06's L3 profile. INSTALLED, not merely rendered.
+#
+# It differs from ci/values-default.yaml in exactly the ways a test must:
+#   * images are the per-run e2e tags (the harness overrides image.tag);
+#   * meter is the TESTCLOCK build, so a month boundary can be crossed without
+#     waiting a month (P03 Task 8 Step 5b / Plan 06 HB-3);
+#   * LiteLLM points at an instance the HARNESS deploys in the throwaway
+#     namespace, whose ONLY upstream is the stub model;
+#   * the rung catalog's synthetic prices are ROUND NUMBERS, so a dollar
+#     assertion is exact.
+#
+# *** IT MUST NOT POINT AT THE REAL litellm.litellm.svc. *** The real LiteLLM
+# routes local models to Ollama (192.168.1.142) and shares the owner's real spend
+# ledger. An e2e run against it would burn real GPU, pollute real spend data, and
+# make every cost assertion nondeterministic.
+#
+# NOTE ON litellm.mode: this chart is EXTERNAL-ONLY (OD-3). There is no
+# `litellm.enabled: true`. The harness deploys its own LiteLLM into the run's
+# namespace and passes the URL. Plan 06's HB-5 originally asked for a bundled one;
+# that would have meant adding a subchart to satisfy a test, which is backwards.
+#
+# This peer of chart/gonk/ is INSTALLED, not rendered: ci/ profiles are
+# render-only goldens; this one is the thing Plan 06 actually helm-installs.
+#
+# *** THE ONE THING THIS FILE MUST NEVER CONTAIN IS A CREDENTIAL. *** `make
+# secrets-scan` (Plan 06 Task 9) greps for token shapes and fails the build; the
+# harness mints every secret at runtime into a directory outside the repo.
+image:
+  registry: registry.orac.local/agentic/gonk-project
+  pullSecrets:
+    - name: gitlab-registry-pull-creds
+
+intake:
+  image: {tag: ""}                 # harness sets it: gonk-intake:e2e-<runid>
+  replicaCount: 1                  # determinism > availability in a test
+  reconcileInterval: 10m           # NOT lowered: the harness forces passes (HB-1)
+  webhookPublicURL: ""             # harness sets it
+
+meter:
+  image: {tag: ""}                 # harness sets it: gonk-meter:e2e-<runid>-testclock
+  replicaCount: 1
+
+gitlab:
+  url: ""                          # harness sets it (the cached gitlab-ce fixture)
+  botUsername: gonk
+  caCert:
+    existingConfigMap: trust-bundle
+    key: tls-ca-bundle.pem
+
+litellm:
+  mode: external
+  externalURL: ""                  # harness sets it -> its OWN LiteLLM, stub upstream only
+
+gascity:
+  # BUNDLED controller: the e2e run tests the factory the chart ships, controller
+  # included. The harness sets gascity.image.tag (e2e-<runid>) and, once Task 0.5
+  # has settled them, supervisorPort/delivery/workload. supervisorURL is DERIVED.
+  enabled: true
+  image: {tag: ""}                 # harness sets it
+  dispatch: http
+
+dolt:
+  # BUNDLED Dolt: backs BEADS ONLY (RECONCILED, Task 0 -- this comment
+  # previously described a GONK_LEDGER=dolt harness mode that never shipped:
+  # Task 0b's spike ran before this file was ever written for real, and Dolt
+  # failed the reservation-race isolation test -- ADR-004 Decision 10). The
+  # harness sets the image tag; the ledger below is unconditionally Postgres.
+  enabled: true
+  image: {tag: ""}                 # harness sets it
+
+ledger:
+  backend: postgres                # the ONLY value (ADR-004 Decision 10)
+  postgres:
+    mode: ""                       # harness sets it (shared|cnpg|external) to
+                                    # exercise whichever Postgres tenancy Plan 06's
+                                    # e2e run targets
+
+ingress:
+  enabled: false                   # the harness port-forwards; no DNS, no cert
+
+# NetworkPolicies are NOT ENFORCED on this cluster (Flannel; Cilium suspended).
+# They are still RENDERED here, because Plan 06's egress-denial test must be able
+# to find the policy it is skipping -- and because the day Cilium lands, this
+# profile is what proves it.
+networkPolicy:
+  enabled: true
+
+operatorConfig:
+  instance:
+    ladder: [qwen-local, glm-test]
+    budget:
+      monthly_cost_usd: 1.00       # a ceiling the budget suite can actually reach
+      monthly_tokens: "10M"
+      per_task_tokens: "1M"
+  rungs:
+    # ROUND NUMBERS. Every dollar assertion in Plan 06 is exact, and
+    # ledger.ApproxUSD's 1e-9 tolerance exists for float representation, not for
+    # sloppy prices.
+    - {name: qwen-local, kind: local, model: stub-local, est_cost_usd: 0,
+       est_tokens: "100K", synthetic_usd_per_1m_tokens: 0.25}
+    - {name: glm-test,   kind: cloud, model: stub-cloud, est_cost_usd: 0.20,
+       est_tokens: "100K"}
+  meter:
+    max_spend_staleness: 5m
+    reservation_ttl: 5m            # the expiry test must not take an hour
+    max_clock_skew: 5m
+    max_infra_retries: 2
+    enforce_ladder_order: true
+
+onboarding:
+  defaultRung: qwen-local          # MUST be in instance.ladder, or the brick test fires
