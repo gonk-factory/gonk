@@ -7,7 +7,7 @@ Spec: docs/superpowers/specs/2026-07-12-gonk-stack-design.md
 | 01 foundation & config contract | scaffold, CI, gonkcfg, atags | done |
 | 02 gitlab-intake | webhooks, reconciliation, onboarding MR | done |
 | 03 gonk-meter | rung policy, key provisioning, ledger | done |
-| 04 pack & images | agents/formulas/orders, docker images | in progress (Tasks 2, 4, 5, 6, 7 done) |
+| 04 pack & images | agents/formulas/orders, docker images | done |
 | 05 chart | Helm chart, BYO seams | not started |
 | 06 e2e harness | kind + gitlab-ce + stub model, kill tests | not started |
 
@@ -56,7 +56,24 @@ Update the Status column as tasks complete (house rule: progress lives here).
   value), the bot-identity refusal (wrong token owner refuses to start), and
   `ADR-003` (the trust-boundary decisions this plan locks in).
 
-## Contracts published by plan 04 (Task 2, in progress)
+## Contracts published by plan 04 (Task 1)
+
+- `pkg/gate` — the deterministic session-outcome classifier: `Classify(Signals)
+  string` (pure, total — no LLM anywhere, and a permanent regression test greps
+  the package for `openai|litellm|prompt|llm|model.` to prove it), `Escalates`
+  (only `gate-failed` buys a rung), `MayPour` (Gate 2's `decide -> pour` rule,
+  compared against `pkg/intake.MayFire` by `cmd/gonk-gate/contract_test.go` so
+  the two gates cannot drift by comment alone), and `BeadMarker`/
+  `MarkerPresent` (the load-bearing `<!-- gonk:bead:<id> -->` token a
+  deterministic gate reads without judging prose). **The one invariant:**
+  infra failures (`ReservationExpired`, `ArtifactUnknown`, `SpendStale`) never
+  escalate a rung; only a completed session with `ModelTokens > 0` and no
+  artifact does. The classifier's one known false positive (a pod evicted
+  after >=1 completion but before posting buys one bounded, budget-checked
+  unearned escalation) is documented in the package doc comment, in
+  `ADR-004` (added by this task), and in `ADR-005`.
+
+## Contracts published by plan 04 (Task 2)
 
 - `pkg/gcapi` (+ `pkg/gcapi/gcapitest`) — the real Gas City supervisor
   order-run client, closing Plan 02's OD-A: `POST
@@ -78,6 +95,39 @@ Update the Status column as tasks complete (house rule: progress lives here).
   wrapper) is a no-op; whichever plan/task wires it into `cmd/gonk-gate`
   (Task 3) or replaces `HTTPDispatcher` should do so deliberately, not by
   accident of import order.
+
+## Contracts published by plan 04 (Task 3)
+
+- `cmd/gonk-gate` — the deterministic, zero-LLM gate binary, one binary with
+  subcommands shipped in both the controller and agent images (AD-3):
+  - `dispatch` — **Gate 2**, the only code path in the system that pours a
+    formula. Calls `/v1/policy/decide` unconditionally, on every invocation,
+    and never trusts an order var's `rung`/`reservation_id`/`key_ref`
+    (`TestDispatchAlwaysDecidesEvenWhenVarsCarryARung` — deleting this test
+    is how the money door opens). Sends `dispatchArgs.BeadAnchor`, never a
+    Gas City-internal bead id, to meter.
+  - `sweep` — the sweeper order's body: classifies every `running` bead
+    whose session has ended (`pkg/gate.Classify`), posts
+    `/v1/policy/outcome`, re-fires `gonk-dispatch` on `escalate`/`retry`
+    (clearing `SessionEndedAt` first so a 30s cooldown order cannot
+    re-report the same outcome every tick), and unparks beads whose
+    `RetryAfter` has passed. Forces a spend sync and polls
+    `spend_as_of >= SessionEndedAt` before trusting `ModelTokens` (HB-2);
+    times out to `SpendStale` (infra-failed), never to a guess.
+  - `check` — `[steps.check]`'s body: pure, idempotent, no POST — is the
+    bot's marker-carrying comment on the issue?
+  - `trailers` — see Task 8, below.
+  - `--version` (added in Task 6): prints the linked `GONK_TAG`, exit 0, no
+    config required.
+- `pkg/beadstore` (+ `beadstore.Memory`, `beadstore.BdCLI`) — the per-bead
+  work-state interface (AD-2): `Record.SessionEndedAt` (stamped by whatever
+  observes session finish — see "Carried into later plans" below),
+  `ReservationID`/`ReservationExpiresAt` (verbatim from meter's
+  `DecideResponse`, so the sweeper can compute `ReservationExpired` without
+  asking meter again), and `BeadAnchor` as the idempotency key. Every
+  `cmd/gonk-gate` test runs against `Memory`; `BdCLI` (confirmed against the
+  real `bd` binary in Task 6 — see "Carried into later plans") is the only
+  place the exact `bd` CLI surface is spoken.
 
 ## Contracts published by plan 04 (Task 4)
 
@@ -453,6 +503,25 @@ Update the Status column as tasks complete (house rule: progress lives here).
   Flagged, not fixed — outside this task's four Dockerfiles-and-gate
   scope.
 
+## Contracts published by plan 04 (Task 8)
+
+- `cmd/gonk-gate trailers` + `images/agent/prepare-commit-msg` — commit
+  provenance, installed as a `prepare-commit-msg` git hook in the rig clone
+  at session start (AD-4), never asked of the agent as prose. Two rules that
+  are both about not lying in permanent history: `commit_trailers` defaults
+  **on**, `include_usage` defaults **off** (cost in public git history is a
+  per-project choice, spec 6.1); and on `complete: false` (the usual case at
+  commit time — the session is normally still open) the trailer block writes
+  `Gonk-Usage: pending`, **never a number** (AD-5, carried from Plan 03's
+  AD-7 verbatim: a wrong cost baked into permanent git history can never be
+  corrected). A trailer lookup **never fails a commit** — every
+  meter-unreachable path degrades to the shipped default or to `pending`,
+  because losing an agent's real work over a missing metadata footer is a
+  far worse trade than the missing footer itself. `renderTrailers` refuses
+  the whole block (rather than sanitizing) if any value carries an embedded
+  `\r`/`\n`, and `appendTrailerBlock` is idempotent against
+  `prepare-commit-msg` re-invocation on `commit --amend`.
+
 ## Carried into later plans
 
 - **Plan 03 (highest-value item):** `Effective.Budget`'s "unlimited" sentinels
@@ -605,6 +674,7 @@ Update the Status column as tasks complete (house rule: progress lives here).
   `trust-bundle` ConfigMap (key `tls-ca-bundle.pem`) and set
   `SSL_CERT_FILE=/etc/ssl/orac/ca.crt`. There is no config value anywhere
   that disables TLS verification.
+
 - **Plan 06 (e2e):** **HB-1 is shipped**: `POST /admin/reconcile?wait=true`
   (`pkg/intake/server.go`, backed by `Reconciler.WaitForNextPass`) blocks
   until a pass that started at or after the request completes, then returns a
@@ -616,3 +686,180 @@ Update the Status column as tasks complete (house rule: progress lives here).
   nothing in plan 02's own test suite substitutes for them. Plan 06 also owns
   the honest accounting of the NetworkPolicy gap: the egress-denial test is
   written and skipped until Cilium lands.
+
+## Amendment register (plan 04's "Upstream amendments required", reconciled against merged reality)
+
+Plan 04's own text ("Upstream amendments required") anticipated several
+changes to Plans 02/03/05/06 as still-pending specs. **Plans 02 and 03 are
+now EXECUTED and merged to `main`** (see the status table at the top of this
+file) — the items below that Plan 04 asked those plans to make are checked
+against the actual merged code, not against the plan text, and marked DONE
+where the code already does it.
+
+### Plan 02 (gitlab-intake) — DONE, verified against merged code
+
+- **DONE.** "Intake does NOT call `/policy/decide`" is corrected in the
+  merged code, not just in a plan document: `pkg/intake/dispatch.go`'s
+  `Dispatch.Handle` (Gate 1) calls `POST /v1/policy/decide` and fires the
+  order only when `MayFire(resp.Decision)` (`decision == "run"`), passing
+  `rung`, `model`, `metadata`, `key_ref`, `reservation_id` as order vars; on
+  `defer` it logs and fires nothing (recording `retry_after` only as a log
+  field, per spec); on `deny` it applies the narrow GitLab deny label and
+  fires nothing. Confirmed by reading the merged `pkg/intake/dispatch.go`
+  directly (not inferred from the plan text) — see `Decide`/`Handle` and the
+  `/policy/decide` call sites cited in `Dispatch.Handle`'s own doc comment.
+- **DONE.** `intake.MayFire(decision string) bool` exists
+  (`pkg/intake/dispatch.go`) and is the exact predicate
+  `cmd/gonk-gate/contract_test.go` compares against `pkg/gate.MayPour` to
+  catch Gate-1/Gate-2 drift mechanically.
+- **DONE.** `bead_id` is the deterministic `BeadAnchor` at **both** gates:
+  intake's `Dispatch.Handle` sends `BeadID: dec.BeadAnchor` (never a Gas
+  City-internal bead id) to `/v1/policy/decide`, and `cmd/gonk-gate dispatch`
+  (Gate 2, Task 3) sends `dispatchArgs.BeadAnchor` the same way. Both gates
+  therefore key meter's reservation/ladder state on the same string.
+- **DONE.** `intake.HTTPDispatcher` is superseded conceptually by
+  `pkg/gcapi` (Task 2) for the pack's own Gate-2 caller; `pkg/gcapi`'s wire
+  shape was verified byte-identical to `HTTPDispatcher`'s at the time it was
+  built. (Whether `HTTPDispatcher` itself has since been physically replaced
+  by a thin `gcapi` wrapper inside `pkg/intake` is a Plan 02-owned file and
+  outside Task 9's remit to re-verify; the wire-shape compatibility that
+  makes the swap a no-op is what Plan 04 committed to, and that held.)
+- **STILL TRUE, not a gap:** intake still sends no attempt count (by design
+  — meter derives attempt from its own outcome history) and still has no
+  quiet-hours code (quiet hours arrive as a `defer`, which intake now simply
+  handles).
+
+### Plan 03 (gonk-meter) — DONE, verified against merged code
+
+- **DONE.** `/v1/policy/decide` is idempotent on an open reservation for
+  `(project, bead_id, session_key)`: `internal/meter/service/http.go`'s
+  `OpenReservations` lookup backs exactly this, and
+  `TestDecideIsIdempotentOnOpenReservation`
+  (`internal/meter/service/service_test.go`) is the regression test pinning
+  it — a second `/decide` for the same key returns the existing reservation
+  rather than minting a second one. This is precisely what Plan 04's
+  two-gate model (Gate 1 in intake, Gate 2 in `gonk-gate dispatch`, both
+  calling `/decide` for the same bead) depends on to avoid double-charging
+  headroom.
+- **DONE (by construction of this plan, not a separate meter change).** The
+  pack is a legitimate caller of `GET /v1/projects/{project}` (`gonk-gate
+  trailers`, for `effective.provenance`) and of `POST /admin/spend/sync`
+  (`gonk-gate sweep`'s `gatherSpend`, forcing a poll before classifying,
+  every 30s per the sweep order's cooldown). Both call sites exist in the
+  merged Task 3/8 code.
+- **NOT BUILT, correctly, per the plan's own instruction not to build it
+  speculatively:** OD-7's fallback (a short-lived per-attempt virtual key
+  carrying the atags in LiteLLM key-metadata) was not implemented. The
+  primary mechanism (the `x-litellm-spend-logs-metadata` header) is
+  VERIFIED on LiteLLM v1.92.0, so this remains contingency-only, to be built
+  as a Plan 03 amendment only if the header path is ever found to fail
+  live (Plan 06).
+- **AD-10 (meter single-replica) is LIFTED — already recorded in ADR-004
+  itself, restated here because Plan 05's chart depends on it.** Task 8 of
+  Plan 03 superseded the original Dolt-era assumption: meter's ledger is
+  Postgres, and `ReserveIfFits` enforces both overspend-safety
+  (`SELECT ... FOR UPDATE` on the ceiling row) and `/decide` idempotency (a
+  partial `UNIQUE` index on the open `(project, bead_id, session_key)` key)
+  **in the database, across replicas** — proven by
+  `TestReserveIfFitsRace`/`TestReserveIsIdempotentAcrossReplicas`
+  (`internal/meter/store/postgres_race_test.go`) with no service-side mutex
+  in the way. **Plan 05's chart must NOT hard-pin `replicas: 1` as a
+  correctness requirement.** It may still *default* to 1 for the modest
+  footprint of an initial deployment, but nothing in the chart, its
+  documentation, or its dashboards may claim meter needs single-replica
+  operation to be safe — that claim is now false.
+
+### Plan 05 (chart) — STILL TODO (Plan 05 has not started)
+
+- **KNOWN, not yet consumed:** `networkPolicy.agentPodSelector` is
+  `matchLabels: {app: gc-agent}` — Gas City's k8s session provider labels
+  agent pods hardcoded (`internal/runtime/k8s/pod.go`). OD-5 is answered.
+  Ship it as the chart's **default**, not a required value. **This does not
+  close the enforcement gap** — NetworkPolicy is not enforced on this
+  cluster (Flannel; Cilium suspended), so a right selector on an unenforced
+  policy still blocks nothing; Plan 06's egress-denial test stays written
+  and skipped until Cilium lands.
+- **TODO:** no site-specific model names in chart defaults —
+  `operatorConfig.rungs`/`operatorConfig.instance.ladder` must be required
+  (the chart fails to render on empty), and `onboarding.defaultRung` must be
+  validated against the instance ladder (guard G5), with no default that
+  passes it by accident.
+- **TODO:** add `gonk-agent` and `gonk-controller` image references to
+  chart values (exact tags, at `registry.orac.local/agentic/gonk-project/`)
+  alongside the existing `gonk-intake`/`gonk-meter` pins, so Renovate can
+  bump all four and an e2e values file can override them per run.
+- **TODO:** the meter `testclock` image is a separate tag
+  (`…:<tag>-testclock`), selected only by `values-e2e.yaml`, never a
+  production flag — `TestProductionMeterImageHasNoTestClock` (Task 7) is the
+  guard that would catch a chart wiring the seam into production.
+- **NEW — AD-10 lifted (see the Plan 03 entry above):** the chart must not
+  hard-pin `meter.replicas: 1` as a correctness requirement.
+
+### Plan 06 (e2e harness) — STILL TODO (Plan 06 has not started)
+
+- **HB-4 is satisfied with a caveat**, unchanged from Plan 04's own text:
+  classification is delivered via `POST /v1/policy/outcome` + a stable
+  stdout JSON line (`{"event":"gonk.outcome",...}`) + bead history. The
+  event-bus publish half (OD-6) is not delivered — the publish API is not in
+  the Gas City facts available to any plan so far. Plan 06 subscribes to
+  what exists; it must not mark the ladder tests green against a surface
+  that does not exist.
+- **TODO — live-verify the attribution seam (OD-7).** Verified in design
+  (LiteLLM v1.92.0 smoke test + opencode source confirmation at the pin);
+  **not yet verified against a real agent pod's real request reaching a
+  real LiteLLM.** Spec goal 4 rests on this.
+- **TODO — measure the classifier's known false positive** (pod evicted
+  after >=1 completion, before posting) using the K-series kill tests.
+- **TODO — `[steps.check]`'s real env contract.** See "Carry-forwards found
+  during Plan 04's own execution" in `ADR-005` — `cmd/gonk-gate check`
+  currently reads `GC_WEBHOOK_ARG_*`, which is wrong for a formula check
+  step; the fix needs the `bd` metadata read-back path.
+- **TODO — wire a real Gas City session-lifecycle signal into
+  `Record.SessionEndedAt`.** Until Plan 06 deploys a real Gas City and
+  bridges its `tracking_id` completion signal, `cmd/gonk-gate sweep`'s
+  completed-session classification path is inert (fails closed — no spend
+  leak — but does nothing).
+- **The bead marker `<!-- gonk:bead:<id> -->` is a contract**, not a prompt
+  detail — carried forward unchanged from the plan text.
+
+## Carried into later plans (plan 04)
+
+- **ADR numbering shifted: Plan 05's chart ADR is `ADR-006`, not `ADR-004` or
+  `ADR-005`.** Plan 03 claimed `ADR-004` first (merged before Plan 04
+  started); this plan's own architecture ADR is `docs/adr/ADR-005-pack-and-images.md`.
+  Whoever writes Plan 05's ADR should number by what is actually merged on
+  `main` (`ls docs/adr/`), not by a plan document's own guess at its number.
+- **`cmd/gonk-gate sweep`'s completed-session path is inert until a real Gas
+  City session-lifecycle signal stamps `Record.SessionEndedAt`.** Fails
+  closed (no spend leak); Plan 06 wires the signal in once a real Gas City
+  is deployed. See `ADR-005`, "Carry-forwards found during Plan 04's own
+  execution".
+- **`cmd/gonk-gate check`'s env contract (`GC_WEBHOOK_ARG_*`) does not match
+  Gas City's real `[steps.check]` invocation** (`GC_BEAD_ID`/`GC_ITERATION`/
+  `GC_WORK_DIR`/…, confirmed against `internal/convergence/condition.go` in
+  Task 6). Each formula step now stamps the needed values onto the checked
+  bead's own metadata so a fix has somewhere to read them from; the
+  `GC_BEAD_ID` → `bd show`/metadata read-back itself is not implemented.
+  Whoever runs a formula through a real `[steps.check]` next (Plan 06, or an
+  earlier owner) must close this before that formula's check step can pass.
+- **`pkg/beadstore/bd.go`'s `bd` invocations were confirmed and fixed against
+  the real `bd` 1.0.3 binary in Task 6** (four silent-failure bugs found and
+  fixed: the `label` verb/id argument order, `gonk::*` not glob-expanding,
+  missing `--json` on `bd create`, and `text` vs `body` on `bd comments`).
+  This carry-forward is resolved, not open — recorded so nobody re-opens it
+  as a guess.
+- **`discussion_id` (mention-reply's thread target) is declared in the pack
+  wire shape but not yet plumbed through `dispatch.go`.** A small,
+  well-scoped follow-up for Plan 06 or an earlier owner.
+- **The real `gc lint` does not validate order-level semantics** (formula
+  XOR exec, no pool on an exec order), and the loader path the real
+  controller uses (`orderdiscovery.ScanAll`) silently drops a bad order and
+  still exits 0. `internal/packtest` is the real gate for this in gonk's own
+  codebase — say so explicitly in any future document that cites `gc lint`
+  as sufficient; it is not.
+- **Neither `cmd/gonk-intake` nor `cmd/gonk-meter` declares `var version
+  string`**, so the `-ldflags -X main.version` in their Dockerfiles is a
+  harmless no-op. A trivial follow-up whenever someone next touches either
+  `main.go`.
+- **The bead marker `<!-- gonk:bead:<id> -->` is a contract**, not a prompt
+  detail.

@@ -3299,7 +3299,11 @@ git commit -m "feat(gonk-gate): commit provenance trailers; never publish a cost
 - Create: `docs/adr/ADR-004-pack-gate-and-images.md`
 - Modify: `PLAN.md`
 
-- [ ] **Step 1: Write `docs/adr/ADR-004-pack-gate-and-images.md`**
+- [x] **Step 1: Write `docs/adr/ADR-004-pack-gate-and-images.md`** — written as
+  `docs/adr/ADR-005-pack-and-images.md` instead: `ADR-004` was already claimed
+  by Plan 03 (`ADR-004-rung-policy-and-budget-enforcement.md`), merged to
+  `main` before this plan started. Plan 05's own chart ADR is therefore
+  `ADR-006`, not `ADR-004`. See the numbering note at the top of `ADR-005`.
 
 It records the decisions a future maintainer will otherwise "simplify" away.
 **Each of these must appear with its reason, not just its conclusion:**
@@ -3339,7 +3343,14 @@ It records the decisions a future maintainer will otherwise "simplify" away.
     opencode + LiteLLM. Spec goal 4 rests on it; if the live proof ever fell
     through to "project-level attribution only", **say so in bold**.
 
-- [ ] **Step 2: Update `PLAN.md`**
+- [x] **Step 2: Update `PLAN.md`** — plan 04 marked done; "Contracts published
+  by plan 04" gained Task 1/3/8 sections (`pkg/gate`, `cmd/gonk-gate`,
+  `pkg/beadstore`, provenance trailers) alongside the existing Task 2/4/5/6/7
+  ones; a full "Amendment register" reconciles Plan 04's anticipated upstream
+  amendments against Plans 02/03's actual merged code (DONE, not TODO, where
+  applicable) and lists what remains genuinely TODO for Plans 05/06; and
+  "Carried into later plans (plan 04)" records the ADR-006-for-Plan-05 note
+  plus every carry-forward found during this plan's own execution.
 
 Set plan 04's status, and add to "Carried into later plans":
 
@@ -3363,12 +3374,9 @@ Set plan 04's status, and add to "Carried into later plans":
 - **The bead marker `<!-- gonk:bead:<id> -->` is a contract**, not a prompt detail.
 ```
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add docs/adr/ADR-004-pack-gate-and-images.md PLAN.md
-git commit -m "docs(adr-004): the two-place rung gate, the outcome classifier, and the clean-room constraint"
-```
+- [x] **Step 3: Commit** — as
+  `docs(pack): ADR-005, PLAN.md, amendment register; mark plan 04 done`
+  (the file is `ADR-005`, not `ADR-004` — see Step 1).
 
 ---
 
@@ -3589,8 +3597,8 @@ that admits the gap.
 
 ## Definition of done
 
-- [ ] `gofmt -l .` prints nothing; `go vet ./...` clean; `golangci-lint run ./...` clean (v2.12.2, pinned with CI — see PLAN.md).
-- [ ] `go test ./... -race -count=1` passes.
+- [x] `gofmt -l .` prints nothing; `go vet ./...` clean; `golangci-lint run ./...` clean (v2.12.2, pinned with CI — see PLAN.md). Re-verified in Task 9: `gofmt -l` empty, `go vet ./...` clean, `golangci-lint run ./...` -> "0 issues" (v2.12.2, go1.26.2), all offline (`GOFLAGS=-mod=vendor GOPROXY=off`).
+- [x] `go test ./... -race -count=1` passes. Re-verified in Task 9: all packages `ok`, offline. `test/images` (build tag `images`) matches no packages under a plain `go test ./...`/`./test/images/...` — confirmed excluded from the normal gate.
 - [ ] `go test ./test/images/ -tags images -race -count=1` passes (needs podman, `--network=host`).
 - [ ] `make lint-pack` — **the pack names no model, holds no credential**.
 - [ ] `make pack-validate` — **Gas City's real loader accepts the pack**, *and rejects a pack with an injected unknown key* (the negative control is what gives the positive its meaning).
@@ -3603,7 +3611,7 @@ that admits the gap.
 - [ ] `TestSweepIsIdempotentAcrossRuns` passes (a cooldown order runs every 30 s forever).
 - [ ] `TestPendingUsageWhenCostIsIncomplete` passes. **No cost meter does not know goes into permanent git history.**
 - [ ] `TestProductionMeterImageHasNoTestClock` passes.
-- [ ] ADR-004 written, **including the known false positive and the licensing statement**.
-- [ ] The **Upstream amendments** above are filed against Plans 02, 03, 05 and 06. **Plan 02's "intake does not call `/policy/decide`" is the one that is now factually wrong; do not let it sit.**
-- [ ] `PLAN.md` updated.
-- [ ] **`gascity-packs` was never opened.** If it was, say so — the open-sourcing review depends on this being true, not on it being claimed.
+- [x] ADR-004 written, **including the known false positive and the licensing statement** — as `docs/adr/ADR-005-pack-and-images.md` (`ADR-004` was already taken by Plan 03; see the numbering note at its top). Includes the known false positive (§4) and the licensing statement (§9).
+- [x] The **Upstream amendments** above are filed against Plans 02, 03, 05 and 06 — as an "Amendment register" in `PLAN.md`, reconciled against the now-merged reality: Plans 02's and 03's items are marked DONE and cited against the actual merged code (`pkg/intake/dispatch.go`'s `Dispatch.Handle`, `internal/meter/service/service_test.go`'s `TestDecideIsIdempotentOnOpenReservation`), not left as pending plan text. **Plan 02's "intake does not call `/policy/decide`" is confirmed fixed in the merged code, not just documented as fixed.** Plans 05/06's items remain genuinely TODO (neither plan has started) and are recorded as such.
+- [x] `PLAN.md` updated: plan 04 -> done; Task 1/3/8 contracts added; the amendment register; "Carried into later plans (plan 04)" with the ADR-006-for-Plan-05 note and every carry-forward found during this plan's execution.
+- [x] **`gascity-packs` was never opened.** Confirmed true for Task 9's own work (no read/copy/paraphrase of it at any point in writing this ADR or PLAN.md), consistent with every earlier task's own record — recorded in `ADR-005` §9, not merely claimed.
