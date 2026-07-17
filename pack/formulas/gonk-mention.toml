@@ -1,0 +1,73 @@
+# pack/formulas/gonk-mention.toml
+#
+# ONE step, handed to the "mention" agent (pack/agents/mention/). Routed
+# there by orders/gonk-mention.toml's `pool = "mention"`.
+#
+# spec 5.5: the conversational surface. It replies IN THE THREAD
+# (discussion_id names which one), and carries the same marker rule as
+# triage and scaffold.
+
+formula = "gonk-mention"
+description = "Reply to an @gonk mention in {{project}}#{{issue_iid}}."
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+project = ""
+project_id = ""
+rig = ""
+issue_iid = ""
+bead_anchor = ""
+# See formulas/gonk-triage.toml's comment: NOT named `bead_id` -- reserved by
+# formulas v2.
+city_bead_id = ""
+session_key = ""
+trigger = ""
+config_hash = ""
+rung = ""
+model = ""
+attempt = ""
+reservation_id = ""
+metadata_json = ""
+key_secret_name = ""
+key_secret_key = ""
+# KNOWN GAP (flagged, not silently assumed): cmd/gonk-gate/dispatch.go's
+# runDispatch does not currently pass a discussion_id through to the poured
+# formula's vars (its vars map -- see dispatch.go -- has no discussion_id
+# key), even though orders/gonk-dispatch.toml declares it as an accepted
+# [order.params] entry. Declared here with an empty default so the formula at
+# least loads and documents the intended wire shape; cmd/gonk-gate needs a
+# dispatchArgs.DiscussionID field and a vars["discussion_id"] entry in the
+# pour step before mention-reply can actually reply in the right thread.
+discussion_id = ""
+
+[[steps]]
+id = "mention"
+title = "Reply to @gonk in {{project}}#{{issue_iid}}"
+description = """
+Reply, in discussion thread `{{discussion_id}}` of issue !{{issue_iid}} in
+project `{{project}}`, to the mention that triggered this work. Load
+`.agent/` from the repository first, if it exists.
+
+Post exactly one reply in that same thread, ending with this line, verbatim,
+on its own line:
+
+<!-- gonk:bead:{{city_bead_id}} -->
+
+Do not close the issue. Do not open a merge request. Do not push a branch.
+"""
+
+[steps.metadata]
+project_id = "{{project_id}}"
+issue_iid = "{{issue_iid}}"
+city_bead_id = "{{city_bead_id}}"
+trigger = "{{trigger}}"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = "scripts/gonk-check.sh"
+timeout = "2m"

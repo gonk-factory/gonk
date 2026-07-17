@@ -1,0 +1,93 @@
+# pack/formulas/gonk-triage.toml
+#
+# ONE step, handed to the "triage" agent (pack/agents/triage/ -- the directory
+# name IS the agent name). Routed there by orders/gonk-triage.toml's
+# `pool = "triage"` (see pack.toml's note on per-agent pools, OD-2).
+
+formula = "gonk-triage"
+description = "Triage GitLab issue !{{issue_iid}} in {{project}}."
+
+# formula_compiler >=2.0.0 opts into the v2 graph compiler. [steps.check] is
+# graph-only (formula-spec-v2.md section 1.2/3.1): a formula that uses it
+# without this declaration must fail to compile.
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+# Every one of these (except label_prefix) is supplied by `gonk-gate dispatch`
+# via the order-run route's {"vars": {...}} body -- see
+# cmd/gonk-gate/dispatch.go's runDispatch. The three that came from
+# gonk-meter -- rung, model, metadata_json -- are stamped VERBATIM and never
+# chosen here.
+project = ""
+project_id = ""
+rig = ""
+issue_iid = ""
+bead_anchor = ""
+# NOTE: this is NOT named `bead_id`. formulas v2 reserves `bead_id` (alongside
+# `convoy_id` and the deprecated `issue` alias) -- internal/graphv2/invocation.go's
+# ValidateNoReservedUserVars rejects ANY caller-supplied vars map containing a
+# `bead_id` key with "formulas v2 reserved variable \"bead_id\" cannot be
+# supplied by the caller", regardless of whether a formula declares it. The
+# Gas City-internal bead id (what cmd/gonk-gate's dispatchArgs.BeadID holds,
+# e.g. "gk-1a2b") is carried here as `city_bead_id` instead.
+city_bead_id = ""
+session_key = ""
+trigger = ""
+config_hash = ""
+rung = ""
+model = ""
+attempt = ""
+reservation_id = ""
+metadata_json = ""
+key_secret_name = ""
+key_secret_key = ""
+
+[vars.label_prefix]
+description = "Label prefix applied to triage labels. Not sent by dispatch -- this default is the only source."
+default = "gonk::"
+
+[[steps]]
+id = "triage"
+title = "Triage issue !{{issue_iid}} in {{project}}"
+description = """
+Read issue !{{issue_iid}} in project `{{project}}` and triage it.
+
+Load `.agent/` from the repository first: it is the project's own context and
+it overrides anything you would otherwise assume.
+
+Apply labels to the issue, each prefixed `{{label_prefix}}`.
+
+Post exactly one comment containing a short analysis of what the issue is
+asking for, anything genuinely ambiguous phrased as a direct question to the
+reporter, and this line, verbatim, on its own line, as the LAST line of the
+comment:
+
+<!-- gonk:bead:{{city_bead_id}} -->
+
+Do not close the issue. Do not open a merge request. Do not push a branch.
+"""
+
+# Stamped onto the bead's own metadata so gonk-gate check (run by
+# [steps.check] below) can look up which GitLab issue/project/trigger this
+# bead is for without re-deriving it. gc.* keys are reserved for the runtime;
+# these are not gc.*-prefixed, so they are ours to use.
+[steps.metadata]
+project_id = "{{project_id}}"
+issue_iid = "{{issue_iid}}"
+city_bead_id = "{{city_bead_id}}"
+trigger = "{{trigger}}"
+
+# THE GATE. formula-spec-v2 section 3.1: [steps.check]'s ONLY mode is exec,
+# and it is a VERIFICATION LOOP -- re-run until it passes or times out. So it
+# must be pure and idempotent: `gonk-gate check` asks GitLab one question and
+# answers with an exit code. It does NOT post an outcome and does NOT decide
+# anything -- `gonk-gate sweep` (the cooldown exec order) does that, exactly
+# once per bead.
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = "scripts/gonk-check.sh"
+timeout = "2m"

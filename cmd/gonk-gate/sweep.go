@@ -1,0 +1,240 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
+	"gitlab.orac.local/agentic/gonk-project/pkg/gate"
+	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi"
+	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
+)
+
+// dispatchOrderName is the exec order that wraps `gonk-gate dispatch` (Gate
+// 2). Re-firing it -- not calling runDispatch in-process -- is what makes the
+// re-sling and the unpark go through the SAME re-decide path a first dispatch
+// does: Gas City runs a fresh `gonk-gate dispatch` process, which asks meter
+// /v1/policy/decide again. There is exactly one other RunOrder call site in
+// this tree (dispatch.go, the pour); this is not a second pour path because
+// "gonk-dispatch" is never a formula-order.
+const dispatchOrderName = "gonk-dispatch"
+
+// sweepDeps is gonk-sweep's dependency set. Every field has a safe default
+// applied in runSweep so a caller only needs to set what a given test cares
+// about.
+type sweepDeps struct {
+	Meter *meterAPI
+	GC    *gcapi.Client
+	GL    gitlabQuerier
+	Store beadstore.Store
+	Log   *slog.Logger
+
+	// BotUsername authenticates the marker-carrying comment (a human quoting
+	// the marker must not satisfy the gate).
+	BotUsername string
+
+	// Now is the sweeper's clock. Defaults to time.Now.
+	Now func() time.Time
+	// SpendPollInterval/SpendDeadline bound the "wait for meter's spend view
+	// to catch up" loop (HB-2). Production defaults are 1s/60s; tests set
+	// both short so a stale-spend test does not sleep for a minute.
+	SpendPollInterval time.Duration
+	SpendDeadline     time.Duration
+}
+
+func (d *sweepDeps) withDefaults() sweepDeps {
+	out := *d
+	if out.Log == nil {
+		out.Log = slog.Default()
+	}
+	if out.Now == nil {
+		out.Now = time.Now
+	}
+	if out.SpendPollInterval <= 0 {
+		out.SpendPollInterval = time.Second
+	}
+	if out.SpendDeadline <= 0 {
+		out.SpendDeadline = 60 * time.Second
+	}
+	return out
+}
+
+// runSweep is `gonk-sweep`'s body: the cooldown exec order that runs every
+// 30s and, deterministically, (1) classifies every `running` bead whose
+// session has ended, reports the outcome, and re-slings an escalation or
+// retry; (2) unparks every `parked` bead whose RetryAfter has passed. NO
+// MODEL CALL ANYWHERE.
+//
+// Exit codes: 0 = the pass completed (individual beads may have hit infra
+// errors that are logged and skipped -- one bad bead must not block the
+// whole sweep); 1 = the pass could not even start (store unreachable).
+func runSweep(ctx context.Context, d sweepDeps) int {
+	dd := d.withDefaults()
+
+	running, err := dd.Store.List(ctx, beadstore.StateRunning)
+	if err != nil {
+		dd.Log.Error("sweep: list running beads failed", "err", err)
+		return 1
+	}
+	for _, rec := range running {
+		sweepRunning(ctx, dd, rec)
+	}
+
+	parked, err := dd.Store.List(ctx, beadstore.StateParked)
+	if err != nil {
+		dd.Log.Error("sweep: list parked beads failed", "err", err)
+		return 1
+	}
+	now := dd.Now()
+	for _, rec := range parked {
+		if now.Before(rec.RetryAfter) {
+			continue
+		}
+		refire(ctx, dd, rec)
+	}
+	return 0
+}
+
+// sweepRunning classifies one running bead. It is a no-op for a bead whose
+// session has not ended yet (SessionEndedAt is the zero value): "still
+// running" is not this tick's job.
+func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
+	if rec.SessionEndedAt.IsZero() {
+		return
+	}
+
+	signals := gate.Signals{
+		ReservationExpired: !rec.ReservationExpiresAt.IsZero() && d.Now().After(rec.ReservationExpiresAt),
+	}
+
+	kind := artifactKindForTrigger[rec.Trigger]
+	// Aborted (a human closed the bead) is only meaningful for an issue-scoped
+	// trigger: scaffold's work item is the PROJECT (spec 5.3 -- it runs before
+	// any issue exists), so there is no issue to close.
+	aborted := false
+	if kind == "comment" {
+		issue, err := d.GL.GetIssue(ctx, rec.ProjectID, rec.IssueIID)
+		if err != nil {
+			signals.ArtifactUnknown = true
+		} else if issue.State == "closed" {
+			aborted = true
+		}
+	}
+	signals.Aborted = aborted
+
+	if !signals.ArtifactUnknown && !signals.Aborted {
+		present, unknown, _ := artifactPresent(ctx, d.GL, d.BotUsername, kind, rec.ProjectID, rec.IssueIID, rec.BeadID)
+		if unknown {
+			signals.ArtifactUnknown = true
+		} else {
+			signals.ArtifactPresent = present
+		}
+	}
+
+	// Only spend real effort proving tokens were spent when it can change the
+	// answer: Aborted/ReservationExpired/ArtifactUnknown/ArtifactPresent all
+	// already settle Classify's verdict without it (see gate.Classify's
+	// priority order), and asking meter for spend it does not need is exactly
+	// the trap that would misclassify a genuine success as infra-failed the
+	// moment a spend sync happened to lag.
+	if !signals.Aborted && !signals.ReservationExpired && !signals.ArtifactUnknown && !signals.ArtifactPresent {
+		tokens, stale := gatherSpend(ctx, d, rec)
+		signals.SpendStale = stale
+		signals.ModelTokens = tokens
+	}
+
+	outcome := gate.Classify(signals)
+
+	// Bind the outcome to the reservation METER minted at the /decide that put
+	// this record into StateRunning. An unbound outcome is a forgery vector: a
+	// caller-synthesized reservation_id could "confirm" a gate-failed on a
+	// reservation it never held.
+	resp, err := d.Meter.Outcome(ctx, meterapi.OutcomeRequest{
+		Project: rec.Project, BeadID: rec.BeadAnchor, SessionKey: rec.SessionKey,
+		Attempt: rec.Attempt, Rung: rec.Rung, ReservationID: rec.ReservationID, Outcome: outcome,
+	})
+	if err != nil {
+		d.Log.Error("sweep: POST /v1/policy/outcome failed", "err", err, "bead", rec.BeadAnchor)
+		return
+	}
+
+	switch resp.Next {
+	case "done":
+		rec.State = beadstore.StateDone
+		if err := d.Store.Put(ctx, rec); err != nil {
+			d.Log.Error("sweep: store Put failed", "err", err, "bead", rec.BeadAnchor)
+		}
+		d.Log.Info("sweep: bead done", "bead", rec.BeadAnchor, "outcome", outcome)
+	case "escalate", "retry":
+		// The re-sling: fire the gonk-dispatch order for the SAME BeadAnchor. It
+		// goes through Gate 2 by construction -- Gas City runs a fresh
+		// `gonk-gate dispatch`, which re-decides and OVERWRITES this record via
+		// its own Store.Put once it runs.
+		//
+		// But that happens in a SEPARATE, asynchronous process: the order-run
+		// route only QUEUES the order (spec/gcapi: {status, tracking_id}), it
+		// does not run it inline. Until it does, this record is still sitting
+		// here with the SAME SessionEndedAt that just earned an outcome. Clear
+		// it NOW, in the same Put that records the re-sling: a bead with a zero
+		// SessionEndedAt reads as "still running" (sweepRunning's own guard) and
+		// is skipped by every sweep tick until the fresh dispatch (or its
+		// eventual session) stamps a real one again. Without this, a cooldown
+		// order firing every 30s would re-report this outcome and re-fire the
+		// re-sling once per tick -- walking the ladder for free.
+		rec.SessionEndedAt = time.Time{}
+		if err := d.Store.Put(ctx, rec); err != nil {
+			d.Log.Error("sweep: store Put failed", "err", err, "bead", rec.BeadAnchor)
+		}
+		refire(ctx, d, rec)
+		d.Log.Info("sweep: re-sling fired", "bead", rec.BeadAnchor, "outcome", outcome, "next", resp.Next)
+	default:
+		d.Log.Error("sweep: meter returned an unknown Next; leaving the bead running", "next", resp.Next, "bead", rec.BeadAnchor)
+	}
+}
+
+// gatherSpend forces a spend sync (HB-2) and polls session cost until
+// meter's view has caught up past SessionEndedAt, or the deadline elapses.
+// On deadline it reports SpendStale: we could not PROVE the model answered,
+// so we do not escalate (AD-6: uncertainty never escalates).
+func gatherSpend(ctx context.Context, d sweepDeps, rec beadstore.Record) (tokens int64, stale bool) {
+	if _, err := d.Meter.SpendSync(ctx); err != nil {
+		return 0, true
+	}
+	deadline := d.Now().Add(d.SpendDeadline)
+	for {
+		cost, err := d.Meter.CostSession(ctx, rec.SessionKey)
+		if err == nil && !cost.AsOf.Before(rec.SessionEndedAt) {
+			return cost.TotalTokens, false
+		}
+		if !d.Now().Before(deadline) {
+			return 0, true
+		}
+		select {
+		case <-ctx.Done():
+			return 0, true
+		case <-time.After(d.SpendPollInterval):
+		}
+	}
+}
+
+// refire re-fires gonk-dispatch for rec.BeadAnchor -- the ONLY way a sweep
+// causes more spend, and it goes through Gate 2 by construction (see
+// dispatchOrderName's doc comment).
+func refire(ctx context.Context, d sweepDeps, rec beadstore.Record) {
+	vars := map[string]string{
+		"project":     rec.Project,
+		"project_id":  fmt.Sprint(rec.ProjectID),
+		"rig":         rec.Rig,
+		"issue_iid":   fmt.Sprint(rec.IssueIID),
+		"bead_anchor": rec.BeadAnchor,
+		"bead_id":     rec.BeadID,
+		"session_key": rec.SessionKey,
+		"trigger":     rec.Trigger,
+		"config_hash": rec.ConfigHash,
+	}
+	if _, err := d.GC.RunOrder(ctx, dispatchOrderName, vars); err != nil {
+		d.Log.Error("sweep: re-fire gonk-dispatch failed", "err", err, "bead", rec.BeadAnchor)
+	}
+}

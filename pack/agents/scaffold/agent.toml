@@ -1,0 +1,10 @@
+# agents/scaffold/agent.toml -- THE DIRECTORY NAME ("scaffold") IS THE AGENT
+# NAME. A `name` field here would be ignored by the loader (pack-spec.md
+# 1.2.4). Do not add one and believe it.
+
+description = "Reads a repository and opens a post-merge MR that scaffolds .agent/."
+
+# No model name here -- see agents/triage/agent.toml's comment; the same
+# reasoning applies verbatim to every agent in this pack.
+
+min_active_sessions = 0

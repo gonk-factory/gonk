@@ -57,6 +57,11 @@ type Project struct {
 	MRs      []glab.MergeRequest
 	Issues   []glab.Issue
 	Members  []glab.Member
+	// Notes is keyed by issue IID. gonk-gate's check/sweep read these to find
+	// the bot's marker comment; nothing else in the tree needs per-note
+	// fidelity today, so there is no CreateNote API route -- tests append
+	// directly (see AddNote).
+	Notes map[int64][]glab.Note
 
 	hookTokens map[int64]string
 	srv        *Server
@@ -224,6 +229,60 @@ func (s *Server) SetMRState(projectID, iid int64, state string, at time.Time) {
 	s.t.Fatalf("glabtest: SetMRState: no MR iid=%d in project %d", iid, projectID)
 }
 
+// AddIssue seeds an issue at a caller-chosen IID (gonk-gate's tests need
+// specific IIDs to match a bead's IssueIID; state is normally "opened").
+func (s *Server) AddIssue(projectID, iid int64, state string, labels ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[projectID]
+	if !ok {
+		s.t.Fatalf("glabtest: AddIssue: unknown project %d", projectID)
+		return
+	}
+	p.Issues = append(p.Issues, glab.Issue{
+		IID: iid, State: state, Labels: labels,
+		WebURL: fmt.Sprintf("%s/-/issues/%d", p.WebURL, iid),
+	})
+}
+
+// SetIssueState moves an issue to "opened" or "closed" -- gonk-gate's
+// sweeper reads this for gate.Signals.Aborted (a human closed the bead).
+func (s *Server) SetIssueState(projectID, iid int64, state string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[projectID]
+	if !ok {
+		s.t.Fatalf("glabtest: SetIssueState: unknown project %d", projectID)
+		return
+	}
+	for i := range p.Issues {
+		if p.Issues[i].IID == iid {
+			p.Issues[i].State = state
+			return
+		}
+	}
+	s.t.Fatalf("glabtest: SetIssueState: no issue iid=%d in project %d", iid, projectID)
+}
+
+// AddNote appends a note to an issue. system marks a GitLab-generated audit
+// note (label changes, etc.) rather than authored text -- the gate must
+// never mistake one for the bot's marker comment.
+func (s *Server) AddNote(projectID, issueIID int64, author glab.User, body string, system bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[projectID]
+	if !ok {
+		s.t.Fatalf("glabtest: AddNote: unknown project %d", projectID)
+		return
+	}
+	if p.Notes == nil {
+		p.Notes = map[int64][]glab.Note{}
+	}
+	id := s.nextID
+	s.nextID++
+	p.Notes[issueIID] = append(p.Notes[issueIID], glab.Note{ID: id, Body: body, Author: author, System: system})
+}
+
 // Requests is the "METHOD /path" log in request order, for asserting
 // idempotency: several later tasks run reconcile twice and require zero
 // writes on the second pass.
@@ -296,6 +355,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleListIssues(w, r, segs[3])
 	case r.Method == http.MethodPost && len(segs) == 5 && segs[2] == "projects" && segs[4] == "issues":
 		s.handleCreateIssue(w, r, segs[3])
+	case r.Method == http.MethodGet && len(segs) == 7 && segs[2] == "projects" && segs[4] == "issues" && segs[6] == "notes":
+		s.handleListIssueNotes(w, r, segs[3], segs[5])
+	case r.Method == http.MethodGet && len(segs) == 6 && segs[2] == "projects" && segs[4] == "issues":
+		s.handleGetIssue(w, r, segs[3], segs[5])
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"message": "glabtest: no route"})
 	}
@@ -664,6 +727,45 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request, idStr
 	p.Issues = append(p.Issues, is)
 	s.mu.Unlock()
 	writeJSON(w, http.StatusCreated, is)
+}
+
+func (s *Server) handleGetIssue(w http.ResponseWriter, r *http.Request, idStr, iidStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	iid, err := strconv.ParseInt(iidStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Issue Not Found"})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, is := range p.Issues {
+		if is.IID == iid {
+			writeJSON(w, http.StatusOK, is)
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Issue Not Found"})
+}
+
+func (s *Server) handleListIssueNotes(w http.ResponseWriter, r *http.Request, idStr, iidStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	iid, err := strconv.ParseInt(iidStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Issue Not Found"})
+		return
+	}
+	s.mu.Lock()
+	notes := append([]glab.Note{}, p.Notes[iid]...)
+	s.mu.Unlock()
+	paginateWrite(w, r, notes)
 }
 
 // paginateWrite slices items per the page/per_page query params (default

@@ -1,0 +1,16 @@
+# pack/orders/gonk-triage.toml
+#
+# The formula-order. It is fired ONLY by gonk-dispatch, ONLY after
+# /v1/policy/decide said `run`. Nothing else may fire it -- and note that the
+# supervisor's order-run route has NO AUTH (admission is by network
+# position), so "nothing else CAN reach it" is a property of the
+# NetworkPolicy and the namespace, not of this file.
+[order]
+description = "Triage one GitLab issue. Poured by gonk-dispatch after a budget decision."
+formula = "gonk-triage"               # XOR `exec`. NEVER BOTH.
+trigger = "manual"
+# Pool = the agent's own name (see pack.toml's note on OD-2): a "pool of one"
+# so this formula's step can ONLY be picked up by the triage agent's session,
+# never by scaffold's or mention's even though all three share this pack.
+pool = "triage"
+timeout = "20m"

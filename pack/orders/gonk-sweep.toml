@@ -1,0 +1,29 @@
+# pack/orders/gonk-sweep.toml
+#
+# The deterministic outcome brain. NO LLM IN IT.
+#
+# WHY IT IS AN ORDER AND NOT A FORMULA STEP: every [[steps]] in a formula
+# becomes a bead handed to an AGENT (formula-spec-v2), so a formula cannot
+# contain a deterministic final step. And [steps.check] -- the only exec
+# inside a formula -- is a re-run verification LOOP, so it must be
+# side-effect-free and cannot POST an outcome. Therefore the classifier lives
+# here, in a cooldown exec order that runs once every 30s and does each bead
+# exactly once.
+#
+# It: (1) classifies every finished session from OBJECTIVE signals (GitLab:
+# did the artifact land? meter: did the model actually answer?); (2) POSTs
+# /v1/policy/outcome bound to the reservation METER minted; (3) re-fires
+# gonk-dispatch on escalate/retry -- WHICH RE-DECIDES, so the re-sling is
+# gated; (4) unparks deferred beads whose retry_after has passed -- ALSO via
+# gonk-dispatch.
+#
+# INFRA FAILURES NEVER ESCALATE A RUNG (spec 6.3). If this order ever reports
+# an infra failure as gate-failed, it buys an escalation the project did not
+# earn.
+[order]
+description = "Classify finished sessions, report outcomes, re-sling escalations, unpark deferred beads. Deterministic; no model calls."
+exec = "scripts/gonk-sweep.sh"
+trigger = "cooldown"
+interval = "30s"
+timeout = "300s"
+# NO `pool` -- exec orders may not have one.

@@ -1,0 +1,10 @@
+# pack/orders/gonk-mention.toml
+#
+# The formula-order for the conversational surface (spec 5.5). Fired ONLY by
+# gonk-dispatch, ONLY after /v1/policy/decide said `run`.
+[order]
+description = "Reply to an @gonk mention. Poured by gonk-dispatch after a budget decision."
+formula = "gonk-mention"
+trigger = "manual"
+pool = "mention"                      # see pack.toml's note on OD-2.
+timeout = "20m"

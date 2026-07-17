@@ -1,0 +1,49 @@
+# gonk-intake image: the GitLab-side webhook/reconciliation binary (Plan 02).
+# It calls no language model, ever (cmd/gonk-intake/main.go's own package doc).
+#
+# Multi-stage: a vendored, OFFLINE Go build (docs/environment.md: this box and
+# CI cannot reach proxy.golang.org) producing a static binary, then a minimal
+# distroless runtime. Every ARG below is read from images/versions.env; there
+# is no default and no `latest` anywhere.
+#
+# Build: see `make intake-image` (Makefile).
+
+ARG GO_VERSION
+ARG DISTROLESS_BASE
+
+# ---- build gonk-intake (static; vendor/ is committed -- docs/environment.md:
+# CI cannot reach proxy.golang.org, so this stage is fully offline, -mod=vendor,
+# no `go mod download` anywhere, same as images/Dockerfile.agent's gate stage
+# and images/Dockerfile.controller's gate stage). ----------------------------
+FROM golang:${GO_VERSION} AS build
+WORKDIR /src
+ARG GONK_TAG
+COPY go.mod go.sum ./
+COPY vendor/ vendor/
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY pkg/ pkg/
+# NOTE: cmd/gonk-intake does not declare `var version string` (confirmed
+# against cmd/gonk-intake/main.go, 2026-07-16) -- like images/Dockerfile.agent's
+# equivalent note about gonk-gate at Task 5 time, the `-X main.version=...`
+# below is a harmless no-op linker directive until that lands, kept here so
+# adding the symbol later needs no Dockerfile change. gonk-intake's own
+# version string (used in onboarding MR templates, not `--version`) comes from
+# the GONK_VERSION env var at runtime instead (main.go's Config.Version).
+RUN CGO_ENABLED=0 go build -mod=vendor -trimpath \
+    -ldflags="-s -w -X main.version=${GONK_TAG}" \
+    -o /out/gonk-intake ./cmd/gonk-intake
+
+# ---- runtime: distroless static, nonroot, pinned by DIGEST ------------------
+FROM ${DISTROLESS_BASE}
+COPY --from=build /out/gonk-intake /usr/local/bin/gonk-intake
+
+# The private CA (docs/environment.md). trust-manager's `trust-bundle`
+# ConfigMap is mounted here by the chart (Plan 05). NEVER disable TLS
+# verification -- gonk-intake talks to gitlab.orac.local and gonk-meter, both
+# behind this private CA (see main.go: "no TLS configuration anywhere ...
+# disabling verification here is never the answer").
+ENV SSL_CERT_FILE=/etc/ssl/orac/ca.crt
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/gonk-intake"]

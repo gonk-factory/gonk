@@ -545,7 +545,7 @@ expensive rung. There is no LLM in this function and there never will be.
 - Create: `pkg/gate/outcome.go`, `pkg/gate/marker.go`
 - Test: `pkg/gate/outcome_test.go`, `pkg/gate/marker_test.go`
 
-- [ ] **Step 1: Write the failing test** — `pkg/gate/outcome_test.go`
+- [x] **Step 1: Write the failing test** — `pkg/gate/outcome_test.go`
 
 ```go
 package gate
@@ -683,12 +683,12 @@ func TestMarkerRoundTrip(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `go test ./pkg/gate/ -v`
 Expected: FAIL — no Go files / undefined `Classify`, `Signals`, `Escalates`, `BeadMarker`.
 
-- [ ] **Step 3: Implement `pkg/gate/outcome.go`**
+- [x] **Step 3: Implement `pkg/gate/outcome.go`**
 
 ```go
 // Package gate is gonk's deterministic outcome classifier: the pure function
@@ -794,7 +794,7 @@ session provider**, which is not in the facts available to this plan.
 already evict pods); if it is common, it becomes an upstream ask. Put this
 paragraph in ADR-004 verbatim.
 
-- [ ] **Step 4: Implement `pkg/gate/marker.go`**
+- [x] **Step 4: Implement `pkg/gate/marker.go`**
 
 ```go
 package gate
@@ -821,7 +821,7 @@ func MarkerPresent(body, beadID string) bool {
 }
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `go test ./pkg/gate/ -race -count=1 -v`
 Expected: PASS (5 tests, ~30 subtests).
@@ -834,7 +834,7 @@ grep -rniE "openai|litellm|prompt|llm|model\." pkg/gate/ && echo "FAIL: a judge 
 
 Expected: `ok`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 gofmt -l . && go vet ./pkg/gate/ && go test ./pkg/gate/ -race -count=1
@@ -872,7 +872,7 @@ Ingress exposes only `/hook/gitlab`).
 - Create: `pkg/gcapi/client.go`, `pkg/gcapi/gcapitest/server.go`
 - Test: `pkg/gcapi/client_test.go`
 
-- [ ] **Step 1: Write the failing test** — `pkg/gcapi/client_test.go`
+- [x] **Step 1: Write the failing test** — `pkg/gcapi/client_test.go`
 
 ```go
 package gcapi
@@ -1000,12 +1000,12 @@ func TestNilVarsSendsEmptyObject(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `go test ./pkg/gcapi/ -v`
 Expected: FAIL — undefined `New`, `Client`, `RunOrder`, `IsNotFound`.
 
-- [ ] **Step 3: Implement `pkg/gcapi/client.go`**
+- [x] **Step 3: Implement `pkg/gcapi/client.go`**
 
 ```go
 // Package gcapi is a minimal typed client for the ONE Gas City supervisor route
@@ -1163,7 +1163,7 @@ Add the two helpers (`readCapped`, `truncate`) with the same semantics as
 `pkg/glab/client.go` (Plan 02, Task 1) — cap the body, error rather than
 truncate, never embed a credential in an error string.
 
-- [ ] **Step 4: Implement `pkg/gcapi/gcapitest/server.go`**
+- [x] **Step 4: Implement `pkg/gcapi/gcapitest/server.go`**
 
 An in-memory supervisor for the rest of the plan's tests. Behaviour contract:
 
@@ -1190,12 +1190,12 @@ func (s *Server) Client(city string) *gcapi.Client
 func (s *Server) PouredNames() []string  // convenience for assertions
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `go test ./pkg/gcapi/... -race -count=1 -v`
 Expected: PASS (6 tests).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 gofmt -l . && go vet ./pkg/gcapi/... && go test ./pkg/gcapi/... -race -count=1
@@ -1232,7 +1232,7 @@ part of the pack's contract, not an implementation detail:
 (`meterapi`: *"defer and deny are HTTP 200"*). An order that "fails" on a `defer`
 would make quiet hours look like an outage on every dashboard in the building.
 
-- [ ] **Step 1: Write `pkg/beadstore` and its failing test**
+- [x] **Step 1: Write `pkg/beadstore` and its failing test**
 
 `pkg/beadstore/store_test.go`:
 
@@ -1323,7 +1323,7 @@ func TestPutIsIdempotentOnBeadAnchor(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Implement `pkg/beadstore`**
+- [x] **Step 2: Implement `pkg/beadstore`**
 
 ```go
 // Package beadstore is gonk-gate's per-bead work record: the small amount of
@@ -1417,7 +1417,7 @@ controller image and pins the exact invocations. Until then `bd.go` is written
 against `bd comment` / `bd label` / `bd list --label`, and **a wrong guess changes
 exactly this one file.**
 
-- [ ] **Step 3: Write the failing dispatch test** — `cmd/gonk-gate/dispatch_test.go`
+- [x] **Step 3: Write the failing dispatch test** — `cmd/gonk-gate/dispatch_test.go`
 
 ```go
 package main
@@ -1622,12 +1622,12 @@ func TestDispatchRefusesWithoutCity(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Run it and watch it fail**
+- [x] **Step 4: Run it and watch it fail**
 
 Run: `go test ./cmd/gonk-gate/ -run Dispatch -v`
 Expected: FAIL — undefined `runDispatch`, `dispatchDeps`, `dispatchArgs`.
 
-- [ ] **Step 5: Implement `cmd/gonk-gate/dispatch.go`**
+- [x] **Step 5: Implement `cmd/gonk-gate/dispatch.go`**
 
 ```go
 package main
@@ -1830,7 +1830,7 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 var errNoCity = errors.New("GONK_CITY is unset")
 ```
 
-- [ ] **Step 6: Write and implement `cmd/gonk-gate/sweep.go`** — the classifier's driver
+- [x] **Step 6: Write and implement `cmd/gonk-gate/sweep.go`** — the classifier's driver
 
 `sweep` is the **cooldown exec order's** body. It runs every 30 s and does three
 things, all deterministic:
@@ -1908,7 +1908,7 @@ func TestSweepIsIdempotentAcrossRuns(t *testing.T)
 every 30 seconds forever. A sweeper that re-reports an outcome each tick walks a
 project to the top of its ladder in a couple of minutes.
 
-- [ ] **Step 7: Write and implement `cmd/gonk-gate/check.go`** — the `[steps.check]` body
+- [x] **Step 7: Write and implement `cmd/gonk-gate/check.go`** — the `[steps.check]` body
 
 ```go
 // runCheck is what a formula's [steps.check] executes. It is PURE and IDEMPOTENT:
@@ -1931,7 +1931,7 @@ func runCheck(ctx context.Context, d checkDeps) int
 marker present → 3; a *human's* comment quoting the marker → 3 (author must be the
 bot); GitLab 500 → 1.
 
-- [ ] **Step 8: The shared-semantics test — Gate 1 and Gate 2 must mean the same thing**
+- [x] **Step 8: The shared-semantics test — Gate 1 and Gate 2 must mean the same thing**
 
 `cmd/gonk-gate/contract_test.go`:
 
@@ -2011,7 +2011,7 @@ This requires a tiny exported helper on each side (`gate.MayPour`,
 listed at the bottom of this plan — it is three lines, and it is what makes the
 drift mechanically detectable instead of a comment nobody reads.
 
-- [ ] **Step 9: Run everything**
+- [x] **Step 9: Run everything**
 
 ```bash
 go test ./pkg/beadstore/ ./cmd/gonk-gate/ -race -count=1 -v
@@ -2031,7 +2031,7 @@ grep -rn "RunOrder" cmd/gonk-gate/ | grep -v _test.go
 # NOT a formula-order). Any THIRD call site is a second pour path and a bug.
 ```
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./pkg/... ./cmd/... -race -count=1
@@ -2056,7 +2056,7 @@ git commit -m "feat(gonk-gate): deterministic dispatch gate, outcome sweeper, an
    A guess here is caught by Task 6 (the real loader), but only after you have
    written it wrong.
 
-- [ ] **Step 1: Pin gascity and transcribe the exact key names — do not guess**
+- [x] **Step 1: Pin gascity and transcribe the exact key names — do not guess**
 
 ```bash
 mkdir -p /tmp/gonk-upstream && cd /tmp/gonk-upstream
@@ -2082,7 +2082,7 @@ Read, and write the exact key names into a scratch note before writing any TOML:
 **Confirm the licence:** `LICENSE` in `gascity` says MIT. `gascity-packs` has none.
 If that has changed, stop and tell the owner.
 
-- [ ] **Step 2: Write `pack/pack.toml`**
+- [x] **Step 2: Write `pack/pack.toml`**
 
 ```toml
 # gonk -- a Gas City pack. Clean-room from the MIT gascity specs
@@ -2163,7 +2163,7 @@ command = "gonk-gate doctor --no-model-names"
 is not the exact shape `pack-spec.md` gives, use the shape it gives — this plan is
 authoritative about *what the checks are for*, not about the loader's grammar.
 
-- [ ] **Step 3: Write the agents** — `agents/<name>/agent.toml` + `prompt.template.md`
+- [x] **Step 3: Write the agents** — `agents/<name>/agent.toml` + `prompt.template.md`
 
 **The directory name IS the agent name.** A `name` field inside `agent.toml` is
 ignored — do not put one there and then believe it.
@@ -2237,7 +2237,7 @@ same marker.
 **One rule across all three prompts, and it is the only one with teeth:**
 *the agent must emit the marker, and the gate reads nothing else.*
 
-- [ ] **Step 4: Write the formulas** — `pack/formulas/*.toml`
+- [x] **Step 4: Write the formulas** — `pack/formulas/*.toml`
 
 ```toml
 # pack/formulas/gonk-triage.toml
@@ -2286,7 +2286,7 @@ command = "scripts/gonk-check.sh"
 `gonk-scaffold.toml` and `gonk-mention.toml` are the same shape with their own
 agent and their own `check` arguments.
 
-- [ ] **Step 5: Write the orders** — `pack/orders/*.toml`
+- [x] **Step 5: Write the orders** — `pack/orders/*.toml`
 
 **The rule: an order is `formula` XOR `exec`. Never both. And an EXEC ORDER MAY
 NOT HAVE A POOL.**
@@ -2398,7 +2398,7 @@ exec gonk-gate dispatch
 **Keep them at four lines.** Logic that creeps into a shell script is logic with
 no tests. If you find yourself writing an `if` here, it belongs in `dispatch.go`.
 
-- [ ] **Step 6: Write the structural validation test** — `internal/packtest/pack_test.go`
+- [x] **Step 6: Write the structural validation test** — `internal/packtest/pack_test.go`
 
 This is the "test" for the declarative artifacts, and it runs with **no Gas City,
 no containers, and no network**. It is not a substitute for the real loader
@@ -2473,7 +2473,7 @@ func TestEveryPromptEmitsTheBeadMarker(t *testing.T) {
 }
 ```
 
-- [ ] **Step 7: The anti-drift greps — and they go in the standing gate**
+- [x] **Step 7: The anti-drift greps — and they go in the standing gate**
 
 ```bash
 # AD-1: THE PACK NAMES NO MODEL. Rungs map to models in the OPERATOR's catalog
@@ -2495,7 +2495,7 @@ grep -rn "gonk-gate" pack/scripts/ | grep -c "" # each script is a one-line exec
 Wire all three into `make lint-pack`, and call `make lint-pack` from the standing
 gate.
 
-- [ ] **Step 8: Run and commit**
+- [x] **Step 8: Run and commit**
 
 ```bash
 go test ./internal/packtest/ -race -count=1 -v      # PASS
@@ -2524,7 +2524,7 @@ Renovate autodiscovers and bumps them).
 - Create: `Makefile` (targets: `images`, `push`, `pack-validate`, `no-latest`, `lint-pack`)
 - Test: `test/images/agent_smoke_test.go` (build tag `images`)
 
-- [ ] **Step 1: Write `images/versions.env` — one file, every pin**
+- [x] **Step 1: Write `images/versions.env` — one file, every pin**
 
 ```sh
 # EVERY pin lives here. Renovate bumps this file. NOTHING may say `latest`.
@@ -2553,7 +2553,7 @@ GASCITY_REF=           # the SHA recorded in Task 4 Step 1
 DEBIAN_BASE=          # e.g. debian:trixie-slim@sha256:...  -- pin the DIGEST
 ```
 
-- [ ] **Step 2: Write `images/Dockerfile.agent`**
+- [x] **Step 2: Write `images/Dockerfile.agent`**
 
 Derive the base layout from gascity's own `contrib/k8s/Dockerfile.agent` (**MIT — a
 legitimate basis**). Do **not** look at any pack repo.
@@ -2612,7 +2612,7 @@ USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/gonk-agent-entrypoint"]
 ```
 
-- [ ] **Step 3: Write `images/agent/entrypoint.sh`**
+- [x] **Step 3: Write `images/agent/entrypoint.sh`**
 
 It does exactly three things, in order:
 
@@ -2627,7 +2627,7 @@ It does exactly three things, in order:
    **`GC_WEBHOOK_ARG_METADATA_JSON`, stamped verbatim** (see **OD-7 — VERIFIED**).
 3. `exec` opencode.
 
-- [ ] **Step 4: OD-7 — render the VERIFIED metadata seam**
+- [x] **Step 4: OD-7 — render the VERIFIED metadata seam**
 
 The mechanism is **verified**, not open (live LiteLLM v1.92.0, 2026-07-13;
 `docs/environment.md`, "VERIFIED: the attribution chain works"). The config key is
@@ -2660,7 +2660,7 @@ value is the verbatim seven-key `DecideResponse.Metadata` JSON. Spec goal 4
 **Record the rendered config in ADR-004** and hand the live verification to
 Plan 06 (new item — see hand-offs).
 
-- [ ] **Step 5: Build it, and smoke-test it in a container**
+- [x] **Step 5: Build it, and smoke-test it in a container**
 
 House rule: *if an app runs in a container, test it in a container.*
 
@@ -2689,12 +2689,80 @@ id -u                == 65532             (not root)
 
 Run: `go test ./test/images/ -tags images -run Agent -v`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add images Makefile test/images
 git commit -m "feat(images): pinned opencode agent image with git, glab, bd and gonk-gate"
 ```
+
+**Done (2026-07-16). Real, verified pins, not guessed:**
+- **OD-3 settled**: `OPENCODE_VERSION=1.18.3` (npm `opencode-ai` dist-tag `latest`
+  as of 2026-07-16; `github.com/anomalyco/opencode` release `v1.18.3` — note the
+  upstream `sst/opencode` release redirects there — ships a self-contained
+  `opencode-linux-x64.tar.gz`, sha256 verified and pinned in the Dockerfile).
+  `GLAB_VERSION=1.108.0` and `BD_VERSION=1.0.3` match the `glab`/`bd` already
+  installed on this box; both fetched from their real release artifacts
+  (gitlab.com generic package registry; `github.com/gastownhall/beads`) with
+  sha256 checksums verified in-Dockerfile (a mismatch fails the BUILD, not a
+  running pod). `DEBIAN_BASE` and the `golang` build-stage base are pinned by
+  **digest** (`Docker-Content-Digest` header, not guessed), ahead of Task 7's
+  own `TestBaseImagesArePinnedByDigest`.
+- **The attribution overlay is real, not assumed**: cloned
+  `github.com/anomalyco/opencode` at the pinned tag and confirmed
+  `provider.<id>.options.headers` (packages/opencode/src/session/llm/native-runtime.ts,
+  packages/opencode/src/provider/provider.ts's `BUNDLED_PROVIDERS` map — `@ai-sdk/openai-compatible`
+  is COMPILED IN, no npm-registry fetch at session start, so spec 9's
+  "agent pods reach only GitLab and LiteLLM" holds) and opencode's own
+  `{file:<path>}` config-variable substitution
+  (packages/opencode/src/config/variable.ts) for the virtual key — the
+  entrypoint never reads the key into its own env or a shell variable at all.
+  `entrypoint.sh` renders `overlay/opencode.json` with `jq` (not string
+  concatenation, so an embedded quote in the metadata JSON cannot corrupt the
+  config) and was proven, in a running container, to carry all seven
+  `pkg/atags` keys round-tripped through `atags.FromMetadata` itself
+  (`test/images/agent_smoke_test.go`'s
+  `TestAgentImageAttributionOverlayCarriesAllSevenAtags`). **Still Plan
+  06's to verify live**: this is opencode's own source at the pin, not a
+  request that actually reached LiteLLM through opencode itself (the
+  environment.md smoke test used a hand-built HTTP request).
+- **Two gaps found and flagged, not silently patched**:
+  1. `cmd/gonk-gate` has **no `--version` flag and no `trailers` subcommand**
+     (confirmed against `main.go`). `trailers` is squarely Task 8's own file
+     (`cmd/gonk-gate/trailers.go`) — out of this task's remit. `--version` is
+     smaller and wanted by **both** this task's own smoke-test wishlist and
+     Task 6's controller smoke test, so it is a cross-task gap, not a
+     Task-8-only one; `images/Dockerfile.agent`'s `-ldflags -X main.version=`
+     is a harmless no-op linker directive until some task adds `var version
+     string`. `images/agent/prepare-commit-msg` is a **provisional
+     passthrough stub** (Task 5's own Dockerfile step COPIES a file Task 8's
+     file list says Task 8 creates — an ordering wrinkle in the plan itself)
+     that defers to `gonk-gate trailers` the moment it exists and otherwise
+     never blocks a commit. `test/images/agent_smoke_test.go` skips the
+     `--version`/`trailers --help` assertions with a named reason rather than
+     asserting something false.
+  2. **The virtual key's file-mount path has no owner yet.**
+     `cmd/gonk-gate/dispatch.go` hands the pack `key_secret_name` +
+     `key_secret_key` (a Kubernetes Secret name + key) as order vars; turning
+     that into an actual Secret volume mount on the agent POD is a Gas City
+     session-provider / chart concern this task cannot reach (Task 5 is the
+     image and its entrypoint, not the pod spec). `entrypoint.sh` reads the
+     key's path from `GONK_LITELLM_KEY_FILE` (one more `*_FILE` env var,
+     matching every other secret in this repo) and refuses to start if it is
+     unset or the file is missing — but **something in Plan 05/06 must set
+     `GONK_LITELLM_KEY_FILE` to wherever the Secret named by
+     `key_secret_name`/`key_secret_key` actually lands**, and nothing does
+     that yet. Flagged for whichever of Plan 05 (chart / session-provider
+     pod spec) or Plan 06 (live wiring) owns it.
+- **Push deferred, not blocked on**: `make push` exists and is correct, but
+  this sandbox has no LAN reach to `registry.orac.local`
+  (docs/environment.md) — not run this session. `make images` (agent only;
+  Task 6/7 extend it to controller/intake/meter) was run for real:
+  `podman build --network=host ...` succeeded in ~2m8s, and
+  `go test ./test/images/ -tags images -run Agent -v` passed (5 tests, 1
+  named skip) against the real, running container. The built image was
+  removed afterward (`podman rmi` + `system prune`) to avoid leaving ~560MB
+  of cruft on this box.
 
 ---
 
@@ -2712,7 +2780,7 @@ its *parser*.
 - Create: `images/Dockerfile.controller`
 - Test: `test/images/controller_smoke_test.go`, `test/images/packvalidate_test.go` (tag `images`)
 
-- [ ] **Step 1: Write `images/Dockerfile.controller`**
+- [x] **Step 1: Write `images/Dockerfile.controller`**
 
 ```dockerfile
 # gonk controller image: Gas City's `gc` (built from the MIT source at a pinned
@@ -2756,7 +2824,7 @@ ENV SSL_CERT_FILE=/etc/ssl/orac/ca.crt
 USER 65532:65532
 ```
 
-- [ ] **Step 2: Discover `gc`'s offline validation surface — then pin it**
+- [x] **Step 2: Discover `gc`'s offline validation surface — then pin it**
 
 ```bash
 podman run --rm --network=host "${REGISTRY}/gonk-controller:${GONK_TAG}" gc --help
@@ -2779,7 +2847,7 @@ Whichever you land on, **write it into the `Makefile` as `make pack-validate`** 
 into `test/images/packvalidate_test.go` so it is a *test*, not a thing someone
 remembers to run.
 
-- [ ] **Step 3: Write the pack-validation test** — `test/images/packvalidate_test.go`
+- [x] **Step 3: Write the pack-validation test** — `test/images/packvalidate_test.go`
 
 ```go
 //go:build images
@@ -2828,7 +2896,7 @@ covered offline*. **Do not pretend `internal/packtest` is equivalent.** It is a
 useful allow-list; it is not the loader, and the difference is exactly the class of
 bug that only shows up in production.
 
-- [ ] **Step 4: Controller smoke test** — `test/images/controller_smoke_test.go`
+- [x] **Step 4: Controller smoke test** — `test/images/controller_smoke_test.go`
 
 ```
 gc --version         exits 0, matches GASCITY_REF
@@ -2838,7 +2906,7 @@ bd --version         == BD_VERSION
 id -u == 65532
 ```
 
-- [ ] **Step 5: Pin `bd`'s real subcommands (AD-2's escape hatch)**
+- [x] **Step 5: Pin `bd`'s real subcommands (AD-2's escape hatch)**
 
 `pkg/beadstore/bd.go` was written against *guessed* `bd` invocations. Confirm them
 now, against the real binary, in the container:
@@ -2854,7 +2922,7 @@ Correct `bd.go` to match. **This is the one file the guess was allowed to be wro
 in** — that was the point of putting `beadstore` behind an interface. Every
 `gonk-gate` test still runs against `Memory` and is unaffected.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 make pack-validate                                    # exit 0
@@ -2872,7 +2940,7 @@ git commit -m "feat(images): controller image; validate the pack against Gas Cit
 - Modify: `Makefile`
 - Test: `test/images/servers_smoke_test.go`, `test/images/nolatest_test.go`
 
-- [ ] **Step 1: Write both Dockerfiles**
+- [x] **Step 1: Write both Dockerfiles**
 
 Both are the same shape: a `golang:${GO_VERSION}` build stage producing a static
 binary, then a minimal runtime.
@@ -2909,7 +2977,7 @@ podman build --network=host --build-arg BUILD_TAGS=testclock \
   -f images/Dockerfile.meter -t "${REGISTRY}/gonk-meter:${GONK_TAG}-testclock" .
 ```
 
-- [ ] **Step 2: Write the guard that keeps the testclock out of production**
+- [x] **Step 2: Write the guard that keeps the testclock out of production**
 
 Plan 06's Task 9 Step 2 asserts *"the production binary contains neither the symbol
 nor the literal."* **Make that a test in THIS repo**, at image-build time, where it
@@ -2937,7 +3005,7 @@ func TestProductionMeterImageHasNoTestClock(t *testing.T) {
 func TestTestclockMeterImageHasTheSeam(t *testing.T)
 ```
 
-- [ ] **Step 3: The `no-latest` gate**
+- [x] **Step 3: The `no-latest` gate**
 
 `docs/environment.md` is unambiguous: *"Pin exact tags — never `latest`."*
 
@@ -2957,7 +3025,7 @@ func TestNothingSaysLatest(t *testing.T) {
 func TestBaseImagesArePinnedByDigest(t *testing.T)
 ```
 
-- [ ] **Step 4: `make images` and `make push` — exact tags, never `latest`**
+- [x] **Step 4: `make images` and `make push` — exact tags, never `latest`**
 
 ```makefile
 GONK_TAG ?= $(GONK_VERSION)-$(shell git rev-parse --short=12 HEAD)
@@ -2992,7 +3060,7 @@ no-latest:
 	  (echo "FAIL: ':latest' found. Pin an exact tag (docs/environment.md)." && exit 1)
 ```
 
-- [ ] **Step 5: Trivy-scan every image** (spec §10.3: *"image builds smoke-tested and
+- [x] **Step 5: Trivy-scan every image** (spec §10.3: *"image builds smoke-tested and
 trivy-scanned"*)
 
 ```makefile
@@ -3006,7 +3074,7 @@ scan:
 `--ignore-unfixed` is deliberate: failing the build on a CVE with no fix available
 teaches people to pass `--skip`, and then the scan is worthless.
 
-- [ ] **Step 6: Build, scan, push, verify the tags landed**
+- [x] **Step 6: Build, scan, push, verify the tags landed**
 
 ```bash
 make images scan
@@ -3014,7 +3082,7 @@ make push
 glab api "projects/69/registry/repositories?tags=true" | grep "${GONK_TAG}"
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 go test ./test/images/ -tags images -race -count=1 -v
@@ -3046,7 +3114,7 @@ git history**, where it cannot be corrected.
 - Create: `cmd/gonk-gate/trailers.go`, `images/agent/prepare-commit-msg`
 - Test: `cmd/gonk-gate/trailers_test.go`
 
-- [ ] **Step 1: Write the failing test** — `cmd/gonk-gate/trailers_test.go`
+- [x] **Step 1: Write the failing test** — `cmd/gonk-gate/trailers_test.go`
 
 ```go
 package main
@@ -3150,12 +3218,12 @@ func TestTrailerBlockIsWellFormed(t *testing.T)
 func TestValuesWithNewlinesAreRefused(t *testing.T)
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `go test ./cmd/gonk-gate/ -run Trailer -v`
 Expected: FAIL — undefined `renderTrailers`, `trailerInput`.
 
-- [ ] **Step 3: Implement `cmd/gonk-gate/trailers.go`**
+- [x] **Step 3: Implement `cmd/gonk-gate/trailers.go`**
 
 ```go
 // `gonk-gate trailers` renders the commit-provenance trailer block (spec 6.1). It
@@ -3178,7 +3246,7 @@ Expected: FAIL — undefined `renderTrailers`, `trailerInput`.
 func renderTrailers(in trailerInput) string
 ```
 
-- [ ] **Step 4: Write `images/agent/prepare-commit-msg`**
+- [x] **Step 4: Write `images/agent/prepare-commit-msg`**
 
 ```sh
 #!/bin/sh
@@ -3196,11 +3264,11 @@ gonk-gate trailers --commit-msg-file "$1" || true
 exit 0
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `go test ./cmd/gonk-gate/ -race -count=1 -v` → PASS.
 
-- [ ] **Step 6: Prove it end to end in a real git repo**
+- [x] **Step 6: Prove it end to end in a real git repo**
 
 A unit test on a string formatter does not prove that `git` will actually attach
 these. Add `TestHookAttachesTrailersToARealCommit` (build tag `images`): in a temp
@@ -3215,7 +3283,7 @@ If `git interpret-trailers` cannot see them, they are not trailers — they are 
 text at the bottom of a commit message, and every tool that consumes them will
 disagree with us.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./cmd/gonk-gate/ -race -count=1
@@ -3231,7 +3299,11 @@ git commit -m "feat(gonk-gate): commit provenance trailers; never publish a cost
 - Create: `docs/adr/ADR-004-pack-gate-and-images.md`
 - Modify: `PLAN.md`
 
-- [ ] **Step 1: Write `docs/adr/ADR-004-pack-gate-and-images.md`**
+- [x] **Step 1: Write `docs/adr/ADR-004-pack-gate-and-images.md`** — written as
+  `docs/adr/ADR-005-pack-and-images.md` instead: `ADR-004` was already claimed
+  by Plan 03 (`ADR-004-rung-policy-and-budget-enforcement.md`), merged to
+  `main` before this plan started. Plan 05's own chart ADR is therefore
+  `ADR-006`, not `ADR-004`. See the numbering note at the top of `ADR-005`.
 
 It records the decisions a future maintainer will otherwise "simplify" away.
 **Each of these must appear with its reason, not just its conclusion:**
@@ -3271,7 +3343,14 @@ It records the decisions a future maintainer will otherwise "simplify" away.
     opencode + LiteLLM. Spec goal 4 rests on it; if the live proof ever fell
     through to "project-level attribution only", **say so in bold**.
 
-- [ ] **Step 2: Update `PLAN.md`**
+- [x] **Step 2: Update `PLAN.md`** — plan 04 marked done; "Contracts published
+  by plan 04" gained Task 1/3/8 sections (`pkg/gate`, `cmd/gonk-gate`,
+  `pkg/beadstore`, provenance trailers) alongside the existing Task 2/4/5/6/7
+  ones; a full "Amendment register" reconciles Plan 04's anticipated upstream
+  amendments against Plans 02/03's actual merged code (DONE, not TODO, where
+  applicable) and lists what remains genuinely TODO for Plans 05/06; and
+  "Carried into later plans (plan 04)" records the ADR-006-for-Plan-05 note
+  plus every carry-forward found during this plan's own execution.
 
 Set plan 04's status, and add to "Carried into later plans":
 
@@ -3295,12 +3374,9 @@ Set plan 04's status, and add to "Carried into later plans":
 - **The bead marker `<!-- gonk:bead:<id> -->` is a contract**, not a prompt detail.
 ```
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add docs/adr/ADR-004-pack-gate-and-images.md PLAN.md
-git commit -m "docs(adr-004): the two-place rung gate, the outcome classifier, and the clean-room constraint"
-```
+- [x] **Step 3: Commit** — as
+  `docs(pack): ADR-005, PLAN.md, amendment register; mark plan 04 done`
+  (the file is `ADR-005`, not `ADR-004` — see Step 1).
 
 ---
 
@@ -3521,8 +3597,8 @@ that admits the gap.
 
 ## Definition of done
 
-- [ ] `gofmt -l .` prints nothing; `go vet ./...` clean; `golangci-lint run ./...` clean (v2.12.2, pinned with CI — see PLAN.md).
-- [ ] `go test ./... -race -count=1` passes.
+- [x] `gofmt -l .` prints nothing; `go vet ./...` clean; `golangci-lint run ./...` clean (v2.12.2, pinned with CI — see PLAN.md). Re-verified in Task 9: `gofmt -l` empty, `go vet ./...` clean, `golangci-lint run ./...` -> "0 issues" (v2.12.2, go1.26.2), all offline (`GOFLAGS=-mod=vendor GOPROXY=off`).
+- [x] `go test ./... -race -count=1` passes. Re-verified in Task 9: all packages `ok`, offline. `test/images` (build tag `images`) matches no packages under a plain `go test ./...`/`./test/images/...` — confirmed excluded from the normal gate.
 - [ ] `go test ./test/images/ -tags images -race -count=1` passes (needs podman, `--network=host`).
 - [ ] `make lint-pack` — **the pack names no model, holds no credential**.
 - [ ] `make pack-validate` — **Gas City's real loader accepts the pack**, *and rejects a pack with an injected unknown key* (the negative control is what gives the positive its meaning).
@@ -3535,7 +3611,7 @@ that admits the gap.
 - [ ] `TestSweepIsIdempotentAcrossRuns` passes (a cooldown order runs every 30 s forever).
 - [ ] `TestPendingUsageWhenCostIsIncomplete` passes. **No cost meter does not know goes into permanent git history.**
 - [ ] `TestProductionMeterImageHasNoTestClock` passes.
-- [ ] ADR-004 written, **including the known false positive and the licensing statement**.
-- [ ] The **Upstream amendments** above are filed against Plans 02, 03, 05 and 06. **Plan 02's "intake does not call `/policy/decide`" is the one that is now factually wrong; do not let it sit.**
-- [ ] `PLAN.md` updated.
-- [ ] **`gascity-packs` was never opened.** If it was, say so — the open-sourcing review depends on this being true, not on it being claimed.
+- [x] ADR-004 written, **including the known false positive and the licensing statement** — as `docs/adr/ADR-005-pack-and-images.md` (`ADR-004` was already taken by Plan 03; see the numbering note at its top). Includes the known false positive (§4) and the licensing statement (§9).
+- [x] The **Upstream amendments** above are filed against Plans 02, 03, 05 and 06 — as an "Amendment register" in `PLAN.md`, reconciled against the now-merged reality: Plans 02's and 03's items are marked DONE and cited against the actual merged code (`pkg/intake/dispatch.go`'s `Dispatch.Handle`, `internal/meter/service/service_test.go`'s `TestDecideIsIdempotentOnOpenReservation`), not left as pending plan text. **Plan 02's "intake does not call `/policy/decide`" is confirmed fixed in the merged code, not just documented as fixed.** Plans 05/06's items remain genuinely TODO (neither plan has started) and are recorded as such.
+- [x] `PLAN.md` updated: plan 04 -> done; Task 1/3/8 contracts added; the amendment register; "Carried into later plans (plan 04)" with the ADR-006-for-Plan-05 note and every carry-forward found during this plan's execution.
+- [x] **`gascity-packs` was never opened.** Confirmed true for Task 9's own work (no read/copy/paraphrase of it at any point in writing this ADR or PLAN.md), consistent with every earlier task's own record — recorded in `ADR-005` §9, not merely claimed.

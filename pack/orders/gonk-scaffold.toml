@@ -1,0 +1,10 @@
+# pack/orders/gonk-scaffold.toml
+#
+# The formula-order for the .agent/ scaffold MR (spec 5.3). Fired ONLY by
+# gonk-dispatch, ONLY after /v1/policy/decide said `run`.
+[order]
+description = "Scaffold .agent/ via a post-merge MR. Poured by gonk-dispatch after a budget decision."
+formula = "gonk-scaffold"
+trigger = "manual"
+pool = "scaffold"                     # see pack.toml's note on OD-2.
+timeout = "20m"

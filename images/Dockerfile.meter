@@ -1,0 +1,64 @@
+# gonk-meter image: the metering/budget authority (Plan 03) -- /v1/policy/decide,
+# outcome recording, ledger, cost API. At runtime it reaches Postgres (CNPG)
+# and mounts every secret (LiteLLM admin key, meter bearer token(s), store
+# DSN) from FILES, never env values (cmd/gonk-meter/main.go's own Config doc
+# comment) -- this Dockerfile never bakes a secret and never disables TLS.
+#
+# Multi-stage: a vendored, OFFLINE Go build (docs/environment.md: this box and
+# CI cannot reach proxy.golang.org) producing a static binary, then a minimal
+# distroless runtime. Every ARG below is read from images/versions.env (except
+# BUILD_TAGS -- see the testclock variant below); there is no default and no
+# `latest` anywhere.
+#
+# Build: see `make meter-image` / `make meter-testclock-image` (Makefile).
+
+ARG GO_VERSION
+ARG DISTROLESS_BASE
+
+# ---- build gonk-meter (static; vendor/ is committed -- docs/environment.md:
+# CI cannot reach proxy.golang.org, so this stage is fully offline, -mod=vendor,
+# no `go mod download` anywhere, same as images/Dockerfile.agent's gate stage
+# and images/Dockerfile.controller's gate stage). ----------------------------
+FROM golang:${GO_VERSION} AS build
+WORKDIR /src
+ARG GONK_TAG
+# BUILD_TAGS="" (default) builds the PRODUCTION binary. BUILD_TAGS=testclock
+# builds the e2e-only binary whose clock can be MOVED BY A FILE
+# (cmd/gonk-meter/clock_testclock.go -- Plan 03's HB-3, Plan 06's gate). A
+# meter whose clock can be moved by a file is a meter whose MONTH BOUNDARY can
+# be moved by a file -- in production that is a budget bypass: reset the
+# window, reset the spend. `make meter-testclock-image` tags the result
+# gonk-meter:$(GONK_TAG)-testclock, never gonk-meter:$(GONK_TAG), so the two
+# can never be confused at the registry. TestProductionMeterImageHasNoTestClock
+# / TestTestclockMeterImageHasTheSeam (test/images/servers_smoke_test.go)
+# assert the two images differ exactly this way.
+ARG BUILD_TAGS=""
+COPY go.mod go.sum ./
+COPY vendor/ vendor/
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY pkg/ pkg/
+# NOTE: cmd/gonk-meter does not declare `var version string` (confirmed
+# against cmd/gonk-meter/main.go, 2026-07-16) -- like images/Dockerfile.agent's
+# equivalent note about gonk-gate at Task 5 time, the `-X main.version=...`
+# below is a harmless no-op linker directive until that lands, kept here so
+# adding the symbol later needs no Dockerfile change.
+RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -tags "${BUILD_TAGS}" \
+    -ldflags="-s -w -X main.version=${GONK_TAG}" \
+    -o /out/gonk-meter ./cmd/gonk-meter
+
+# ---- runtime: distroless static, nonroot, pinned by DIGEST -----------------
+FROM ${DISTROLESS_BASE}
+COPY --from=build /out/gonk-meter /usr/local/bin/gonk-meter
+
+# The private CA (docs/environment.md). trust-manager's `trust-bundle`
+# ConfigMap is mounted here by the chart (Plan 05, at this exact path). NEVER
+# disable TLS verification -- gonk-meter talks to LiteLLM, Postgres (CNPG) and
+# the in-cluster API server (keysink), all behind this private CA. NO SECRET
+# IS BAKED INTO THIS IMAGE: the LiteLLM admin key, the meter bearer token(s)
+# and the store DSN are all FILE MOUNTS the chart wires at runtime -- this
+# Dockerfile never COPYs one in and never sets one as an ENV value.
+ENV SSL_CERT_FILE=/etc/ssl/orac/ca.crt
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/gonk-meter"]

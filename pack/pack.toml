@@ -1,0 +1,98 @@
+# gonk -- a Gas City pack. Clean-room from the MIT gascity specs
+# (docs/reference/specs/pack-spec.md, formula-spec-v2.md, docs/tutorials/07-orders.md)
+# and the loader at internal/config/pack.go, internal/orders/order.go,
+# internal/graphv2/invocation.go (all pinned at the SHA in
+# images/versions.env -- see Task 5/6). NOTHING here is derived from
+# gastownhall/gascity-packs, which carries no licence.
+#
+# THE LOADER REJECTS UNKNOWN TOP-LEVEL KEYS. The only tables below are ones
+# internal/config/pack.go's PackConfig struct actually decodes: pack,
+# agent_defaults. Agents/formulas/orders/doctor checks are NOT declared here --
+# they are discovered from the well-known agents/, formulas/, orders/, and
+# doctor/ directories (pack-spec.md 1.2.14, "Authoring Summary"). This pack
+# uses ONLY the new, non-legacy authoring surface: no inline [[agent]], no
+# legacy [[doctor]], no legacy [[commands]].
+
+[pack]
+name = "gonk"
+# schema lives INSIDE [pack], not as a bare top-level key -- verified against
+# internal/config/config.go's PackMeta struct (`Schema int toml:"schema"`) and
+# pack-spec.md 1.2.1's own worked example. A bare top-level `schema = 2` is not
+# a field of PackConfig and is exactly the kind of stray key the loader's
+# undecoded-key check is built to catch.
+schema = 2
+version = "0.1.0"
+description = "Issue triage, .agent/ scaffolding and mention replies on self-hosted GitLab, with hard budgets."
+
+# ---------------------------------------------------------------------------
+# WHY THERE IS NO [[webhook]] HERE
+#
+# GitLab authenticates webhooks with a constant X-Gitlab-Token header. Gas
+# City's verification registry (internal/config/webhook.go) is a CLOSED SET OF
+# FIVE schemes -- github-hmac-sha256, hmac-sha256, slack-v0, discord-ed25519,
+# jwt-jwks -- and none of them is a constant-time shared-secret compare.
+# hmac-sha256 is an HMAC OVER THE BODY and WILL NOT SUBSTITUTE.
+#
+# So every GitLab event goes to gonk-intake's own receiver instead (Plan 02),
+# which verifies the token before reading a byte of body, suppresses
+# bot-authored events, dedupes redeliveries, fetches and size-caps .gonk.yml,
+# and registers the project with gonk-meter -- none of which a [[webhook.rule]]
+# could do anyway.
+#
+# A `gitlab-token` verify scheme is a clean upstream PR (spec 4.4). NOTHING
+# HERE DEPENDS ON IT LANDING.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# WHY THERE IS NO [[service]] HERE
+#
+# gonk-intake and gonk-meter are standalone Kubernetes Deployments shipped by
+# our Helm chart (Plan 05), NOT pack [[service]] proxy_process entries. A
+# proxy_process is a controller-supervised local process; our services are Go
+# servers that need a CNPG database, ExternalSecrets, probes, independent
+# scaling and their own NetworkPolicy -- and gonk-meter is THE BUDGET
+# ENFORCER, whose availability must not be coupled to the Gas City
+# controller's lifecycle.
+#
+# This is still pack-first: the pack carries the agents, formulas and orders;
+# the chart carries the two servers. (Owner decision, 2026-07-13.)
+# ---------------------------------------------------------------------------
+
+[agent_defaults]
+# wake_mode is the ONLY [agent_defaults] field this pack sets. Scale-to-zero
+# (spec 4.2) is an AGENT-level field (min_active_sessions, internal/config's
+# Agent struct), not an agent_defaults field -- AgentDefaults has no
+# min_active_sessions of its own (confirmed against internal/config/config.go).
+# Each agents/<name>/agent.toml below sets it directly.
+#
+# spec 4.2 / 5.4: durable, layered continuity. `.gonk.yml`'s `continuity`
+# selects per project; this is the pack-level default. If ACP resume across
+# pod recreation turns out to be broken (spec 11.4 -- a NAMED RISK), the
+# fallback is `fresh`, and correctness survives because it never depended on
+# LLM context (bead history + the GitLab thread + .agent/ reconstruct
+# everything).
+wake_mode = "resume"
+
+# ---------------------------------------------------------------------------
+# WHY THERE IS NO [[pricing]] HERE (OD-5)
+#
+# Synthetic prices for local rungs are site-local OPERATOR config
+# (pkg/opercfg, Plan 03's rung catalog carries synthetic_usd_per_1m_tokens),
+# mirrored into LiteLLM's own model_cost_map by gitops -- never the pack. A
+# price in an open-source pack would hardcode one site's economics.
+# ---------------------------------------------------------------------------
+
+# NOTE ON POOLS (OD-2, revised from the plan's "one shared pool" assumption):
+# each of the three agents (triage/scaffold/mention) gets its OWN order-level
+# pool, named after the agent (see orders/gonk-{triage,scaffold,mention}.toml).
+# Gas City routes a pool's ready work to ANY agent whose work query matches
+# that pool label (docs/tutorials/06-beads.md, "How agents find work") --
+# agents do not additionally filter by which formula produced the bead. A
+# single shared "gonk" pool across three agents with three DIFFERENT prompts
+# would let the mention agent's session pick up a triage bead (or vice versa)
+# and run the wrong prompt against it. Per-agent pools (each a "pool of one",
+# which docs/tutorials/07-orders.md confirms is a supported target: "a single
+# agent's name works as a pool target too") avoid that misroute entirely, and
+# OD-2 itself calls the blast radius of picking wrong here "trivial ... one
+# line per order file" -- so this is a same-day correction, not a re-opened
+# decision.
