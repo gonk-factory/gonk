@@ -1,0 +1,22 @@
+{{- if .Values.intake.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-intake
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: intake
+    gonk.orac.local/exposure: public
+spec:
+  type: ClusterIP
+  # ONE PORT. This is the Service the Ingress points at, and the listener behind
+  # it serves POST /hook/gitlab and 404s everything else. Adding a port here is
+  # how you would accidentally expose /metrics and POST /admin/reconcile to the
+  # internet. Do not.
+  ports:
+    - name: http-hook
+      port: {{ .Values.intake.ports.public }}
+      targetPort: http-hook
+  selector:
+    {{- include "gonk.selectorLabels" (dict "ctx" . "component" "intake") | nindent 4 }}
+{{- end }}

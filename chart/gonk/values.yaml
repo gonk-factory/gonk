@@ -81,6 +81,10 @@ intake:
   # fix the trust, do not turn this off. (Plan 06 verifies it for real.)
   webhookSSLVerify: true
   reconcileInterval: 10m
+  # How old a cached project entry may be before dispatch refuses to fire for
+  # it (GONK_DISPATCH_STALENESS_WINDOW). Optional: "" -> intake's own safe
+  # default (30m). This is not a knob to widen away a real staleness problem.
+  dispatchStalenessWindow: ""
   resources:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {memory: 256Mi}

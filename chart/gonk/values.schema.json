@@ -35,7 +35,12 @@
         },
         "webhookTokenGen": {"type": "string", "minLength": 1},
         "webhookSSLVerify": {"type": "boolean"},
-        "reconcileInterval": {"type": "string", "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"}
+        "reconcileInterval": {"type": "string", "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"},
+        "dispatchStalenessWindow": {
+          "type": "string",
+          "pattern": "^$|^[0-9]+(ns|us|ms|s|m|h)$",
+          "description": "GONK_DISPATCH_STALENESS_WINDOW. Optional; empty resolves to intake's own default (30m)."
+        }
       }
     },
     "meter": {

@@ -27,3 +27,15 @@ Webhook endpoint: {{ .Values.intake.webhookPublicURL }}
 {{- if not .Values.ingress.enabled }}
   (ingress.enabled is false -- you are fronting this yourself)
 {{- end }}
+{{- if .Values.ingress.enabled }}
+
+Ingress: {{ .Values.ingress.className }}, host {{ .Values.ingress.host }}, path {{ .Values.ingress.path }} ONLY
+  (the private listener -- /metrics, /healthz, POST /admin/reconcile -- is on
+  Service gonk-intake-internal and is never routed here).
+
+  *** ACTION REQUIRED, OUTSIDE THIS CHART ***: add {{ .Values.ingress.host }} to
+  the CoreDNS hosts block (gitops:clusters/orac/foundation/coredns/
+  configmap-coredns.yaml) or in-cluster DNS resolution for this host FAILS
+  SILENTLY -- the symptom is a GitLab webhook that simply never arrives. This
+  chart cannot make that change; it lives in the gitops repo, not here.
+{{- end }}
