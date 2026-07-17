@@ -3,6 +3,12 @@
 package charttest
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -136,4 +142,219 @@ func TestMeterDefaultsToSingleReplicaAndRecreate(t *testing.T) {
 	if !strings.Contains(d.Doc, "type: Recreate") {
 		t.Error("gonk-meter's default strategy is not Recreate")
 	}
+}
+
+// --- Task 4: the RBAC that makes the Kubernetes KeySink legal ---------------
+
+// The KeySink's RBAC must be a NAMESPACED Role -- never a ClusterRole. A
+// cluster-wide write grant on Secrets is a cluster-wide compromise.
+func TestKeySinkRBACIsNamespaced(t *testing.T) {
+	out := Render(t, Minimum()...)
+	MustObject(t, out, "ServiceAccount", "gonk-meter")
+	MustObject(t, out, "Role", "gonk-meter")
+	MustObject(t, out, "RoleBinding", "gonk-meter")
+	for _, o := range Objects(t, out) {
+		if o.Kind == "ClusterRole" || o.Kind == "ClusterRoleBinding" {
+			t.Fatalf("the chart grants CLUSTER-wide RBAC (%s/%s)", o.Kind, o.Metadata.Name)
+		}
+	}
+}
+
+// The Role is inert if nothing tells meter WHERE to write. A chart that renders
+// perfect RBAC and never sets GONK_KEYSINK_NAMESPACE ships a meter that falls
+// back to the MEMORY sink -- provisioning virtual keys that no pod can read, and
+// leaving every project in `key-missing` (P03 AD-1).
+func TestMeterIsPointedAtAKeySinkNamespace(t *testing.T) {
+	d := MustObject(t, Render(t, Minimum()...), "Deployment", "gonk-meter")
+	if !strings.Contains(d.Doc, "GONK_KEYSINK_NAMESPACE") {
+		t.Fatal("meter has RBAC to write key Secrets but no namespace to write them in")
+	}
+	if !strings.Contains(d.Doc, "gonk-key-") {
+		t.Error("GONK_KEYSINK_PREFIX is not set; the Role's Secret names and the sink's would drift")
+	}
+	if strings.Contains(d.Doc, "automountServiceAccountToken: false") {
+		t.Fatal("meter cannot build an in-cluster client without its ServiceAccount token")
+	}
+}
+
+// No meter -> no keysink RBAC. Rendering the Role/RoleBinding/ServiceAccount
+// for a component the operator disabled would be dead weight at best and a
+// stale write grant at worst. (intake.enabled must also be false here: a
+// separate guard refuses intake without meter, since intake asks meter
+// before dispatching every order.)
+func TestKeySinkRBACGatedOnMeterEnabled(t *testing.T) {
+	out := Render(t, append(Minimum(), "--set", "meter.enabled=false", "--set", "intake.enabled=false")...)
+	NoObject(t, out, "ServiceAccount", "gonk-meter")
+	NoObject(t, out, "Role", "gonk-meter")
+	NoObject(t, out, "RoleBinding", "gonk-meter")
+}
+
+// The RoleBinding must bind gonk-meter's own ServiceAccount, in the namespace
+// the Release (and GONK_KEYSINK_NAMESPACE) actually installs into.
+func TestKeySinkRoleBindingTargetsMeterServiceAccount(t *testing.T) {
+	rb := MustObject(t, Render(t, Minimum()...), "RoleBinding", "gonk-meter")
+	roleRef, _ := rb.Raw["roleRef"].(map[string]any)
+	if roleRef["kind"] != "Role" || roleRef["name"] != "gonk-meter" {
+		t.Fatalf("RoleBinding roleRef = %+v, want Role/gonk-meter", roleRef)
+	}
+	subjects, _ := rb.Raw["subjects"].([]any)
+	if len(subjects) != 1 {
+		t.Fatalf("RoleBinding has %d subjects, want exactly 1", len(subjects))
+	}
+	subj, _ := subjects[0].(map[string]any)
+	if subj["kind"] != "ServiceAccount" || subj["name"] != "gonk-meter" {
+		t.Fatalf("RoleBinding subject = %+v, want ServiceAccount/gonk-meter", subj)
+	}
+	if subj["namespace"] != "gonk" { // Render() passes --namespace gonk
+		t.Fatalf("RoleBinding subject namespace = %v, want the release namespace", subj["namespace"])
+	}
+}
+
+// The Role must be LEAST PRIVILEGE: no wildcard resource or verb, and its
+// secrets rule must live in the core ("") API group.
+func TestKeySinkRoleIsLeastPrivilege(t *testing.T) {
+	role := MustObject(t, Render(t, Minimum()...), "Role", "gonk-meter")
+	rules := toSliceOfMaps(t, role.Raw["rules"])
+	if len(rules) == 0 {
+		t.Fatal("Role gonk-meter has no rules")
+	}
+	for _, rule := range rules {
+		for _, res := range toStringSlice(rule["resources"]) {
+			if res == "*" {
+				t.Fatal("Role grants a wildcard resource; least privilege forbids this")
+			}
+		}
+		for _, v := range toStringSlice(rule["verbs"]) {
+			if v == "*" {
+				t.Fatal("Role grants a wildcard verb; least privilege forbids this")
+			}
+		}
+		groups := toStringSlice(rule["apiGroups"])
+		if len(groups) != 1 || groups[0] != "" {
+			t.Fatalf("Role rule is not scoped to the core API group: apiGroups = %v", groups)
+		}
+	}
+}
+
+// This is the test that ties the Role to reality: the verbs granted on
+// Secrets must be EXACTLY the client-go calls internal/meter/keysink/k8s.go
+// makes -- derived from the source itself, not copied by hand. A future
+// keysink change that starts calling Get/List/Watch/Patch on Secrets fails
+// THIS test until role-gonk-meter.yaml is updated to match, instead of
+// failing silently as a 403 on a real cluster (which is what Plan 06 would
+// otherwise be left to discover).
+func TestKeySinkRoleVerbsMatchK8sSink(t *testing.T) {
+	role := MustObject(t, Render(t, Minimum()...), "Role", "gonk-meter")
+	rules := toSliceOfMaps(t, role.Raw["rules"])
+
+	var roleVerbs []string
+	var sawSecretsRule bool
+	for _, rule := range rules {
+		if !containsStr(toStringSlice(rule["resources"]), "secrets") {
+			continue
+		}
+		sawSecretsRule = true
+		roleVerbs = append(roleVerbs, toStringSlice(rule["verbs"])...)
+	}
+	if !sawSecretsRule {
+		t.Fatal(`Role gonk-meter has no rule for resource "secrets"`)
+	}
+	sort.Strings(roleVerbs)
+
+	want := keysinkSecretsVerbs(t)
+	if !reflect.DeepEqual(roleVerbs, want) {
+		t.Fatalf("Role gonk-meter grants verbs %v on secrets, but "+
+			"internal/meter/keysink/k8s.go actually calls %v -- update "+
+			"role-gonk-meter.yaml to match (add a verb it needs, or drop one "+
+			"it does not)", roleVerbs, want)
+	}
+}
+
+// secretsVerbCall matches a client-go call of the shape
+// `<something>.Secrets(<ns>).<Verb>(ctx, ...)` -- the exact pattern k8s.go
+// uses for Create/Update/Delete.
+var secretsVerbCall = regexp.MustCompile(`\.Secrets\([^)]*\)\.(Get|List|Watch|Create|Update|UpdateStatus|Patch|Delete|DeleteCollection)\(`)
+
+// keysinkSecretsVerbs reads internal/meter/keysink/k8s.go directly and returns
+// the sorted, de-duplicated set of RBAC verbs its Secrets calls require. It is
+// deliberately a source-level check, not a copy of today's verb list, so it
+// keeps tracking the sink even as it changes.
+func keysinkSecretsVerbs(t *testing.T) []string {
+	t.Helper()
+	_, self, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	src := filepath.Join(filepath.Dir(self), "..", "meter", "keysink", "k8s.go")
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read keysink source %s: %v", src, err)
+	}
+
+	verbSet := map[string]bool{}
+	for _, m := range secretsVerbCall.FindAllStringSubmatch(string(b), -1) {
+		switch m[1] {
+		case "Create":
+			verbSet["create"] = true
+		case "Update", "UpdateStatus":
+			verbSet["update"] = true
+		case "Delete", "DeleteCollection":
+			verbSet["delete"] = true
+		case "Get":
+			verbSet["get"] = true
+		case "List":
+			verbSet["list"] = true
+		case "Watch":
+			verbSet["watch"] = true
+		case "Patch":
+			verbSet["patch"] = true
+		}
+	}
+	if len(verbSet) == 0 {
+		t.Fatalf("found no client-go Secrets(...) calls in %s; the regex or the path is stale", src)
+	}
+	var verbs []string
+	for v := range verbSet {
+		verbs = append(verbs, v)
+	}
+	sort.Strings(verbs)
+	return verbs
+}
+
+func containsStr(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// toStringSlice converts a []any of strings (as decoded from YAML into
+// map[string]any) into a []string.
+func toStringSlice(v any) []string {
+	items, _ := v.([]any)
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		if s, ok := it.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// toSliceOfMaps converts a []any of map[string]any (as decoded from YAML)
+// into a []map[string]any.
+func toSliceOfMaps(t *testing.T, v any) []map[string]any {
+	t.Helper()
+	items, _ := v.([]any)
+	out := make([]map[string]any, 0, len(items))
+	for _, it := range items {
+		m, ok := it.(map[string]any)
+		if !ok {
+			t.Fatalf("expected a mapping, got %T: %+v", it, it)
+		}
+		out = append(out, m)
+	}
+	return out
 }
