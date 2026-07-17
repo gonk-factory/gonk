@@ -86,9 +86,9 @@ func TestChartFailsToRenderWithoutOperatorRungCatalogAndLadder(t *testing.T) {
 		t.Fatal("chart rendered with an EMPTY rung catalog and instance ladder; it must fail closed (a phantom-model default 404s at first token)")
 	}
 	// And with a full operator config (Minimum), it renders and the ladder is present.
-	// NOTE (Task 1): the operator-config ConfigMap itself is Task 2's; until it
-	// exists this second half is skipped rather than faked.
-	t.Skip("Task 2: gonk-operator-config ConfigMap does not exist yet")
+	// (Task 2): the operator-config ConfigMap now exists
+	// (chart/gonk/templates/configmap-operator-config.yaml), so this second half
+	// is no longer skipped.
 	cm := MustObject(t, Render(t, Minimum()...), "ConfigMap", "gonk-operator-config")
 	oc := cm.Data(t)["operator-config.yaml"]
 	if !strings.Contains(oc, "ladder:") || !strings.Contains(oc, "qwen-local") {

@@ -1,0 +1,16 @@
+{{- include "gonk.guards" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gonk-operator-config
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: meter
+data:
+  # Consumed by gonk-meter via --operator-config. pkg/opercfg validates this and
+  # gonk-meter REFUSES TO START if it does not validate -- every budget decision
+  # flows from this file. Meter re-reads it from disk on each tick (a ConfigMap
+  # update is a file change, not a restart), and keeps the PREVIOUS config if the
+  # new one fails to validate. It never falls back to no config at all.
+  operator-config.yaml: |
+    {{- toYaml (omit .Values.operatorConfig "__nothing__") | nindent 4 }}

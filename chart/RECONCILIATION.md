@@ -107,3 +107,40 @@ legal on a real API server -- unchanged by this reconciliation.
   `Makefile` (image names/tags, the `no-latest` gate, the testclock variant).
 - `docs/adr/ADR-001` through `ADR-005` (index; confirms `ADR-005` is taken by
   `pack-and-images.md`, so this plan's chart-seams ADR is `ADR-006`).
+
+## Addendum: Task 2 test-fixture drift found by TDD (not a Task 0 item, noted here for the same audience)
+
+Three of Task 2's own `guards_test.go` cases, copied verbatim from the plan
+text, failed against the code actually shipped in this worktree (Task 1's
+`values.yaml`/`values.schema.json`, committed separately). All three are test
+bugs, not chart bugs; fixed in `internal/charttest/guards_test.go`:
+
+1. **`TestGuardOnboardingRungNotInInstanceLadder`** used plain `--set` for
+   `operatorConfig.rungs[1].est_cost_usd=0.4`. Helm's plain `--set` never
+   infers `float64` (only int64/bool/string), so `0.4` arrived at
+   `values.schema.json` as the *string* `"0.4"` and failed `"type": "number"`
+   before the G5 guard this test targets ever ran -- the exact trap
+   `Minimum()`'s own comment already documents for `synthetic_usd_per_1m_tokens`.
+   Fixed: `--set-json`.
+2. **`TestGuardIngressWithoutHost` / `TestGuardIngressWithoutClassName`**
+   assumed `ingress.host` / `ingress.className` have no default. They do:
+   OD-2 (`docs/environment.md`) answered them with real cluster values
+   (`gonk.orac.local`, `traefik`), so the un-set field was never actually
+   empty and the render succeeded. Fixed: both tests now explicitly blank the
+   field under test.
+3. **`TestGuardLedgerNeedsDSNSecret`** (G19) expected the guard's own message
+   (`secrets.ledger.existingSecret`). `values.schema.json`'s
+   `$defs.secretRef` already requires `existingSecret` to be non-empty
+   (`minLength: 1`, `additionalProperties: false` -- no `--set-json` smuggling
+   route around it) for every secret ref, `secrets.ledger` included. Layer A
+   (the schema) rejects this misconfig before layer B's (`_guards.tpl`'s) G19
+   `fail()` ever runs -- the same "belt-and-braces" relationship G3/G4
+   document for the rung catalog, except here there is no relaxed-schema path
+   that would ever let G19 fire. `_guards.tpl` keeps the G19 `fail()` as
+   written (harmless, and a real backstop if `minLength` is ever relaxed);
+   the test now asserts the schema's actual (slash-path) error text instead
+   of the guard's dot-path message.
+
+None of these change chart behavior: the render still fails closed in all
+three cases, with an actionable message. They only change which layer (A vs
+B) is observed to fire, and the test file was corrected to match.
