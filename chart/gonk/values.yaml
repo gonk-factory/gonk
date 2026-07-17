@@ -175,12 +175,19 @@ litellm:
 # COMPONENT: the Gas City controller  (OD-4 [ANSWERED]: the chart DEPLOYS it)
 #
 # There is NO upstream Helm chart; this chart templates the controller as a proper
-# workload (Task 6.5). It runs `gc start --foreground /city`, hosts the supervisor
-# REST/SSE listener, and spawns agent pods via its k8s session provider.
+# workload (Task 6.5). It runs `gc supervisor run` as PID 1 (SETTLED by Task 0.5 --
+# NOT `gc start --foreground /city`, a flag that does not exist), hosts the per-city
+# supervisor REST/SSE listener, and spawns agent pods via its k8s session provider.
 #
-# THREE FIELDS BELOW ARE SMOKE-GATED (Task 0.5) and their defaults are PROVISIONAL:
-# supervisorPort, delivery, workload. Do not treat them as settled until the smoke
-# deploy has recorded chart/gonk/smoke/gc-controller-smoke.md.
+# TASK 0.5 SETTLED the three formerly-smoke-gated fields against real tooling
+# (chart/gonk/smoke/gc-controller-smoke.md), OVERTURNING the plan's provisional
+# draft: supervisorPort=9443 (NOT 8372), delivery=prebaked ONLY (a read-only
+# ConfigMap at /city is not viable), workload=deployment + strategy Recreate.
+#
+# IMAGE-GATED (bead gonk-fsl): the Plan 04 gonk-controller image is still missing
+# dolt/tmux/jq/lsof/pgrep and bundles bd<1.0.4, so `gc init` cannot yet finish and
+# the 9443 listener is config-derived, not socket-confirmed. The chart encodes the
+# settled SHAPE; the charttest gate asserts it RENDERS, not that the pod boots.
 # =============================================================================
 gascity:
   enabled: true           # deploy the bundled controller. false => BYO controller,
@@ -194,26 +201,26 @@ gascity:
   # When gascity.enabled=true the supervisor URL is DERIVED from the in-chart
   # controller Service, so leave this empty. It is REQUIRED only when enabled=false.
   supervisorURL: ""
-  # SMOKE-GATED (Task 0.5): config docs say 9443, earlier research said 8372. The
-  # Service, probes and NetworkPolicy all read this. Provisional default:
-  supervisorPort: 8372
-  # SMOKE-GATED (Task 0.5): how the pack + city.toml reach /city, and whether the
-  # gc init -> .gc-start sentinel handshake fires.
-  #   prebaked : baked into the gonk-controller image (Plan 04 prebaked=true)
-  #   configmap: mounted from configmap-gonk-city.yaml at /city
-  delivery: prebaked
-  # SMOKE-GATED (Task 0.5): whether the single-replica reconcile loop tolerates a
-  # Deployment, or needs a bare Pod (restartPolicy: Never) / StatefulSet. NO leader
-  # election exists, so EXACTLY ONE controller must ever run.
-  workload: deployment    # deployment | pod | statefulset
-  supervisor:
-    bind: 0.0.0.0         # REQUIRED for in-container use (defaults to 127.0.0.1)
-    allowMutations: true  # REQUIRED: the reconcile loop mutates city state
-  city:
-    # Only consumed when delivery=configmap. When prebaked, the image already
-    # carries /city/city.toml and the pack. The [session]/[beads]/[dolt] stanzas
-    # are rendered from the component values above so beads points at the Dolt below.
-    tomlOverride: ""
+  # SETTLED (Task 0.5, smoke U1): the per-city [api] listener (bind=0.0.0.0,
+  # allow_mutations=true) written by `gc init --bootstrap-profile k8s-cell`. This is
+  # what intake dispatches to and what the Service/probes target. Port 8372 -- the
+  # machine-wide supervisor admin API -- binds 127.0.0.1 LOOPBACK ONLY and is NEVER
+  # exposed by a Service/Ingress/NetworkPolicy (a peer pod cannot reach it).
+  supervisorPort: 9443
+  # SETTLED (Task 0.5, smoke U2): prebaked is the ONLY viable delivery. The gonk
+  # pack is baked into the image at /opt/gonk/pack; an initContainer copies it into
+  # a WRITABLE emptyDir /city and runs `gc init --preserve-existing
+  # --bootstrap-profile k8s-cell`. A read-only ConfigMap mounted at /city is NOT
+  # viable -- gc init must write .gc/, city.toml and .beads/ there. Single-value
+  # enum (like ledger.backend) so a future override mode can be added without a
+  # breaking values-key rename.
+  delivery: prebaked      # prebaked
+  # SETTLED (Task 0.5, smoke U3): Deployment with strategy Recreate. NO leader
+  # election exists, so EXACTLY ONE controller must ever run; Recreate terminates
+  # the old pod before the new one starts (RollingUpdate's maxSurge could run two).
+  # StatefulSet (OrderedReady) is the documented single-instance alternative; the
+  # upstream bare-Pod hack is dropped (a Deployment survives pod restart cleanly).
+  workload: deployment    # deployment | statefulset
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {memory: 1Gi}

@@ -1,0 +1,17 @@
+{{- if .Values.gascity.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+# NAMESPACED, and pods:[get] ONLY (docs/environment.md). An agent session pod reads
+# its own pod object and NOTHING else -- no list/watch, no create/exec/delete, no
+# configmaps. If this ever grows a verb, a compromised agent gains reach; keep it
+# to the single grant Gas City's source actually needs.
+kind: Role
+metadata:
+  name: gc-agent
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get]
+{{- end }}

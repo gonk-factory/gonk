@@ -1,0 +1,158 @@
+{{- if .Values.gascity.enabled }}
+{{- $sts := eq .Values.gascity.workload "statefulset" }}
+# The bundled Gas City controller. SETTLED by Task 0.5 (smoke/gc-controller-smoke.md),
+# overriding the plan's provisional draft:
+#   - `gc supervisor run` as PID 1 (NOT `gc start --foreground /city`, a flag that
+#     does not exist; NEVER `gc register`, which daemonizes a second supervisor and
+#     crashes PID 1 -- smoke U1/U3);
+#   - prebaked delivery: an initContainer copies the baked pack into a WRITABLE
+#     emptyDir /city and runs `gc init --preserve-existing --bootstrap-profile
+#     k8s-cell` (a read-only ConfigMap at /city is not viable -- smoke U2);
+#   - Deployment, replicas 1, strategy Recreate (StatefulSet is the single-instance
+#     alternative). No leader election exists, so EXACTLY ONE controller runs.
+#
+# IMAGE-GATED (bead gonk-fsl): the Plan 04 image is missing dolt/tmux/jq/lsof/pgrep
+# and bundles bd<1.0.4, so `gc init` cannot finish and the 9443 [api] listener is
+# config-derived, not socket-confirmed. This template encodes the settled SHAPE; the
+# charttest gate asserts it RENDERS, not that the pod boots.
+apiVersion: apps/v1
+kind: {{ if $sts }}StatefulSet{{ else }}Deployment{{ end }}
+metadata:
+  name: gonk-controller
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  # EXACTLY ONE. No leader election (smoke U3): two reconcile loops would race the
+  # Dolt beads store. Pinned to 1 and deliberately NOT exposed as a knob.
+  replicas: 1
+  {{- if $sts }}
+  serviceName: gonk-controller
+  {{- else }}
+  # Recreate, never RollingUpdate: maxSurge could briefly run two controllers
+  # during a rollout (smoke U3). Recreate terminates the old pod before the new one
+  # starts -- the exactly-one guarantee in the absence of leader election.
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "gonk.selectorLabels" (dict "ctx" . "component" "controller") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gonk.labels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+      {{- with .Values.gascity.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: gc-controller
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # PREBAKED DELIVERY (smoke U2). The gonk pack is baked into the image at
+      # /opt/gonk/pack. This initContainer copies it into the writable emptyDir
+      # /city and runs `gc init --preserve-existing` (which keeps the gonk pack.toml
+      # -- `gc init --template gascity` would DISCARD it and pull remote GitHub
+      # imports) with `--bootstrap-profile k8s-cell` (which writes the
+      # [api] bind=0.0.0.0/allow_mutations=true/port=9443 block). The exact command
+      # is the one the smoke recorded as working.
+      initContainers:
+        - name: bootstrap-city
+          image: {{ include "gonk.image" (dict "ctx" . "image" .Values.gascity.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              cp -r /opt/gonk/pack/. /city/
+              gc init --preserve-existing --bootstrap-profile k8s-cell \
+                --default-provider claude --skip-provider-readiness \
+                --dolt-host "$GC_DOLT_HOST" --dolt-port "$GC_DOLT_PORT" \
+                --dolt-database "bd_{{ .Values.dolt.database }}" \
+                --dolt-project-id "{{ .Values.dolt.database }}" \
+                --no-start /city
+              mkdir -p "$HOME/.gc"
+              printf '[[cities]]\n  path = "/city"\n  name = "gonk"\n' > "$HOME/.gc/cities.toml"
+          env:
+            {{- include "gonk.controllerEnv" . | nindent 12 }}
+          volumeMounts:
+            {{- include "gonk.controllerMounts" . | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+      containers:
+        - name: controller
+          image: {{ include "gonk.image" (dict "ctx" . "image" .Values.gascity.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # `gc supervisor run` as PID 1 via `exec` (smoke U1/U3). The initContainer
+          # already wrote ~/.gc/cities.toml, so registration is NOT needed here --
+          # and `gc register` MUST NOT be used, it daemonizes a second supervisor
+          # after which the foreground one exits "supervisor already running" and
+          # kills PID 1.
+          command: ["/bin/sh", "-c", "exec gc supervisor run"]
+          env:
+            {{- include "gonk.controllerEnv" . | nindent 12 }}
+          ports:
+            # The per-city [api] listener (0.0.0.0:9443). This is what intake
+            # dispatches to and what the Service targets. Port 8372 (the machine-wide
+            # supervisor admin API) binds 127.0.0.1 LOOPBACK ONLY and MUST NEVER be
+            # exposed by a Service/Ingress/NetworkPolicy (smoke U1).
+            - name: supervisor
+              containerPort: {{ .Values.gascity.supervisorPort }}
+          # TCP probe on 9443: the unauthenticated HTTP health endpoints (/health,
+          # /v0/readiness) live on the 8372 LOOPBACK admin API, which a kubelet
+          # httpGet against the pod IP cannot reach (smoke U1). The only cross-pod
+          # liveness signal is the 9443 city-API socket. IMAGE-GATED (gonk-fsl):
+          # 9443 does not bind until the image can finish init -- the probe SHAPE is
+          # settled, the boot is not.
+          livenessProbe:
+            tcpSocket: {port: supervisor}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            tcpSocket: {port: supervisor}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.gascity.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "gonk.controllerMounts" . | nindent 12 }}
+      volumes:
+        # /city and /home/gonk MUST be writable by uid 65532 (smoke U2): gc init
+        # writes the city into /city and gc writes ~/.gc under HOME. emptyDir, shared
+        # between the bootstrap initContainer and the supervisor. NEVER a read-only
+        # configMap at /city -- gc init cannot write into it.
+        - name: city
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.gitlab.caCert.existingConfigMap }}
+        # The private-CA bundle (trust-manager publishes `trust-bundle` into every
+        # namespace). gc clones the city's git remote from https://gitlab.orac.local,
+        # whose cert is signed by the cluster CA; SSL_CERT_FILE names this path.
+        - name: orac-ca
+          configMap:
+            name: {{ .Values.gitlab.caCert.existingConfigMap }}
+            items:
+              - key: {{ .Values.gitlab.caCert.key }}
+                path: {{ .Values.gitlab.caCert.key }}
+        {{- end }}
+      {{- with .Values.gascity.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gascity.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gascity.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

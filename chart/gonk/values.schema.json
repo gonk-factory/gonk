@@ -83,15 +83,15 @@
         "supervisorURL": {"type": "string"},
         "supervisorPort": {
           "type": "integer", "minimum": 1, "maximum": 65535,
-          "description": "SMOKE-GATED (Task 0.5): config docs say 9443, earlier research 8372. Default is provisional until the smoke deploy settles it."
+          "description": "SETTLED (Task 0.5, smoke U1): the per-city [api] listener (0.0.0.0:9443). NOT 8372, the loopback-only supervisor admin API that must never be exposed."
         },
         "delivery": {
-          "enum": ["prebaked", "configmap"],
-          "description": "SMOKE-GATED (Task 0.5): pack+city baked into the controller image, or mounted from a ConfigMap at /city. Must fire the gc init->.gc-start sentinel handshake."
+          "enum": ["prebaked"],
+          "description": "SETTLED (Task 0.5, smoke U2): prebaked ONLY. The pack is baked into the image and an initContainer copies it into a writable /city. A read-only ConfigMap at /city is not viable (gc init must write there). Single-value enum, future-proof."
         },
         "workload": {
-          "enum": ["deployment", "pod", "statefulset"],
-          "description": "SMOKE-GATED (Task 0.5): whether the single-replica reconcile loop tolerates a Deployment or needs a bare Pod/StatefulSet."
+          "enum": ["deployment", "statefulset"],
+          "description": "SETTLED (Task 0.5, smoke U3): Deployment (strategy Recreate) is the default; StatefulSet is the single-instance alternative. Both are exactly one replica; the upstream bare-Pod hack is dropped."
         },
         "image": {"$ref": "#/$defs/imageOptional"}
       }

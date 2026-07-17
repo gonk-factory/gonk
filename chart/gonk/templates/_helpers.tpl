@@ -85,7 +85,12 @@ app.kubernetes.io/component: {{ .component }}
 {{/*
   gonk.supervisorURL -- where intake POSTs orders. DERIVED from the in-chart
   controller Service when the controller is bundled, else the operator-supplied
-  external URL. The port is smoke-gated (gascity.supervisorPort, Task 0.5).
+  external URL. The port is SETTLED at 9443 (gascity.supervisorPort, smoke U1).
+
+  IMAGE-GATED (bead gonk-fsl): the http-vs-https scheme on 9443 was NOT
+  socket-confirmed -- the image cannot finish city init yet, so the 9443 listener
+  never bound during the Task 0.5 smoke. `http` is the smoke doc's default; re-check
+  the scheme once the image can boot a city.
 */}}
 {{- define "gonk.supervisorURL" -}}
 {{- if .Values.gascity.enabled -}}
@@ -107,4 +112,52 @@ gonk-dolt.{{ .Release.Namespace }}.svc
 
 {{- define "gonk.doltPort" -}}
 {{- if .Values.dolt.enabled -}}{{ .Values.dolt.port }}{{- else -}}{{ .Values.dolt.external.port }}{{- end -}}
+{{- end -}}
+
+{{/*
+  gonk.controllerEnv CTX -- the env SHARED by the controller's bootstrap
+  initContainer and its `gc supervisor run` main container.
+
+  SETTLED by Task 0.5 (smoke/gc-controller-smoke.md), NOT the plan draft:
+  - HOME=/home/gonk on a writable volume -- the image's passwd home for uid 65532
+    is `/` (read-only), so gc cannot write ~/.gc without this (smoke U2).
+  - GC_DOLT_HOST/PORT point beads at the bundled/external Dolt.
+  - GC_SESSION_PROVIDER=k8s so the supervisor spawns agent SESSION pods.
+  - The draft's GC_DAEMON_SUPERVISOR_BIND / _ALLOW_MUTATIONS are OMITTED on
+    purpose: smoke U1 proved no env moves the bind. The 0.0.0.0:9443 [api] bind and
+    allow_mutations=true come from `gc init --bootstrap-profile k8s-cell`, never env.
+*/}}
+{{- define "gonk.controllerEnv" -}}
+- name: HOME
+  value: /home/gonk
+- name: GC_DOLT_HOST
+  value: {{ include "gonk.doltHost" . | quote }}
+- name: GC_DOLT_PORT
+  value: {{ include "gonk.doltPort" . | quote }}
+- name: GC_SESSION_PROVIDER
+  value: k8s
+{{- if .Values.gitlab.caCert.existingConfigMap }}
+- name: SSL_CERT_FILE
+  value: {{ .Values.gitlab.caCert.mountPath | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
+  gonk.controllerMounts CTX -- the volumeMounts SHARED by the bootstrap
+  initContainer and the supervisor. /city and /home/gonk are WRITABLE emptyDirs
+  (smoke U2: gc init writes the city into /city, gc writes ~/.gc under HOME).
+*/}}
+{{- define "gonk.controllerMounts" -}}
+- name: city
+  mountPath: /city
+- name: home
+  mountPath: /home/gonk
+- name: tmp
+  mountPath: /tmp
+{{- if .Values.gitlab.caCert.existingConfigMap }}
+- name: orac-ca
+  mountPath: {{ .Values.gitlab.caCert.mountPath }}
+  subPath: {{ .Values.gitlab.caCert.key }}
+  readOnly: true
+{{- end }}
 {{- end -}}
