@@ -1,0 +1,76 @@
+{{- if .Values.dolt.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gonk-dolt
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dolt
+spec:
+  # ONE replica, ALWAYS. dolt sql-server is not clustered here; the Gas City
+  # beads store needs ONE writer with real transactions. RECONCILED, Task 0:
+  # this server hosts the beads database ONLY -- gonk-meter's reservation path
+  # (the ledger) is Postgres/CNPG, never a database on this server (ADR-004
+  # Decision 10; docs/spikes/dolt-reservation-isolation.md).
+  replicas: 1
+  serviceName: gonk-dolt
+  selector:
+    matchLabels:
+      {{- include "gonk.selectorLabels" (dict "ctx" . "component" "dolt") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gonk.labels" . | nindent 8 }}
+        app.kubernetes.io/component: dolt
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: dolt
+          image: {{ include "gonk.image" (dict "ctx" . "image" .Values.dolt.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Auth is root / empty password / --no-tls, host+port only. There is no
+          # credential to configure, so the chart does not pretend to (env doc).
+          args:
+            - sql-server
+            - --host=0.0.0.0
+            - --port={{ .Values.dolt.port }}
+            - --no-tls
+            - --data-dir=/var/lib/dolt
+          ports:
+            - name: mysql
+              containerPort: {{ .Values.dolt.port }}
+          # A TCP probe only: authenticating a real query would need a client, and
+          # this server has no credential to authenticate anyway.
+          livenessProbe:
+            tcpSocket: {port: mysql}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            tcpSocket: {port: mysql}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.dolt.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml (omit .Values.containerSecurityContext "readOnlyRootFilesystem") | nindent 12 }}
+            readOnlyRootFilesystem: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/dolt
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [{{ .Values.dolt.persistence.accessMode }}]
+        {{- if .Values.dolt.persistence.storageClass }}
+        storageClassName: {{ .Values.dolt.persistence.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.dolt.persistence.size }}
+{{- end }}
