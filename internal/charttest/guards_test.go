@@ -55,11 +55,9 @@ func TestGuardOnboardingRungNotInInstanceLadder(t *testing.T) {
 // meter.unsafeAllowMultipleReplicas value. A plain replicaCount override must
 // render cleanly with no guard in the way.
 //
-// SKIPPED here: chart/gonk/templates/deployment-gonk-meter.yaml is Task 3's
-// (not yet written in this worktree), so there is no Deployment/gonk-meter to
-// assert on yet. Un-skip in Task 3.
+// Un-skipped in Task 3: chart/gonk/templates/deployment-gonk-meter.yaml now
+// exists, so there is a Deployment/gonk-meter to assert on.
 func TestMeterMultipleReplicasRendersWithNoGuard(t *testing.T) {
-	t.Skip("Task 3: chart/gonk/templates/deployment-gonk-meter.yaml does not exist yet")
 	out := Render(t, append(Minimum(), "--set", "meter.replicaCount=2")...)
 	d := MustObject(t, out, "Deployment", "gonk-meter")
 	if !strings.Contains(d.Doc, "replicas: 2") {
