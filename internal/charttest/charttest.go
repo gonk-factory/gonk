@@ -195,6 +195,21 @@ func NoObject(t *testing.T, out, kind, name string) {
 // (ServiceMonitor, PrometheusRule, CNPG Cluster) have no upstream schema, so
 // they are validated against vendored schemas in chart/gonk/tests/crd-schemas/
 // -- NOT with -ignore-missing-schemas, which would silently skip them.
+//
+// The schema-location template below MUST match how this kubeconform binary
+// actually substitutes it, which is NOT documented consistently across
+// kubeconform versions: verified empirically (v0.6.7, see bead notes) by
+// pointing -schema-location at a logging HTTP server and reading the requests
+// it made. It lowercases {{.ResourceKind}} (Cluster -> cluster) and splits
+// apiVersion on "/" into {{.Group}} (unset for core/v1) and
+// {{.ResourceAPIVersion}} (just the version, e.g. "v1" -- NOT "group_v1"). A
+// template of "{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" -- which matches
+// neither the casing nor drops the group -- silently never resolves, and every
+// CRD falls through to "could not find schema", which -strict without
+// -ignore-missing-schemas turns into a hard failure. The vendored schema
+// files live one directory per API group (chart/gonk/tests/crd-schemas/<group>/
+// <lowercase-kind>_<version>.json) to keep the same Kind in two different
+// groups from colliding.
 func Kubeconform(t *testing.T, render string, crdSchemaDir string) {
 	t.Helper()
 	if _, err := exec.LookPath("kubeconform"); err != nil {
@@ -207,7 +222,7 @@ func Kubeconform(t *testing.T, render string, crdSchemaDir string) {
 	args := []string{"-strict", "-summary"}
 	if crdSchemaDir != "" {
 		args = append(args, "-schema-location", "default",
-			"-schema-location", filepath.Join(crdSchemaDir, "{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"))
+			"-schema-location", filepath.Join(crdSchemaDir, "{{.Group}}", "{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"))
 	}
 	cmd := exec.Command("kubeconform", append(args, f)...)
 	var b bytes.Buffer

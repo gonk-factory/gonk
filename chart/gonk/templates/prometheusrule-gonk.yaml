@@ -1,0 +1,96 @@
+{{- if .Values.monitoring.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gonk
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: gonk.rules
+      rules:
+        # Plan 02 AD-2, in as many words: "a project goes dark and nobody notices.
+        # This is the assumed default I am least comfortable with. Mitigation,
+        # which Plan 05 must ship: an alert rule on
+        # gonk_intake_projects{state="invalid"} > 0." Here it is.
+        - alert: GonkProjectConfigInvalid
+          expr: gonk_intake_projects{state="invalid"} > 0
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "A project's .gonk.yml will not load; the project is doing nothing."
+            description: >-
+              gonk fails closed on an unparseable .gonk.yml: no work is dispatched and
+              the LiteLLM key is deleted. It does NOT tell anyone. Without this alert
+              a project goes dark silently. Fix the config, or de-onboard the project.
+
+        # Meter's view of spend is a POLL of LiteLLM's /spend/logs. If the poll is
+        # stale, every headroom calculation is optimistic -- which is fail-OPEN.
+        - alert: GonkMeterSpendSyncStale
+          expr: gonk_meter_spend_sync_age_seconds > 900
+          for: 10m
+          labels: {severity: critical}
+          annotations:
+            summary: "gonk-meter's spend view is stale; budget headroom is being over-estimated."
+            description: >-
+              gonk-meter's view of LiteLLM spend is a periodic poll of /spend/logs, not a
+              push. A stale sync means every remaining-budget calculation is optimistic,
+              which is fail-OPEN for a budget enforcer. Check gonk-meter's connectivity
+              to LiteLLM and gonk_meter_spend_sync_failures_total.
+
+        - alert: GonkMeterDown
+          expr: up{job=~".*gonk-meter.*"} == 0
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: "gonk-meter is down."
+            description: >-
+              No session can spawn (the pack's /policy/decide fails closed) and
+              gonk-intake will go NotReady, which takes the webhook endpoint offline.
+              GitLab auto-disables hooks that fail repeatedly -- check the hooks after
+              recovery.
+
+        # A lost race is a session that ASKED for budget and lost. A few are normal
+        # under load. A flood means the serialization is not working, which is the
+        # exact failure Plan 03's Task 0b was written to detect.
+        - alert: GonkReservationRacesLost
+          expr: rate(gonk_meter_reservation_races_lost_total[15m]) > 0.2
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "gonk-meter is losing reservation races; check that meter is single-replica and the store isolates."
+            description: >-
+              A lost race is a Decide call that asked for budget and lost to a concurrent
+              caller on a now-stale snapshot -- deferred instead of run. A few are normal
+              under load; a sustained flood means the store's isolation (ADR-004 Decision
+              10: SELECT ... FOR UPDATE + a partial UNIQUE index) is not holding.
+
+        - alert: GonkDeferredBeadsStuck
+          expr: gonk_meter_deferred_beads > 0
+          for: 6h
+          labels: {severity: warning}
+          annotations:
+            summary: "Work has been parked in waiting-for-capacity for 6h -- out of budget, or stuck in quiet hours."
+            description: >-
+              gonk_meter_deferred_beads counts beads currently waiting on a defer
+              decision (budget exhausted, quiet hours, stale spend, key not yet
+              provisioned) for a project. Six hours parked usually means a budget needs
+              raising, quiet hours needs revisiting, or the project's virtual key needs
+              attention.
+
+        - alert: GonkSpendRowsUnattributed
+          expr: rate(gonk_meter_spend_rows_unattributed_total[1h]) > 0
+          for: 1h
+          labels: {severity: warning}
+          annotations:
+            summary: "LiteLLM spend rows are arriving without attribution tags; someone is spending through a key gonk did not provision."
+            description: >-
+              gonk_meter_spend_rows_unattributed_total counts spend-log rows where no
+              project could be resolved from their metadata at all. A nonzero rate means
+              a virtual key exists in LiteLLM that gonk-meter did not provision, or did
+              not tag the way gonk-meter expects -- that spend is invisible to every
+              per-project budget in this chart.
+{{- end }}

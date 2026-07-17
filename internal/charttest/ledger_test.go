@@ -125,6 +125,13 @@ func TestKubeconformCoreResources(t *testing.T) {
 }
 
 func TestKubeconformCNPGProfile(t *testing.T) {
-	out := Render(t, append(Minimum(), "--set", "ledger.backend=postgres")...)
+	// mode=cnpg, not just backend=postgres: ledger.postgres.mode DEFAULTS to
+	// "shared" (see TestSharedPostgresRendersNoDatabase above), which emits NO
+	// Cluster CR at all. Without this --set the CRD schema path here is never
+	// actually exercised -- a bug caught while wiring Task 8's monitoring
+	// kubeconform test, which found the vendored CRD schema files did not
+	// resolve against this kubeconform binary at all (see Kubeconform's doc
+	// comment in charttest.go).
+	out := Render(t, append(Minimum(), "--set", "ledger.backend=postgres", "--set", "ledger.postgres.mode=cnpg")...)
 	Kubeconform(t, out, filepath.Join(ChartDir(), "tests", "crd-schemas"))
 }
