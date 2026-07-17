@@ -1,0 +1,116 @@
+{{- if and .Values.networkPolicy.enabled .Values.meter.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-meter
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: meter
+  annotations:
+    {{- include "gonk.networkPolicyBanner" . | nindent 4 }}
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/orac/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      {{- include "gonk.selectorLabels" (dict "ctx" . "component" "meter") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # intake (project registration) and the agent pods (session cost, for commit
+    # trailers). Both are in this namespace.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "intake") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.agentPodSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.meter.port }}
+    # The PACK's dispatch formula (POST /v1/policy/decide) and gate step
+    # (POST /v1/policy/outcome) run inside the Gas City controller.
+    # WITHOUT THIS RULE, NO SESSION CAN EVER SPAWN.
+    #   * bundled controller  -> in THIS namespace (component: controller)
+    #   * BYO controller      -> the gascity namespaceSelector
+    - from:
+        {{- if .Values.gascity.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "controller") | nindent 14 }}
+        {{- else }}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.gascity.namespaceSelector | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.meter.port }}
+    # Prometheus (/metrics is unauthenticated; the rest of the API is not).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.prometheus.namespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.meter.port }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 14 }}
+      ports:
+        {{- range .Values.networkPolicy.dns.ports }}
+        - protocol: UDP
+          port: {{ . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    # LiteLLM's ADMIN API: provision virtual keys, read /spend/logs. This is a
+    # different door from the agents' -- same host, admin credential.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.litellm.namespaceSelector | nindent 14 }}
+      ports:
+        {{- range .Values.networkPolicy.litellm.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    # The ledger. RECONCILED, Task 0: the OLD `ledger.backend == "dolt"` branch is
+    # DELETED -- that state does not exist any more (ADR-004 Decision 10), and
+    # meter never has a legitimate reason to egress to the Dolt Service (it backs
+    # beads only). The `cnpg` branch below is unchanged. A gap this reconciliation
+    # ALSO closes: the DEFAULT ledger.postgres.mode is `shared` (the existing
+    # databases-app/postgres CNPG cluster), and the original text had NO egress
+    # rule for that mode at all -- meter's own default profile would have had no
+    # NetworkPolicy path to its own ledger. `external` has the same gap. Both now
+    # get a namespaceSelector egress, matching the litellm/dns pattern above.
+    {{- if eq .Values.ledger.postgres.mode "cnpg" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: gonk-ledger-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- else }}
+    {{/* shared (the DEFAULT: databases-app/postgres) or external (BYO Postgres,
+         any namespace). networkPolicy.ledgerPostgres.namespaceSelector defaults
+         to matching databases-app for `shared`; override it for `external`. */}}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ledgerPostgres.namespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.ledger.postgres.port | default 5432 }}
+    {{- end }}
+    # The Kubernetes API server (the KeySink writes per-project Secrets). A
+    # NetworkPolicy cannot name the API server by service, so this is left to the
+    # cluster's own allowance -- and if your CNI blocks it, meter cannot deliver
+    # keys and NOTHING RUNS. Plan 06 must confirm.
+{{- end }}

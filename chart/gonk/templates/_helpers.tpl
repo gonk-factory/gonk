@@ -28,6 +28,23 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{/*
+  gonk.networkPolicyBanner -- the "NOT ENFORCED" disclaimer, as a real
+  ANNOTATION, not just a spec-block comment.
+
+  Helm comments never reach the API server (they are stripped at template
+  render time, long before `kubectl apply`), so `kubectl get networkpolicy -o
+  yaml` on the real cluster would show NONE of the surrounding spec comments
+  -- an operator inspecting the live object would see nothing warning them
+  that it blocks nothing. An annotation is real object data: it survives all
+  the way to etcd and back out through `kubectl get/describe`. Every
+  NetworkPolicy template carries this AND keeps its own spec-block prose
+  comment for anyone reading the chart source or a `helm template` dry run.
+*/}}
+{{- define "gonk.networkPolicyBanner" -}}
+gonk.orac.local/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/orac/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+{{- end -}}
+
+{{/*
   image DICT{ctx,image} -> registry-qualified reference.
 
   RECONCILED, Task 0: `.image.registry`, if set on the SPECIFIC image dict,
