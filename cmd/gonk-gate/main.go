@@ -35,11 +35,28 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/pkg/glab"
 )
 
+// version is stamped at build time (`-ldflags -X main.version=...`) by both
+// images/Dockerfile.agent and images/Dockerfile.controller, to GONK_TAG.
+// "dev" is what a plain `go build`/`go run` gets, never a released image.
+// Task 5 and Task 6's own smoke-test wishlists both wanted `--version`
+// (flagged as a known gap in both, closed here): images/Dockerfile.controller's
+// controller_smoke_test.go asserts this output equals GONK_TAG.
+var version = "dev"
+
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	if len(os.Args) < 2 {
 		log.Error("usage: gonk-gate dispatch|sweep|check")
 		os.Exit(2)
+	}
+
+	// --version/-version: answered before loadGateConfig, deliberately --
+	// unlike every real subcommand this needs no GONK_CITY/meter-token
+	// config, and must work in a bare `podman run --entrypoint gonk-gate
+	// <image> --version` smoke test with no env set at all.
+	if os.Args[1] == "--version" || os.Args[1] == "-version" {
+		fmt.Println(version)
+		os.Exit(0)
 	}
 
 	cfg, err := loadGateConfig()

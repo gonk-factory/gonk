@@ -10,14 +10,15 @@ GONK_TAG ?= $(GONK_VERSION)-$(shell git rev-parse --short=12 HEAD)
 PODMAN := podman
 BUILD  := $(PODMAN) build --network=host
 
-.PHONY: images push pack-validate no-latest lint-pack
+.PHONY: images agent-image controller-image push pack-validate no-latest lint-pack
 
-# images: only gonk-agent exists as of Plan 04 Task 5. Task 6 (controller) and
-# Task 7 (intake, meter) each add their own `$(BUILD) -f images/Dockerfile.X
-# ...` line here when their Dockerfiles land -- this target is NOT the final
-# four-image list Task 7 formalizes, it is what Task 5 can honestly build
-# today.
-images: no-latest
+# images: gonk-agent (Task 5) and gonk-controller (Task 6). Task 7 (intake,
+# meter) adds its own two lines here when their Dockerfiles land -- this
+# target is NOT the final four-image list Task 7 formalizes, it is what
+# Plan 04 can honestly build today.
+images: no-latest agent-image controller-image
+
+agent-image:
 	$(BUILD) \
 	  --build-arg GONK_TAG=$(GONK_TAG) \
 	  --build-arg GO_VERSION=$(GO_VERSION) \
@@ -27,6 +28,20 @@ images: no-latest
 	  --build-arg BD_VERSION=$(BD_VERSION) \
 	  -f images/Dockerfile.agent -t $(REGISTRY)/gonk-agent:$(GONK_TAG) .
 
+# controller-image: gc (MIT gascity, pinned GASCITY_REF) + gonk-gate + bd +
+# the pack (Task 6). Kept as its own target (not folded only into `images`)
+# so `pack-validate` below can build just this one, without also needing
+# network reach to opencode's/glab's release servers that agent-image's fetch
+# stage requires.
+controller-image:
+	$(BUILD) \
+	  --build-arg GONK_TAG=$(GONK_TAG) \
+	  --build-arg GO_VERSION=$(GO_VERSION) \
+	  --build-arg DEBIAN_BASE=$(DEBIAN_BASE) \
+	  --build-arg BD_VERSION=$(BD_VERSION) \
+	  --build-arg GASCITY_REF=$(GASCITY_REF) \
+	  -f images/Dockerfile.controller -t $(REGISTRY)/gonk-controller:$(GONK_TAG) .
+
 # push: EVERY GITLAB RUNNER IS OFFLINE (docs/environment.md). CI has never
 # executed for this repo, so the first images are pushed BY HAND from a box
 # with LAN reach to registry.orac.local -- expected, not a workaround to be
@@ -35,18 +50,21 @@ images: no-latest
 push: images
 	@echo "pushing $(GONK_TAG) to $(REGISTRY)"
 	$(PODMAN) push $(REGISTRY)/gonk-agent:$(GONK_TAG)
+	$(PODMAN) push $(REGISTRY)/gonk-controller:$(GONK_TAG)
 
-# pack-validate: Gas City's REAL loader, offline (Task 6, Plan 04). It needs
-# images/Dockerfile.controller and the `gc` binary, neither of which exists in
-# this worktree yet -- Task 4's internal/packtest is the interim, OFFLINE
-# structural gate (an allow-list, not the loader) and is not a substitute.
-# This target fails loud rather than silently claim a validation that has not
-# happened.
-pack-validate:
-	@echo "pack-validate: NOT YET IMPLEMENTED -- Gas City's real loader is Task 6" >&2
-	@echo "(needs images/Dockerfile.controller + the gc binary). Interim gate:" >&2
-	@echo "  go test ./internal/packtest/ -race -count=1" >&2
-	@exit 1
+# pack-validate: Gas City's REAL loader (internal/config's pack parser, via
+# `gc lint`), offline, in the controller image -- no cluster, no deployed
+# city (Task 6, Plan 04). This is NOT a substitute for
+# `go test ./internal/packtest/` (Task 4's OFFLINE structural allow-list) --
+# it is the complementary check: the actual code that will reject an unknown
+# pack.toml key in production, run against our pack now. See
+# test/images/packvalidate_test.go for the fuller picture, including the
+# negative controls and the order-level semantic checks `gc lint` does NOT
+# cover (documented there and in ADR-004).
+pack-validate: controller-image
+	@echo "pack-validate: gc lint (Gas City's real loader) against the gonk pack, offline, in the controller image"
+	$(PODMAN) run --rm --network=host \
+	  $(REGISTRY)/gonk-controller:$(GONK_TAG) gc lint /opt/gonk/pack
 
 # no-latest: docs/environment.md is unambiguous -- "Pin exact tags -- never
 # latest." Renovate autodiscovers and bumps PINNED tags; it cannot bump a

@@ -1,0 +1,81 @@
+# gonk controller image: Gas City's `gc` (built from the MIT source at a pinned
+# SHA) + `bd` + gonk's pack + `gonk-gate`.
+#
+# gonk-gate ships HERE because the pack's exec orders (gonk-dispatch, gonk-sweep)
+# run on the orchestrator. THEY ARE THE BUDGET GATE, and they have no model call
+# in them.
+#
+# Derived from gascity's contrib/k8s/Dockerfile.controller (MIT). NOTHING here is
+# derived from gascity-packs, which carries no licence.
+#
+# Build: see `make controller-image` (Makefile). Every ARG below is read from
+# images/versions.env; there is no default and no `latest` anywhere.
+
+ARG GO_VERSION
+ARG DEBIAN_BASE
+
+# ---- build gc (MIT gascity, pinned SHA -- NEVER a floating branch/tag) ------
+FROM golang:${GO_VERSION} AS gc
+ARG GASCITY_REF
+RUN test -n "${GASCITY_REF}" || (echo "GASCITY_REF is unset -- refusing to build against a moving upstream" && exit 1)
+WORKDIR /src
+RUN git clone https://github.com/gastownhall/gascity . && git checkout "${GASCITY_REF}"
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/gc ./cmd/gc
+
+# ---- build gonk-gate (static; vendor/ is committed -- docs/environment.md: --
+# CI cannot reach proxy.golang.org, so this stage is fully offline, -mod=vendor,
+# no `go mod download` anywhere, same as images/Dockerfile.agent's gate stage) --
+FROM golang:${GO_VERSION} AS gate
+WORKDIR /src
+ARG GONK_TAG
+COPY go.mod go.sum ./
+COPY vendor/ vendor/
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY pkg/ pkg/
+RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags="-s -w -X main.version=${GONK_TAG}" \
+    -o /out/gonk-gate ./cmd/gonk-gate
+
+# ---- fetch bd (pinned; checksum-verified) -----------------------------------
+# A separate stage so `curl`/`tar` never ship in the runtime image, and so a
+# checksum mismatch fails the BUILD, not a running pod (mirrors
+# images/Dockerfile.agent's fetch stage).
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS fetch
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tar \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /fetch
+
+ARG BD_VERSION
+RUN test -n "${BD_VERSION}" || (echo "BD_VERSION is unset" && exit 1)
+RUN curl -fsSL -o bd.tar.gz \
+      "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
+    && echo "1ef5dca818d7e81574df9e9f9fc2a16ab711da09b0fa7b822ae162d9a81c8912  bd.tar.gz" | sha256sum -c - \
+    && tar xzf bd.tar.gz bd \
+    && chmod +x bd
+
+# ---- runtime -----------------------------------------------------------------
+FROM ${DEBIAN_BASE}
+
+# git: the beads store and `gc`'s own worktree machinery shell out to it.
+# ca-certificates: TLS to gitlab.orac.local, the Dolt server and gonk-meter
+# (all behind the private CA -- SSL_CERT_FILE below, never InsecureSkipVerify).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=gc   /out/gc        /usr/local/bin/gc
+COPY --from=gate /out/gonk-gate /usr/local/bin/gonk-gate
+COPY --from=fetch /fetch/bd     /usr/local/bin/bd
+COPY pack/ /opt/gonk/pack/
+
+# THE PRIVATE CA -- see images/Dockerfile.agent's identical comment. The
+# controller talks to gitlab.orac.local (pack fetch, if ever configured),
+# gonk-meter and its own Dolt server, all behind the cluster's private CA.
+ENV SSL_CERT_FILE=/etc/ssl/orac/ca.crt
+
+# No /etc/passwd entry for 65532 (this base image is plain debian, not
+# distroless) -- HOME must be explicit or `gc`/git fall back to "/" and fail to
+# write state as a non-root uid with no home directory.
+RUN mkdir -p /city /home/gonk && chown -R 65532:65532 /city /home/gonk /opt/gonk
+ENV HOME=/home/gonk
+USER 65532:65532

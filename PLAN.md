@@ -7,7 +7,7 @@ Spec: docs/superpowers/specs/2026-07-12-gonk-stack-design.md
 | 01 foundation & config contract | scaffold, CI, gonkcfg, atags | done |
 | 02 gitlab-intake | webhooks, reconciliation, onboarding MR | done |
 | 03 gonk-meter | rung policy, key provisioning, ledger | done |
-| 04 pack & images | agents/formulas/orders, docker images | in progress (Tasks 2, 4, 5 done) |
+| 04 pack & images | agents/formulas/orders, docker images | in progress (Tasks 2, 4, 5, 6 done) |
 | 05 chart | Helm chart, BYO seams | not started |
 | 06 e2e harness | kind + gitlab-ce + stub model, kill tests | not started |
 
@@ -239,6 +239,112 @@ Update the Status column as tasks complete (house rule: progress lives here).
   HTTP request, not opencode itself. A future opencode version bump must
   re-confirm `provider.<id>.options.headers` still exists at the new pin
   before trusting it (Task 5 Step 4's own instruction).
+
+## Contracts published by plan 04 (Task 6)
+
+- `images/Dockerfile.controller` — `gc` built from MIT gascity source at the
+  pinned `GASCITY_REF` (`git clone` + `git checkout` to the exact SHA, refused
+  if unset) + `gonk-gate` (vendored, offline, `-X main.version=$(GONK_TAG)`) +
+  `bd` (checksum-verified fetch) + the pack baked at `/opt/gonk/pack/`. Runs
+  as `65532:65532`, `SSL_CERT_FILE` at the private-CA mount. Builds clean with
+  `make controller-image` — verified for real (~5m19s cold, ~1m12s with the
+  `gc` build-stage layer cached), image then removed after testing.
+- **GO_VERSION bumped 1.26.2 -> 1.26.5** (`images/versions.env`), a REAL,
+  REPRODUCED build failure, not a hypothetical one: gascity's own `go.mod`
+  AT THE EXACT PINNED `GASCITY_REF` SHA requires `go >= 1.26.5`; the `gc`
+  build stage failed outright against 1.26.2. 1.26.5 still satisfies gonk's
+  own `go 1.26` directive and is what this dev box's local toolchain already
+  is, so this is a safe, shared bump. Digest re-resolved the same way as the
+  original pin (`Docker-Content-Digest` on the tag's manifest-list).
+- **The REAL Gas City loader result: gc lint ACCEPTS the gonk pack, verified
+  by actually building and running `gc` from the MIT source at the pinned
+  SHA** (not simulated, not assumed — confirmed both by hand and in
+  `test/images/packvalidate_test.go`'s `TestGasCityLoaderAcceptsTheGonkPack`,
+  which asserts `passed:true, error_count:0` on `gc lint /opt/gonk/pack --json`
+  inside the built controller image). The negative control
+  (`TestGasCityLoaderRejectsAnUnknownKey`) proves the check is real: an
+  injected `[gonk_invented_table]` is rejected, by name, in the error text.
+- **REAL FINDING: `gc lint` does NOT validate order-level semantics**
+  (formula XOR exec, no pool on an exec order — `internal/orders/order.go`'s
+  `Validate`). Confirmed by hand: an order declaring both `formula` and
+  `exec` passes `gc lint` with zero diagnostics. The actual enforcement point
+  is `orderdiscovery.ScanAll` (`internal/orderdiscovery/discovery.go`),
+  reached via `gc order list --city <dir> --json` — THE SAME CODE PATH the
+  real controller's `order_dispatch.go` uses to build its live dispatch set.
+- **REAL FINDING, and the more important one: that path does NOT hard-fail
+  a bad order.** Every caller in gascity's own `cmd/gc` (order list/show, and
+  the controller's own dispatch scan) wires `OnValidateError` to log the
+  violation and continue — `internal/orderdiscovery`'s `validateOrders`
+  drops the one bad order and keeps the rest. Confirmed by hand: an injected
+  formula+exec order (and, separately, an injected exec+pool order) makes
+  `gc order list --json`'s order count drop from 5 to 4, names the order and
+  the exact rule violated on stderr, and **still exits 0**. So a malformed
+  order in production does not crash the controller — it silently vanishes
+  from the routing table, with only a log line (easy to miss) marking the
+  loss. `test/images/packvalidate_test.go`'s `TestLoaderDropsAnOrderWithBothFormulaAndExec`
+  / `TestLoaderDropsAnExecOrderWithAPool` assert this REAL (not fabricated)
+  behavior — not a fictional non-zero exit code — and
+  `TestGasCityLoaderLoadsAllFiveGonkOrders` is the positive control proving
+  all 5 real gonk orders load with none dropped.
+- **`pkg/beadstore/bd.go`'s guessed `bd` invocations were WRONG in FOUR
+  places, all confirmed and fixed against the real `bd` 1.0.3 binary**
+  (matches `images/versions.env`'s `BD_VERSION` and the `bd` already on this
+  box) — this is worse than Task 4's `bead_id` finding, because every one of
+  these four bugs was **silent**: `Put`/`Get` would have run against a real
+  Dolt bead store, reported success, and done nothing.
+  1. `bd label <id> remove/add <label>` (verb after the id) is not valid
+     usage — cobra prints the `label` subcommand's help TO STDOUT and exits
+     **0**. The real order is `bd label remove/add <id> <label>`.
+  2. `bd label remove <id> "gonk::*"` does **not** glob-expand (confirmed:
+     the literal label `gonk::*` is "removed" — a no-op — while the real
+     `gonk::<state>` label stays). Fixed by enumerating the bead's actual
+     labels (`bd label list <id> --json`) and removing each `gonk::`-prefixed
+     one by its literal name (`removeGonkStateLabels`).
+  3. `bd create ... ` with no `--json` flag prints human-readable text, not
+     JSON — `Put`'s very first bead-creation call would have failed to
+     decode on every cold start. Fixed: `--json` added (and `--label` ->
+     `--labels`, the documented flag name, confirmed to also work).
+  4. `bd comments <id> --json` names the comment body **`text`**, not
+     `body` — the original struct tag (`json:"body"`) silently decoded to
+     an empty string on every row, so `Get`/`List` would NEVER find an
+     existing gonk-state comment no matter how many times `Put` had run.
+     Fixed: `json:"text"`.
+  All four are pinned by `bd_test.go` (a fake `Run` hook, no real `bd`
+  needed for the normal gate) AND were independently verified end-to-end
+  against the real local `bd` 1.0.3 binary (create -> comment -> label
+  transition -> list-by-state round trip, by hand, before writing the
+  file). Also fixed in the same pass: `bd list`/`bd comments --format json`
+  -> the documented global `--json` boolean flag (the former happened to
+  also produce JSON, undocumented — not worth depending on).
+- **`cmd/gonk-gate --version` added** (`var version = "dev"`, stamped via
+  `-ldflags -X main.version=$(GONK_TAG)` in both Dockerfiles), closing the
+  cross-task gap Task 5 flagged and this task's own controller smoke test
+  needed. Verified in the real image:
+  `gonk-gate --version` → the exact `GONK_TAG` string, exit 0, no
+  `GONK_CITY`/meter-token config required (unlike every real subcommand).
+- `test/images/controller_smoke_test.go` + `test/images/packvalidate_test.go`
+  (build tag `images`, excluded from the normal gate — verified: a plain
+  `go test ./...` run shows no `test/images` package at all) — 9 tests, all
+  real, all run against the live-built controller image: pinned-version
+  assertions (`gc version --long` contains the full `GASCITY_REF` SHA —
+  REAL FINDING: `gc --version` is not a flag, `gc version` is a subcommand,
+  and only `--long` includes the commit; `bd --version`), `gonk-gate
+  --version`, the pack baked in, non-root, the real-loader accept/reject
+  pair, and the three order-semantics tests above.
+- **Not closed by this task, carried forward honestly**: PLAN.md's Task 4
+  notes flagged that `cmd/gonk-gate check`'s env-var contract
+  (`GC_WEBHOOK_ARG_*`) does not match Gas City's real `[steps.check]`
+  invocation (`GC_BEAD_ID`/`GC_ITERATION`/etc, per
+  `internal/convergence/condition.go`), and hinted this task's `bd`
+  confirmation would unblock a fix. It does (the invocation surface is now
+  correct), but implementing the `GC_BEAD_ID` -> `bd show`/metadata
+  read-back path itself is a distinct, non-trivial change to
+  `cmd/gonk-gate/main.go`/`check.go` outside this task's six explicit steps
+  (Dockerfile, loader-validation surface, pack-validation test, controller
+  smoke test, `bd` pin, commit) — flagging it again here rather than
+  rushing it in. **Whoever runs a formula through a real `[steps.check]`
+  next (Plan 06, or an earlier owner of this gap) must close it before
+  that formula's check step can pass against a real running city.**
 
 ## Carried into later plans
 

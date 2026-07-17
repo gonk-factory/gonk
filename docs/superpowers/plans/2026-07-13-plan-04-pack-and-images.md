@@ -2780,7 +2780,7 @@ its *parser*.
 - Create: `images/Dockerfile.controller`
 - Test: `test/images/controller_smoke_test.go`, `test/images/packvalidate_test.go` (tag `images`)
 
-- [ ] **Step 1: Write `images/Dockerfile.controller`**
+- [x] **Step 1: Write `images/Dockerfile.controller`**
 
 ```dockerfile
 # gonk controller image: Gas City's `gc` (built from the MIT source at a pinned
@@ -2824,7 +2824,7 @@ ENV SSL_CERT_FILE=/etc/ssl/orac/ca.crt
 USER 65532:65532
 ```
 
-- [ ] **Step 2: Discover `gc`'s offline validation surface — then pin it**
+- [x] **Step 2: Discover `gc`'s offline validation surface — then pin it**
 
 ```bash
 podman run --rm --network=host "${REGISTRY}/gonk-controller:${GONK_TAG}" gc --help
@@ -2847,7 +2847,7 @@ Whichever you land on, **write it into the `Makefile` as `make pack-validate`** 
 into `test/images/packvalidate_test.go` so it is a *test*, not a thing someone
 remembers to run.
 
-- [ ] **Step 3: Write the pack-validation test** — `test/images/packvalidate_test.go`
+- [x] **Step 3: Write the pack-validation test** — `test/images/packvalidate_test.go`
 
 ```go
 //go:build images
@@ -2896,7 +2896,7 @@ covered offline*. **Do not pretend `internal/packtest` is equivalent.** It is a
 useful allow-list; it is not the loader, and the difference is exactly the class of
 bug that only shows up in production.
 
-- [ ] **Step 4: Controller smoke test** — `test/images/controller_smoke_test.go`
+- [x] **Step 4: Controller smoke test** — `test/images/controller_smoke_test.go`
 
 ```
 gc --version         exits 0, matches GASCITY_REF
@@ -2906,7 +2906,7 @@ bd --version         == BD_VERSION
 id -u == 65532
 ```
 
-- [ ] **Step 5: Pin `bd`'s real subcommands (AD-2's escape hatch)**
+- [x] **Step 5: Pin `bd`'s real subcommands (AD-2's escape hatch)**
 
 `pkg/beadstore/bd.go` was written against *guessed* `bd` invocations. Confirm them
 now, against the real binary, in the container:
@@ -2922,7 +2922,7 @@ Correct `bd.go` to match. **This is the one file the guess was allowed to be wro
 in** — that was the point of putting `beadstore` behind an interface. Every
 `gonk-gate` test still runs against `Memory` and is unaffected.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 make pack-validate                                    # exit 0
