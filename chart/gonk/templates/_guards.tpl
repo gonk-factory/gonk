@@ -127,4 +127,16 @@
 {{- if and .Values.gascity.enabled (not .Values.gascity.image.tag) -}}
   {{- fail "gascity.enabled is true but gascity.image.tag is empty. The chart deploys the Gas City controller (Plan 04's gonk-controller image); pin an exact tag (no default, never `latest`)." -}}
 {{- end -}}
+
+{{- /* G21: the bundled controller's supervisor port is NOT operator-tunable.
+       Task 0.5's smoke proved the per-city [api] listener binds 0.0.0.0:9443
+       hardcoded by `gc init --bootstrap-profile k8s-cell` (no env or flag moves
+       it), while 8372 is the machine-wide supervisor API bound to 127.0.0.1 only.
+       So the Service MUST target 9443: any other value renders a controller
+       Service that connection-refuses (and 8372 specifically would advertise the
+       loopback admin port). This value exists only so the doctrine is visible in
+       values.yaml; the guard is what keeps it honest. See smoke/gc-controller-smoke.md. */ -}}
+{{- if and .Values.gascity.enabled (ne (int .Values.gascity.supervisorPort) 9443) -}}
+  {{- fail (printf "gascity.supervisorPort is %d but the bundled Gas City controller's per-city [api] listener is hardcoded to 0.0.0.0:9443 by `gc init --bootstrap-profile k8s-cell` -- it is not tunable. A Service on any other port connection-refuses against the pod (and 8372 is the 127.0.0.1-only supervisor admin API that must never be exposed). Leave gascity.supervisorPort at 9443. See chart/gonk/smoke/gc-controller-smoke.md." (int .Values.gascity.supervisorPort)) -}}
+{{- end -}}
 {{- end -}}

@@ -631,7 +631,7 @@ rules:
   # falls back to Update on an AlreadyExists from Create), and Delete
   # (de-onboarding). No `patch`: the sink never calls Patch. This is asserted
   # against the source, not just this comment
-  # (internal/charttest/rbac_test.go, TestKeySinkRoleVerbsMatchK8sSink) --
+  # (internal/charttest/secrets_test.go, TestKeySinkRoleVerbsMatchK8sSink) --
   # a future keysink change that starts calling a new verb fails THAT test
   # until this Role is updated to match, instead of failing silently as a 403
   # on a real cluster.

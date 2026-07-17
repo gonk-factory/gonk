@@ -86,6 +86,18 @@ func TestGuardHTTPDispatchWithoutSupervisorURL(t *testing.T) {
 	}
 }
 
+// G21: the bundled controller's supervisor port is not operator-tunable -- gc
+// binds the per-city [api] on 0.0.0.0:9443 (hardcoded by the k8s-cell bootstrap
+// profile), and 8372 is the 127.0.0.1-only admin API that must never be exposed.
+// A Service on any other port silently connection-refuses, so the chart refuses.
+func TestGuardSupervisorPortMustBe9443(t *testing.T) {
+	mustFail(t, "hardcoded to 0.0.0.0:9443",
+		"--set", "gascity.supervisorPort=8372")
+	// And a bare non-9443 value, not just the loopback admin port, is rejected.
+	mustFail(t, "not tunable",
+		"--set", "gascity.supervisorPort=8080")
+}
+
 func TestLogDispatchIsAllowedWhenDeliberate(t *testing.T) {
 	Render(t, append(Minimum(),
 		"--set", "gascity.supervisorURL=",

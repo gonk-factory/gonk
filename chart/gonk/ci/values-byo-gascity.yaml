@@ -23,7 +23,10 @@ dolt:
 
 gascity:
   enabled: false
-  supervisorURL: http://gc.external.svc:8372
+  # The per-city [api] listener port (9443), NOT the machine-wide supervisor
+  # admin API (8372, which binds 127.0.0.1 only). A BYO supervisor must expose
+  # the 9443-equivalent dispatch endpoint. See chart/gonk/smoke/gc-controller-smoke.md.
+  supervisorURL: http://gc.external.svc:9443
 
 litellm:
   externalURL: http://litellm.litellm.svc:4000

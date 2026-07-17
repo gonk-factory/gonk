@@ -437,7 +437,7 @@ rules:
   # falls back to Update on an AlreadyExists from Create), and Delete
   # (de-onboarding). No `patch`: the sink never calls Patch. This is asserted
   # against the source, not just this comment
-  # (internal/charttest/rbac_test.go, TestKeySinkRoleVerbsMatchK8sSink) --
+  # (internal/charttest/secrets_test.go, TestKeySinkRoleVerbsMatchK8sSink) --
   # a future keysink change that starts calling a new verb fails THAT test
   # until this Role is updated to match, instead of failing silently as a 403
   # on a real cluster.
@@ -672,7 +672,7 @@ spec:
             # from the in-chart controller Service (gascity.enabled) or from
             # gascity.supervisorURL (BYO controller) -- see `gonk.supervisorURL`.
             - name: GONK_SUPERVISOR_URL
-              value: "http://gc.external.svc:8372"
+              value: "http://gc.external.svc:9443"
             # RECONCILED, Task 0: intake carries its OWN copy of the operator
             # ladder (main.go's loadConfig fails closed if this is unset/empty --
             # ADR-002). It MUST be the same ladder gonk-meter resolves rungs
