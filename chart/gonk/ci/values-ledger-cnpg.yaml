@@ -1,0 +1,45 @@
+# Task 8.5 toggle-matrix profile: dolt.enabled stays true (beads is unaffected
+# -- it is a completely separate component from the ledger), and
+# ledger.postgres.mode moves from the "shared"-tenancy default to "cnpg": the
+# chart renders its OWN postgresql.cnpg.io/v1 Cluster for the ledger, instead
+# of consuming an existing CNPG tenancy. RECONCILED, Task 0: this is not "the
+# Task 0b fallback" any more -- Postgres is the ONLY ledger backend, so this
+# profile is just "stand up your own CNPG Cluster" mode, and proof that beads
+# stays on Dolt regardless of which Postgres mode the ledger uses.
+intake:
+  image:
+    tag: v0.1.0
+  webhookPublicURL: https://gonk.example.test/hook/gitlab
+
+meter:
+  image:
+    tag: v0.1.0
+
+gascity:
+  image:
+    tag: v0.1.0
+
+dolt:
+  image:
+    tag: v1.43.0
+
+litellm:
+  externalURL: http://litellm.litellm.svc:4000
+
+ledger:
+  postgres:
+    mode: cnpg
+
+operatorConfig:
+  instance:
+    ladder: [qwen-local]
+  rungs:
+    - name: qwen-local
+      kind: local
+      model: stub-local
+      est_cost_usd: 0
+      est_tokens: 200K
+      synthetic_usd_per_1m_tokens: 0.20
+
+onboarding:
+  defaultRung: qwen-local

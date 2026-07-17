@@ -1,0 +1,44 @@
+# Task 8.5 toggle-matrix profile: the bundled Dolt (Gas City's BEADS store) is
+# disabled and replaced by an external Dolt SQL server (e.g. self-hosted
+# DoltLab). No gonk-dolt StatefulSet renders; the CONTROLLER (which is the only
+# thing that ever talks to the beads Dolt) points at the external host
+# instead. RECONCILED, Task 0: this has NO EFFECT on the ledger, which is
+# Postgres regardless of dolt.enabled -- meter never had a Dolt position.
+#
+# dolt.image.tag is deliberately OMITTED: it is only required when
+# dolt.enabled=true (G20/_guards.tpl), and values.schema.json's dolt.image
+# uses $defs.imageOptional, not $defs.image, for exactly this reason.
+intake:
+  image:
+    tag: v0.1.0
+  webhookPublicURL: https://gonk.example.test/hook/gitlab
+
+meter:
+  image:
+    tag: v0.1.0
+
+gascity:
+  image:
+    tag: v0.1.0
+
+dolt:
+  enabled: false
+  external:
+    host: dolt.databases.svc
+
+litellm:
+  externalURL: http://litellm.litellm.svc:4000
+
+operatorConfig:
+  instance:
+    ladder: [qwen-local]
+  rungs:
+    - name: qwen-local
+      kind: local
+      model: stub-local
+      est_cost_usd: 0
+      est_tokens: 200K
+      synthetic_usd_per_1m_tokens: 0.20
+
+onboarding:
+  defaultRung: qwen-local
