@@ -251,3 +251,121 @@ exec gc supervisor run     # do NOT use `gc register` — it daemonizes a second
    `strategy: Recreate`; container command runs `gc supervisor run` as PID 1 and
    never `gc register`; `HOME=/home/gonk` on a writable volume; do not pre-create
    the beads DB; do not expose 8372.
+
+---
+
+## gonk-fsl fix (re-smoke, local)
+
+**Status:** the Plan 04 image-completeness gap (U2 concern above) is **FIXED and
+proven locally**. `gc init` no longer fails on missing runtime binaries, the
+supervisor reaches ready, and the beads store is created in Dolt end-to-end.
+
+- **Run date:** 2026-07-17
+- **Branch / image:** `fix-gonk-fsl-controller-image`, rebuilt with `make
+  controller-image` →
+  `registry.orac.local/agentic/gonk-project/gonk-controller:v0.1.0-171760c58f0f`
+  (podman `--network=host`; **rebuilt**, not copied into — user rule).
+- **Where measured:** locally in `podman --network=host` only — the SAME setup
+  that reproduced the U2 failure. The in-cluster re-run (cross-pod 9443, the U3
+  Dolt-advisory-lock-across-restart branch) is still owned by the cluster phase.
+- **Throwaway Dolt:** `docker.io/dolthub/dolt-sql-server:2.1.7` (matched to the
+  pinned dolt CLI), run with the image's own entrypoint defaults
+  (`0.0.0.0:3306`, `root`, empty password, no TLS). NOTE: the smoke's
+  `dolt-sql-server:v1.43.0` tag no longer exists on Docker Hub; `2.1.7` is the
+  current tag matching our `DOLT_VERSION` pin. Torn down at the end (none linger).
+
+### What was added to the image (all pinned + checksum-verified in `images/versions.env` / `images/Dockerfile.controller`)
+
+Source of every version/step: gascity's own build chain at `GASCITY_REF`
+(`contrib/k8s/Dockerfile.base` apt list + `deps.env` +
+`.github/scripts/install-dolt-archive.sh`), PORTED into our runtime stage (we
+build `gc` from source, we do not `FROM gc-agent`).
+
+| Dep | Version | Source | Where it came from (upstream) |
+|---|---|---|---|
+| `dolt` (CLI) | **2.1.7** | fetch stage, sha256 `15983e81…477e28e7` (linux-amd64) | `deps.env DOLT_VERSION=2.1.7`; sha hard-coded in `install-dolt-archive.sh` (re-verified by download) |
+| `bd` (beads) | **1.0.3 → 1.1.0** | fetch stage, sha256 `b0f3dd60…d491a34` | `deps.env BD_VERSION=v1.1.0` (min-supported is `v1.0.4`; `gc init` refused 1.0.3) |
+| `jq` | apt (trixie) | runtime `apt-get` | `Dockerfile.base` apt list |
+| `lsof` | apt (trixie) | runtime `apt-get` | `Dockerfile.base` ("runtime hard dep (gc doctor)") |
+| `procps` (pgrep) | apt (trixie) | runtime `apt-get` | `Dockerfile.base` apt list |
+| `tmux` | apt (trixie) | runtime `apt-get` | `Dockerfile.base` apt list |
+| `util-linux` (flock) | apt (trixie) | runtime `apt-get` | `Dockerfile.base` ("flock(1) for the bd/Dolt beads lock — runtime hard dep") |
+| `tini` | apt (trixie) | runtime `apt-get`; `ENTRYPOINT ["/usr/bin/tini","--"]` | `Dockerfile.base` apt + `Dockerfile.controller` ENTRYPOINT (gc doesn't reap SIGCHLD) |
+
+**`gc-beads-bd` was NOT shipped separately — and does not need to be.** The
+exec:beads provider script `gc-beads-bd.sh` is **embedded in the `gc` binary** and
+materialized into the city at init (`.gc/system/packs/bd/assets/scripts/…`). Proof:
+the U2 BEFORE error strings ("gc-beads-bd: setting git config --global beads.role
+maintainer", "managed Dolt server unreachable … refusing to force-reinitialize
+(data-safety)") are verbatim lines **from that script** (gascity
+`examples/bd/assets/scripts/gc-beads-bd.sh`), which means the OLD image already ran
+the script — it just could not reach Dolt because the `dolt` CLI and friends the
+script shells out to were absent. The fix is those binaries, not the script.
+`kubectl` / `gc-beads-k8s` / `gc-events-k8s` were **NOT** added: the `k8s-cell`
+bootstrap profile only sets `[api]` (verified in gascity `cmd/gc/cmd_init.go`
+`applyBootstrapProfile`); it does not wire the exec k8s providers, and the session
+provider is native (`GC_SESSION=k8s`, compiled in). See "still needs in-cluster"
+below.
+
+### Proof — BEFORE vs AFTER (`gc init`, local, in-container)
+
+- **BEFORE** (U2, old image): `gc-fatal: init: beads lifecycle: init city beads:
+  exec beads init: gc-beads-bd: … managed Dolt server unreachable while inspecting
+  existing store 'bd_gonk'; refusing to force-reinitialize (data-safety).`
+- **AFTER** (this image): `gc init … --no-start /city` → **exit 0**, prints
+  `Welcome to Gas City!` / `Preserved existing pack.toml.`; `pack.toml` stays
+  `name = "gonk"`; `city.toml` has the `[api] port=9443 bind="0.0.0.0"
+  allow_mutations=true` block and a `[dolt] host="127.0.0.1" port=3306`.
+
+### Proof — supervisor + beads store creation (the U2 gate)
+
+Ran the U2 container command (`cp` pack → `gc init` → write `~/.gc/cities.toml` →
+`exec gc supervisor run`):
+
+- **Supervisor reaches ready.** `GET http://127.0.0.1:8372/health` →
+  `{"status":"ok","version":"1.1.1",…,"cities_running":1,"startup":{"ready":true,
+  "phase":"running","phases_completed":["loading_config","starting_bead_store",
+  "resolving_formulas","adopting_sessions","starting_agents"]}}`. The previously
+  unreachable `starting_bead_store` phase now **completes** (took ~5.7s).
+- **The beads store is CREATED in Dolt.** `SHOW DATABASES` on the throwaway Dolt
+  now lists **`bd_gonk`** (absent before init), and `SHOW TABLES FROM bd_gonk`
+  returns the full beads schema (`issues`, `dependencies`, `events`, `comments`,
+  `labels`, `issue_counter`, …). This is the exact `gc-beads-bd` → `dolt` path
+  that failed in U2, now working end-to-end.
+
+### Observed bind ports (corrects U1 for supervisor mode)
+
+- **8372 — binds, loopback only.** `ss -ltnp`: `LISTEN 127.0.0.1:8372
+  users:(("gc",…))`. Same as U1.
+- **9443 — does NOT bind under `gc supervisor run`.** New, measured finding: the
+  supervisor log says verbatim **`city 'gonk' has [api] port=9443 which is ignored
+  under supervisor mode`**. So the city `[api]` (9443) is *config* consumed by
+  `gc start`, but `gc supervisor run` multiplexes through 8372 and does **not**
+  open a 9443 socket in this topology. U1's "point the Service/probe at 9443"
+  recommendation must be re-decided against this: either the chart runs the city
+  via `gc start` (which does open 9443) rather than bare `gc supervisor run`, or
+  the front door is fronted differently. **This is a chart/topology question the
+  in-cluster re-run must settle — flagged, not resolved here.**
+
+### `.gc-start` sentinel
+
+- **Did not fire — and is not part of the `gc supervisor run` path.** `.gc-start`
+  is the deploy handshake in gascity's *own* `Dockerfile.controller` CMD, which
+  waits for `/city/.gc-start` and then `exec gc start --foreground`. gonk runs
+  `gc supervisor run` (per U3's PID-1 finding), which starts the city directly and
+  reaches `ready` with no `.gc-start` file (none appears in `/city`). If the chart
+  moves to a `gc start`-based front door to get the 9443 socket (see above), the
+  sentinel handshake comes back into scope; under supervisor mode it does not.
+
+### What STILL needs the in-cluster re-run
+
+1. **9443 cross-pod reachability** — decide `gc start` (opens 9443) vs `gc
+   supervisor run` (ignores 9443), then socket-confirm 9443 on the pod IP from a
+   second pod / the Service. Not answerable locally under supervisor mode.
+2. **U3 Dolt advisory-lock across a pod restart** — still unreached: init now
+   succeeds, so this path is finally *reachable*, but exercising two controllers
+   contending for the Dolt lock across a `Recreate` rollout needs the cluster.
+3. **Session/events RBAC footprint** — the k8s session provider (and any
+   `gc-events-k8s`/`kubectl` need) only exercises once a session is actually
+   spawned in-cluster; re-verify the Role and whether `kubectl`/`gc-events-k8s`
+   must be added at that point.

@@ -67,7 +67,7 @@ ARG BD_VERSION
 RUN test -n "${BD_VERSION}" || (echo "BD_VERSION is unset" && exit 1)
 RUN curl -fsSL -o bd.tar.gz \
       "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
-    && echo "1ef5dca818d7e81574df9e9f9fc2a16ab711da09b0fa7b822ae162d9a81c8912  bd.tar.gz" | sha256sum -c - \
+    && echo "b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34  bd.tar.gz" | sha256sum -c - \
     && tar xzf bd.tar.gz bd \
     && chmod +x bd
 
