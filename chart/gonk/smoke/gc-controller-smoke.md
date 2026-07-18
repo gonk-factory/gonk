@@ -560,3 +560,130 @@ gonk-controller** — it is the only mode that binds the city `[api]` order-run 
 and needs no host allowlist. The two gonk-side blockers (client `X-GC-Request`
 header — now clearly required alongside the grant; and the `trigger="manual"` →
 must be `"webhook"`, bead gonk-vsy) still stand and are unchanged by this.
+
+---
+
+## In-cluster re-smoke (fixed image + auth) — the FINAL cross-pod run
+
+**Status: DONE_WITH_CONCERNS.** The three things local podman testing could *not*
+prove — cross-pod reachability, the city-name mechanism, and the
+Dolt-lock-across-restart path — are now **proven on the real orac cluster**
+(cluster `admin@orac`, throwaway ns `gonk-fsl-smoke-<epoch>`, torn down; teardown
+confirmed `kubectl get ns | grep fsl-smoke` empty). **But getting the chart's REAL
+controller objects to boot in-cluster required TWO runtime-only workarounds, each of
+which is a genuine chart defect that blocks a from-scratch in-cluster deploy** (see
+"Two chart blockers" below). The chart templates were **not** modified (findings-doc
+scope); the workarounds were applied to the LIVE Deployment / to a throwaway Dolt.
+
+- **Run date:** 2026-07-18
+- **Image under test:** `registry.orac.local/agentic/gonk-project/gonk-controller:v0.1.0-470ca24be25a`
+  (the pushed fixed image; **not** rebuilt). Init container + main container + the
+  signer/debug pods all ran this exact image.
+- **What was deployed:** the chart's REAL controller objects, rendered from
+  `chart/gonk` via `helm template ... --show-only` (validating bead gonk-5we's actual
+  output, not a hand copy) — `serviceaccount/role/rolebinding-gc-controller`,
+  `serviceaccount/role/rolebinding-gc-agent`, `service-gonk-controller`,
+  `workload-gonk-controller` (the Deployment) — plus a throwaway Dolt
+  (`dolthub/dolt-sql-server:2.1.7`, headless Service `gonk-dolt`), the
+  `gonk-gc-write-key` Secret (ed25519 PEM private key), and the
+  `gitlab-registry-pull-creds` pull secret. Values: `Minimum()`-style + image tag
+  `v0.1.0-470ca24be25a`, `gascity.writeAuth.verifyKey=k1:<std-b64 pub>`. The chart
+  render PASSED all guards (incl. G22) unmodified.
+
+### 1. Boot + city name — **city IS named `gonk` (the one unverified item: CONFIRMED)**
+
+The bootstrap initContainer log settles it: `gc init ... --name gonk` printed
+**`Initialized city "gonk"`** — the fallback (`[workspace] name="gonk"`) was NOT
+needed. The served route `/v0/city/gonk/order/gonk-dispatch/run` resolved (no
+404 city-not-found), corroborating the name end-to-end.
+
+Once the two blockers below were worked around, the controller reached **Ready 1/1**
+(readiness is a TCP probe on 9443, so Ready ⇒ the `0.0.0.0:9443` `[api]` listener is
+bound and answering cross-pod), `gc start: startup ready elapsed=~0.6s`, and (from
+the identical-image foreground run) `API server listening on http://0.0.0.0:9443` /
+`posture: grant-gated — every mutation requires a signed X-GC-City-Write grant`. The
+beads store **`bd_gonk` was created in Dolt with the full schema (29 tables:
+`issues`, `dependencies`, `events`, `comments`, `labels`, `issue_counter`, …).**
+Confirmed `8372` is **refused cross-pod** (loopback-only, per U1).
+
+### 2. Cross-pod authenticated dispatch — **PASS** (auth enforced, order reached)
+
+From a **separate** pod in the ns, a faithful spec-§7 client (bash + `openssl`
+ed25519 raw-sign + `/dev/tcp`; `aud=gc-city-write.v2`, `cid=""`, fresh `jti`, TTL 60s,
+`req=hex(sha256(POST"\n"path"\n"hex(sha256(body))))`) POSTed to
+`http://gonk-controller.<ns>.svc:9443/v0/city/gonk/order/gonk-dispatch/run` with
+`X-GC-Request: true` + `X-GC-City-Write: <grant>` and body `{"vars":{"issue_iid":"1"}}`:
+
+| Case | Result | Proves |
+|---|---|---|
+| **Valid grant** | **HTTP 422** `webhook-rejected … missing required param(s): bead_anchor, bead_id, project, project_id, rig, session_key, trigger` | **Auth PASSED** + cross-pod reachable + **city `gonk` resolved** + order resolved (the ORDER HANDLER's own param check — reached only after write-auth). The baked order is now `trigger="webhook"` (gonk-vsy fix is in this image). |
+| No `X-GC-City-Write` | **HTTP 401** `missing X-GC-City-Write grant` | CSRF present but grant absent ⇒ 401 (enforcement on) |
+| Garbage grant | **HTTP 403** `write grant rejected` | signature/verify enforced |
+| Tampered body (req-digest mismatch) | **HTTP 403** `write grant rejected` | the `req` request-binding works |
+| Replay (reuse same jti) | 1st **422**, 2nd **403** `write grant rejected` | single-use jti enforced |
+
+Every code matches the write-auth spec §6 failure-mode table exactly. Auth remained
+enforced after the pod restart below (post-restart valid POST → 422).
+
+### 3. U3 — Dolt-lock across restart — **CLEAN** (the path unreachable before the fix)
+
+`kubectl delete pod` the controller (Deployment `strategy: Recreate`): replacement
+**Ready in ~15 s, RESTARTS=0**, clean `API server listening on http://0.0.0.0:9443`
+/ `startup ready elapsed=0.6s`. **No crash-loop, NO "Dolt advisory-lock" wedge, NO
+"managed Dolt server unreachable", NO force-reinit.** The new pod's beads-init found
+the pre-existing `bd_gonk` **reachable** and attached cleanly; `bd_gonk` stayed intact
+(29 tables) and authenticated dispatch worked immediately after. This is the exact
+Dolt-lock-across-restart branch that was unreachable in every prior smoke (init failed
+upstream of it), now exercised and clean.
+
+### Two chart blockers found in the REAL committed output (NEED A FIX — follow-up)
+
+The chart's real controller objects, deployed unmodified against a from-scratch
+in-cluster Dolt, **crash-loop and never boot** for two independent reasons. Each was
+worked around at runtime (chart templates untouched); both must be fixed in the chart.
+
+- **BLOCKER A — `cities.toml` registration is incompatible with `gc start
+  --foreground`.** `workload-gonk-controller.yaml`'s bootstrap initContainer writes
+  `printf '[[cities]]…' > $HOME/.gc/cities.toml` (a leftover from the abandoned
+  `gc supervisor run` topology). The main container then runs `gc start --foreground
+  /city`, which **refuses a registered city**: `gc start: city is registered with the
+  supervisor; run "gc unregister /city" before using --foreground` → CrashLoopBackOff.
+  Foreground mode needs the city **unregistered**. Fix: drop the `cities.toml` write
+  from the initContainer (foreground `gc start` takes the city dir as an arg and needs
+  no registration), or prefix the container command with `gc unregister /city || true`.
+  *Workaround used:* patched the live Deployment's container command to
+  `gc unregister /city >/dev/null 2>&1 || true; exec gc start --foreground /city`.
+
+- **BLOCKER B — the bundled Dolt rejects the controller's cross-pod `root` login.**
+  Dolt's default superuser is **`root@localhost`**. `statefulset-gonk-dolt.yaml` runs
+  `dolt sql-server --host=0.0.0.0 --no-tls` with **no `DOLT_ROOT_HOST`**, so a *remote*
+  pod (the controller) connecting as `root` gets **`Error 1045 (28000): Access denied
+  for user 'root'`**. `gc start` beads-init then reports **`managed Dolt server
+  unreachable while inspecting existing store 'bd_gonk'; refusing to
+  force-reinitialize (data-safety)`** and crash-loops. **This was INVISIBLE in every
+  local smoke** because Dolt ran on `127.0.0.1` (`--network=host`), where `root@localhost`
+  works — it only appears cross-pod. Note `bd dolt test` still says "Connection
+  successful" (it pings TCP), which masks the auth failure. Fix: the bundled Dolt must
+  expose a remotely-usable superuser — run the dolthub image's **entrypoint** with
+  `DOLT_ROOT_HOST=%` (+ ideally `DOLT_ROOT_PASSWORD`), or provision a `root@%` /
+  dedicated grant. Caveat: the chart currently drives the server via explicit
+  `sql-server …` args, which **bypass** the image entrypoint's `DOLT_ROOT_HOST`
+  bootstrap — so the fix likely means using the entrypoint (not raw args) and/or an
+  init SQL that creates the remote user. *Workaround used:* deployed the throwaway Dolt
+  with `DOLT_ROOT_HOST=%` (image default entrypoint), after which the controller booted
+  and created `bd_gonk` end-to-end.
+
+Benign, expected (controller-only smoke; meter/agents not deployed): `tmux server
+unreachable` (no agent sessions to adopt), `GONK_METER_TOKEN_FILE unset` /
+`GONK_CITY is unset` from the in-pod `gonk-sweep` warmup order. None gate the boot.
+
+### Still needs follow-up
+
+1. **File + fix BLOCKER A and BLOCKER B** — both are hard blockers to a real
+   in-cluster deploy (the chart as committed does not boot from scratch). Recommend a
+   bead each against `workload-gonk-controller.yaml` (drop cities.toml / add
+   unregister) and `statefulset-gonk-dolt.yaml` (remote-usable Dolt superuser).
+2. Everything else the fixed image + gonk-5we wiring promised is **proven in-cluster**:
+   city named `gonk`, cross-pod ed25519 grant-gated dispatch (with all negative
+   controls), and clean Dolt-lock-across-restart. No further in-cluster unknowns remain
+   for the controller itself.
