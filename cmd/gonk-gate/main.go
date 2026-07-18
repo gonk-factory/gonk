@@ -143,6 +143,19 @@ type gateConfig struct {
 	City          string // GONK_CITY (OD-1: no default)
 	SupervisorURL string // GONK_SUPERVISOR_URL
 
+	// Write-auth for the grant-gated order-run route. dispatch/sweep both POST
+	// order runs (gonk-dispatch, re-slings), so both need a signer when the
+	// controller is grant-gated. The KEY IS A FILE MOUNT, never an env value,
+	// never logged (the same house rule as every other secret). Absent a key
+	// file, no grant is sent and a grant-gated controller rejects the pour --
+	// a deploy responsibility. signer is built once in loadGateConfig so a bad
+	// key file fails loudly as a misconfiguration (exit 2) rather than at pour
+	// time.
+	WriteKeyFile string // GONK_GC_WRITE_KEY_FILE (PEM PKCS#8 ed25519 private key mount)
+	WriteKeyID   string // GONK_GC_WRITE_KEY_ID   (kid)
+	WriteCID     string // GONK_GC_WRITE_CID      (optional tenancy cid)
+	signer       *gcapi.Signer
+
 	MeterURL       string
 	MeterTokenFile string
 
@@ -164,6 +177,9 @@ func loadGateConfig() (gateConfig, error) {
 	cfg := gateConfig{
 		City:            os.Getenv("GONK_CITY"),
 		SupervisorURL:   os.Getenv("GONK_SUPERVISOR_URL"),
+		WriteKeyFile:    os.Getenv("GONK_GC_WRITE_KEY_FILE"),
+		WriteKeyID:      os.Getenv("GONK_GC_WRITE_KEY_ID"),
+		WriteCID:        os.Getenv("GONK_GC_WRITE_CID"),
 		MeterURL:        os.Getenv("GONK_METER_URL"),
 		MeterTokenFile:  os.Getenv("GONK_METER_TOKEN_FILE"),
 		GitLabURL:       os.Getenv("GONK_GITLAB_URL"),
@@ -183,6 +199,20 @@ func loadGateConfig() (gateConfig, error) {
 	if cfg.MeterTokenFile == "" {
 		return gateConfig{}, fmt.Errorf("GONK_METER_TOKEN_FILE is unset")
 	}
+	// Build the write-auth signer once, here, so an unreadable/invalid key file
+	// is a loud misconfiguration (exit 2) rather than a per-pour surprise. An
+	// unset key file leaves signer nil -- no grant, the loopback default.
+	if cfg.WriteKeyFile != "" {
+		var opts []gcapi.SignerOption
+		if cfg.WriteCID != "" {
+			opts = append(opts, gcapi.WithCID(cfg.WriteCID))
+		}
+		s, err := gcapi.LoadSigner(cfg.WriteKeyFile, cfg.WriteKeyID, opts...)
+		if err != nil {
+			return gateConfig{}, fmt.Errorf("load write-auth signer: %w", err)
+		}
+		cfg.signer = s
+	}
 	return cfg, nil
 }
 
@@ -198,7 +228,11 @@ func (c gateConfig) meter() *meterAPI {
 }
 
 func (c gateConfig) gc() *gcapi.Client {
-	return gcapi.New(c.SupervisorURL, c.City)
+	client := gcapi.New(c.SupervisorURL, c.City)
+	// nil when no key file was configured -- gcapi then sends no grant, the
+	// unchanged loopback path. When set, every RunOrder POST is grant-signed.
+	client.Signer = c.signer
+	return client
 }
 
 func (c gateConfig) gl() *glab.Client {

@@ -24,6 +24,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi"
 	"gitlab.orac.local/agentic/gonk-project/pkg/ghook"
 	"gitlab.orac.local/agentic/gonk-project/pkg/glab"
 	"gitlab.orac.local/agentic/gonk-project/pkg/intake"
@@ -64,6 +65,17 @@ type Config struct {
 	MeterURL              string // GONK_METER_URL
 	MeterTokenFile        string // GONK_METER_TOKEN_FILE (bearer we PRESENT; meter verifies both slots)
 	SupervisorURL         string // GONK_SUPERVISOR_URL ("" -> LogDispatcher; else HTTPDispatcher -> gonk-dispatch order API, Plan 04 Task 2)
+
+	// Write-auth (the grant-gated order-run route). The order-run POST carries a
+	// fresh ed25519 X-GC-City-Write grant when a key is configured; the KEY IS A
+	// FILE MOUNT, never an env value, never logged (same house rule as every
+	// other secret above). Absent a key file, HTTPDispatcher sends no grant (a
+	// grant-gated controller rejects it -- a deploy responsibility). The kid must
+	// match the server's write_auth_verify_key entry; the cid is set only when
+	// the controller is tenancy-scoped.
+	WriteKeyFile string // GONK_GC_WRITE_KEY_FILE (PEM PKCS#8 ed25519 private key mount)
+	WriteKeyID   string // GONK_GC_WRITE_KEY_ID   (kid)
+	WriteCID     string // GONK_GC_WRITE_CID      (optional tenancy cid)
 
 	// InstanceLadder is the operator ladder seeded into onboarding templates
 	// (OD-B; the chart sets it from the same operator config meter resolves
@@ -255,8 +267,22 @@ func newService(ctx context.Context, cfg Config, log *slog.Logger) (*service, er
 	var dispatcher intake.Dispatcher = intake.NewLogDispatcher(log)
 	if cfg.SupervisorURL != "" {
 		// OD-A is resolved (Plan 04, Task 2): POST /v0/city/{cityName}/order/gonk-dispatch/run,
-		// body {"vars":{...}}, no per-route auth.
-		dispatcher = intake.NewHTTPDispatcher(cfg.SupervisorURL, nil)
+		// body {"vars":{...}}. The route is grant-gated: build a Signer from the
+		// file-mounted write-auth key so every order-run POST carries a fresh
+		// ed25519 grant. No key file -> no signer (unsigned; a grant-gated
+		// controller rejects it, which is the deploy's responsibility).
+		var signer *gcapi.Signer
+		if cfg.WriteKeyFile != "" {
+			var opts []gcapi.SignerOption
+			if cfg.WriteCID != "" {
+				opts = append(opts, gcapi.WithCID(cfg.WriteCID))
+			}
+			signer, err = gcapi.LoadSigner(cfg.WriteKeyFile, cfg.WriteKeyID, opts...)
+			if err != nil {
+				return nil, fmt.Errorf("load write-auth signer: %w", err)
+			}
+		}
+		dispatcher = intake.NewHTTPDispatcher(cfg.SupervisorURL, signer, nil)
 	}
 
 	meterToken, err := readSecretFile(cfg.MeterTokenFile)
@@ -355,6 +381,9 @@ func loadConfig() (Config, error) {
 		MeterURL:              os.Getenv("GONK_METER_URL"),
 		MeterTokenFile:        os.Getenv("GONK_METER_TOKEN_FILE"),
 		SupervisorURL:         os.Getenv("GONK_SUPERVISOR_URL"),
+		WriteKeyFile:          os.Getenv("GONK_GC_WRITE_KEY_FILE"),
+		WriteKeyID:            os.Getenv("GONK_GC_WRITE_KEY_ID"),
+		WriteCID:              os.Getenv("GONK_GC_WRITE_CID"),
 		ListenAddr:            os.Getenv("GONK_LISTEN_ADDR"),
 		PrivateAddr:           os.Getenv("GONK_PRIVATE_ADDR"),
 		Version:               os.Getenv("GONK_VERSION"),
