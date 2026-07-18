@@ -369,3 +369,91 @@ Ran the U2 container command (`cp` pack → `gc init` → write `~/.gc/cities.to
    `gc-events-k8s`/`kubectl` need) only exercises once a session is actually
    spawned in-cluster; re-verify the Role and whether `kubectl`/`gc-events-k8s`
    must be added at that point.
+
+### Dispatch endpoint (local) — where `/v0/city/<city>/order/<name>/run` actually lives
+
+Follow-up to the 9443 finding above, resolved locally with the fixed image + a
+local Dolt (`--network=host`, torn down after). gonk's dispatch client
+(`pkg/gcapi/client.go:114`) POSTs `/v0/city/<city>/order/<name>/run`; the chart
+needs that reachable **cross-pod**. Findings, all measured:
+
+**1. The route is served by the machine-wide *supervisor* unified API, not a
+per-city 9443 server.** `gc start` and `gc supervisor run` are the SAME server:
+`gc start --help` says it "registers the city with the machine-wide supervisor,
+ensures the supervisor is running"; `gc supervisor --help` says the supervisor
+"host[s] a unified API server" with "city-namespaced routing" (`/v0/city/{name}/…`).
+There is **no separate `gc serve`/`gc api`/`gc daemon`** (full `gc` command list
+checked). The city `[api]` block (9443) is **ignored under supervisor mode**
+(logged verbatim: `city 'gonk' has [api] port=9443 which is ignored under
+supervisor mode`) — so `gascity.supervisorPort=9443` in Task 6.5 was pointing at
+a port that, under `gc supervisor run`, **nothing listens on**.
+
+**2. Default bind is loopback (`127.0.0.1:8372`) — not cross-pod reachable.**
+Curl evidence against the default-config supervisor (city ready, `--network=host`):
+
+| Request | `:8372` (loopback) | `:9443` |
+|---|---|---|
+| `POST …/order/gonk-dispatch/run` (no CSRF header) | **403** `csrf: X-GC-Request header required on mutation endpoints` (route EXISTS) | conn refused (nothing listening) |
+| `GET /v0/definitely/not/a/route` | **404** `page not found` (proves 403 above = real route, not catch-all) | — |
+| `POST …/order/gonk-dispatch/run` **with** `X-GC-Request: 1` | **422** `order "gonk-dispatch" has trigger "manual"; the run endpoint fires only trigger="webhook" orders` | — |
+| `POST …/order/gonk-NOPE/run` **with** header | **404** `order not found` (route resolves the name) | — |
+
+**3. The unified API CAN bind `0.0.0.0` via config — `~/.gc/supervisor.toml`, not
+env.** (Env was already ruled out in U1.) The `[supervisor]` section
+(`internal/supervisor/config.go`) takes `bind`, `port`, `allow_mutations`,
+`allowed_hosts`, and write-auth keys. This config bound it cross-interface and the
+order-run route answered on the box's **LAN IP `192.168.3.33:9443`** (not
+loopback), `/health` → 200:
+```toml
+[supervisor]
+  bind = "0.0.0.0"
+  port = 9443                       # the SUPERVISOR port; the city [api] 9443 stays ignored
+  allow_mutations = true            # without this a non-loopback bind is READ-ONLY (mutations 403)
+  write_auth_allow_unverified = true # OR set write_auth_verify_key; else non-loopback+mutations FAILS CLOSED at boot (gate G10)
+  allowed_hosts = ["<service-dns>", "<pod-host>"]  # non-loopback bind rejects other Host headers with 421 host_not_allowed
+```
+`ss` confirmed `LISTEN *:9443 users:(("gc",…))`. Three gates stack on a
+non-loopback bind, each measured: (a) **read-only unless `allow_mutations`**;
+(b) **`allowed_hosts`** must list the exact Host names the client uses — port is
+stripped, **no wildcard** (`isAllowedSupervisorHost`), loopback is always allowed;
+(c) **write-auth**: `allow_mutations` + non-loopback + no verify key is a
+fail-closed boot error unless `write_auth_allow_unverified` acks it, and the
+supervisor then prints `the READ plane is UNAUTHENTICATED … mutations are gated
+ONLY by the network front`.
+
+**4. Net — what the chart's controller `command` / Service / probes / `gonk.supervisorURL`
+must target:** run `gc supervisor run` with a mounted `~/.gc/supervisor.toml` that
+sets `[supervisor] bind="0.0.0.0"`, an explicit `port`, `allow_mutations=true`, a
+write-auth posture, and `allowed_hosts` = the Service DNS name(s). Point the
+Service/`httpGet` probes/`gonk.supervisorURL` at **that `[supervisor].port`** (the
+unified API), NOT at the city `[api]` 9443. `8372` stays an internal default; do
+not rely on it cross-pod.
+
+**Chart-wiring implication for Task 6.5 (this DOES change the current design):**
+- The `values.yaml` note "`gascity.supervisorPort` = 9443 (the city `[api]`)" is
+  **wrong for supervisor mode** — 9443-as-city-`[api]` never binds. The Service
+  must target the **supervisor** port from `supervisor.toml`. Rename/repoint the
+  value accordingly (e.g. keep `9443` but source it from `[supervisor].port`).
+- The controller container needs a **`supervisor.toml`** (ConfigMap/inline) with
+  the block above; `gc supervisor run` alone (no config) binds loopback and the
+  dispatch API is unreachable from `gonk-intake`.
+- **Security:** an `0.0.0.0` + `allow_mutations` order-run plane with no write-auth
+  key is an **unauthenticated mutation endpoint**. Task 6.5 must gate it — a
+  `NetworkPolicy` admitting only `gonk-intake` (and `gonk-sweep`'s pod), and/or set
+  `write_auth_verify_key` and have `gonk-intake` sign requests. Do not ship the
+  `write_auth_allow_unverified` shortcut without a NetworkPolicy in front.
+
+**Two gonk-side dispatch blockers this exposed (NOT image-fix / gonk-fsl scope —
+design findings for the dispatch/pack owner, filed here with evidence):**
+- **CSRF header missing in gonk's client.** `pkg/gcapi/client.go:126-127` sets only
+  `Content-Type` and `User-Agent`; the supervisor mutation endpoint requires
+  `X-GC-Request` (403 without it, measured). gonk's `RunOrder` must set that header
+  or every dispatch POST is rejected before it reaches the order.
+- **Order trigger mismatch.** `pack/orders/gonk-dispatch.toml` declares
+  `trigger = "manual"` (comment: "fired by gonk-intake … via POST …/run"), but the
+  run endpoint at `GASCITY_REF` fires **only `trigger = "webhook"`** orders
+  (measured: 422 `webhook-rejected`). As written, `gonk-intake` → `gonk-dispatch`
+  cannot fire this order via the run endpoint. The gonk orders that are meant to be
+  POST-fired need `trigger = "webhook"`, or dispatch needs a different mechanism.
+  Both must be resolved for end-to-end dispatch, independent of the image and of
+  the bind wiring above.
