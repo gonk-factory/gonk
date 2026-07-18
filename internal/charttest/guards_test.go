@@ -98,6 +98,30 @@ func TestGuardSupervisorPortMustBe9443(t *testing.T) {
 		"--set", "gascity.supervisorPort=8080")
 }
 
+// G22: the bundled controller (`gc start --foreground`) is an 0.0.0.0/allow_mutations
+// any-host [api] plane -- unauthenticated unless write-auth is on, and the
+// NetworkPolicy that would restrict it is NOT enforced on this cluster. So BOTH the
+// public verify key AND the private signing-key Secret are required when bundled;
+// there is deliberately no allowUnauthenticated escape hatch.
+func TestGuardBundledControllerNeedsWriteAuth(t *testing.T) {
+	// Missing the public verify key -> fail closed (unauthenticated mutation plane).
+	mustFail(t, "UNAUTHENTICATED mutation plane",
+		"--set", "gascity.writeAuth.verifyKey=")
+	// Missing the private signing-key Secret -> fail closed (nothing can dispatch).
+	mustFail(t, "grant-gated controller rejects every dispatch",
+		"--set", "secrets.gcWriteKey.existingSecret=")
+}
+
+// A BYO controller (gascity.enabled=false) is the operator's own auth concern, so
+// G22 does NOT fire and no write-auth key is required from this chart.
+func TestBYOControllerNeedsNoWriteAuthKey(t *testing.T) {
+	Render(t, append(Minimum(),
+		"--set", "gascity.enabled=false",
+		"--set", "gascity.supervisorURL=http://gc.external.svc:9443",
+		"--set", "gascity.writeAuth.verifyKey=",
+		"--set", "secrets.gcWriteKey.existingSecret=")...)
+}
+
 func TestLogDispatchIsAllowedWhenDeliberate(t *testing.T) {
 	Render(t, append(Minimum(),
 		"--set", "gascity.supervisorURL=",

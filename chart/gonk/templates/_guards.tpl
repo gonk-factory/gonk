@@ -139,4 +139,23 @@
 {{- if and .Values.gascity.enabled (ne (int .Values.gascity.supervisorPort) 9443) -}}
   {{- fail (printf "gascity.supervisorPort is %d but the bundled Gas City controller's per-city [api] listener is hardcoded to 0.0.0.0:9443 by `gc init --bootstrap-profile k8s-cell` -- it is not tunable. A Service on any other port connection-refuses against the pod (and 8372 is the 127.0.0.1-only supervisor admin API that must never be exposed). Leave gascity.supervisorPort at 9443. See chart/gonk/smoke/gc-controller-smoke.md." (int .Values.gascity.supervisorPort)) -}}
 {{- end -}}
+
+{{- /* G22: the bundled controller runs `gc start --foreground` -- a per-city [api]
+       plane bound 0.0.0.0 with allow_mutations=true and any-host (no allowed_hosts).
+       That is an UNAUTHENTICATED mutation endpoint unless write-auth is on, and the
+       NetworkPolicy that would restrict it is NOT ENFORCED on this cluster (Flannel;
+       Cilium suspended). So both halves of ed25519 grant-gating are REQUIRED when
+       the controller is bundled: the PUBLIC verify key (the controller checks
+       grants) AND the PRIVATE signing key Secret (intake + the in-pod gonk-gate mint
+       grants). Missing either => any pod that can route to gonk-controller:9443 could
+       POST an order and trigger budgeted work. There is deliberately no
+       allowUnauthenticated escape hatch. Re-smoke proof: chart/gonk/smoke/gc-controller-smoke.md. */ -}}
+{{- if .Values.gascity.enabled -}}
+  {{- if not .Values.gascity.writeAuth.verifyKey -}}
+    {{- fail "gascity.enabled is true but gascity.writeAuth.verifyKey is empty. The bundled controller runs `gc start --foreground` with allow_mutations=true on an 0.0.0.0 any-host [api] listener -- with no verify key that is an UNAUTHENTICATED mutation plane, and any pod that can reach gonk-controller:9443 could POST an order and trigger budgeted work (the NetworkPolicy that would block it is NOT ENFORCED on this cluster). Set gascity.writeAuth.verifyKey to the ed25519 PUBLIC key (\"kid:base64\", standard-base64 raw-32 pubkey) whose PRIVATE half intake+gate sign with. There is deliberately no allowUnauthenticated escape hatch. See chart/gonk/smoke/gc-controller-smoke.md." -}}
+  {{- end -}}
+  {{- if not .Values.secrets.gcWriteKey.existingSecret -}}
+    {{- fail "gascity.enabled is true but secrets.gcWriteKey.existingSecret is empty. gonk-intake and the in-pod gonk-gate must sign every order-run POST with the ed25519 PRIVATE key whose public half is gascity.writeAuth.verifyKey; with no signing key the grant-gated controller rejects every dispatch (401/403) and nothing runs. Provision the key out of band (Vault/1Password -> ExternalSecret -> k8s Secret; PEM PKCS#8 or a raw 32-byte seed) and set secrets.gcWriteKey.existingSecret/key. The chart never creates or reads this Secret -- it is a 0400 file mount only. See chart/gonk/smoke/gc-controller-smoke.md." -}}
+  {{- end -}}
+{{- end -}}
 {{- end -}}

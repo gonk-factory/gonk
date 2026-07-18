@@ -15,6 +15,11 @@ meter:
     tag: v0.1.0
 
 gascity:
+  # G22: a TEST public verify key -- the repo golden vector's real ed25519
+  # pubkey (chart/gonk/smoke). Grant-gating on; the private half is the Secret
+  # gonk-gc-write-key (secrets.gcWriteKey default), provisioned out of band.
+  writeAuth:
+    verifyKey: "k1:1hcioE4eYD4PsM66wVJ8oBErEfCTyNPt9Q/+ZT0drmk="
   image:
     tag: v0.1.0
 

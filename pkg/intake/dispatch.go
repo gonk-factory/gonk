@@ -9,29 +9,29 @@
 package intake
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/atags"
+	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi"
 	"gitlab.orac.local/agentic/gonk-project/pkg/ghook"
 	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
 )
 
 // OrderRequest is what intake asks the Gas City supervisor to do (spec 4.3
 // step 2). OD-A is RESOLVED by Plan 04, Task 2: the real contract is
-// `POST /v0/city/{cityName}/order/gonk-dispatch/run` with body `{"vars":{...}}`,
-// no per-route auth (admission by network position). Plan 04's `pkg/gcapi`
-// marshals this struct into that `vars` map; intake fires it only on a Gate-1
-// `run`.
+// `POST /v0/city/{cityName}/order/gonk-dispatch/run` with body `{"vars":{...}}`.
+// The route is grant-gated: when a write-auth key is configured the request
+// carries a fresh ed25519 X-GC-City-Write grant plus the X-GC-Request CSRF
+// header (minted by `pkg/gcapi`); without a key it sends no grant, the legacy
+// loopback/network-position path. `pkg/gcapi` marshals this struct into that
+// `vars` map; intake fires it only on a Gate-1 `run`.
 //
 // NOTE what is NOT here: there is no `not_before`. Quiet hours -- and every other
 // wait-vs-spend decision -- belong to gonk-meter, which answers `defer` with a
@@ -549,67 +549,87 @@ func (d *LogDispatcher) FireOrder(_ context.Context, o OrderRequest) error {
 
 // defaultCityName is the one Gas City instance this whole deployment talks to
 // (spec: "the Gas City supervisor", singular -- there is no multi-city concept
-// in gonk today). HTTPDispatcher is a minimal client for OD-A; Plan 04's
-// pkg/gcapi is the fuller one, and a caller with access to it should prefer it.
-// This one exists so Task 10 does not have to wait on a package that has not
-// landed (Plan 04 is not started as of this plan).
+// in gonk today).
 const defaultCityName = "gonk"
 
-// HTTPDispatcher fires orders at the Gas City supervisor's order API. OD-A is
-// RESOLVED (Plan 04, Task 2): POST /v0/city/{cityName}/order/gonk-dispatch/run,
-// body {"vars": {...}}, no per-route auth (admission is by network position,
-// not a bearer token). vars is OrderRequest marshaled through its own JSON
-// tags -- the single source of truth for the shape stays OrderRequest, not a
-// second hand-maintained map.
+// dispatchOrderName is the single order intake ever fires: the Gate-2 budget
+// gate (pack/orders/gonk-dispatch.toml). Every trigger routes through it.
+const dispatchOrderName = "gonk-dispatch"
+
+// HTTPDispatcher fires the gonk-dispatch order at the Gas City supervisor by
+// delegating to *gcapi.Client -- the ONE typed client that mints the ed25519
+// X-GC-City-Write grant (and the always-required X-GC-Request CSRF header) on
+// every mutating POST. The order-run route is grant-gated (write-auth spec):
+// when the client carries a Signer (a write-auth key was file-mounted -- see
+// cmd/gonk-intake) the request is authenticated; when it does not, no grant
+// headers are sent, exactly the legacy loopback / network-position path.
+// Routing intake through gcapi keeps ALL request signing in one place instead
+// of a second hand-rolled, unauthenticated HTTP client.
+//
+// vars is OrderRequest marshaled through its own JSON tags -- the single source
+// of truth for the shape stays OrderRequest, not a second hand-maintained map.
 type HTTPDispatcher struct {
-	BaseURL  string
-	CityName string // "" -> defaultCityName
-	HTTP     *http.Client
+	GC *gcapi.Client
 }
 
-func NewHTTPDispatcher(baseURL string, hc *http.Client) *HTTPDispatcher {
-	if hc == nil {
-		hc = &http.Client{Timeout: 15 * time.Second}
+// NewHTTPDispatcher builds a dispatcher over a *gcapi.Client aimed at baseURL's
+// gonk city. signer, when non-nil, authenticates every order-run POST with a
+// fresh grant; nil leaves the client on the unsigned loopback path (a
+// grant-gated controller then rejects it -- a deploy responsibility). hc
+// overrides the client's HTTP client (nil keeps gcapi's default).
+func NewHTTPDispatcher(baseURL string, signer *gcapi.Signer, hc *http.Client) *HTTPDispatcher {
+	c := gcapi.New(baseURL, defaultCityName)
+	c.UserAgent = "gonk-intake"
+	c.Signer = signer
+	if hc != nil {
+		c.HTTP = hc
 	}
-	return &HTTPDispatcher{BaseURL: strings.TrimSuffix(baseURL, "/"), CityName: defaultCityName, HTTP: hc}
+	return &HTTPDispatcher{GC: c}
 }
 
 func (d *HTTPDispatcher) FireOrder(ctx context.Context, o OrderRequest) error {
-	raw, err := json.Marshal(o)
+	vars, err := orderVars(o)
 	if err != nil {
-		return fmt.Errorf("dispatch: encode order: %w", err)
+		return err
 	}
-	var vars map[string]any
-	if err := json.Unmarshal(raw, &vars); err != nil {
-		return fmt.Errorf("dispatch: encode order: %w", err)
-	}
-	body, err := json.Marshal(map[string]any{"vars": vars})
-	if err != nil {
-		return fmt.Errorf("dispatch: encode order: %w", err)
-	}
-
-	city := d.CityName
-	if city == "" {
-		city = defaultCityName
-	}
-	path := fmt.Sprintf("/v0/city/%s/order/gonk-dispatch/run", url.PathEscape(city))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.BaseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("dispatch: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := d.HTTP.Do(req)
-	if err != nil {
-		return fmt.Errorf("dispatch: %s %s: %w", http.MethodPost, path, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("dispatch: %s %s: %d: %s", http.MethodPost, path, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	// gcapi.RunOrder attaches the write-auth grant (when a Signer is set) and
+	// returns an error carrying only the RESPONSE body -- never the request
+	// vars, so a key_ref (a Secret NAME, never key material) cannot leak into a
+	// log line. Its APIError also disambiguates a write-auth rejection from a
+	// missing order (gcapi's authHint), which the old hand-rolled client could
+	// not.
+	if _, err := d.GC.RunOrder(ctx, dispatchOrderName, vars); err != nil {
+		return err
 	}
 	return nil
+}
+
+// orderVars turns an OrderRequest into the string-valued vars map the order-run
+// route expects (Gas City namespaces each var into the exec's GC_WEBHOOK_ARG_*
+// environment, which is string-typed). OrderRequest stays the single source of
+// truth for the field set: it is marshaled through its own JSON tags, then each
+// value is rendered as a string -- a JSON string value unquoted, everything
+// else (numbers, the metadata_json object, the key_ref object) as its compact
+// JSON text, the same way gonk-gate builds its own pour vars.
+func orderVars(o OrderRequest) (map[string]string, error) {
+	raw, err := json.Marshal(o)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch: encode order: %w", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, fmt.Errorf("dispatch: encode order: %w", err)
+	}
+	vars := make(map[string]string, len(fields))
+	for k, v := range fields {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			vars[k] = s // a JSON string: use its unquoted value
+		} else {
+			vars[k] = string(v) // number/object/array: its compact JSON text
+		}
+	}
+	return vars, nil
 }
 
 // ---------------------------------------------------------------- DenyLabeler implementation (Task 10)

@@ -93,6 +93,20 @@
           "enum": ["deployment", "statefulset"],
           "description": "SETTLED (Task 0.5, smoke U3): Deployment (strategy Recreate) is the default; StatefulSet is the single-instance alternative. Both are exactly one replica; the upstream bare-Pod hack is dropped."
         },
+        "writeAuth": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "verifyKey": {
+              "type": "string",
+              "description": "G22. The ed25519 PUBLIC verify key (GC_CITY_WRITE_PUBKEY) the grant-gated controller checks X-GC-City-Write grants against. Format 'kid:base64' (STANDARD base64 of the raw 32-byte ed25519 public key; comma-separate for rotation). A PUBLIC key, not a secret. REQUIRED (non-empty) when gascity.enabled, else the 0.0.0.0/allow_mutations [api] plane is unauthenticated."
+            },
+            "cid": {
+              "type": "string",
+              "description": "Optional tenancy cid (GC_CITY_WRITE_CID). Empty => untenanted (aud=gc-city-write.v2, cid=''). Set only if the controller runs with the same cid."
+            }
+          }
+        },
         "image": {"$ref": "#/$defs/imageOptional"}
       }
     },
@@ -145,6 +159,17 @@
         "meterAPI": {"$ref": "#/$defs/secretRef"},
         "litellm": {"$ref": "#/$defs/secretRef"},
         "ledger": {"$ref": "#/$defs/secretRef"},
+        "gcWriteKey": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "existingSecret": {
+              "type": "string",
+              "description": "G22. NAME of a pre-provisioned Secret holding the ed25519 PRIVATE signing key intake+gate mint grants with. The chart creates NO Secret and reads NO value -- a 0400 file mount only. REQUIRED (non-empty) when gascity.enabled."
+            },
+            "key": {"type": "string", "minLength": 1, "description": "The key within that Secret holding the PEM PKCS#8 key or raw 32-byte seed."}
+          }
+        },
         "keySink": {
           "type": "object",
           "properties": {"namePrefix": {"type": "string", "minLength": 1}}

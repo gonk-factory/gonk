@@ -39,6 +39,7 @@ controller-image:
 	  --build-arg GO_VERSION=$(GO_VERSION) \
 	  --build-arg DEBIAN_BASE=$(DEBIAN_BASE) \
 	  --build-arg BD_VERSION=$(BD_VERSION) \
+	  --build-arg DOLT_VERSION=$(DOLT_VERSION) \
 	  --build-arg GASCITY_REF=$(GASCITY_REF) \
 	  -f images/Dockerfile.controller -t $(REGISTRY)/gonk-controller:$(GONK_TAG) .
 

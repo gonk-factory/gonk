@@ -97,6 +97,46 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 }
 
+// The write-auth env contract (GONK_GC_WRITE_*) is read into Config so
+// newService can build a gcapi Signer from the file-mounted key. These are
+// OPTIONAL: unset leaves them empty (no signer -> unsigned dispatch, a deploy
+// responsibility), which must not break config loading.
+func TestLoadConfigReadsWriteAuthEnv(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("GONK_GC_WRITE_KEY_FILE", "/var/run/gonk/gc-write.ed25519")
+	t.Setenv("GONK_GC_WRITE_KEY_ID", "gonk-write-1")
+	t.Setenv("GONK_GC_WRITE_CID", "city_gonk")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig = %v", err)
+	}
+	if cfg.WriteKeyFile != "/var/run/gonk/gc-write.ed25519" {
+		t.Errorf("WriteKeyFile = %q", cfg.WriteKeyFile)
+	}
+	if cfg.WriteKeyID != "gonk-write-1" {
+		t.Errorf("WriteKeyID = %q", cfg.WriteKeyID)
+	}
+	if cfg.WriteCID != "city_gonk" {
+		t.Errorf("WriteCID = %q", cfg.WriteCID)
+	}
+}
+
+func TestLoadConfigWriteAuthEnvOptional(t *testing.T) {
+	setRequiredEnv(t)
+	_ = os.Unsetenv("GONK_GC_WRITE_KEY_FILE")
+	_ = os.Unsetenv("GONK_GC_WRITE_KEY_ID")
+	_ = os.Unsetenv("GONK_GC_WRITE_CID")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig with no write-auth env = %v, want it to be optional", err)
+	}
+	if cfg.WriteKeyFile != "" || cfg.WriteKeyID != "" || cfg.WriteCID != "" {
+		t.Errorf("write-auth fields non-empty when unset: %+v", cfg)
+	}
+}
+
 func TestLoadConfigRequiresGitLabURL(t *testing.T) {
 	setRequiredEnv(t)
 	_ = os.Unsetenv("GONK_GITLAB_URL")

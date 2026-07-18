@@ -866,6 +866,18 @@ spec:
             # gascity.supervisorURL (BYO controller) -- see `gonk.supervisorURL`.
             - name: GONK_SUPERVISOR_URL
               value: "http://gonk-controller.gonk.svc:9443"
+            # WRITE-AUTH (gonk-fsl / gonk-5we). The bundled controller runs
+            # `gc start --foreground` grant-gated, so every order-run POST must
+            # carry a fresh ed25519 X-GC-City-Write grant. These name the 0400
+            # file mount of the PRIVATE signing key (a PATH, never a value) and the
+            # kid derived from gascity.writeAuth.verifyKey's public half -- the same
+            # keypair the in-controller gonk-gate signs with. Empty key file => no
+            # grant => the controller rejects the dispatch, which G22 prevents by
+            # requiring the key when gascity.enabled.
+            - name: GONK_GC_WRITE_KEY_FILE
+              value: "/etc/gonk/secrets/gc-write-key/key"
+            - name: GONK_GC_WRITE_KEY_ID
+              value: "k1"
             # RECONCILED, Task 0: intake carries its OWN copy of the operator
             # ladder (main.go's loadConfig fails closed if this is unset/empty --
             # ADR-002). It MUST be the same ladder gonk-meter resolves rungs
@@ -927,6 +939,10 @@ spec:
             - name: secret-meter-api
               mountPath: /etc/gonk/secrets/meter-api
               readOnly: true
+            # The ed25519 PRIVATE signing key, 0400, mounted at $root/gc-write-key.
+            - name: secret-gc-write-key
+              mountPath: /etc/gonk/secrets/gc-write-key
+              readOnly: true
             # The private-CA bundle, mounted at exactly the path SSL_CERT_FILE names.
             # subPath so the file lands at /etc/ssl/orac/ca.crt and not in a dir.
             - name: orac-ca
@@ -963,6 +979,17 @@ spec:
                   items:
                     - key: token
                       path: token
+        # The ed25519 PRIVATE write-auth signing key (gonk-fsl / gonk-5we). Same
+        # pre-provisioned Secret the controller pod mounts; the chart creates none.
+        - name: secret-gc-write-key
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-gc-write-key
+                  items:
+                    - key: key
+                      path: key
         # trust-manager publishes `trust-bundle` (key tls-ca-bundle.pem) into EVERY
         # namespace, so this ConfigMap is a NAME, not something you have to create.
         # It is how a Go service trusts https://gitlab.orac.local's private CA --
@@ -1163,21 +1190,32 @@ spec:
           emptyDir: {}
 ---
 # Source: gonk/templates/workload-gonk-controller.yaml
-# The bundled Gas City controller. SETTLED by Task 0.5 (smoke/gc-controller-smoke.md),
-# overriding the plan's provisional draft:
-#   - `gc supervisor run` as PID 1 (NOT `gc start --foreground /city`, a flag that
-#     does not exist; NEVER `gc register`, which daemonizes a second supervisor and
-#     crashes PID 1 -- smoke U1/U3);
+# The bundled Gas City controller. SETTLED by Task 0.5 + the gonk-fsl re-smoke
+# (smoke/gc-controller-smoke.md), overriding the plan's provisional draft:
+#   - `gc start --foreground /city` as PID 1 (NOT `gc supervisor run`, which logs
+#     `[api] port=9443 ... ignored under supervisor mode` and never binds 9443).
+#     Foreground mode binds the per-city [api] on 0.0.0.0:9443, calls
+#     WithAnyHostAllowed() (any Host, NO allowed_hosts, no 421), and is the only
+#     mode that serves the /v0/city/<city>/order/<name>/run route intake dispatches
+#     to. NEVER `gc register` (daemonizes a second supervisor and crashes PID 1).
+#   - GRANT-GATED: the [api] plane is 0.0.0.0 + allow_mutations=true, i.e. an
+#     UNAUTHENTICATED mutation endpoint unless write-auth is on. GC_CITY_WRITE_PUBKEY
+#     (gascity.writeAuth.verifyKey) turns on ed25519 grant verification; intake and
+#     the in-pod gonk-gate sign every POST with the matching private key. G22 fails
+#     the render closed if either half is missing.
+#   - City NAME must be `gonk`: foreground mode serves the name from city.toml
+#     [workspace], and intake's client dials /v0/city/gonk/... (hardcoded). A
+#     mismatch passes auth then 404s city-not-found -- so `gc init --name gonk`.
 #   - prebaked delivery: an initContainer copies the baked pack into a WRITABLE
 #     emptyDir /city and runs `gc init --preserve-existing --bootstrap-profile
-#     k8s-cell` (a read-only ConfigMap at /city is not viable -- smoke U2);
+#     k8s-cell` (writes [api] bind=0.0.0.0/allow_mutations=true/port=9443; a
+#     read-only ConfigMap at /city is not viable -- smoke U2);
 #   - Deployment, replicas 1, strategy Recreate (StatefulSet is the single-instance
 #     alternative). No leader election exists, so EXACTLY ONE controller runs.
 #
-# IMAGE-GATED (bead gonk-fsl): the Plan 04 image is missing dolt/tmux/jq/lsof/pgrep
-# and bundles bd<1.0.4, so `gc init` cannot finish and the 9443 [api] listener is
-# config-derived, not socket-confirmed. This template encodes the settled SHAPE; the
-# charttest gate asserts it RENDERS, not that the pod boots.
+# The gonk-fsl re-smoke proved the full CSRF + ed25519 write-auth + order-handler
+# path end-to-end on the fixed image (local, torn down); the charttest gate asserts
+# this SHAPE renders. In-cluster 9443 cross-pod reachability is the remaining check.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -1240,14 +1278,22 @@ spec:
             - |
               set -eu
               cp -r /opt/gonk/pack/. /city/
+              # --name gonk is LOAD-BEARING: `gc start --foreground` serves the city
+              # under the name in city.toml [workspace], and intake dials
+              # /v0/city/gonk/... (hardcoded). Without it gc init defaults the name to
+              # "city" and every grant/dispatch for "gonk" 404s city-not-found.
               gc init --preserve-existing --bootstrap-profile k8s-cell \
+                --name gonk \
                 --default-provider claude --skip-provider-readiness \
                 --dolt-host "$GC_DOLT_HOST" --dolt-port "$GC_DOLT_PORT" \
                 --dolt-database "bd_gonk" \
                 --dolt-project-id "gonk" \
                 --no-start /city
-              mkdir -p "$HOME/.gc"
-              printf '[[cities]]\n  path = "/city"\n  name = "gonk"\n' > "$HOME/.gc/cities.toml"
+              # NOTE: do NOT write ~/.gc/cities.toml here. Registering the city makes
+              # `gc start --foreground /city` refuse it ("run `gc unregister /city`
+              # before using --foreground") and crash-loop (gonk-fsl in-cluster
+              # re-smoke, blocker A). Foreground mode runs the city directly from the
+              # explicit /city path -- no registration is needed or wanted.
           env:
             - name: HOME
               value: /home/gonk
@@ -1280,12 +1326,13 @@ spec:
         - name: controller
           image: registry.orac.local/agentic/gonk-project/gonk-controller:v0.1.0
           imagePullPolicy: IfNotPresent
-          # `gc supervisor run` as PID 1 via `exec` (smoke U1/U3). The initContainer
-          # already wrote ~/.gc/cities.toml, so registration is NOT needed here --
-          # and `gc register` MUST NOT be used, it daemonizes a second supervisor
-          # after which the foreground one exits "supervisor already running" and
-          # kills PID 1.
-          command: ["/bin/sh", "-c", "exec gc supervisor run"]
+          # `gc start --foreground /city` as PID 1 via `exec` (gonk-fsl re-smoke).
+          # Foreground mode binds the per-city [api] on 0.0.0.0:9443 and serves the
+          # order-run route; `gc supervisor run` ignores 9443 and never binds it.
+          # `gc register` MUST NOT be used -- it daemonizes a second supervisor that
+          # then kills PID 1. The city dir is passed explicitly, so no registration
+          # is needed.
+          command: ["/bin/sh", "-c", "exec gc start --foreground /city"]
           env:
             - name: HOME
               value: /home/gonk
@@ -1297,6 +1344,21 @@ spec:
               value: k8s
             - name: SSL_CERT_FILE
               value: "/etc/ssl/orac/ca.crt"
+            # WRITE-AUTH (gonk-fsl / gonk-5we). GC_CITY_WRITE_PUBKEY turns on
+            # ed25519 grant verification on the [api] mutation plane (env overrides
+            # city.toml). It is the PUBLIC key -- not a secret. GONK_CITY + the
+            # GONK_GC_WRITE_* env below are for the in-pod gonk-gate (the exec
+            # orders: dispatch/sweep), which SIGNS its own loopback order-run POSTs
+            # with the matching PRIVATE key mounted below -- same keypair/kid as
+            # gonk-intake.
+            - name: GONK_CITY
+              value: gonk
+            - name: GC_CITY_WRITE_PUBKEY
+              value: "k1:1hcioE4eYD4PsM66wVJ8oBErEfCTyNPt9Q/+ZT0drmk="
+            - name: GONK_GC_WRITE_KEY_FILE
+              value: "/etc/gonk/secrets/gc-write-key/key"
+            - name: GONK_GC_WRITE_KEY_ID
+              value: "k1"
           ports:
             # The per-city [api] listener (0.0.0.0:9443). This is what intake
             # dispatches to and what the Service targets. Port 8372 (the machine-wide
@@ -1341,6 +1403,13 @@ spec:
               mountPath: /etc/ssl/orac/ca.crt
               subPath: tls-ca-bundle.pem
               readOnly: true
+            # The ed25519 PRIVATE write-auth key, 0400, for the in-pod gonk-gate to
+            # sign order-run POSTs. Mounted on the SUPERVISOR only (the bootstrap
+            # initContainer runs `gc init` and never signs). Same Secret gonk-intake
+            # mounts; the chart creates none.
+            - name: secret-gc-write-key
+              mountPath: /etc/gonk/secrets/gc-write-key
+              readOnly: true
       volumes:
         # /city and /home/gonk MUST be writable by uid 65532 (smoke U2): gc init
         # writes the city into /city and gc writes ~/.gc under HOME. emptyDir, shared
@@ -1352,6 +1421,18 @@ spec:
           emptyDir: {}
         - name: tmp
           emptyDir: {}
+        # The ed25519 PRIVATE write-auth signing key (gonk-fsl / gonk-5we), 0400,
+        # from a pre-provisioned Secret (the chart creates none). Used by the in-pod
+        # gonk-gate to sign order-run POSTs; G22 requires it when gascity.enabled.
+        - name: secret-gc-write-key
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-gc-write-key
+                  items:
+                    - key: key
+                      path: key
         # The private-CA bundle (trust-manager publishes `trust-bundle` into every
         # namespace). gc clones the city's git remote from https://gitlab.orac.local,
         # whose cert is signed by the cluster CA; SSL_CERT_FILE names this path.

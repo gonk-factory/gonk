@@ -221,6 +221,28 @@ gascity:
   # StatefulSet (OrderedReady) is the documented single-instance alternative; the
   # upstream bare-Pod hack is dropped (a Deployment survives pod restart cleanly).
   workload: deployment    # deployment | statefulset
+  # SETTLED (gonk-fsl re-smoke, smoke "Dispatch: authenticated end-to-end"):
+  # the bundled controller runs `gc start --foreground /city`, which binds the
+  # per-city [api] on 0.0.0.0:9443 (any-host, allow_mutations=true). That is an
+  # UNAUTHENTICATED mutation plane unless write-auth is on -- so it is grant-gated:
+  # every order-run POST must carry a signed ed25519 X-GC-City-Write grant.
+  writeAuth:
+    # The ed25519 PUBLIC verify key the controller checks grants against, set as
+    # GC_CITY_WRITE_PUBKEY (env overrides city.toml). Format "kid:base64" -- the
+    # kid is any non-empty label, the base64 is STANDARD base64 of the raw 32-byte
+    # ed25519 public key (comma-separate a second "kid2:base64" for rotation). This
+    # is a PUBLIC key: it is NOT a secret and lives in values, never in a Secret.
+    # REQUIRED when gascity.enabled (G22): an empty verifyKey would ship an
+    # unauthenticated mutation plane. The matching PRIVATE half is a file mount --
+    # secrets.gcWriteKey below -- shared by gonk-intake and the in-pod gonk-gate,
+    # which sign with the same kid. There is deliberately NO allowUnauthenticated
+    # escape hatch. See chart/gonk/smoke/gc-controller-smoke.md.
+    verifyKey: ""
+    # Optional tenancy cid (GC_CITY_WRITE_CID). Empty => untenanted, the gonk
+    # single-tenant default (aud=gc-city-write.v2, cid=""). Set it ONLY if you also
+    # run the controller with the same GC_CITY_WRITE_CID; intake+gate then mint
+    # cid-bound grants. Leave empty for gonk.
+    cid: ""
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {memory: 1Gi}
@@ -358,6 +380,18 @@ secrets:
     existingSecret: gonk-ledger
     keys:
       dsn: dsn
+  # The ed25519 PRIVATE signing key gonk-intake AND the in-controller gonk-gate use
+  # to mint X-GC-City-Write grants for the grant-gated controller (gascity.writeAuth
+  # above holds its PUBLIC half). Provisioned OUT OF BAND (Vault/1Password ->
+  # ExternalSecret -> k8s Secret; a PEM PKCS#8 ed25519 key, or a raw 32-byte seed):
+  # the chart creates NO Secret and NEVER reads the value -- it is a 0400 FILE MOUNT
+  # only, never an env value, never logged. One keypair / one kid, shared by intake
+  # and gate; the controller verifies with the public half. REQUIRED when
+  # gascity.enabled (G22): with no signing key every dispatch is rejected (401/403)
+  # and nothing runs.
+  gcWriteKey:
+    existingSecret: gonk-gc-write-key
+    key: key               # the key WITHIN that Secret holding the PEM/seed
   # Rotation slot 2 is OPT-IN per credential, because a projected volume whose key
   # does not exist in the Secret makes the pod fail to start -- and slot 2 usually
   # does not exist. Rotation procedure: write the new value to slot 1 and the old

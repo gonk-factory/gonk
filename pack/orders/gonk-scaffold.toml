@@ -5,6 +5,8 @@
 [order]
 description = "Scaffold .agent/ via a post-merge MR. Poured by gonk-dispatch after a budget decision."
 formula = "gonk-scaffold"
-trigger = "manual"
+trigger = "webhook"                   # fired via POST .../order/gonk-scaffold/run by
+                                       # gonk-dispatch; the /run endpoint fires ONLY
+                                       # webhook-trigger orders (manual is rejected 422).
 pool = "scaffold"                     # see pack.toml's note on OD-2.
 timeout = "20m"

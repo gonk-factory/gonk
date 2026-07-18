@@ -5,6 +5,8 @@
 [order]
 description = "Reply to an @gonk mention. Poured by gonk-dispatch after a budget decision."
 formula = "gonk-mention"
-trigger = "manual"
+trigger = "webhook"                   # fired via POST .../order/gonk-mention/run by
+                                       # gonk-dispatch; the /run endpoint fires ONLY
+                                       # webhook-trigger orders (manual is rejected 422).
 pool = "mention"                      # see pack.toml's note on OD-2.
 timeout = "20m"

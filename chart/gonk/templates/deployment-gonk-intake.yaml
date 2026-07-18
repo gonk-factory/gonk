@@ -98,6 +98,17 @@ spec:
             # gascity.supervisorURL (BYO controller) -- see `gonk.supervisorURL`.
             - name: GONK_SUPERVISOR_URL
               value: {{ if eq .Values.gascity.dispatch "log" }}""{{ else }}{{ include "gonk.supervisorURL" . | quote }}{{ end }}
+            {{- if and .Values.gascity.enabled (eq .Values.gascity.dispatch "http") }}
+            # WRITE-AUTH (gonk-fsl / gonk-5we). The bundled controller runs
+            # `gc start --foreground` grant-gated, so every order-run POST must
+            # carry a fresh ed25519 X-GC-City-Write grant. These name the 0400
+            # file mount of the PRIVATE signing key (a PATH, never a value) and the
+            # kid derived from gascity.writeAuth.verifyKey's public half -- the same
+            # keypair the in-controller gonk-gate signs with. Empty key file => no
+            # grant => the controller rejects the dispatch, which G22 prevents by
+            # requiring the key when gascity.enabled.
+            {{- include "gonk.gcWriteEnv" . | nindent 12 }}
+            {{- end }}
             # RECONCILED, Task 0: intake carries its OWN copy of the operator
             # ladder (main.go's loadConfig fails closed if this is unset/empty --
             # ADR-002). It MUST be the same ladder gonk-meter resolves rungs
@@ -153,6 +164,10 @@ spec:
             {{- include "gonk.secretMount" (dict "root" $root "name" "gitlab") | nindent 12 }}
             {{- include "gonk.secretMount" (dict "root" $root "name" "webhook") | nindent 12 }}
             {{- include "gonk.secretMount" (dict "root" $root "name" "meter-api") | nindent 12 }}
+            {{- if and .Values.gascity.enabled (eq .Values.gascity.dispatch "http") }}
+            # The ed25519 PRIVATE signing key, 0400, mounted at $root/gc-write-key.
+            {{- include "gonk.secretMount" (dict "root" $root "name" "gc-write-key") | nindent 12 }}
+            {{- end }}
             {{- if .Values.gitlab.caCert.existingConfigMap }}
             # The private-CA bundle, mounted at exactly the path SSL_CERT_FILE names.
             # subPath so the file lands at /etc/ssl/orac/ca.crt and not in a dir.
@@ -172,6 +187,11 @@ spec:
         {{- if .Values.secrets.rotation.webhookPrevious }}{{- $whKeys = append $whKeys .Values.secrets.webhook.keys.tokenPrevious }}{{- end }}
         {{- include "gonk.secretVolume" (dict "name" "webhook" "secret" .Values.secrets.webhook.existingSecret "keys" $whKeys) | nindent 8 }}
         {{- include "gonk.secretVolume" (dict "name" "meter-api" "secret" .Values.secrets.meterAPI.existingSecret "keys" (list .Values.secrets.meterAPI.keys.token)) | nindent 8 }}
+        {{- if and .Values.gascity.enabled (eq .Values.gascity.dispatch "http") }}
+        # The ed25519 PRIVATE write-auth signing key (gonk-fsl / gonk-5we). Same
+        # pre-provisioned Secret the controller pod mounts; the chart creates none.
+        {{- include "gonk.secretVolume" (dict "name" "gc-write-key" "secret" .Values.secrets.gcWriteKey.existingSecret "keys" (list .Values.secrets.gcWriteKey.key)) | nindent 8 }}
+        {{- end }}
         {{- if .Values.gitlab.caCert.existingConfigMap }}
         # trust-manager publishes `trust-bundle` (key tls-ca-bundle.pem) into EVERY
         # namespace, so this ConfigMap is a NAME, not something you have to create.
