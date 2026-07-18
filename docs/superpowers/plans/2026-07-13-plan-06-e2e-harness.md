@@ -1146,7 +1146,7 @@ git commit -m "test(stubmodel): deterministic OpenAI-compatible stub model serve
 
 **This task exists to stop a future executor losing a day to podman.**
 
-- [ ] **Step 1: Write the failing tests** — `test/harness/harness_test.go`
+- [x] **Step 1: Write the failing tests** — `test/harness/harness_test.go`
 
 ```go
 package harness_test
@@ -1277,11 +1277,11 @@ func containsArg(args []string, want string) bool {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `go test ./test/harness/ -v` → FAIL, package does not exist.
 
-- [ ] **Step 3: Implement `test/harness/wait.go`**
+- [x] **Step 3: Implement `test/harness/wait.go`**
 
 ```go
 // Package harness holds the shared fixtures for gonk's integration (L1),
@@ -1345,7 +1345,7 @@ func WaitFor(ctx context.Context, desc string, deadline time.Duration, cond func
 }
 ```
 
-- [ ] **Step 4: Implement `test/harness/runtime.go`**
+- [x] **Step 4: Implement `test/harness/runtime.go`**
 
 ```go
 package harness
@@ -1417,7 +1417,7 @@ func (r Runtime) RunArgs(name, image string, ports map[int]int, cmd []string) []
 }
 ```
 
-- [ ] **Step 5: Implement `test/harness/ports.go`, `creds.go`, `clock.go`**
+- [x] **Step 5: Implement `test/harness/ports.go`, `creds.go`, `clock.go`**
 
 `ports.go` — a fixed loopback port map, because host networking gives us no choice, plus a preflight:
 
@@ -1492,7 +1492,7 @@ func (tc *TestClock) SetOffset(d time.Duration) error
 
 **`Advance` is monotone by construction.** Plan 03 Decision 6 says a backwards clock jump must never reset a project's spend; the harness must not be the thing that violates it. The one test that *does* need a backwards jump (`TestBackwardsClockDoesNotResetSpend`) uses `SetOffset` explicitly and is the only caller allowed to.
 
-- [ ] **Step 6: Implement `test/harness/doctor.go` — the preflight**
+- [x] **Step 6: Implement `test/harness/doctor.go` — the preflight**
 
 `Doctor()` runs and prints a verdict, and `make e2e-doctor` calls it. It checks, in order:
 
@@ -1506,7 +1506,7 @@ func (tc *TestClock) SetOffset(d time.Duration) error
 
 Output is a table of ✅/❌ and, on any ❌, a **non-zero exit and a specific remedy**. It never says "something went wrong".
 
-- [ ] **Step 7: Create the `Makefile`**
+- [x] **Step 7: Create the `Makefile`**
 
 ```makefile
 # The standing gate. CI has NEVER RUN on this repo -- every runner on
@@ -1550,7 +1550,7 @@ e2e: e2e-doctor images
 secrets-scan: ; $(GO) run ./test/harness/cmd/secrets-scan
 ```
 
-- [ ] **Step 8: Run and commit**
+- [x] **Step 8: Run and commit**
 
 ```bash
 go test ./test/harness/ -race -count=1 -v   # PASS
