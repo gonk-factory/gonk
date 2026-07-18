@@ -529,6 +529,18 @@ verify key `k1:<std-base64(pub)>`. (A minimal stdlib-only Go signer reproduced t
 `pkg/gcapi` needs the same 9 steps — see the write-auth spec §7.)
 
 **Concrete chart contract (Task 6.5 / `pkg/gcapi`):**
+
+> **IMPLEMENTED (bead gonk-5we, branch `fix-gonk-fsl-controller-image`).** Every row
+> below is now wired in the chart: `chart/gonk/templates/workload-gonk-controller.yaml`
+> runs `gc start --foreground /city`, `gc init --name gonk`, and sets
+> `GC_CITY_WRITE_PUBKEY` from `gascity.writeAuth.verifyKey`; the ed25519 PRIVATE key
+> is a 0400 file mount (`secrets.gcWriteKey`) into BOTH `gonk-intake` and the
+> controller pod (for the in-pod `gonk-gate`), with `GONK_GC_WRITE_KEY_FILE`/`_KEY_ID`
+> (`_CID`). Guard G22 (`_guards.tpl`) fails the render closed if either the verify key
+> or the signing-key Secret is missing when `gascity.enabled`. `pkg/gcapi` signs per
+> §7 (`aud="gc-city-write.v2"`, fresh `jti`). Remaining: the in-cluster re-run for
+> 9443 cross-pod reachability.
+
 | Item | Value |
 |---|---|
 | Controller `command` | `gc start --foreground /city` (foreground per-city controller). NOT `gc supervisor run`. |

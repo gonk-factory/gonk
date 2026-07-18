@@ -11,10 +11,12 @@ import (
 // the (Task 0.5-settled) supervisor port 9443, and NAMESPACED RBAC. No leader
 // election exists, so there must be exactly one controller.
 //
-// SETTLED by Task 0.5 (chart/gonk/smoke/gc-controller-smoke.md), overriding the
-// plan's provisional draft:
+// SETTLED by Task 0.5 + the gonk-fsl re-smoke (chart/gonk/smoke/gc-controller-smoke.md):
 //   - port 9443 (the per-city [api] listener), NOT 8372 (loopback admin API);
-//   - command `gc supervisor run` as PID 1, NOT `gc start --foreground /city`;
+//   - command `gc start --foreground /city` as PID 1, NOT `gc supervisor run`
+//     (which logs `[api] ... ignored under supervisor mode` and never binds 9443);
+//   - city NAME gonk (`gc init --name gonk`), so /v0/city/gonk/... resolves;
+//   - grant-gated: GC_CITY_WRITE_PUBKEY on, private signing key mounted;
 //   - delivery prebaked + a writable-/city initContainer, NOT a ConfigMap at /city;
 //   - Deployment, replicas 1, strategy Recreate.
 func TestControllerRendersWorkloadServiceAndRBAC(t *testing.T) {
@@ -29,17 +31,33 @@ func TestControllerRendersWorkloadServiceAndRBAC(t *testing.T) {
 	if !strings.Contains(d.Doc, "Recreate") {
 		t.Errorf("the controller Deployment does not use strategy Recreate; a RollingUpdate can run two controllers at once:\n%s", d.Doc)
 	}
-	// `gc supervisor run` as PID 1 (smoke U1/U3). Never `--foreground` (that flag
-	// does not exist) and never `gc register` (it daemonizes a second supervisor
-	// and self-crashes PID 1).
-	if !strings.Contains(d.Doc, "gc supervisor run") {
-		t.Errorf("the controller does not run `gc supervisor run`:\n%s", d.Doc)
+	// `gc start --foreground /city` as PID 1 (gonk-fsl re-smoke): the ONLY mode that
+	// binds the per-city [api] 9443 order-run route. NEVER `gc supervisor run` (it
+	// ignores 9443) and NEVER `gc register` (it daemonizes a second supervisor and
+	// self-crashes PID 1).
+	if !strings.Contains(d.Doc, "gc start --foreground") {
+		t.Errorf("the controller does not run `gc start --foreground`:\n%s", d.Doc)
 	}
-	if strings.Contains(d.Doc, "--foreground") {
-		t.Errorf("the controller uses `--foreground`, which is the plan's provisional draft; that flag does not exist (smoke U1):\n%s", d.Doc)
+	if strings.Contains(d.Doc, "gc supervisor run") {
+		t.Errorf("the controller runs `gc supervisor run`, which ignores the [api] 9443 order-run route (gonk-fsl re-smoke):\n%s", d.Doc)
 	}
 	if strings.Contains(d.Doc, "gc register") {
 		t.Errorf("the controller calls `gc register`, which daemonizes a second supervisor and crashes PID 1 (smoke U3):\n%s", d.Doc)
+	}
+	// City name is load-bearing: intake dials /v0/city/gonk/... (hardcoded), so the
+	// served name must be gonk or every dispatch 404s city-not-found.
+	if !strings.Contains(d.Doc, "--name gonk") {
+		t.Errorf("the bootstrap does not `gc init --name gonk`; the served city name would default to \"city\" and dispatch 404s (gonk-fsl re-smoke):\n%s", d.Doc)
+	}
+	// Grant-gating on: the [api] plane is 0.0.0.0 + allow_mutations, unauthenticated
+	// without a verify key. GC_CITY_WRITE_PUBKEY turns on ed25519 verification.
+	if !strings.Contains(d.Doc, "GC_CITY_WRITE_PUBKEY") {
+		t.Errorf("the controller does not set GC_CITY_WRITE_PUBKEY; the mutation plane would be unauthenticated (G22):\n%s", d.Doc)
+	}
+	// The in-pod gonk-gate signs its own order-run POSTs: the PRIVATE key is a file
+	// mount (a PATH env, never a value), same seam intake uses.
+	if !strings.Contains(d.Doc, "GONK_GC_WRITE_KEY_FILE") || !strings.Contains(d.Doc, "secret-gc-write-key") {
+		t.Errorf("the controller does not mount the ed25519 signing key for the in-pod gonk-gate:\n%s", d.Doc)
 	}
 	// The prebaked-delivery bootstrap: an initContainer copies the baked pack into
 	// a writable /city and runs `gc init` there (a read-only ConfigMap at /city is
@@ -152,6 +170,60 @@ func TestPackDeliveryIsPrebakedWithWritableCityInit(t *testing.T) {
 	}
 	if strings.Contains(d.Doc, "configMap:\n") && strings.Contains(d.Doc, "name: gonk-city") {
 		t.Errorf("the controller mounts a gonk-city ConfigMap at /city; delivery=configmap was removed (smoke U2):\n%s", d.Doc)
+	}
+}
+
+// WRITE-AUTH end-to-end wiring (gonk-fsl / gonk-5we). The bundled controller is
+// grant-gated, so BOTH the dispatcher (gonk-intake, cross-pod) and the in-pod
+// gonk-gate must sign order-run POSTs with the SAME ed25519 private key, and the
+// controller must verify with its public half. The private key is a 0400 file
+// mount from a pre-provisioned Secret (never an env value, never chart-created);
+// the public key is GC_CITY_WRITE_PUBKEY on the controller.
+func TestWriteAuthWiredIntoIntakeAndController(t *testing.T) {
+	out := Render(t, Minimum()...)
+
+	ctrl := MustObject(t, out, "Deployment", "gonk-controller")
+	intake := MustObject(t, out, "Deployment", "gonk-intake")
+
+	// Controller: public verify key + gate signing env + key mount.
+	for _, want := range []string{
+		"GC_CITY_WRITE_PUBKEY",
+		"k1:1hcioE4eYD4PsM66wVJ8oBErEfCTyNPt9Q/+ZT0drmk=",
+		"GONK_GC_WRITE_KEY_FILE",
+		"name: GONK_GC_WRITE_KEY_ID",
+		"secret-gc-write-key",
+	} {
+		if !strings.Contains(ctrl.Doc, want) {
+			t.Errorf("controller is missing write-auth wiring %q:\n%s", want, ctrl.Doc)
+		}
+	}
+	// The kid must be derived from the public verifyKey ("k1:...") so it cannot drift.
+	// Asserted against the RAW render (quotes preserved): `value: "k1"` matches the
+	// kid but not the pubkey `value: "k1:..."`.
+	if !strings.Contains(out, `value: "k1"`) {
+		t.Errorf("GONK_GC_WRITE_KEY_ID is not the kid \"k1\" derived from verifyKey:\n%s", ctrl.Doc)
+	}
+
+	// Intake: SAME signing key mount + env, so its cross-pod dispatch is signed.
+	for _, want := range []string{
+		"GONK_GC_WRITE_KEY_FILE",
+		"name: GONK_GC_WRITE_KEY_ID",
+		"secret-gc-write-key",
+		"gonk-gc-write-key", // the pre-provisioned Secret NAME both pods reference
+	} {
+		if !strings.Contains(intake.Doc, want) {
+			t.Errorf("intake is missing write-auth signing wiring %q:\n%s", want, intake.Doc)
+		}
+	}
+
+	// The KEY FILE is a PATH under the secret mount root, never an env VALUE, and the
+	// controller must NOT carry the private signing key inline anywhere.
+	if !strings.Contains(ctrl.Doc, "/etc/gonk/secrets/gc-write-key/key") {
+		t.Errorf("controller GONK_GC_WRITE_KEY_FILE is not the mounted key path:\n%s", ctrl.Doc)
+	}
+	// defaultMode 0400 on the projected key (secret-safety).
+	if !strings.Contains(ctrl.Doc, "defaultMode: 256") {
+		t.Errorf("the gc-write-key volume is not mode 0400 (256 decimal):\n%s", ctrl.Doc)
 	}
 }
 

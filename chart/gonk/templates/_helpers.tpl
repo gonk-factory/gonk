@@ -100,6 +100,37 @@ gonk.orac.local/network-policy-enforcement: "NOT ENFORCED on this cluster: Flann
 {{/* ---- umbrella component wiring helpers (Tasks 5, 6, 6.5) ---- */}}
 
 {{/*
+  gonk.gcWriteKeyID CTX -- the signing kid (GONK_GC_WRITE_KEY_ID), DERIVED from
+  the first entry of gascity.writeAuth.verifyKey ("kid:base64[,kid2:base64]").
+  Deriving it here GUARANTEES the private-key kid the client sends matches the
+  public key the controller verifies with -- a hand-set second value could drift
+  and every grant would 403. Standard base64 never contains ':', so splitting the
+  first entry on ':' yields [kid, base64] and its first element is the kid.
+*/}}
+{{- define "gonk.gcWriteKeyID" -}}
+{{- $first := index (splitList "," .Values.gascity.writeAuth.verifyKey) 0 -}}
+{{- index (splitList ":" $first) 0 -}}
+{{- end -}}
+
+{{/*
+  gonk.gcWriteEnv CTX -- the write-auth SIGNING env shared by gonk-intake and the
+  in-controller gonk-gate. Points GONK_GC_WRITE_KEY_FILE at the 0400 file mount
+  (NEVER an env value), sets the kid derived from the public verifyKey, and passes
+  the optional tenancy cid. The key material itself is mounted via
+  gonk.secretVolume/gonk.secretMount with name "gc-write-key".
+*/}}
+{{- define "gonk.gcWriteEnv" -}}
+- name: GONK_GC_WRITE_KEY_FILE
+  value: {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "gc-write-key" "key" .Values.secrets.gcWriteKey.key) | quote }}
+- name: GONK_GC_WRITE_KEY_ID
+  value: {{ include "gonk.gcWriteKeyID" . | quote }}
+{{- if .Values.gascity.writeAuth.cid }}
+- name: GONK_GC_WRITE_CID
+  value: {{ .Values.gascity.writeAuth.cid | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
   gonk.supervisorURL -- where intake POSTs orders. DERIVED from the in-chart
   controller Service when the controller is bundled, else the operator-supplied
   external URL. The port is SETTLED at 9443 (gascity.supervisorPort, smoke U1).

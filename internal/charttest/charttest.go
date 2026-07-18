@@ -47,6 +47,13 @@ func Minimum() []string {
 		"--set", "dolt.image.tag=v1.43.0",
 		"--set", "intake.webhookPublicURL=https://gonk.example.test/hook/gitlab",
 		"--set", "litellm.externalURL=http://litellm.litellm.svc:4000",
+		// G22: the bundled controller is grant-gated (gc start --foreground, an
+		// 0.0.0.0/allow_mutations [api] plane). A default render (gascity.enabled)
+		// must supply the ed25519 PUBLIC verify key, exactly as a real operator
+		// does; the value here is the repo golden vector's real pubkey. The private
+		// signing-key Secret name defaults (secrets.gcWriteKey.existingSecret), so
+		// only the pubkey is a required --set. See chart/gonk/smoke.
+		"--set", "gascity.writeAuth.verifyKey=k1:1hcioE4eYD4PsM66wVJ8oBErEfCTyNPt9Q/+ZT0drmk=",
 		// gascity.supervisorURL is DERIVED when the controller is bundled (the
 		// default). It is NOT set here, precisely so the default render exercises
 		// the bundled path; the BYO path (gascity.enabled=false) supplies it.
