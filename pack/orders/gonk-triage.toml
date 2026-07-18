@@ -8,7 +8,9 @@
 [order]
 description = "Triage one GitLab issue. Poured by gonk-dispatch after a budget decision."
 formula = "gonk-triage"               # XOR `exec`. NEVER BOTH.
-trigger = "manual"
+trigger = "webhook"                   # fired via POST .../order/gonk-triage/run by
+                                       # gonk-dispatch; the /run endpoint fires ONLY
+                                       # webhook-trigger orders (manual is rejected 422).
 # Pool = the agent's own name (see pack.toml's note on OD-2): a "pool of one"
 # so this formula's step can ONLY be picked up by the triage agent's session,
 # never by scaffold's or mention's even though all three share this pack.
