@@ -457,3 +457,94 @@ design findings for the dispatch/pack owner, filed here with evidence):**
   POST-fired need `trigger = "webhook"`, or dispatch needs a different mechanism.
   Both must be resolved for end-to-end dispatch, independent of the image and of
   the bind wiring above.
+
+### Dispatch: authenticated end-to-end (local) — the FULL path works
+
+Resolves the two open questions above (which server mode, and does authenticated
+dispatch actually work) with a full local end-to-end run: fixed image + local
+Dolt (`--network=host`), a real ed25519 grant minted per the reverse-engineered
+write-auth spec, torn down after. **Result: the complete
+CSRF + write-auth + order-handler path succeeds.**
+
+**Server mode — it is `gc start --foreground`, NOT `gc supervisor run`, and NOT a
+`gc controller` command.** Measured:
+- `gc controller` is **not a real command** (`gc: unknown command "controller"`;
+  full `gc --help` list has no `controller`). `cmd/gc/controller.go` is internal.
+- The standalone per-city controller that serves the order-run route on the city
+  `[api]` table is launched by **`gc start --foreground`** (hidden alias
+  `--controller`; `cmd/gc/cmd_start.go:397` → `runController`). Unlike
+  `gc supervisor run` (which logs `[api] port=9443 … ignored under supervisor
+  mode`), foreground mode **binds the `[api]` port** and calls
+  `apiMux.WithAnyHostAllowed()` (`controller.go:1372-1373`) — so **any Host is
+  accepted, `allowed_hosts` is NOT needed, and the 421 host-gate cannot occur.**
+- Confirmed live: `gc start --foreground /city` → `API server listening on
+  http://0.0.0.0:9443`, `ss`: `LISTEN *:9443 users:(("gc",…))`, write-auth active
+  (`posture: grant-gated — every mutation requires a signed X-GC-City-Write grant`).
+
+**Config — the `[api]` table in `city.toml` (not `[supervisor]`):**
+```toml
+[api]
+  port = 9443                # served on 0.0.0.0, any-host
+  bind = "0.0.0.0"
+  allow_mutations = true
+  write_auth_verify_key = "k1:<std-base64 raw32 ed25519 pubkey>"
+  # write_auth_required = true   # optional: make a missing key a boot error
+```
+`gc init --bootstrap-profile k8s-cell` already writes `port/bind/allow_mutations`;
+the chart only needs to add `write_auth_verify_key` (or env `GC_CITY_WRITE_PUBKEY`).
+
+**City NAME is load-bearing.** `/v0/cities` reported the served city as **`city`**
+(foreground mode takes the name from `city.toml` `[workspace]`, which `gc init`
+left at the default). The grant's `city` claim **and** the `{cityName}` path
+segment must both equal the **served** name. Proof: a valid grant for `city=gonk`
+POSTed to `/v0/city/gonk/…` passed auth but returned **404 `city-not-found: gonk`**
+(the served city is `city`, not `gonk`). **Chart requirement:** name the city
+`gonk` — `gc init --name gonk` or set `[workspace] name = "gonk"` — so
+`/v0/city/gonk/order/<name>/run` resolves and `GONK_CITY=gonk` matches.
+
+**End-to-end proof (city named `city` for this run; auth crypto is name-agnostic):**
+- `POST /v0/city/city/order/gonk-dispatch/run` on the LAN IP `192.168.3.33:9443`
+  with `X-GC-Request: true` + `X-GC-City-Write: <grant>` and body
+  `{"vars":{"issue_iid":"1"}}` → **HTTP 422**
+  `order "gonk-dispatch": missing required param(s): bead_anchor, bead_id, project,
+  project_id, rig, session_key, trigger`. This is the **order handler's own param
+  validation** — auth passed and the order RAN. (`gonk-dispatch` was temporarily
+  set `trigger="webhook"` in the throwaway `/city` copy; the repo pack is
+  unchanged — bead gonk-vsy.)
+- **Negative controls prove auth is really enforced** (all measured):
+  - garbage `X-GC-City-Write` → **403** `write grant rejected`
+  - valid grant + **tampered body** (req-digest mismatch) → **403** `write grant
+    rejected` (the `req` binding works)
+  - **replay** the same token: 1st → 422 (handler), 2nd (reused `jti`) → **403**
+    `write grant rejected` (single-use enforced)
+  - no grant header → **401** `missing X-GC-City-Write grant`
+
+**Grant recipe that worked (byte-compatible with gascity):** ed25519 over the raw
+payload JSON; token = `base64url_nopad(payload) "." base64url_nopad(sig)`; payload
+fields `{kid,aud,city,cid,epoch,iat,exp,jti,req}`; `req =
+hex(sha256(method"\n"path"\n"hex(sha256(body))))` (query line omitted when empty);
+`aud = "gc-city-write.v2"`, `cid = ""` — **accepted against this untenanted
+controller** (no `GC_CITY_WRITE_CID` set), TTL 60s, fresh `jti` per request. Server
+verify key `k1:<std-base64(pub)>`. (A minimal stdlib-only Go signer reproduced this;
+`pkg/gcapi` needs the same 9 steps — see the write-auth spec §7.)
+
+**Concrete chart contract (Task 6.5 / `pkg/gcapi`):**
+| Item | Value |
+|---|---|
+| Controller `command` | `gc start --foreground /city` (foreground per-city controller). NOT `gc supervisor run`. |
+| City name | must be `gonk` (`gc init --name gonk` or `[workspace] name="gonk"`); grant `city` + path segment must equal it. |
+| Order-run port (routable) | `[api].port` = **9443**, `bind="0.0.0.0"`, any-host — **Service/probes/`gonk.supervisorURL` target THIS**, not 8372. |
+| `allowed_hosts` | **not needed** in foreground mode (any-host). (Only `gc supervisor run` needs it.) |
+| Config table | `[api]` in `city.toml` (+ `write_auth_verify_key="k1:<b64pub>"`, `allow_mutations=true`). |
+| Client headers | `X-GC-Request: true` **and** `X-GC-City-Write: <fresh grant>` on every POST. |
+| Client grant | ed25519 per §7; `aud="gc-city-write.v2"`, `cid=""` for the untenanted controller. Fresh `jti`/`iat`/`exp` per request (incl. retries). |
+| Auth posture | set `write_auth_verify_key` (grant-gated). Do **not** ship `write_auth_allow_unverified` (that leaves mutations unauthenticated) — foreground+any-host means anything routable to the pod could POST otherwise. Still front with a NetworkPolicy admitting only `gonk-intake`/`gonk-sweep`. |
+
+**Supersedes** the "Dispatch endpoint (local)" recommendation above (which assumed
+`gc supervisor run` + `[supervisor]` + `allowed_hosts`): that mode also works but
+requires `allowed_hosts` and ignores `[api]`. **Foreground mode (`gc start
+--foreground`, `[api]` table, any-host) is the simpler, correct target for
+gonk-controller** — it is the only mode that binds the city `[api]` order-run route
+and needs no host allowlist. The two gonk-side blockers (client `X-GC-Request`
+header — now clearly required alongside the grant; and the `trigger="manual"` →
+must be `"webhook"`, bead gonk-vsy) still stand and are unchanged by this.
