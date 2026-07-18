@@ -429,7 +429,7 @@ docs/spikes/litellm-verified.md      what Task 5 actually measured, against whic
 | A control plane (`/_control/*`) | Scripts are set per test, not per process. One stub serves a whole suite. |
 | Record mode | AD-2: nobody can author opencode's tool-call schema from imagination. |
 
-- [ ] **Step 1: Write the failing test** — `test/stubmodel/server_test.go`
+- [x] **Step 1: Write the failing test** — `test/stubmodel/server_test.go`
 
 ```go
 package stubmodel_test
@@ -668,12 +668,12 @@ func TestControlPlaneResetsScriptAndLog(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `go test ./test/stubmodel/ -v`
 Expected: FAIL — no Go files / undefined `stubmodel.New`.
 
-- [ ] **Step 3: Implement `test/stubmodel/script.go`**
+- [x] **Step 3: Implement `test/stubmodel/script.go`**
 
 ```go
 // Package stubmodel is a deterministic, OpenAI-compatible model server. It is the
@@ -752,7 +752,7 @@ func (s *Step) exhausted() bool {
 }
 ```
 
-- [ ] **Step 4: Implement `test/stubmodel/log.go`**
+- [x] **Step 4: Implement `test/stubmodel/log.go`**
 
 ```go
 package stubmodel
@@ -839,7 +839,7 @@ func (l *Log) reset() {
 }
 ```
 
-- [ ] **Step 5: Implement `test/stubmodel/server.go`**
+- [x] **Step 5: Implement `test/stubmodel/server.go`**
 
 ```go
 package stubmodel
@@ -1061,12 +1061,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 ```
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `go test ./test/stubmodel/ -race -count=1 -v`
 Expected: PASS (10 tests).
 
-- [ ] **Step 7: Add `cmd/gonk-stubmodel/main.go` and its image**
+- [x] **Step 7: Add `cmd/gonk-stubmodel/main.go` and its image**
 
 ```go
 // Command gonk-stubmodel runs the deterministic stub model server as a container,
@@ -1125,13 +1125,13 @@ EXPOSE 8081
 ENTRYPOINT ["/gonk-stubmodel"]
 ```
 
-- [ ] **Step 8: Write `test/stubmodel/record.go`** (AD-2 — do not skip; Task 7 depends on it)
+- [x] **Step 8: Write `test/stubmodel/record.go`** (AD-2 — do not skip; Task 7 depends on it)
 
 A `-record <upstream-url>` flag on `cmd/gonk-stubmodel` that proxies each request to a real upstream, writes `{request, response}` pairs to `test/stubmodel/cassettes/<name>.json`, and **scrubs any `Authorization`/`api_key` field before writing**. `stubmodel.LoadCassette(name) []Step` turns one into a script.
 
 > **Why:** the canned `tool_calls` a passing outcome gate needs must match **opencode's real tool schema**, which is defined by Plan 04 and cannot be invented here. A human records one real turn against bailey, reviews the cassette, and commits it. **Record mode never runs inside a test.** Add `TestCassetteScrubsCredentials` asserting a recorded cassette containing `"api_key":"sk-live-..."` is written with the value redacted.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./test/stubmodel/ -race -count=1 && golangci-lint run ./...

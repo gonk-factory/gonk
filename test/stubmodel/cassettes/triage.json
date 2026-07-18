@@ -1,0 +1,55 @@
+{
+  "name": "triage",
+  "entries": [
+    {
+      "request": {
+        "model": "stub-qwen",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a triage agent. Use tools to act."
+          },
+          {
+            "role": "user",
+            "content": "triage this issue"
+          }
+        ],
+        "api_key": "REDACTED",
+        "metadata": {
+          "gonk_rung": "qwen-local"
+        }
+      },
+      "response": {
+        "id": "chatcmpl-cassette-0001",
+        "object": "chat.completion",
+        "created": 1752400000,
+        "model": "stub-qwen",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_abc123",
+                  "type": "function",
+                  "function": {
+                    "name": "gitlab_comment",
+                    "arguments": "{\"body\":\"triaged: this looks like a bug in the parser\"}"
+                  }
+                }
+              ]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 812,
+          "completion_tokens": 41,
+          "total_tokens": 853
+        }
+      }
+    }
+  ]
+}
