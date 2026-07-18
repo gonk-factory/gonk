@@ -35,11 +35,38 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           # Auth is root / empty password / --no-tls, host+port only. There is no
           # credential to configure, so the chart does not pretend to (env doc).
+          env:
+            # HOME is LOAD-BEARING (gonk-fsl in-cluster re-smoke, blocker C). The
+            # dolthub image assumes it runs as root (HOME=/root) and sets no HOME
+            # env; under this chart's podSecurityContext (runAsUser 65532) HOME then
+            # resolves to `/`, and dolt dies on `mkdir /.dolt: permission denied`
+            # writing its global config. Point HOME at the PVC mount (writable by
+            # 65532 via fsGroup) so dolt writes .dolt alongside its data. The
+            # controller template solves the identical uid/HOME problem the same way.
+            - name: HOME
+              value: /var/lib/dolt
+            # dolt sql-server creates root@${DOLT_ROOT_HOST:-localhost} on FIRST
+            # init. The default root@localhost rejects the controller's CROSS-POD
+            # login (gonk-fsl in-cluster re-smoke, blocker B: `Error 1045 Access
+            # denied for user 'root'`) -- loopback masked it in every local smoke.
+            # `%` creates a remotely-usable root so the Gas City beads store is
+            # reachable from the controller pod. Still no password, still --no-tls
+            # (the documented Dolt auth model -- there is no user/pass/DSN key).
+            - name: DOLT_ROOT_HOST
+              value: "%"
+          # The dolthub image ENTRYPOINT (docker-entrypoint.sh) already runs
+          # `dolt sql-server --host=0.0.0.0 --port=3306 "$@"` AND does the
+          # DOLT_ROOT_HOST bootstrap (blocker B). Passing sql-server/--host/--port
+          # again collides -- `multiple values provided for 'host'` and a crash loop
+          # (gonk-fsl in-cluster re-smoke, blocker D). So pass ONLY the extra flags;
+          # the entrypoint supplies sql-server/--host/--port. The bundled server
+          # therefore LISTENS ON 3306 (entrypoint-fixed) -- dolt.port must stay 3306
+          # so the Service/containerPort/GC_DOLT_PORT match the real listener.
+          # NOTE: `dolt sql-server` in dolthub 2.1.7 has NO --no-tls flag (TLS is
+          # off by default unless tls_cert/tls_key is set) -- passing it is a fatal
+          # `unknown option 'no-tls'` crash (gonk-fsl re-smoke, blocker E). Pass only
+          # --data-dir (not injected by the entrypoint); host/port come from it.
           args:
-            - sql-server
-            - --host=0.0.0.0
-            - --port={{ .Values.dolt.port }}
-            - --no-tls
             - --data-dir=/var/lib/dolt
           ports:
             - name: mysql

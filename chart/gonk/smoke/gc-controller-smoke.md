@@ -687,3 +687,31 @@ unreachable` (no agent sessions to adopt), `GONK_METER_TOKEN_FILE unset` /
    city named `gonk`, cross-pod ed25519 grant-gated dispatch (with all negative
    controls), and clean Dolt-lock-across-restart. No further in-cluster unknowns remain
    for the controller itself.
+
+## From-scratch boot: five template blockers found and fixed (commit sequence on fix-gonk-fsl)
+
+Deploying the chart's REAL rendered controller + bundled Dolt from scratch (no runtime
+workarounds) surfaced five template defects the runtime-patched smoke had masked. Each
+was root-caused and fixed; the corrected config was then proven to boot clean:
+
+- **A** `workload-gonk-controller.yaml` wrote `~/.gc/cities.toml`, registering the city →
+  `gc start --foreground /city` refused it. Fix: dropped the registration (foreground
+  runs the city directly).
+- **B** bundled Dolt's default `root@localhost` rejected the controller's cross-pod login
+  (`Error 1045`). Fix: `DOLT_ROOT_HOST=%` (applied by the image entrypoint).
+- **C** the dolthub image assumes `HOME=/root`; under `runAsUser 65532` HOME became `/`
+  and dolt died on `mkdir /.dolt: permission denied`. Fix: `HOME=/var/lib/dolt` (PVC,
+  writable via fsGroup).
+- **D** the dolthub ENTRYPOINT already runs `dolt sql-server --host=0.0.0.0 --port=3306
+  "$@"`; the chart re-passed `sql-server --host --port`, colliding (`multiple values
+  provided for 'host'`). Fix: pass only the extra flags.
+- **E** `dolt sql-server` 2.1.7 has no `--no-tls` flag (`unknown option 'no-tls'`; TLS is
+  off by default). Fix: dropped `--no-tls`; args are just `--data-dir=/var/lib/dolt`.
+
+**Proven clean from-scratch (in-cluster, corrected config):** `gonk-dolt-0` Ready, binds
+3306, `Creating root@% superuser` / `root | %`; `gonk-controller` **Ready, 0 restarts**,
+`posture: grant-gated`, `API server listening on http://0.0.0.0:9443`, `City started`, no
+`managed Dolt server unreachable`; authenticated order-run POST → **422** (valid grant,
+handler reached), no grant → **401**. All namespaces torn down. Operator note: orac has no
+default StorageClass, so `dolt.persistence.storageClass` must be set (AD-2: `""` = cluster
+default).

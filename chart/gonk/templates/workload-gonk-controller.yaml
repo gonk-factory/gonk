@@ -93,8 +93,11 @@ spec:
                 --dolt-database "bd_{{ .Values.dolt.database }}" \
                 --dolt-project-id "{{ .Values.dolt.database }}" \
                 --no-start /city
-              mkdir -p "$HOME/.gc"
-              printf '[[cities]]\n  path = "/city"\n  name = "gonk"\n' > "$HOME/.gc/cities.toml"
+              # NOTE: do NOT write ~/.gc/cities.toml here. Registering the city makes
+              # `gc start --foreground /city` refuse it ("run `gc unregister /city`
+              # before using --foreground") and crash-loop (gonk-fsl in-cluster
+              # re-smoke, blocker A). Foreground mode runs the city directly from the
+              # explicit /city path -- no registration is needed or wanted.
           env:
             {{- include "gonk.controllerEnv" . | nindent 12 }}
           volumeMounts:
