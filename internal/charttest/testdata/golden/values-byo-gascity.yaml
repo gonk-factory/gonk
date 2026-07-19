@@ -1016,7 +1016,7 @@ spec:
         - name: gitlab-registry-pull-creds
       containers:
         - name: dolt
-          image: docker.io/dolthub/dolt-sql-server:v1.43.0
+          image: docker.io/dolthub/dolt-sql-server:2.1.7
           imagePullPolicy: IfNotPresent
           # Auth is root / empty password / --no-tls, host+port only. There is no
           # credential to configure, so the chart does not pretend to (env doc).
