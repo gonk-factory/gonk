@@ -182,3 +182,38 @@ lint-pack:
 		echo "FAIL: only $$n/$$total scripts under pack/scripts/ end in a bare exec gonk-gate call"; \
 		exit 1; \
 	fi
+
+# ---------------------------------------------------------------------------
+# The standing gate (Plan 06, Task 2). CI has NEVER RUN on this repo -- every
+# runner on gitlab.orac.local was offline through Plan 01 -- so THIS is the real
+# gate, and every target below must be runnable on a laptop, offline, against the
+# vendored module cache.
+GO ?= go
+# Offline by default: the module cache is vendored (go mod vendor + committed).
+export GOFLAGS ?= -mod=vendor
+export GOPROXY ?= off
+
+.PHONY: gate fmt vet test lint e2e-doctor
+
+# gate is L0 + L1: no containers, race-clean, in under ~90s. It is what runs on
+# every commit.
+gate: fmt vet test lint
+
+fmt:
+	@out="$$(gofmt -l . | grep -v '^vendor/' || true)"; \
+	  if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+
+vet:
+	$(GO) vet ./...
+
+test:
+	$(GO) test ./... -race -count=1
+
+lint:
+	/root/go/bin/golangci-lint run ./...
+
+# e2e-doctor is the preflight that refuses to waste your 25 minutes: it fails
+# fast, with a remedy, when a layer's prereqs are absent. Expected to FAIL on the
+# dev box (broken CNI bridge) -- that IS the OD-3 finding, not a bug in this task.
+e2e-doctor:
+	$(GO) run ./test/harness/cmd/doctor

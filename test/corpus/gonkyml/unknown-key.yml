@@ -1,0 +1,4 @@
+# additionalProperties:false -- an unknown top-level key must be rejected.
+version: 1
+enabled: true
+bananas: true

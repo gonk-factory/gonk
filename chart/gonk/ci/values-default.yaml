@@ -40,7 +40,7 @@ gascity:
 
 dolt:
   image:
-    tag: v1.43.0
+    tag: 2.1.7
 
 litellm:
   externalURL: http://litellm.litellm.svc.cluster.local:4000
