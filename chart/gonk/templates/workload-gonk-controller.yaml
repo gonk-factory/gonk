@@ -146,6 +146,25 @@ spec:
               value: gc-agent
             - name: GC_K8S_PREBAKED
               value: "true"
+            # v1-minimal session-config delivery (gonk-aql). The in-controller
+            # gonk-gate `dispatch` reads these and forwards them to the agent
+            # session as order vars (GC_WEBHOOK_ARG_{LITELLM_URL,LITELLM_KEY,
+            # BOT_TOKEN}), because Gas City mounts no gonk secrets into session
+            # pods and controller env does not flow to sessions. LITELLM_KEY and
+            # BOT_TOKEN are a DELIBERATE v1 compromise (a credential on the
+            # controller env and then in an order var) that the v2 broker removes.
+            - name: GONK_LITELLM_URL
+              value: {{ .Values.litellm.externalURL | quote }}
+            - name: GONK_LITELLM_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.litellm.existingSecret | quote }}
+                  key: {{ .Values.secrets.litellm.keys.adminKey | quote }}
+            - name: GONK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.gitlab.existingSecret | quote }}
+                  key: {{ .Values.secrets.gitlab.keys.token | quote }}
           ports:
             # The per-city [api] listener (0.0.0.0:9443). This is what intake
             # dispatches to and what the Service targets. Port 8372 (the machine-wide

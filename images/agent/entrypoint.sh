@@ -55,12 +55,43 @@ fi
 # and spec goal 4 (attribution at every granularity) does not tolerate that.
 : "${GC_WEBHOOK_ARG_MODEL:?GC_WEBHOOK_ARG_MODEL is unset -- this is gonk-meter's rung decision, never a literal, and there is no default}"
 : "${GC_WEBHOOK_ARG_METADATA_JSON:?GC_WEBHOOK_ARG_METADATA_JSON is unset -- the attribution seam (OD-7) has nothing to stamp}"
-: "${GONK_LITELLM_URL:?GONK_LITELLM_URL is unset}"
-: "${GONK_LITELLM_KEY_FILE:?GONK_LITELLM_KEY_FILE is unset -- the virtual key is a FILE MOUNT, never an env value}"
+
+# --- v1-minimal session-config delivery (gonk-aql / minimal opencode leg) ------
+# Gas City's k8s session provider mounts no gonk secrets and controller env does
+# not flow to sessions (allow_env_override is inert at GASCITY_REF), so the
+# LiteLLM URL/key and the bot token are threaded in as ORDER ARGS
+# (GC_WEBHOOK_ARG_*, set by cmd/gonk-gate/dispatch.go from controller env). This
+# is a DELIBERATE v1 compromise: two of these are secrets transiting an order var,
+# which the v2 broker removes by keeping all creds out of the pod. The overlay
+# still consumes the key only as opencode's {file:...} syntax -- the key bytes
+# are written to a 0600 file here and never enter the rendered JSON or a shell
+# var that a child process inherits.
+: "${GONK_LITELLM_URL:=${GC_WEBHOOK_ARG_LITELLM_URL:-}}"
+: "${GONK_LITELLM_URL:?GONK_LITELLM_URL is unset (no GC_WEBHOOK_ARG_LITELLM_URL either)}"
+
+if [ -z "${GONK_LITELLM_KEY_FILE:-}" ]; then
+	# Materialize the virtual key from the order arg into a private file so
+	# opencode's {file:...} apiKey syntax can read it without the key ever
+	# appearing in the rendered config.
+	: "${GC_WEBHOOK_ARG_LITELLM_KEY:?neither GONK_LITELLM_KEY_FILE nor GC_WEBHOOK_ARG_LITELLM_KEY is set -- no way to authenticate to LiteLLM}"
+	GONK_LITELLM_KEY_FILE="${GONK_RUNTIME_DIR:-/tmp/gonk}/llkey"
+	mkdir -p "$(dirname "${GONK_LITELLM_KEY_FILE}")"
+	( umask 077; printf '%s' "${GC_WEBHOOK_ARG_LITELLM_KEY}" > "${GONK_LITELLM_KEY_FILE}" )
+	log "materialized LiteLLM key file at ${GONK_LITELLM_KEY_FILE}"
+fi
 
 if [ ! -f "${GONK_LITELLM_KEY_FILE}" ]; then
 	log "GONK_LITELLM_KEY_FILE=${GONK_LITELLM_KEY_FILE} does not exist -- refusing to start unattributed/unauthenticated"
 	exit 1
+fi
+
+# glab auth for the direct-post path: the triage prompt has opencode read the
+# issue and post the comment via glab. glab honours GITLAB_HOST + GITLAB_TOKEN.
+# (v2: the broker posts and the agent holds no GitLab token.)
+if [ -n "${GC_WEBHOOK_ARG_BOT_TOKEN:-}" ]; then
+	export GITLAB_HOST="${GITLAB_HOST:-${GONK_GITLAB_HOST:-gitlab.orac.local}}"
+	export GITLAB_TOKEN="${GITLAB_TOKEN:-${GC_WEBHOOK_ARG_BOT_TOKEN}}"
+	log "configured glab for ${GITLAB_HOST}"
 fi
 
 OVERLAY_PATH="${GONK_OPENCODE_OVERLAY:-/etc/gonk/overlay/opencode.json}"
