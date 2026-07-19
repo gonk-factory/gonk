@@ -1873,7 +1873,7 @@ func (s *SyntheticSession) Report(t testing.TB, outcome string)     // success|g
 func (s *SyntheticSession) Run(t testing.TB, calls int, outcome string) meterapi.DecideResponse // all three
 ```
 
-- [ ] **Step 1: The seam + happy path** — `onboarding_test.go`, `triage_test.go`
+- [x] **Step 1: The seam + happy path** — `onboarding_test.go`, `triage_test.go`
 
 ```go
 // The spec-11.2 walk, with fakes. Closes P3-10 and the intake<->meter half of P2-9.
@@ -1937,7 +1937,7 @@ func TestInstanceKillSwitchDisablesAProjectWithoutAConfigChange(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: The hostile corpus, end to end** — `hostile_test.go`
+- [x] **Step 2: The hostile corpus, end to end** — `hostile_test.go`
 
 ```go
 // Every hostile .gonk.yml, pushed to a real project through the real intake, into
@@ -1989,7 +1989,7 @@ func TestAttributionUnsafeValuesNeverReachTheLedger(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: The escalation ladder** — `ladder_test.go`. **The settled, load-bearing decision: infra failures NEVER escalate a rung.**
+- [x] **Step 3: The escalation ladder** — `ladder_test.go`. **The settled, load-bearing decision: infra failures NEVER escalate a rung.**
 
 ```go
 // Spec 6.3, and the single most important behavioural claim in this system after
@@ -2092,7 +2092,7 @@ func TestOutcomeBoundToAMeterMintedReservation(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: The concurrent-reservation race** — `race_test.go`. **The crown jewel.**
+- [x] **Step 4: The concurrent-reservation race** — `race_test.go`. **The crown jewel.**
 
 ```go
 // TWO SESSIONS RACING THE LAST OF A BUDGET. EXACTLY ONE MAY WIN.
@@ -2148,7 +2148,7 @@ func TestConcurrentSessionsCannotOverspendACeiling(t *testing.T) {
 
 Run this one at `-count=10`: *a race that manifests one run in three is still a budget escape.*
 
-- [ ] **Step 5: The brick test** — `brick_test.go`. **This is the regression the brief specifically asked for.**
+- [x] **Step 5: The brick test** — `brick_test.go`. **This is the regression the brief specifically asked for.**
 
 ```go
 // THE ONBOARDING DEFAULT MUST BE ABLE TO AFFORD ITS OWN ONLY RUNG.
@@ -2206,7 +2206,7 @@ func TestOnboardingDefaultCanAffordItsOnlyRung(t *testing.T) {
 func TestBrickTestWouldCatchCurrencyUnification(t *testing.T) { /* inject a summing budget.Remain; require FAIL */ }
 ```
 
-- [ ] **Step 6: The prose-independence proof** — `prose_test.go` (**AD-4**)
+- [x] **Step 6: The prose-independence proof** — `prose_test.go` (**AD-4**)
 
 ```go
 // "No test may depend on model output being good." Proven mechanically, not promised:
@@ -2221,7 +2221,7 @@ func TestNoAssertionDependsOnModelProse(t *testing.T) {
 }
 ```
 
-- [ ] **Step 7: Run and commit**
+- [x] **Step 7: Run and commit**
 
 ```bash
 go test ./test/integration/ -race -count=1 -v      # < 60s
