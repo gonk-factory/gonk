@@ -16,6 +16,19 @@
 #     single rule edit once a runner + registry credentials exist.
 # =============================================================================
 
+# Shared homelab CI: the kaniko image-build + helm-push templates and the
+# orac.local cluster specifics (node pinning, the in-cluster registry Service,
+# the zot pull-through mirror, pod sizing). This is the ESTABLISHED way images
+# are built in CI on this cluster -- gonk consumes it rather than reinventing the
+# unprivileged-kaniko dance. The `include` also merges that project's global
+# `variables:` (INTERNAL_REGISTRY_REPO / INTERNAL_REGISTRY_HOST / ZOT_MIRROR /
+# KUBERNETES_NODE_SELECTOR_HOSTNAME=johnny / pod sizing) into this pipeline.
+# See homelab/ci-templates (gitlab.orac.local project 65) /kaniko.yml.
+include:
+  - project: 'homelab/ci-templates'
+    ref: main
+    file: '/kaniko.yml'
+
 stages: [lint, test, chart, images]
 
 variables:
@@ -90,33 +103,160 @@ no-latest:
     - make no-latest
 
 # -----------------------------------------------------------------------------
-# DOCUMENTED-MANUAL: image build / push / scan.
+# Image build + push, IN CI, via unprivileged kaniko (homelab/ci-templates).
 #
-# These need podman (--network=host on WSL), network reach to the upstream
-# release servers the Dockerfiles fetch from, and push credentials to
-# registry.orac.local. NONE of that exists on an offline runner, and the first
-# images are built + pushed BY HAND (Makefile `push`). `rules: when: never`
-# keeps them out of every pipeline while preserving the exact target mapping; a
-# single rule edit turns them on once a runner + registry creds exist. DO NOT
-# "fix" these by inventing reach the runner lacks.
+# HISTORY: the first gonk-controller/intake/meter images were built + pushed BY
+# HAND (Makefile `push`) because every runner was offline and no runner had ever
+# executed a job. That era is over -- a runner is online and pipelines are green,
+# so images now build in CI. The k8s executor is `privileged = false` (no DinD),
+# which is exactly what kaniko is for: it builds a Dockerfile in userspace and
+# pushes straight to the in-cluster registry Service over plain HTTP (bypassing
+# the Traefik ingress' blob-PATCH timeout and the private orac CA the executor
+# pods don't mount). Auth is the CI job token -- registry.orac.local IS this
+# GitLab's integrated registry, so $CI_REGISTRY_USER/$CI_REGISTRY_PASSWORD push
+# to $CI_PROJECT_PATH with no deploy token.
+#
+# TAGGING stays gonk's convention, NOT the shared template's (sha8 + `latest`):
+# $(GONK_VERSION)-<sha12>, matching images/versions.env + the Makefile so a CI
+# build and a by-hand `make push` of the same commit produce the identical tag.
+# `latest` is never pushed (G11 + the no-latest gate reject it on principle).
+#
+# The build-args come from images/versions.env (sourced in before_script), so CI
+# and the Makefile read the exact same pins. The testclock meter is built with
+# BUILD_TAGS=testclock to a SEPARATE `-testclock` tag and is NEVER the plain
+# meter tag (a clock a file can move must never ship as production).
 # -----------------------------------------------------------------------------
-image-build:
+.gonk-kaniko:
   stage: images
+  image:
+    name: gcr.io/kaniko-project/executor:v1.24.0-debug
+    entrypoint: [""]
+  # Build images on branch pipelines (and main). Heavy, but these are the
+  # deliverable's proof that the build runs in CI; dial to `when: manual` later
+  # if per-commit image churn becomes a concern.
   rules:
-    - when: never
-  script:
-    # `make images` runs the no-latest gate first, then builds all four images
-    # (agent, controller, intake, meter) plus the e2e-only testclock meter.
-    - make images
+    - if: '$CI_COMMIT_BRANCH'
+  # Serialize the image builds: the template pins every job to node johnny, and
+  # five parallel kaniko pods there would contend for memory. One at a time gives
+  # each build johnny's full headroom (and warms the shared layer cache in order).
+  resource_group: gonk-images
+  before_script:
+    # Same pins the Makefile uses -- one source of truth (images/versions.env).
+    - set -a; . images/versions.env; set +a
+    - export GONK_TAG="${GONK_VERSION}-$(printf %s "$CI_COMMIT_SHA" | cut -c1-12)"
+    - mkdir -p /kaniko/.docker
+    # Job-token auth for both the external registry name and the internal Service
+    # hostname kaniko actually dials -- same JWT realm either way.
+    - |
+      AUTH=$(printf %s "$CI_REGISTRY_USER:$CI_REGISTRY_PASSWORD" | base64 | tr -d '\n')
+      printf '{"auths":{"%s":{"auth":"%s"},"%s":{"auth":"%s"}}}' \
+        "$CI_REGISTRY" "$AUTH" "$INTERNAL_REGISTRY_HOST" "$AUTH" \
+        > /kaniko/.docker/config.json
 
-image-push:
-  stage: images
-  rules:
-    - when: never
+agent-image:
+  extends: .gonk-kaniko
   script:
-    # Pushes $(GONK_TAG) (never `latest`) to registry.orac.local. Needs push
-    # credentials this pipeline does not carry.
-    - make push
+    - >-
+      /kaniko/executor
+      --context "$CI_PROJECT_DIR"
+      --dockerfile "$CI_PROJECT_DIR/images/Dockerfile.agent"
+      --destination "$INTERNAL_REGISTRY_REPO/gonk-agent:$GONK_TAG"
+      --build-arg GONK_TAG=$GONK_TAG
+      --build-arg GO_VERSION=$GO_VERSION
+      --build-arg DEBIAN_BASE=$DEBIAN_BASE
+      --build-arg OPENCODE_VERSION=$OPENCODE_VERSION
+      --build-arg GLAB_VERSION=$GLAB_VERSION
+      --build-arg BD_VERSION=$BD_VERSION
+      --cache=true
+      --cache-repo="$INTERNAL_REGISTRY_REPO/cache"
+      --compressed-caching=false
+      --registry-mirror=$ZOT_MIRROR
+      --insecure-registry=$ZOT_MIRROR
+      --insecure-registry=$INTERNAL_REGISTRY_HOST
+      --skip-tls-verify
+
+controller-image:
+  extends: .gonk-kaniko
+  script:
+    - >-
+      /kaniko/executor
+      --context "$CI_PROJECT_DIR"
+      --dockerfile "$CI_PROJECT_DIR/images/Dockerfile.controller"
+      --destination "$INTERNAL_REGISTRY_REPO/gonk-controller:$GONK_TAG"
+      --build-arg GONK_TAG=$GONK_TAG
+      --build-arg GO_VERSION=$GO_VERSION
+      --build-arg DEBIAN_BASE=$DEBIAN_BASE
+      --build-arg BD_VERSION=$BD_VERSION
+      --build-arg DOLT_VERSION=$DOLT_VERSION
+      --build-arg GASCITY_REF=$GASCITY_REF
+      --cache=true
+      --cache-repo="$INTERNAL_REGISTRY_REPO/cache"
+      --compressed-caching=false
+      --registry-mirror=$ZOT_MIRROR
+      --insecure-registry=$ZOT_MIRROR
+      --insecure-registry=$INTERNAL_REGISTRY_HOST
+      --skip-tls-verify
+
+intake-image:
+  extends: .gonk-kaniko
+  script:
+    - >-
+      /kaniko/executor
+      --context "$CI_PROJECT_DIR"
+      --dockerfile "$CI_PROJECT_DIR/images/Dockerfile.intake"
+      --destination "$INTERNAL_REGISTRY_REPO/gonk-intake:$GONK_TAG"
+      --build-arg GONK_TAG=$GONK_TAG
+      --build-arg GO_VERSION=$GO_VERSION
+      --build-arg DISTROLESS_BASE=$DISTROLESS_BASE
+      --cache=true
+      --cache-repo="$INTERNAL_REGISTRY_REPO/cache"
+      --compressed-caching=false
+      --registry-mirror=$ZOT_MIRROR
+      --insecure-registry=$ZOT_MIRROR
+      --insecure-registry=$INTERNAL_REGISTRY_HOST
+      --skip-tls-verify
+
+meter-image:
+  extends: .gonk-kaniko
+  script:
+    - >-
+      /kaniko/executor
+      --context "$CI_PROJECT_DIR"
+      --dockerfile "$CI_PROJECT_DIR/images/Dockerfile.meter"
+      --destination "$INTERNAL_REGISTRY_REPO/gonk-meter:$GONK_TAG"
+      --build-arg GONK_TAG=$GONK_TAG
+      --build-arg GO_VERSION=$GO_VERSION
+      --build-arg DISTROLESS_BASE=$DISTROLESS_BASE
+      --cache=true
+      --cache-repo="$INTERNAL_REGISTRY_REPO/cache"
+      --compressed-caching=false
+      --registry-mirror=$ZOT_MIRROR
+      --insecure-registry=$ZOT_MIRROR
+      --insecure-registry=$INTERNAL_REGISTRY_HOST
+      --skip-tls-verify
+
+# The e2e-only testclock meter: SAME Dockerfile, BUILD_TAGS=testclock, a distinct
+# `-testclock` tag. Never the plain meter tag (Makefile meter-testclock-image;
+# test/images/servers_smoke_test.go asserts the two images differ exactly here).
+meter-testclock-image:
+  extends: .gonk-kaniko
+  script:
+    - >-
+      /kaniko/executor
+      --context "$CI_PROJECT_DIR"
+      --dockerfile "$CI_PROJECT_DIR/images/Dockerfile.meter"
+      --destination "$INTERNAL_REGISTRY_REPO/gonk-meter:$GONK_TAG-testclock"
+      --build-arg GONK_TAG=$GONK_TAG
+      --build-arg GO_VERSION=$GO_VERSION
+      --build-arg DISTROLESS_BASE=$DISTROLESS_BASE
+      --build-arg BUILD_TAGS=testclock
+      --cache=true
+      --cache-repo="$INTERNAL_REGISTRY_REPO/cache"
+      --compressed-caching=false
+      --registry-mirror=$ZOT_MIRROR
+      --insecure-registry=$ZOT_MIRROR
+      --insecure-registry=$INTERNAL_REGISTRY_HOST
+      --skip-tls-verify
 
 image-scan:
   stage: images
