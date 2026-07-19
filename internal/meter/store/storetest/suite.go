@@ -36,6 +36,18 @@ func unlimited() budget.Budget {
 	}
 }
 
+// zeroCostBudget is the onboarding default (spec 5.3): monthly_cost_usd: 0 with
+// room in the token ceilings. A local (zero-cost) rung must run freely under it
+// -- that is exactly the "dead on arrival" brick gonk-2g4 fixes -- while a
+// priced (cloud) rung must never be affordable.
+func zeroCostBudget() budget.Budget {
+	return budget.Budget{
+		MonthlyCostUSD: 0,
+		MonthlyTokens:  1_000_000,
+		PerTaskTokens:  1_000_000,
+	}
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
@@ -59,6 +71,9 @@ func Run(t *testing.T, newStore func() store.Store) {
 	t.Run("RecordAttemptIsIdempotentPerReservation", testRecordAttemptIsIdempotentPerReservation(newStore))
 	t.Run("ATerminalOutcomeSupersedesTheJanitorsGuess", testATerminalOutcomeSupersedesTheJanitorsGuess(newStore))
 	t.Run("ReservationsHoldBudgetAndExpire", testReservationsHoldBudgetAndExpire(newStore))
+	t.Run("ZeroCostRungReservesUnderZeroCostBudget", testZeroCostRungReservesUnderZeroCostBudget(newStore))
+	t.Run("PricedRungRejectedUnderZeroCostBudget", testPricedRungRejectedUnderZeroCostBudget(newStore))
+	t.Run("ZeroCostRungStillBoundByTokenGate", testZeroCostRungStillBoundByTokenGate(newStore))
 	t.Run("ReserveIsIdempotentPerOpenKey", testReserveIsIdempotentPerOpenKey(newStore))
 	t.Run("SettleHoldsBudgetUntilTheSpendCatchesUp", testSettleHoldsBudgetUntilTheSpendCatchesUp(newStore))
 	t.Run("SpendRowsAreDeduped", testSpendRowsAreDeduped(newStore))
@@ -218,6 +233,108 @@ func testReservationsHoldBudgetAndExpire(newStore func() store.Store) func(t *te
 		}
 		if again, _ := s.ExpireReservations(ctx, now.Add(3*time.Hour)); len(again) != 0 {
 			t.Fatal("ExpireReservations returned the same reservation twice")
+		}
+	}
+}
+
+// gonk-2g4 (the brick): the onboarding default is monthly_cost_usd: 0 plus a
+// local ladder [qwen-local], so a fresh project's ONLY rung is a zero-cost
+// (CostUSD == 0) reservation. ReserveIfFits must let it through -- it holds no
+// real dollars -- exactly as rung.Decide (decide.go: `spec.EstCostUSD > 0 &&
+// !rem.FitsCost(...)`) already skips the cost gate for it. Before the fix the
+// stores applied FitsCost unconditionally, FitsCost(0) is false under a $0
+// ceiling, so every onboarded project was DEAD ON ARRIVAL. The token ceilings
+// still have room here, so the ONLY thing that could reject this is the cost
+// leg -- which is what this test pins.
+func testZeroCostRungReservesUnderZeroCostBudget(newStore func() store.Store) func(t *testing.T) {
+	return func(t *testing.T) {
+		ctx, s := context.Background(), newStore()
+		now := at("2026-07-13T10:00:00Z")
+		r := store.Reservation{
+			ID: "rsv-local", Project: "group/repo", BeadID: "gk-1", SessionKey: "s1",
+			Rung: "qwen-local", Attempt: 1, CostUSD: 0, Tokens: 1000,
+			CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		}
+		res, err := s.ReserveIfFits(ctx, "group/repo", zeroCostBudget(), budget.Spend{}, r)
+		if err != nil {
+			t.Fatalf("ReserveIfFits(zero-cost local rung) errored: %v", err)
+		}
+		if !res.Fits {
+			t.Fatal("a zero-cost local rung was REJECTED under monthly_cost_usd: 0 -- gonk-2g4 brick: every onboarded project is dead on arrival")
+		}
+		if open, _ := s.OpenReservations(ctx, "group/repo", now.Add(30*time.Minute)); len(open) != 1 {
+			t.Fatalf("OpenReservations = %d, want 1 (the zero-cost reservation must actually be held)", len(open))
+		}
+	}
+}
+
+// The money-safety counterweight to the brick fix: skipping the cost leg is
+// legal ONLY for a zero-cost rung. A PRICED (cloud) rung with CostUSD > 0 still
+// holds real dollars, so under a $0 cost ceiling it must STILL be rejected --
+// the fix must not open an overspend path. Token room is available, so the ONLY
+// thing that can (and must) reject this is the cost leg.
+func testPricedRungRejectedUnderZeroCostBudget(newStore func() store.Store) func(t *testing.T) {
+	return func(t *testing.T) {
+		ctx, s := context.Background(), newStore()
+		now := at("2026-07-13T10:00:00Z")
+		r := store.Reservation{
+			ID: "rsv-cloud", Project: "group/repo", BeadID: "gk-1", SessionKey: "s1",
+			Rung: "glm", Attempt: 1, CostUSD: 0.40, Tokens: 1000,
+			CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		}
+		res, err := s.ReserveIfFits(ctx, "group/repo", zeroCostBudget(), budget.Spend{}, r)
+		if err != nil {
+			t.Fatalf("ReserveIfFits(priced rung) errored: %v", err)
+		}
+		if res.Fits {
+			t.Fatal("a PRICED rung (CostUSD > 0) was admitted under monthly_cost_usd: 0 -- the cost gate was weakened; this is an overspend hole")
+		}
+		if open, _ := s.OpenReservations(ctx, "group/repo", now.Add(30*time.Minute)); len(open) != 0 {
+			t.Fatalf("OpenReservations = %d, want 0 (a rejected priced rung must hold no budget)", len(open))
+		}
+	}
+}
+
+// The other half of money-safety: skipping the cost leg for a zero-cost rung
+// must NOT skip the TOKEN legs. Local rungs are bounded by the token ceilings
+// (synthetic pricing makes USD ceilings unreliable for them via LiteLLM), so a
+// zero-cost rung whose token budget is exhausted must STILL be rejected.
+func testZeroCostRungStillBoundByTokenGate(newStore func() store.Store) func(t *testing.T) {
+	return func(t *testing.T) {
+		ctx, s := context.Background(), newStore()
+		now := at("2026-07-13T10:00:00Z")
+		// A tight monthly-token ceiling with no cost ceiling. The rung is free but
+		// wants more tokens than remain.
+		tightTokens := budget.Budget{
+			MonthlyCostUSD: 0,
+			MonthlyTokens:  500,
+			PerTaskTokens:  1_000_000,
+		}
+		r := store.Reservation{
+			ID: "rsv-local-big", Project: "group/repo", BeadID: "gk-1", SessionKey: "s1",
+			Rung: "qwen-local", Attempt: 1, CostUSD: 0, Tokens: 1000,
+			CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		}
+		res, err := s.ReserveIfFits(ctx, "group/repo", tightTokens, budget.Spend{}, r)
+		if err != nil {
+			t.Fatalf("ReserveIfFits(zero-cost, token-exhausted) errored: %v", err)
+		}
+		if res.Fits {
+			t.Fatal("a zero-cost rung over its MONTHLY-token ceiling was admitted -- the fix skipped a token leg, not just the cost leg")
+		}
+
+		// Same again, but the PER-TASK token ceiling is the binding one.
+		tightTask := budget.Budget{
+			MonthlyCostUSD: 0,
+			MonthlyTokens:  1_000_000,
+			PerTaskTokens:  500,
+		}
+		res, err = s.ReserveIfFits(ctx, "group/repo", tightTask, budget.Spend{}, r)
+		if err != nil {
+			t.Fatalf("ReserveIfFits(zero-cost, per-task-exhausted) errored: %v", err)
+		}
+		if res.Fits {
+			t.Fatal("a zero-cost rung over its PER-TASK token ceiling was admitted -- the per-task token leg was skipped")
 		}
 	}
 }

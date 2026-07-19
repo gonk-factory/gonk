@@ -143,7 +143,14 @@ func (m *Memory) ReserveIfFits(_ context.Context, project string, ceiling budget
 	// The rung's own draw must still fit on top of everything already held.
 	// NOTE the cost check is against REAL dollars only: r.SyntheticCostUSD is
 	// deliberately absent here (Decision 9).
-	if !rem.FitsCost(r.CostUSD) || !rem.FitsMonthTokens(r.Tokens) || !rem.FitsTaskTokens(r.Tokens) {
+	//
+	// gonk-2g4: skip the cost leg for a ZERO-cost (local) rung, mirroring
+	// rung.Decide (decide.go: `spec.EstCostUSD > 0 && !rem.FitsCost(...)`). A
+	// zero-cost reservation holds no real dollars, so FitsCost(0) -- which is
+	// false under a $0 ceiling -- must not gate it, or the onboarding default
+	// (monthly_cost_usd: 0, ladder: [qwen-local]) bricks every project. The
+	// TOKEN legs are NOT skipped: local rungs are bounded by the token ceilings.
+	if (r.CostUSD > 0 && !rem.FitsCost(r.CostUSD)) || !rem.FitsMonthTokens(r.Tokens) || !rem.FitsTaskTokens(r.Tokens) {
 		return ReserveResult{}, nil // a lost race is a DEFER, not an error
 	}
 	m.reservations[r.ID] = r
