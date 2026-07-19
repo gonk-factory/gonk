@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -33,11 +34,24 @@ import (
 // 11: the HTTP API, not LiteLLM's Postgres -- a supported surface that
 // survives upgrades). We prefer the v2 shape (mandatory dates, paginated, 10k
 // row cap) over the legacy /spend/logs, which is the one that OOM-killed the
-// pod when called without a date bound. *** LIVE-INFRASTRUCTURE BOUNDARY ***:
-// whether the pinned LiteLLM version (v1.92.0, docs/environment.md) actually
-// serves this path, and the exact pagination-cursor field name, is unverified
-// until Plan 06's e2e harness confirms it against a real proxy.
+// pod when called without a date bound.
+//
+// VERIFIED against real LiteLLM v1.92.0 (gonk-huy live harness, ghcr.io/
+// berriai/litellm-database:v1.92.0). The exact wire contract this adapter now
+// speaks, and which cost a Plan 03 shipping bug to learn:
+//   - Dates MUST be "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS". An RFC3339 value
+//     (2026-07-01T00:00:00Z) is rejected HTTP 400 "Invalid date format".
+//   - The body is an OBJECT, not a bare array:
+//     {"data":[...], "total":N, "page":P, "page_size":S, "total_pages":T}.
+//   - Pagination is by the body fields page/total_pages. There is NO
+//     X-Next-Page header (the only response headers are Date and content-type).
 const spendLogsPath = "/spend/logs/v2"
+
+// litellmDateFormat is the ONLY date format real v1.92.0 /spend/logs/v2
+// accepts alongside bare "YYYY-MM-DD"; RFC3339 is a 400. We send the full
+// timestamp so the start bound is exact (Since must return rows at or after t,
+// not merely at or after t's calendar day).
+const litellmDateFormat = "2006-01-02 15:04:05"
 
 // HTTPSpendSource reads LiteLLM's spend log over HTTP.
 type HTTPSpendSource struct {
@@ -100,6 +114,17 @@ type logEntry struct {
 	} `json:"metadata"`
 }
 
+// spendLogPage is the v2 response envelope. VERIFIED against real v1.92.0:
+// /spend/logs/v2 returns this object, never a bare array. Pagination is driven
+// by Page/TotalPages -- there is no cursor header.
+type spendLogPage struct {
+	Data       []logEntry `json:"data"`
+	Total      int        `json:"total"`
+	Page       int        `json:"page"`
+	PageSize   int        `json:"page_size"`
+	TotalPages int        `json:"total_pages"`
+}
+
 // Since implements SpendSource. See the package-level comment above for the
 // OOM-guard invariant this method exists to uphold: every page of every
 // request carries both start_date and end_date.
@@ -109,7 +134,7 @@ func (s *HTTPSpendSource) Since(ctx context.Context, t time.Time) ([]spend.Row, 
 		rows        []spend.Row
 		sourceClock time.Time
 	)
-	page := "1"
+	page := 1
 	for {
 		body, status, header, err := s.fetchPage(ctx, t, end, page)
 		if err != nil {
@@ -125,30 +150,33 @@ func (s *HTTPSpendSource) Since(ctx context.Context, t time.Time) ([]spend.Row, 
 				}
 			}
 		}
-		var entries []logEntry
-		if err := json.Unmarshal(body, &entries); err != nil {
+		var pg spendLogPage
+		if err := json.Unmarshal(body, &pg); err != nil {
 			return nil, time.Time{}, fmt.Errorf("litellm: %s: decoding page: %w", spendLogsPath, err)
 		}
-		for _, e := range entries {
+		for _, e := range pg.Data {
 			if row, ok := s.toRow(e); ok {
 				rows = append(rows, row)
 			}
 		}
-		next := header.Get("X-Next-Page")
-		if next == "" {
+		// Paginate by the body's page/total_pages -- v2 sends no cursor header.
+		// Stop when we have read the last page, and defensively when a page came
+		// back empty (a total_pages that never catches up must not loop forever).
+		if page >= pg.TotalPages || len(pg.Data) == 0 {
 			break
 		}
-		page = next
+		page++
 	}
 	return rows, sourceClock, nil
 }
 
-func (s *HTTPSpendSource) fetchPage(ctx context.Context, start, end time.Time, page string) ([]byte, int, http.Header, error) {
+func (s *HTTPSpendSource) fetchPage(ctx context.Context, start, end time.Time, page int) ([]byte, int, http.Header, error) {
 	q := url.Values{}
 	// BOTH bounds, on EVERY page -- this is the line the OOM guard lives on.
-	q.Set("start_date", start.UTC().Format(time.RFC3339))
-	q.Set("end_date", end.UTC().Format(time.RFC3339))
-	q.Set("page", page)
+	// litellmDateFormat, NOT RFC3339: real v1.92.0 rejects RFC3339 with HTTP 400.
+	q.Set("start_date", start.UTC().Format(litellmDateFormat))
+	q.Set("end_date", end.UTC().Format(litellmDateFormat))
+	q.Set("page", strconv.Itoa(page))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+spendLogsPath+"?"+q.Encode(), nil)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("litellm: building spend-log request: %w", err)
