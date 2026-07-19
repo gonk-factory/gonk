@@ -19,7 +19,7 @@ meter:
 
 dolt:
   image:
-    tag: v1.43.0
+    tag: 2.1.7
 
 gascity:
   enabled: false

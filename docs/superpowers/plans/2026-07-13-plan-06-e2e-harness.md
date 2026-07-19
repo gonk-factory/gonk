@@ -429,7 +429,7 @@ docs/spikes/litellm-verified.md      what Task 5 actually measured, against whic
 | A control plane (`/_control/*`) | Scripts are set per test, not per process. One stub serves a whole suite. |
 | Record mode | AD-2: nobody can author opencode's tool-call schema from imagination. |
 
-- [ ] **Step 1: Write the failing test** — `test/stubmodel/server_test.go`
+- [x] **Step 1: Write the failing test** — `test/stubmodel/server_test.go`
 
 ```go
 package stubmodel_test
@@ -668,12 +668,12 @@ func TestControlPlaneResetsScriptAndLog(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `go test ./test/stubmodel/ -v`
 Expected: FAIL — no Go files / undefined `stubmodel.New`.
 
-- [ ] **Step 3: Implement `test/stubmodel/script.go`**
+- [x] **Step 3: Implement `test/stubmodel/script.go`**
 
 ```go
 // Package stubmodel is a deterministic, OpenAI-compatible model server. It is the
@@ -752,7 +752,7 @@ func (s *Step) exhausted() bool {
 }
 ```
 
-- [ ] **Step 4: Implement `test/stubmodel/log.go`**
+- [x] **Step 4: Implement `test/stubmodel/log.go`**
 
 ```go
 package stubmodel
@@ -839,7 +839,7 @@ func (l *Log) reset() {
 }
 ```
 
-- [ ] **Step 5: Implement `test/stubmodel/server.go`**
+- [x] **Step 5: Implement `test/stubmodel/server.go`**
 
 ```go
 package stubmodel
@@ -1061,12 +1061,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 ```
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `go test ./test/stubmodel/ -race -count=1 -v`
 Expected: PASS (10 tests).
 
-- [ ] **Step 7: Add `cmd/gonk-stubmodel/main.go` and its image**
+- [x] **Step 7: Add `cmd/gonk-stubmodel/main.go` and its image**
 
 ```go
 // Command gonk-stubmodel runs the deterministic stub model server as a container,
@@ -1125,13 +1125,13 @@ EXPOSE 8081
 ENTRYPOINT ["/gonk-stubmodel"]
 ```
 
-- [ ] **Step 8: Write `test/stubmodel/record.go`** (AD-2 — do not skip; Task 7 depends on it)
+- [x] **Step 8: Write `test/stubmodel/record.go`** (AD-2 — do not skip; Task 7 depends on it)
 
 A `-record <upstream-url>` flag on `cmd/gonk-stubmodel` that proxies each request to a real upstream, writes `{request, response}` pairs to `test/stubmodel/cassettes/<name>.json`, and **scrubs any `Authorization`/`api_key` field before writing**. `stubmodel.LoadCassette(name) []Step` turns one into a script.
 
 > **Why:** the canned `tool_calls` a passing outcome gate needs must match **opencode's real tool schema**, which is defined by Plan 04 and cannot be invented here. A human records one real turn against bailey, reviews the cassette, and commits it. **Record mode never runs inside a test.** Add `TestCassetteScrubsCredentials` asserting a recorded cassette containing `"api_key":"sk-live-..."` is written with the value redacted.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 gofmt -l . && go vet ./... && go test ./test/stubmodel/ -race -count=1 && golangci-lint run ./...
@@ -1146,7 +1146,7 @@ git commit -m "test(stubmodel): deterministic OpenAI-compatible stub model serve
 
 **This task exists to stop a future executor losing a day to podman.**
 
-- [ ] **Step 1: Write the failing tests** — `test/harness/harness_test.go`
+- [x] **Step 1: Write the failing tests** — `test/harness/harness_test.go`
 
 ```go
 package harness_test
@@ -1277,11 +1277,11 @@ func containsArg(args []string, want string) bool {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `go test ./test/harness/ -v` → FAIL, package does not exist.
 
-- [ ] **Step 3: Implement `test/harness/wait.go`**
+- [x] **Step 3: Implement `test/harness/wait.go`**
 
 ```go
 // Package harness holds the shared fixtures for gonk's integration (L1),
@@ -1345,7 +1345,7 @@ func WaitFor(ctx context.Context, desc string, deadline time.Duration, cond func
 }
 ```
 
-- [ ] **Step 4: Implement `test/harness/runtime.go`**
+- [x] **Step 4: Implement `test/harness/runtime.go`**
 
 ```go
 package harness
@@ -1417,7 +1417,7 @@ func (r Runtime) RunArgs(name, image string, ports map[int]int, cmd []string) []
 }
 ```
 
-- [ ] **Step 5: Implement `test/harness/ports.go`, `creds.go`, `clock.go`**
+- [x] **Step 5: Implement `test/harness/ports.go`, `creds.go`, `clock.go`**
 
 `ports.go` — a fixed loopback port map, because host networking gives us no choice, plus a preflight:
 
@@ -1492,7 +1492,7 @@ func (tc *TestClock) SetOffset(d time.Duration) error
 
 **`Advance` is monotone by construction.** Plan 03 Decision 6 says a backwards clock jump must never reset a project's spend; the harness must not be the thing that violates it. The one test that *does* need a backwards jump (`TestBackwardsClockDoesNotResetSpend`) uses `SetOffset` explicitly and is the only caller allowed to.
 
-- [ ] **Step 6: Implement `test/harness/doctor.go` — the preflight**
+- [x] **Step 6: Implement `test/harness/doctor.go` — the preflight**
 
 `Doctor()` runs and prints a verdict, and `make e2e-doctor` calls it. It checks, in order:
 
@@ -1506,7 +1506,7 @@ func (tc *TestClock) SetOffset(d time.Duration) error
 
 Output is a table of ✅/❌ and, on any ❌, a **non-zero exit and a specific remedy**. It never says "something went wrong".
 
-- [ ] **Step 7: Create the `Makefile`**
+- [x] **Step 7: Create the `Makefile`**
 
 ```makefile
 # The standing gate. CI has NEVER RUN on this repo -- every runner on
@@ -1550,7 +1550,7 @@ e2e: e2e-doctor images
 secrets-scan: ; $(GO) run ./test/harness/cmd/secrets-scan
 ```
 
-- [ ] **Step 8: Run and commit**
+- [x] **Step 8: Run and commit**
 
 ```bash
 go test ./test/harness/ -race -count=1 -v   # PASS
@@ -1570,7 +1570,7 @@ git commit -m "test(harness): container-runtime detection, e2e doctor, no-sleep 
 
 **Why the corpus.** `.gonk.yml` is **attacker-controlled**: anyone with push access to any project the bot is invited to controls those bytes. Plan 01 shipped a **one-line remote crash** — `budget: { monthly_cost_usd: .nan }` nil-panicked the validator inside the process that enforces every project's budget and kill switch. That bug is fixed, but *the class of bug is not*, and there is no test in the repo whose job is to keep it fixed. This corpus is that test.
 
-- [ ] **Step 1: Write the corpus** — one file per hostile input, `test/corpus/gonkyml/`
+- [x] **Step 1: Write the corpus** — one file per hostile input, `test/corpus/gonkyml/`
 
 | File | The attack |
 |---|---|
@@ -1594,7 +1594,7 @@ git commit -m "test(harness): container-runtime detection, e2e doctor, no-sleep 
 | `empty.yml`, `not-yaml.yml`, `bom.yml`, `crlf.yml` | degenerate inputs: empty, `\x00\xff`, UTF-8 BOM, CRLF line endings |
 | *(generated, not committed)* | a **64 MiB** `.gonk.yml` — asserts Plan 02's `GetRawFile` size cap fires **before** the parse, not after |
 
-- [ ] **Step 2: Write the assertion** — `test/corpus/corpus_test.go`
+- [x] **Step 2: Write the assertion** — `test/corpus/corpus_test.go`
 
 ```go
 package corpus_test
@@ -1643,7 +1643,7 @@ func TestHostileConfigsDoNotExhaustMemory(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Add the fuzz target** — `test/corpus/fuzz_test.go`
+- [x] **Step 3: Add the fuzz target** — `test/corpus/fuzz_test.go`
 
 ```go
 // FuzzGonkYMLNeverPanics is the net under the whole class of bug that Plan 01
@@ -1670,7 +1670,7 @@ func FuzzGonkYMLNeverPanics(f *testing.F) {
 
 **Also add the same corpus to `pkg/opercfg`** once Plan 03 lands it: Plan 01's carry-forward says *nothing validates operator-supplied instance/group `Policy`* and Plan 03 Task 2 closes it — but the operator config is `gonk-city` content, not attacker content, so it gets the corpus for *robustness*, not for *security*. Distinguish those in the comment; do not overclaim.
 
-- [ ] **Step 4: Implement `test/ledger/money.go`**
+- [x] **Step 4: Implement `test/ledger/money.go`**
 
 ```go
 package ledger
@@ -1692,7 +1692,7 @@ func AssertUSD(t testing.TB, what string, got, want float64) {
 }
 ```
 
-- [ ] **Step 5: Implement `test/ledger/assert.go` — the three-way check**
+- [x] **Step 5: Implement `test/ledger/assert.go` — the three-way check**
 
 **This is the heart of requirement 4: assert on the ledger, not just on the happy path.**
 
@@ -1778,7 +1778,7 @@ type Attempt struct {
 }
 ```
 
-- [ ] **Step 6: Test the assertion library itself** — `test/ledger/assert_test.go`
+- [x] **Step 6: Test the assertion library itself** — `test/ledger/assert_test.go`
 
 **An assertion library that cannot fail is worse than none.** Feed `Assert` deliberately-corrupted `Views` and require each one to be caught:
 
@@ -1794,7 +1794,7 @@ func TestAssertNoSpendCatchesOneRow(t *testing.T)      // a single row -> must F
 
 Each uses a `testing.TB` recorder so a *failure* is the *pass*. This is the same idiom as Plan 03's saboteur suites, and for the same reason: without it, the ledger assertions could be quietly vacuous and every scenario below would be green and meaningless.
 
-- [ ] **Step 7: Run and commit**
+- [x] **Step 7: Run and commit**
 
 ```bash
 go test ./test/corpus/ ./test/ledger/ -race -count=1 -v
@@ -1873,7 +1873,7 @@ func (s *SyntheticSession) Report(t testing.TB, outcome string)     // success|g
 func (s *SyntheticSession) Run(t testing.TB, calls int, outcome string) meterapi.DecideResponse // all three
 ```
 
-- [ ] **Step 1: The seam + happy path** — `onboarding_test.go`, `triage_test.go`
+- [x] **Step 1: The seam + happy path** — `onboarding_test.go`, `triage_test.go`
 
 ```go
 // The spec-11.2 walk, with fakes. Closes P3-10 and the intake<->meter half of P2-9.
@@ -1937,7 +1937,7 @@ func TestInstanceKillSwitchDisablesAProjectWithoutAConfigChange(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: The hostile corpus, end to end** — `hostile_test.go`
+- [x] **Step 2: The hostile corpus, end to end** — `hostile_test.go`
 
 ```go
 // Every hostile .gonk.yml, pushed to a real project through the real intake, into
@@ -1989,7 +1989,7 @@ func TestAttributionUnsafeValuesNeverReachTheLedger(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: The escalation ladder** — `ladder_test.go`. **The settled, load-bearing decision: infra failures NEVER escalate a rung.**
+- [x] **Step 3: The escalation ladder** — `ladder_test.go`. **The settled, load-bearing decision: infra failures NEVER escalate a rung.**
 
 ```go
 // Spec 6.3, and the single most important behavioural claim in this system after
@@ -2092,7 +2092,7 @@ func TestOutcomeBoundToAMeterMintedReservation(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: The concurrent-reservation race** — `race_test.go`. **The crown jewel.**
+- [x] **Step 4: The concurrent-reservation race** — `race_test.go`. **The crown jewel.**
 
 ```go
 // TWO SESSIONS RACING THE LAST OF A BUDGET. EXACTLY ONE MAY WIN.
@@ -2148,7 +2148,7 @@ func TestConcurrentSessionsCannotOverspendACeiling(t *testing.T) {
 
 Run this one at `-count=10`: *a race that manifests one run in three is still a budget escape.*
 
-- [ ] **Step 5: The brick test** — `brick_test.go`. **This is the regression the brief specifically asked for.**
+- [x] **Step 5: The brick test** — `brick_test.go`. **This is the regression the brief specifically asked for.**
 
 ```go
 // THE ONBOARDING DEFAULT MUST BE ABLE TO AFFORD ITS OWN ONLY RUNG.
@@ -2206,7 +2206,7 @@ func TestOnboardingDefaultCanAffordItsOnlyRung(t *testing.T) {
 func TestBrickTestWouldCatchCurrencyUnification(t *testing.T) { /* inject a summing budget.Remain; require FAIL */ }
 ```
 
-- [ ] **Step 6: The prose-independence proof** — `prose_test.go` (**AD-4**)
+- [x] **Step 6: The prose-independence proof** — `prose_test.go` (**AD-4**)
 
 ```go
 // "No test may depend on model output being good." Proven mechanically, not promised:
@@ -2221,7 +2221,7 @@ func TestNoAssertionDependsOnModelProse(t *testing.T) {
 }
 ```
 
-- [ ] **Step 7: Run and commit**
+- [x] **Step 7: Run and commit**
 
 ```bash
 go test ./test/integration/ -race -count=1 -v      # < 60s

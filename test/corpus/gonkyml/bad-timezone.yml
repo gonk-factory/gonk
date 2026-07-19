@@ -1,0 +1,9 @@
+# timezone: Mars/Olympus. NOTE: gonkcfg's schema only requires a non-empty
+# string; the tz database is consulted at schedule-evaluation time, not at
+# Load. gonkcfg ACCEPTS this file; an invalid zone is caught downstream.
+# Disposition: AcceptByLoader.
+version: 1
+enabled: true
+schedule:
+  timezone: Mars/Olympus
+  quiet_hours: "01:00-02:00"

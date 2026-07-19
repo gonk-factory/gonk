@@ -1,0 +1,7 @@
+# Cloud rung before local rung. NOTE: gonkcfg does NOT enforce ladder order --
+# that is enforce_ladder_order (Plan 03 AD-4), applied at the meter/rung layer,
+# not at .gonk.yml schema validation. gonkcfg ACCEPTS this file; it is rejected
+# downstream. Disposition: AcceptByLoader (documents the seam, no overclaim).
+version: 1
+enabled: true
+ladder: [sonnet, qwen-local]

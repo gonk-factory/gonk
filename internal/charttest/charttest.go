@@ -44,7 +44,7 @@ func Minimum() []string {
 		"--set", "intake.image.tag=v0.1.0",
 		"--set", "meter.image.tag=v0.1.0",
 		"--set", "gascity.image.tag=v0.1.0",
-		"--set", "dolt.image.tag=v1.43.0",
+		"--set", "dolt.image.tag=2.1.7",
 		"--set", "intake.webhookPublicURL=https://gonk.example.test/hook/gitlab",
 		"--set", "litellm.externalURL=http://litellm.litellm.svc:4000",
 		// G22: the bundled controller is grant-gated (gc start --foreground, an
