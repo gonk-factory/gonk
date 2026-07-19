@@ -42,6 +42,15 @@ reservation_id = ""
 metadata_json = ""
 key_secret_name = ""
 key_secret_key = ""
+# v1-minimal session-config delivery (gonk-aql). Supplied by gonk-gate dispatch
+# from the controller's env because Gas City mounts no gonk secrets into session
+# pods and controller env does not flow to sessions. litellm_url is not secret;
+# litellm_key + bot_token are a DELIBERATE v1 compromise (creds via order var),
+# removed by the v2 broker. Reach the agent as GC_WEBHOOK_ARG_{LITELLM_URL,
+# LITELLM_KEY,BOT_TOKEN}; images/agent/entrypoint.sh consumes them.
+litellm_url = ""
+litellm_key = ""
+bot_token = ""
 
 [vars.label_prefix]
 description = "Label prefix applied to triage labels. Not sent by dispatch -- this default is the only source."

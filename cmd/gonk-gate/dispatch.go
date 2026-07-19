@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
 	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi"
@@ -189,6 +190,18 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 		// credential in the event bus and in every log line that echoes it.
 		"key_secret_name": dec.KeyRef.SecretName,
 		"key_secret_key":  dec.KeyRef.SecretKey,
+
+		// v1-minimal session-config delivery (gonk-aql). Gas City's k8s session
+		// provider mounts no gonk secrets and controller env does not flow to
+		// sessions, so the agent's LiteLLM endpoint/key and the bot token are
+		// forwarded from THIS controller's env as order vars. litellm_url is not
+		// secret; litellm_key and bot_token DELIBERATELY VIOLATE the "never a
+		// credential in an order var" rule above -- a v1-only compromise for the
+		// minimal opencode leg, removed by the v2 broker (which keeps all creds
+		// out of the pod). Empty values are simply not forwarded.
+		"litellm_url": os.Getenv("GONK_LITELLM_URL"),
+		"litellm_key": os.Getenv("GONK_LITELLM_KEY"),
+		"bot_token":   os.Getenv("GONK_BOT_TOKEN"),
 	}
 
 	if _, err := d.GC.RunOrder(ctx, order, vars); err != nil {
