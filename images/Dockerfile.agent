@@ -80,8 +80,12 @@ FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7
 # jq: entrypoint.sh renders overlay/opencode.json with it -- guarantees valid
 # JSON (correct escaping of the verbatim atags metadata blob) instead of
 # hand-built string concatenation.
+# tmux: Gas City's k8s session provider launches the agent as
+# `tmux new-session -d -s <s> "$CMD"` (internal/runtime/k8s/pod.go @ GASCITY_REF)
+# -- it OVERRIDES this image's ENTRYPOINT and wraps the agent command in tmux, so
+# the binary must be present or the session pod dies before opencode ever starts.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates jq \
+      git ca-certificates jq tmux \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fetch /fetch/opencode      /usr/local/bin/opencode

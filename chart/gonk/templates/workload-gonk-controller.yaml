@@ -129,6 +129,23 @@ spec:
             - name: GC_CITY_WRITE_PUBKEY
               value: {{ .Values.gascity.writeAuth.verifyKey | quote }}
             {{- include "gonk.gcWriteEnv" . | nindent 12 }}
+            # K8S SESSION PROVIDER (gonk-aql). GC_SESSION_PROVIDER=k8s (controllerEnv)
+            # tells the supervisor to spawn agent SESSION pods, but the provider
+            # (internal/runtime/k8s/provider.go @ GASCITY_REF) needs to be told WHICH
+            # image, in WHICH namespace, under WHICH SA -- none of which the chart set
+            # before. GC_K8S_IMAGE is the one place componentImages.agent is consumed
+            # (it was dead config until now). PREBAKED=true skips the staging init
+            # container + workspace-ready wait: the agent image is self-contained
+            # (opencode + tools baked) and triage injects its context, so no rig
+            # clone is staged into the pod.
+            - name: GC_K8S_IMAGE
+              value: {{ include "gonk.image" (dict "ctx" . "image" .Values.componentImages.agent) | quote }}
+            - name: GC_K8S_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: GC_K8S_SERVICE_ACCOUNT
+              value: gc-agent
+            - name: GC_K8S_PREBAKED
+              value: "true"
           ports:
             # The per-city [api] listener (0.0.0.0:9443). This is what intake
             # dispatches to and what the Service targets. Port 8372 (the machine-wide
