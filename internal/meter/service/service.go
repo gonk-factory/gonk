@@ -308,6 +308,38 @@ func (s *Service) deleteKeyIfAny(ctx context.Context, project string) error {
 	return nil
 }
 
+// resolveKeyRef turns an EnsureKey result into the KeyRef the registration
+// should carry, and stores the token in the KeySink when there is a fresh one.
+//
+// LiteLLM reveals a virtual key's plaintext secret exactly once, at creation,
+// so litellm.HTTPAdmin.EnsureKey returns an EMPTY info.Token whenever it took
+// its update-in-place path (an existing alias whose budget it merely changed).
+// An empty Token means "the token is UNCHANGED, and cannot be re-fetched": we
+// must keep the plaintext the KeySink already holds rather than overwrite it
+// with nothing. So on an empty Token we reuse the project's stored KeyRef.
+//
+// If nothing is stored to preserve -- the alias exists in LiteLLM but we hold
+// no plaintext for it (recovering lost state, or adopting a stray key) -- we
+// rotate the key to mint a fresh usable token, because a project with no
+// readable credential cannot run. This is the one case that legitimately
+// changes a token during a plain re-register, and only to escape having none.
+func (s *Service) resolveKeyRef(ctx context.Context, project string, spec litellm.KeySpec, info litellm.KeyInfo) (store.KeyRef, error) {
+	if info.Token != "" {
+		return s.keys.Put(ctx, project, info.Token)
+	}
+	if prev, ok, err := s.store.GetRegistration(ctx, project); err != nil {
+		return store.KeyRef{}, err
+	} else if ok && prev.KeyRef.SecretName != "" {
+		// Token unchanged and already stored: keep it, do not re-Put nothing.
+		return prev.KeyRef, nil
+	}
+	rotated, err := s.admin.RotateKey(ctx, spec)
+	if err != nil {
+		return store.KeyRef{}, err
+	}
+	return s.keys.Put(ctx, project, rotated.Token)
+}
+
 // resolveProject is the shared core of Register and the reresolve loop: load
 // + validate the raw .gonk.yml, fold operator policy over it via the ONLY
 // call to gonkcfg.Resolve in the system, and manage the project's key and
@@ -410,7 +442,7 @@ func (s *Service) resolveProject(ctx context.Context, project, rig string, raw [
 		return resp, http.StatusOK, nil
 	}
 
-	keyRef, err := s.keys.Put(ctx, project, info.Token)
+	keyRef, err := s.resolveKeyRef(ctx, project, spec, info)
 	if err != nil {
 		return meterapi.ProjectResponse{}, 0, fmt.Errorf("service: register %q: keysink put: %w", project, err)
 	}
@@ -1192,7 +1224,7 @@ func (s *Service) ReconcileKeys(ctx context.Context) error {
 		if err != nil {
 			continue // still missing; the next tick retries
 		}
-		keyRef, err := s.keys.Put(ctx, reg.Project, info.Token)
+		keyRef, err := s.resolveKeyRef(ctx, reg.Project, spec, info)
 		if err != nil {
 			return fmt.Errorf("service: reconcile keys: keysink put %q: %w", reg.Project, err)
 		}

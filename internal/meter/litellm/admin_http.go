@@ -8,18 +8,29 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
 // HTTPAdmin talks to LiteLLM's key-management API over HTTP.
 //
-// *** LIVE-INFRASTRUCTURE BOUNDARY ***: this adapter is written against
-// LiteLLM's documented /key/generate, /key/update, /key/delete, and /key/info
-// endpoints and is tested only against an httptest.Server standing in for
-// LiteLLM. It is NOT verified against a real LiteLLM until Plan 06's e2e
-// harness; the exact request/response shapes of the pinned LiteLLM version
-// (ghcr.io/berriai/litellm-database:v1.92.0, docs/environment.md) must be
-// confirmed there.
+// VERIFIED against real LiteLLM v1.92.0 (gonk-huy live harness). The contract
+// that matters for re-provisioning, and which a Plan 03 bug got wrong:
+//   - A key's PLAINTEXT secret is revealed exactly once, in the /key/generate
+//     response. No later call recovers it: /key/list and /key/info return only
+//     the hashed token id, and presenting that hash as a Bearer token is 401.
+//   - There is therefore no lookup-by-alias that yields a usable token. To
+//     UPDATE an existing key by alias we resolve its hashed id via
+//     /key/list?key_alias=<alias> and pass that id to /key/update (which
+//     accepts it) -- but we cannot, and do not, return a fresh usable token
+//     from the update path. updateByAlias returns an empty KeyInfo.Token
+//     meaning "budget updated in place; the plaintext is unchanged". The
+//     caller must preserve the token it already stored.
+//   - /key/info?key_alias= does NOT 404-cleanly: it ignores the param and
+//     returns the CALLER's own key, which is why alias lookups must never go
+//     through /key/info.
+//   - Admin routes require a proxy_admin-role key; a plain key is 401. That is
+//     a deployment concern (mint the right key); the adapter just carries it.
 type HTTPAdmin struct {
 	baseURL  string
 	adminKey string
@@ -45,12 +56,27 @@ type keyRequestBody struct {
 	RPMLimit       *int              `json:"rpm_limit,omitempty"`
 }
 
-// keyResponseBody is the wire shape /key/generate, /key/update, and /key/info
-// return. Key is the secret token -- it is read into KeyInfo.Token and must
-// never be logged or echoed into an error.
+// keyResponseBody is the FLAT wire shape /key/generate and /key/update return
+// (VERIFIED against real v1.92.0: top-level key + key_alias). Key is the secret
+// token -- it is read into KeyInfo.Token and must never be logged or echoed
+// into an error. NOTE the asymmetry: /key/generate's Key is the usable
+// plaintext secret; /key/update's Key is only the hashed token id (the
+// plaintext is never returned again), so the update path does NOT decode a
+// usable token out of this shape.
 type keyResponseBody struct {
 	Key      string `json:"key"`
 	KeyAlias string `json:"key_alias"`
+}
+
+// keyListResponse is /key/list's shape. With no return_full_object it lists the
+// HASHED token ids under "keys" (VERIFIED against real v1.92.0). This is the
+// only endpoint that filters by alias and thus the only way to resolve an
+// existing key from its alias -- the id it yields identifies the record for
+// /key/update, but is NOT a usable Bearer token.
+type keyListResponse struct {
+	Keys       []string `json:"keys"`
+	TotalCount int      `json:"total_count"`
+	TotalPages int      `json:"total_pages"`
 }
 
 func requestBodyFor(spec KeySpec) (keyRequestBody, error) {
@@ -146,33 +172,59 @@ func (a *HTTPAdmin) EnsureKey(ctx context.Context, spec KeySpec) (KeyInfo, error
 	return decodeKeyResponse("/key/generate", body, status)
 }
 
-// updateByAlias looks the existing key up by alias (LiteLLM's /key/update
-// identifies the record by token, not alias) and then updates it.
+// updateByAlias updates an existing key identified only by its alias. It
+// resolves the key's hashed token id via /key/list?key_alias= (the only alias
+// filter LiteLLM offers), hands that id to /key/update (which accepts it), and
+// returns a KeyInfo with an EMPTY Token.
+//
+// The empty Token is the crux, not an oversight: real v1.92.0 reveals a key's
+// plaintext secret only once, at /key/generate. /key/list and /key/update
+// return only the hashed id, which is NOT usable as a Bearer token (verified:
+// presenting it is 401). An update does not rotate, so the plaintext is
+// unchanged -- the caller must keep the token it stored at create time. The
+// meter service honours this by preserving its stored KeyRef when Token == "".
 func (a *HTTPAdmin) updateByAlias(ctx context.Context, spec KeySpec, reqBody keyRequestBody) (KeyInfo, error) {
-	infoBody, status, err := a.do(ctx, http.MethodGet, "/key/info?key_alias="+strings.TrimSpace(spec.Alias), nil)
+	tokenID, err := a.resolveTokenIDByAlias(ctx, spec.Alias)
 	if err != nil {
 		return KeyInfo{}, err
 	}
-	existing, err := decodeKeyResponse("/key/info", infoBody, status)
-	if err != nil {
-		return KeyInfo{}, err
-	}
-	reqBody.Key = existing.Token
+	reqBody.Key = tokenID
 	body, status, err := a.do(ctx, http.MethodPost, "/key/update", reqBody)
 	if err != nil {
 		return KeyInfo{}, err
 	}
-	info, err := decodeKeyResponse("/key/update", body, status)
+	if status >= 400 {
+		return KeyInfo{}, fmt.Errorf("litellm: /key/update: status %d: %s", status, string(body))
+	}
+	// Deliberately no usable Token: see the doc comment. Budget is now updated.
+	return KeyInfo{Alias: spec.Alias, Token: ""}, nil
+}
+
+// resolveTokenIDByAlias returns the hashed token id of the single key bearing
+// the given alias. gonk mints exactly one key per alias (keysink.Slug's hash
+// suffix guarantees alias uniqueness), so a well-formed result has exactly one
+// id; anything else is an error rather than a guess about which key to update.
+func (a *HTTPAdmin) resolveTokenIDByAlias(ctx context.Context, alias string) (string, error) {
+	q := url.Values{}
+	q.Set("key_alias", strings.TrimSpace(alias))
+	body, status, err := a.do(ctx, http.MethodGet, "/key/list?"+q.Encode(), nil)
 	if err != nil {
-		return KeyInfo{}, err
+		return "", err
 	}
-	if info.Token == "" {
-		// Some LiteLLM versions do not echo the token back from /key/update.
-		// The token has not changed (update, not rotate), so the one we already
-		// looked up is still correct.
-		info.Token = existing.Token
+	if status >= 400 {
+		return "", fmt.Errorf("litellm: /key/list: status %d: %s", status, string(body))
 	}
-	return info, nil
+	var lr keyListResponse
+	if err := json.Unmarshal(body, &lr); err != nil {
+		return "", fmt.Errorf("litellm: /key/list: decoding response: %w", err)
+	}
+	if len(lr.Keys) == 0 {
+		return "", fmt.Errorf("litellm: /key/list: no key found for alias")
+	}
+	if len(lr.Keys) > 1 {
+		return "", fmt.Errorf("litellm: /key/list: %d keys share alias, refusing to guess which to update", len(lr.Keys))
+	}
+	return lr.Keys[0], nil
 }
 
 // RotateKey invalidates the project's current token and issues a fresh one

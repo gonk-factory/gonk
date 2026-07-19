@@ -97,16 +97,14 @@ func TestHTTPSpendSourceParsesTagsAndClock(t *testing.T) {
 		}
 		w.Header().Set("Date", "Mon, 13 Jul 2026 10:00:00 GMT")
 		w.Header().Set("Content-Type", "application/json")
-		// TWO PAGES, so a regression to a single unbounded-page fetch FAILS: the
-		// client must page until the source says there are no more. The exact paging
-		// marker follows the pinned LiteLLM /spend/logs/v2 contract (mandatory dates,
-		// 10k cap); here an X-Next-Page header stands in for it, and Plan 06 verifies
-		// the real one. LiteLLM persists the header-supplied tags at
+		// TWO PAGES of the REAL v1.92.0 envelope {data,total,page,page_size,
+		// total_pages}, paginated by page/total_pages -- there is NO X-Next-Page
+		// header on the real proxy. A regression to a single-page fetch FAILS: c3
+		// lives on page 2. LiteLLM persists the header-supplied tags at
 		// metadata.spend_logs_metadata (VERIFIED, docs/environment.md).
 		switch q.Get("page") {
 		case "", "1":
-			w.Header().Set("X-Next-Page", "2")
-			_, _ = w.Write([]byte(`[
+			_, _ = w.Write([]byte(`{"total":3,"page":1,"page_size":2,"total_pages":2,"data":[
 			  {"request_id":"c1","spend":0.40,"prompt_tokens":8000,"completion_tokens":1500,
 			   "startTime":"2026-07-05T10:00:00Z",
 			   "metadata":{"spend_logs_metadata":{
@@ -114,17 +112,16 @@ func TestHTTPSpendSourceParsesTagsAndClock(t *testing.T) {
 			               "gonk_session_key":"s1","gonk_rung":"glm","gonk_attempt":"1",
 			               "gonk_trigger":"issue-triage"}}},
 			  {"request_id":"c2","spend":0.10,"startTime":"2026-07-05T11:00:00Z","metadata":{}}
-			]`))
+			]}`))
 		default:
-			w.Header().Set("X-Next-Page", "")
-			_, _ = w.Write([]byte(`[
+			_, _ = w.Write([]byte(`{"total":3,"page":2,"page_size":2,"total_pages":2,"data":[
 			  {"request_id":"c3","spend":0.25,"prompt_tokens":4000,"completion_tokens":500,
 			   "startTime":"2026-07-06T10:00:00Z",
 			   "metadata":{"spend_logs_metadata":{
 			               "gonk_project":"group/repo","gonk_rig":"repo","gonk_bead_id":"gk-2",
 			               "gonk_session_key":"s3","gonk_rung":"glm","gonk_attempt":"1",
 			               "gonk_trigger":"issue-triage"}}}
-			]`))
+			]}`))
 		}
 	}))
 	defer srv.Close()
