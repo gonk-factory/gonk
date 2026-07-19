@@ -425,7 +425,13 @@ func (p *Postgres) ReserveIfFits(ctx context.Context, project string, ceiling bu
 	want.ReservedTaskTokens += sumTaskTokens
 
 	rem := budget.Remain(ceiling, want)
-	if !rem.FitsCost(r.CostUSD) || !rem.FitsMonthTokens(r.Tokens) || !rem.FitsTaskTokens(r.Tokens) {
+	// gonk-2g4: skip the cost leg for a ZERO-cost (local) rung, mirroring
+	// rung.Decide (decide.go: `spec.EstCostUSD > 0 && !rem.FitsCost(...)`) and
+	// kept byte-consistent with Memory.ReserveIfFits. A zero-cost reservation
+	// holds no real dollars, so FitsCost(0) -- false under a $0 ceiling -- must
+	// not gate it, or the onboarding default (monthly_cost_usd: 0, ladder:
+	// [qwen-local]) bricks every project. The TOKEN legs are NOT skipped.
+	if (r.CostUSD > 0 && !rem.FitsCost(r.CostUSD)) || !rem.FitsMonthTokens(r.Tokens) || !rem.FitsTaskTokens(r.Tokens) {
 		return ReserveResult{}, nil // lost race: rolled back by the deferred Rollback
 	}
 
