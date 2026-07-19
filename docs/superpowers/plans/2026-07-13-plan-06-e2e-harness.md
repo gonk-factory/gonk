@@ -1570,7 +1570,7 @@ git commit -m "test(harness): container-runtime detection, e2e doctor, no-sleep 
 
 **Why the corpus.** `.gonk.yml` is **attacker-controlled**: anyone with push access to any project the bot is invited to controls those bytes. Plan 01 shipped a **one-line remote crash** — `budget: { monthly_cost_usd: .nan }` nil-panicked the validator inside the process that enforces every project's budget and kill switch. That bug is fixed, but *the class of bug is not*, and there is no test in the repo whose job is to keep it fixed. This corpus is that test.
 
-- [ ] **Step 1: Write the corpus** — one file per hostile input, `test/corpus/gonkyml/`
+- [x] **Step 1: Write the corpus** — one file per hostile input, `test/corpus/gonkyml/`
 
 | File | The attack |
 |---|---|
@@ -1594,7 +1594,7 @@ git commit -m "test(harness): container-runtime detection, e2e doctor, no-sleep 
 | `empty.yml`, `not-yaml.yml`, `bom.yml`, `crlf.yml` | degenerate inputs: empty, `\x00\xff`, UTF-8 BOM, CRLF line endings |
 | *(generated, not committed)* | a **64 MiB** `.gonk.yml` — asserts Plan 02's `GetRawFile` size cap fires **before** the parse, not after |
 
-- [ ] **Step 2: Write the assertion** — `test/corpus/corpus_test.go`
+- [x] **Step 2: Write the assertion** — `test/corpus/corpus_test.go`
 
 ```go
 package corpus_test
@@ -1643,7 +1643,7 @@ func TestHostileConfigsDoNotExhaustMemory(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Add the fuzz target** — `test/corpus/fuzz_test.go`
+- [x] **Step 3: Add the fuzz target** — `test/corpus/fuzz_test.go`
 
 ```go
 // FuzzGonkYMLNeverPanics is the net under the whole class of bug that Plan 01
@@ -1670,7 +1670,7 @@ func FuzzGonkYMLNeverPanics(f *testing.F) {
 
 **Also add the same corpus to `pkg/opercfg`** once Plan 03 lands it: Plan 01's carry-forward says *nothing validates operator-supplied instance/group `Policy`* and Plan 03 Task 2 closes it — but the operator config is `gonk-city` content, not attacker content, so it gets the corpus for *robustness*, not for *security*. Distinguish those in the comment; do not overclaim.
 
-- [ ] **Step 4: Implement `test/ledger/money.go`**
+- [x] **Step 4: Implement `test/ledger/money.go`**
 
 ```go
 package ledger
@@ -1692,7 +1692,7 @@ func AssertUSD(t testing.TB, what string, got, want float64) {
 }
 ```
 
-- [ ] **Step 5: Implement `test/ledger/assert.go` — the three-way check**
+- [x] **Step 5: Implement `test/ledger/assert.go` — the three-way check**
 
 **This is the heart of requirement 4: assert on the ledger, not just on the happy path.**
 
@@ -1778,7 +1778,7 @@ type Attempt struct {
 }
 ```
 
-- [ ] **Step 6: Test the assertion library itself** — `test/ledger/assert_test.go`
+- [x] **Step 6: Test the assertion library itself** — `test/ledger/assert_test.go`
 
 **An assertion library that cannot fail is worse than none.** Feed `Assert` deliberately-corrupted `Views` and require each one to be caught:
 
@@ -1794,7 +1794,7 @@ func TestAssertNoSpendCatchesOneRow(t *testing.T)      // a single row -> must F
 
 Each uses a `testing.TB` recorder so a *failure* is the *pass*. This is the same idiom as Plan 03's saboteur suites, and for the same reason: without it, the ledger assertions could be quietly vacuous and every scenario below would be green and meaningless.
 
-- [ ] **Step 7: Run and commit**
+- [x] **Step 7: Run and commit**
 
 ```bash
 go test ./test/corpus/ ./test/ledger/ -race -count=1 -v

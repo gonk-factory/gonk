@@ -1,0 +1,7 @@
+# THE Plan 01 remote crash. budget.monthly_cost_usd: .nan nil-panicked the
+# jsonschema "minimum" comparison inside the process that enforces every
+# project's budget. This file is the regression test. It MUST be rejected.
+version: 1
+enabled: true
+budget:
+  monthly_cost_usd: .nan
