@@ -165,6 +165,15 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.gitlab.existingSecret | quote }}
                   key: {{ .Values.secrets.gitlab.keys.token | quote }}
+            # The in-controller gonk-gate exec orders (gonk-dispatch, gonk-sweep)
+            # call gonk-meter /v1/policy/decide -- they need the meter URL and a
+            # bearer-token FILE (GONK_METER_TOKEN_FILE), exactly like gonk-intake.
+            # Without these, `gc: order exec gonk-dispatch failed ... GONK_METER_
+            # TOKEN_FILE unset` and NO formula is ever poured (no session spawns).
+            - name: GONK_METER_URL
+              value: "http://gonk-meter:{{ .Values.meter.port }}"
+            - name: GONK_METER_TOKEN_FILE
+              value: {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "meter-api" "key" .Values.secrets.meterAPI.keys.token) | quote }}
           ports:
             # The per-city [api] listener (0.0.0.0:9443). This is what intake
             # dispatches to and what the Service targets. Port 8372 (the machine-wide
@@ -197,6 +206,9 @@ spec:
             # initContainer runs `gc init` and never signs). Same Secret gonk-intake
             # mounts; the chart creates none.
             {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "gc-write-key") | nindent 12 }}
+            # The meter bearer token for the in-controller gonk-gate exec orders
+            # (GONK_METER_TOKEN_FILE above points here).
+            {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "meter-api") | nindent 12 }}
       volumes:
         # /city and /home/gonk MUST be writable by uid 65532 (smoke U2): gc init
         # writes the city into /city and gc writes ~/.gc under HOME. emptyDir, shared
@@ -212,6 +224,7 @@ spec:
         # from a pre-provisioned Secret (the chart creates none). Used by the in-pod
         # gonk-gate to sign order-run POSTs; G22 requires it when gascity.enabled.
         {{- include "gonk.secretVolume" (dict "name" "gc-write-key" "secret" .Values.secrets.gcWriteKey.existingSecret "keys" (list .Values.secrets.gcWriteKey.key)) | nindent 8 }}
+        {{- include "gonk.secretVolume" (dict "name" "meter-api" "secret" .Values.secrets.meterAPI.existingSecret "keys" (list .Values.secrets.meterAPI.keys.token)) | nindent 8 }}
         {{- if .Values.gitlab.caCert.existingConfigMap }}
         # The private-CA bundle (trust-manager publishes `trust-bundle` into every
         # namespace). gc clones the city's git remote from https://gitlab.orac.local,
