@@ -27,3 +27,14 @@ trigger = "cooldown"
 interval = "30s"
 timeout = "300s"
 # NO `pool` -- exec orders may not have one.
+
+# [order.env] — Gas City STRIPS inherited env whose key contains a secret marker
+# (internal/execenv.IsSensitiveKey: PASSWORD/TOKEN/SECRET/...). GONK_METER_TOKEN_FILE
+# contains "TOKEN", so it is dropped from the exec order env even though the
+# controller container sets it -> gonk-gate reports "GONK_METER_TOKEN_FILE unset"
+# and no formula is poured. An explicit [order.env] override is re-applied AFTER
+# filtering. The value is the chart mount PATH (secrets.mountRoot default
+# /etc/gonk/secrets), not a secret. GONK_METER_URL / GONK_GC_WRITE_KEY_FILE are
+# NOT stripped (no secret marker in the key) so they still inherit fine.
+[order.env]
+GONK_METER_TOKEN_FILE = "/etc/gonk/secrets/meter-api/token"

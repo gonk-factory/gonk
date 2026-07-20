@@ -96,14 +96,49 @@ no gonk-gate change for this proof.
 
 ## Tasks
 
-- [ ] T1 image: add tmux; add `gonk-agent-configure`; rebuild via CI.
-- [ ] T2 chart: wire GC_K8S_* controller env (consume componentImages.agent).
-- [ ] T3 chart: gc-agent SA pull secret; git-credentials + litellm key plumbing.
-- [ ] T4 pack: triage agent provider=opencode + pre_start + prompt wiring.
-- [ ] T5 deploy to throwaway ns; drive onboarding -> merge -> file issue.
-- [ ] T6 prove: a real opencode session runs, meters against stub LiteLLM, and a
-      triage comment lands. Verify the 7 attribution atags on the spend row.
+- [x] T1 image: add tmux (entrypoint reused, not a separate configure script);
+      CI-built at v0.1.0-e1a3c47129a4.
+- [x] T2 chart: wire GC_K8S_* controller env (consume componentImages.agent).
+- [x] T3 chart: gc-agent SA pull secret; creds threaded via dispatch order vars
+      (litellm_url/key + bot_token) instead of git-credentials seam.
+- [x] T4 pack: triage agent start_command=gonk-agent-entrypoint (escape hatch),
+      prompt_mode=flag, OPENCODE_PERMISSION allow; dispatch + formula vars.
+- [~] T5 deploy to throwaway ns (gonk-e2e-opencode-e1a3c471); onboarding ->
+      merge -> file issue. IN PROGRESS.
+- [~] T6 prove the metered opencode session. BLOCKED on the actual model call by
+      Bailey GPU (Ollama inference wedged 2026-07-19 -- every /api/chat hangs with
+      no response while the node is idle; hardware/GitOps to fix). Everything up
+      to the model call (agent pod spawn, opencode start, LiteLLM reach) is
+      provable now; the comment + attribution row land once Bailey is back.
 - [ ] T7 teardown; document findings in test/e2e/.
+
+## Blockers found by running the real path (each hid the next)
+
+The dispatch->session path had NEVER run, so it was a stack of latent bugs; each
+fix revealed the next. All fixed this session (commits on the branch):
+
+1. `bead_id` missing from intake's dispatch order vars -> every dispatch 422
+   "missing required param(s): bead_id". (pkg/intake/dispatch.go). The L3 smoke
+   saw this exact 422 and misread it as success.
+2. `GONK_METER_TOKEN_FILE unset` on the controller -> the in-controller gonk-gate
+   exec orders (gonk-dispatch/sweep) can't call meter -> exit 2, no pour.
+   (chart: meter URL + meter-api mount on the controller).
+3. Formula orders (gonk-triage/scaffold/mention) had no `[order.params]` -> the
+   supervisor rejects webhook orders with an empty params block and skips them at
+   load -> RunOrder(gonk-triage) 404. (pack: add [order.params]).
+
+Deploy-time (not code): the webhook secret must be >= 32 bytes (intake fatals
+otherwise); `.agent/` added to project 75 main to reach `valid` deterministically
+(the model-gated scaffold agent is itself an opencode session, deferred).
+
+## Bailey GPU note (2026-07-19)
+
+The real-model path points the throwaway LiteLLM's `stub-local` at
+`ollama_chat/qwen3:14b` on `ollama.bailey-gpu.svc` (owner's call: use a real
+tool-capable model, NOT the 120b nemotron; do not roll back to the stub). Bailey
+is currently wedged -- inference calls hang indefinitely though `/api/tags`
+answers and the node is idle. Left as-is for the hardware/GitOps teams; the e2e
+harness is correct and will complete once Bailey serves inference again.
 
 ## Known risks / open checks
 
