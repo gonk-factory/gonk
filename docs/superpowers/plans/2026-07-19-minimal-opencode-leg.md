@@ -291,3 +291,57 @@ compromise (creds in city agent config) and widens its blast radius: any operato
 running `gc config explain` sees the key and the token. Worth reconsidering in v2
 (the broker keeps creds out of the pod entirely) and worth a redaction bug
 upstream.
+
+## 2026-07-24 (later): opencode PROVEN on the metered path; sessions stable
+
+Merged to main (owner: "let's just develop on main for now"). Two more blockers
+fixed, and the harness is proven working:
+
+10. The entrypoint made a missing model FATAL, but Gas City launches agent pods
+    as POOL sessions -- `tmux new-session -d -s main "gonk-agent-entrypoint" &&
+    sleep infinity`, with NO prompt appended; the prompt arrives later. So the
+    entrypoint exited, took the tmux session with it, and the pod was reaped and
+    respawned every ~60s. Now: model = marker > GC_WEBHOOK_ARG_MODEL > GONK_MODEL
+    (static, injected by the chart from onboarding.defaultRung's model in the
+    OPERATOR's catalog -- the pack still names no model). Missing attribution
+    metadata warns loudly and OMITS the header rather than sending an empty one.
+11. XDG leak. Overriding HOME was not enough: processenv's allow-list also copies
+    XDG_CONFIG_HOME from the controller (pointing under /home/gonk, which exists
+    only in the controller pod), so opencode -- XDG-aware -- died in Bun on
+    `EACCES: permission denied, mkdir '/home/gonk'` WITH the overlay already
+    rendered correctly, which reads like a config bug and is not one. All four
+    XDG dirs are now pinned under the writable HOME in the agent [env].
+
+### PROVEN, not inferred (standalone probe pod, real entrypoint, real image)
+
+- overlay rendered: `model: gonk/stub-local`, `apiKey: {file:/tmp/gonk/llkey}`,
+  attribution header correctly OMITTED when no marker is present.
+- prompt markers stripped from argv before opencode saw them.
+- opencode ran a FULL loop: created a session, `stream providerID=gonk
+  modelID=stub-local`, `process`, `exiting loop`.
+- LiteLLM recorded THREE spend rows against `ollama_chat/qwen3:14b` --
+  1783 tokens / $0.00044575 and 124 tokens / $0.000031. THE MONEY PATH IS REAL.
+- in the REAL triage pod: `tmux ls` -> `main: 1 windows`, opencode resident, and
+  `gc session list` shows triage-1/2/3 ACTIVE for 2-5m (no more 60s reaping).
+
+### THE NEXT BLOCKER (exact, reproducible)
+
+EVERY CALLER-SUPPLIED FORMULA VAR RENDERS EMPTY. `bd show` on a triage bead:
+
+    Read issue ! in project `` and triage it.
+    Apply labels to the issue, each prefixed gonk::.
+    METADATA  city_bead_id:
+
+`label_prefix` renders ("gonk::") because it is the ONE var with a `default`.
+Everything gonk-gate passes in the RunOrder body -- project, issue_iid,
+bead_anchor, city_bead_id, model, metadata_json -- arrives empty, and the
+`<!-- gonk:bead:... -->` marker line is gone with them.
+
+So the order params are not reaching formula var expansion. This ALSO blocks the
+marker seam (blocker 6's fix), since {{model}}/{{metadata_json}} render empty.
+Start at gcapi's RunOrder body shape vs what the supervisor expects for a
+formula order's vars (webhookmatch.MatchResult.Vars -> formula ExpandVars is the
+documented channel; ExecEnvVars is the exec-order one and is NOT it).
+
+The agent never gets a usable prompt until this is fixed, which is why no triage
+comment has been posted yet even though the harness itself now works.
