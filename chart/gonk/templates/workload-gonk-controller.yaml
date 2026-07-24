@@ -176,6 +176,16 @@ spec:
             # gonk-intake.
             - name: GONK_CITY
               value: gonk
+            # WHERE THE IN-POD gonk-gate POSTS ITS POUR. gonk-dispatch runs inside
+            # THIS pod and calls POST /v0/city/gonk/order/gonk-triage/run on the
+            # city [api] -- so it needs the supervisor URL exactly like gonk-intake
+            # does. Without it gcapi builds a URL with no scheme or host and the
+            # pour dies on `unsupported protocol scheme ""` -- AFTER meter has
+            # already decided, so the budget decision is spent and nothing pours.
+            # Same helper as intake's (the bundled controller Service on 9443), so
+            # the two can never disagree about where the city is.
+            - name: GONK_SUPERVISOR_URL
+              value: {{ include "gonk.supervisorURL" . | quote }}
             - name: GC_CITY_WRITE_PUBKEY
               value: {{ .Values.gascity.writeAuth.verifyKey | quote }}
             {{- include "gonk.gcWriteEnv" . | nindent 12 }}

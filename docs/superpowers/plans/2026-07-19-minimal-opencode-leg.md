@@ -167,6 +167,41 @@ fix revealed the next. All fixed this session (commits on the branch):
    have gonk-gate read the file. Chart mounts the litellm + gitlab secrets on the
    controller; the key material never sits in a controller env var.
 
+5. `envArg` UPPERCASED the param name. Gas City sets `GC_WEBHOOK_ARG_<name>` with
+   the `[order.params]` key VERBATIM (`internal/webhookmatch/extract.go`'s
+   `ExecEnvVars` is a plain map copy), and every gonk param is lower_snake_case.
+   So EVERY dispatch arg read back `""` and gonk-dispatch died on
+   `unknown trigger; pouring nothing` with `trigger=""` -- AFTER asking meter,
+   i.e. it burned a budget decision and poured nothing. Fixed: verbatim first,
+   uppercase kept as a fallback.
+
+6. **Per-session config CANNOT reach a session pod as env.** This one invalidated
+   the T3/T4 design, and only reading Gas City proved it:
+   - `GC_WEBHOOK_ARG_*` is an EXEC-ORDER overlay only --
+     `internal/orderdispatch/dispatch.go`: *"ExecEnv is the environment overlay
+     applied when Order is an exec order."* `gonk-triage` is a FORMULA order.
+   - A session pod's env is `resolved.Env` (STATIC agent/provider/city config)
+     plus a FIXED passthrough allow-list (`internal/processenv/provider.go`:
+     PATH, HOME, USER, TZ, CLAUDE_*, locale -- no `GONK_*`) plus Dolt/city path
+     projections.
+
+   So the entrypoint's required `GC_WEBHOOK_ARG_{MODEL,METADATA_JSON,...}` could
+   never be set and it would have exited 1 at its own guard.
+
+   FIX (owner's call, 2026-07-24): the two PER-SESSION values ride the one
+   per-session channel, the PROMPT -- `gonk-triage` stamps
+   `<!-- gonk:model:... -->` / `<!-- gonk:meta:... -->`, the entrypoint parses
+   them out of its own `--prompt` arg, strips them, and passes the rest to
+   opencode. NOTHING SECRET goes in the prompt. The STATIC per-install creds
+   (LiteLLM URL/key, bot token) are written into the per-agent `[env]` in /city
+   by the bootstrap initContainer from the mounted secrets. This is the shape v2
+   keeps: the broker injects context the same way, minus the marker hack.
+
+7. The controller never set `GONK_BEAD_REPO_DIR`, so gonk-gate used an IN-MEMORY
+   bead store -- its own warning says "never for the controller". Parked beads
+   would never unpark and outcomes would never be reported, silently. Set to
+   `/city`.
+
 Deploy-time (not code): the webhook secret must be >= 32 bytes (intake fatals
 otherwise); `.agent/` added to project 75 main to reach `valid` deterministically
 (the model-gated scaffold agent is itself an opencode session, deferred).
@@ -180,10 +215,39 @@ is currently wedged -- inference calls hang indefinitely though `/api/tags`
 answers and the node is idle. Left as-is for the hardware/GitOps teams; the e2e
 harness is correct and will complete once Bailey serves inference again.
 
+## CI is currently broken by an infrastructure outage (2026-07-24)
+
+Pipeline 1582 @ 383ada07: `lint`, `test`, `chart-lint`, `no-latest` ALL PASS --
+the image jobs fail on the homelab network, not on this code:
+
+```
+zot.registry-system.svc:5000/v2/library/golang/manifests/sha256:ae5a...
+  -> NAME_UNKNOWN: repository name not known to registry
+fallback -> index.docker.io -> dial tcp 34.206.143.55:443: i/o timeout
+```
+
+The zot pull-through mirror no longer serves `library/golang` / `library/debian`,
+and the cluster's fallback egress to Docker Hub times out; two jobs then sat
+retrying to the 1h timeout. Same handling as Bailey: leave it to hardware/GitOps,
+do NOT "fix" it by moving pins. CI-build proof for the images is already banked
+(pipeline 1555, memory `proof-2026-07-19-gonk-agent-image-built`).
+
+Iteration meanwhile uses a LOCAL build + push, which the owner explicitly allowed
+("the build must be RUNNABLE in CI, but you can use local resources"). Pushing
+needs the in-cluster path, because the ingress 499s on large layers:
+
+```
+kubectl port-forward -n gitlab svc/gitlab-registry 5000:5000
+podman login localhost:5000 -u steve --password-stdin   # glab's token works
+podman tag  registry.orac.local/agentic/gonk-project/<img>:<tag> localhost:5000/agentic/gonk-project/<img>:<tag>
+podman push --tls-verify=false localhost:5000/agentic/gonk-project/<img>:<tag>
+```
+
 ## Known risks / open checks
 
-- Does the dispatch order deliver model + metadata (+ key) to the session as
-  `GC_WEBHOOK_ARG_*` pod env? Verify against gonk-dispatch order args.
+- ~~Does the dispatch order deliver model + metadata (+ key) to the session as
+  `GC_WEBHOOK_ARG_*` pod env?~~ ANSWERED, AND THE ANSWER WAS NO -- see blocker 6.
+  This was the risk that mattered.
 - opencode config schema at the pinned OPENCODE_VERSION (overlay key path) — the
   entrypoint comment flags this as needing live verification (Plan 06). This run
   IS that verification.
