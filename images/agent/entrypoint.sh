@@ -90,11 +90,39 @@ marker_value() {
 		| head -1
 }
 
+# THE SESSION IS RESIDENT, SO NONE OF THIS MAY BE FATAL AT STARTUP.
+# Gas City's k8s provider launches the pod as a POOL session:
+#     tmux new-session -d -s main "gonk-agent-entrypoint" && sleep infinity
+# with NO prompt appended -- the prompt is delivered later, into the running
+# tmux, when a bead is assigned. So at startup there are no markers, and an
+# entrypoint that exits on a missing model takes the tmux session with it: the
+# server dies, the reconciler sees runtime-missing, and the pod is reaped and
+# respawned in a ~60s loop. (Observed exactly that.)
+#
+# Precedence, most specific first: prompt marker (per-session, when we were
+# handed a prompt) > GC_WEBHOOK_ARG_* (any non-gascity caller that sets it) >
+# GONK_MODEL, the STATIC per-install default the chart injects from the
+# operator's default rung. Static is the honest v1 answer: this deployment has
+# one local rung, and per-session model selection is what the v2 broker adds.
 : "${GC_WEBHOOK_ARG_MODEL:=$(marker_value model)}"
 : "${GC_WEBHOOK_ARG_METADATA_JSON:=$(marker_value meta)}"
+: "${GC_WEBHOOK_ARG_MODEL:=${GONK_MODEL:-}}"
 
-: "${GC_WEBHOOK_ARG_MODEL:?no model: neither GC_WEBHOOK_ARG_MODEL nor a <!-- gonk:model:... --> prompt marker. This is gonk-meter s rung decision, never a literal, and there is no default}"
-: "${GC_WEBHOOK_ARG_METADATA_JSON:?no attribution metadata: neither GC_WEBHOOK_ARG_METADATA_JSON nor a <!-- gonk:meta:... --> prompt marker -- the attribution seam (OD-7) has nothing to stamp}"
+if [ -z "${GC_WEBHOOK_ARG_MODEL}" ]; then
+	log "no model: no <!-- gonk:model:... --> prompt marker, no GC_WEBHOOK_ARG_MODEL, no GONK_MODEL."
+	log "this is gonk-meter's rung decision and there is no built-in default -- refusing to start."
+	exit 1
+fi
+
+# Attribution metadata is NOT fatal, deliberately. A resident pool session has no
+# bead yet, so there is nothing per-bead to stamp until a prompt arrives; dying
+# here would trade all attribution for no session at all. The header is simply
+# omitted when empty, and that is LOUD in the log so a silent loss of the
+# attribution seam (OD-7) cannot pass for normal.
+if [ -z "${GC_WEBHOOK_ARG_METADATA_JSON}" ]; then
+	log "WARNING: no attribution metadata (no <!-- gonk:meta:... --> marker, no GC_WEBHOOK_ARG_METADATA_JSON)"
+	log "WARNING: spend rows for this session will NOT carry per-bead attribution"
+fi
 
 # --- v1-minimal session-config delivery (gonk-aql / minimal opencode leg) ------
 # Gas City's k8s session provider mounts no gonk secrets and controller env does
@@ -178,9 +206,13 @@ jq -n \
 				"options": {
 					"baseURL": $baseurl,
 					"apiKey": $keyfile,
-					"headers": {
-						"x-litellm-spend-logs-metadata": $metadata
-					}
+					# OMIT the attribution header entirely when there is no
+					# metadata, rather than sending an empty one: LiteLLM would
+					# record an empty metadata field, which reads on the spend row
+					# exactly like "attributed to nothing" and is indistinguishable
+					# from a bug in the attribution chain. No header is honest.
+					"headers": (if $metadata == "" then {} else
+						{"x-litellm-spend-logs-metadata": $metadata} end)
 				},
 				"models": {
 					($model): { "name": $model }

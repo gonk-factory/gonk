@@ -1830,13 +1830,15 @@ spec:
                 grep -q '^\[env\]' "$agent_toml" || printf '\n[env]\n' >> "$agent_toml"
                 awk -v url='http://litellm.litellm.svc.cluster.local:4000' \
                     -v key="$LITELLM_KEY" -v bot="$BOT_TOKEN" \
-                    -v host='https://gitlab.orac.local' '
+                    -v host='https://gitlab.orac.local' \
+                    -v model='qwen3-14b' '
                   /^\[env\]/ && !seen {
                     print
                     printf "GONK_LITELLM_URL = \"%s\"\n", url
                     printf "GONK_LITELLM_KEY = \"%s\"\n", key
                     printf "GONK_BOT_TOKEN = \"%s\"\n", bot
                     printf "GONK_GITLAB_URL = \"%s\"\n", host
+                    if (model != "") printf "GONK_MODEL = \"%s\"\n", model
                     seen = 1
                     next
                   }

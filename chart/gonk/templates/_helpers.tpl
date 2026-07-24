@@ -222,3 +222,24 @@ gonk-dolt.{{ .Release.Namespace }}.svc
   readOnly: true
 {{- end }}
 {{- end -}}
+
+{{/*
+  gonk.defaultRungModel -- the model of onboarding.defaultRung in the operator's
+  rung catalog, or "" when the rung is not found.
+
+  This is the STATIC per-install model a resident agent session renders its
+  opencode overlay with at startup. It exists because Gas City launches agent
+  pods as POOL sessions with no prompt attached, so there is no per-session model
+  at the moment the harness needs one to write its config. A prompt marker still
+  overrides it per session once a bead is assigned (pack/formulas/gonk-triage.toml).
+
+  THE PACK STILL NAMES NO MODEL. This reads the OPERATOR's catalog
+  (operatorConfig.rungs, the same values gonk-meter serves from), so the model
+  keeps coming from the rung catalog and never from the pack.
+*/}}
+{{- define "gonk.defaultRungModel" -}}
+{{- $want := .Values.onboarding.defaultRung -}}
+{{- range .Values.operatorConfig.rungs -}}
+{{- if eq .name $want }}{{ .model }}{{ end -}}
+{{- end -}}
+{{- end -}}
