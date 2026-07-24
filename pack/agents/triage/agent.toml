@@ -48,6 +48,19 @@ prompt_flag = "--prompt"
 # baseline (cityAnchoredSessionEnv applies providerEnv over it), so this is the
 # place to fix it. /tmp is writable in the agent image for any uid.
 HOME = "/tmp/gonk-home"
+# ...AND THE XDG VARS, for the same reason and from the same leak. Overriding
+# HOME alone is NOT enough: internal/processenv's allow-list also copies
+# XDG_CONFIG_HOME (and friends) from the controller, where they point under
+# /home/gonk. opencode is XDG-aware, so it ignored the corrected HOME and died on
+#     EACCES: permission denied, mkdir '/home/gonk'
+# from inside Bun -- with the overlay already rendered correctly, which made it
+# look like a config problem when it was a home-directory problem. All four are
+# pinned under the writable HOME so no XDG-aware tool in the image can be sent
+# back to a path that does not exist in this pod.
+XDG_CONFIG_HOME = "/tmp/gonk-home/.config"
+XDG_DATA_HOME = "/tmp/gonk-home/.local/share"
+XDG_CACHE_HOME = "/tmp/gonk-home/.cache"
+XDG_STATE_HOME = "/tmp/gonk-home/.local/state"
 # opencode's permission gate: "*" -> allow, so the session can run glab
 # (read the issue, post the comment) without an interactive approval prompt.
 OPENCODE_PERMISSION = '{"*":"allow"}'
