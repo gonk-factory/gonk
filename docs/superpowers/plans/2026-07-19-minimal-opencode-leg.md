@@ -103,14 +103,40 @@ no gonk-gate change for this proof.
       (litellm_url/key + bot_token) instead of git-credentials seam.
 - [x] T4 pack: triage agent start_command=gonk-agent-entrypoint (escape hatch),
       prompt_mode=flag, OPENCODE_PERMISSION allow; dispatch + formula vars.
-- [~] T5 deploy to throwaway ns (gonk-e2e-opencode-e1a3c471); onboarding ->
-      merge -> file issue. IN PROGRESS.
-- [~] T6 prove the metered opencode session. BLOCKED on the actual model call by
-      Bailey GPU (Ollama inference wedged 2026-07-19 -- every /api/chat hangs with
-      no response while the node is idle; hardware/GitOps to fix). Everything up
-      to the model call (agent pod spawn, opencode start, LiteLLM reach) is
-      provable now; the comment + attribution row land once Bailey is back.
+- [x] T5 deploy to throwaway ns (gonk-e2e-opencode-e1a3c471); onboarding ->
+      merge -> file issue. Project 75 is `valid`, webhook 3 delivers, issues #2-#5
+      filed, `gonk_intake_dispatched_total{trigger="issue-triage"}` incremented.
+- [~] T6 prove the metered opencode session. UNBLOCKED 2026-07-24 (see below):
+      Bailey serves again and the whole model path is verified by hand. Remaining:
+      the pour itself, which needed blocker 4.
 - [ ] T7 teardown; document findings in test/e2e/.
+
+## Recovering this run after a scratchpad wipe (2026-07-24)
+
+The session scratchpad (`e2e-run/`: NS, overrides.yaml, deploy.sh, teardown.sh)
+was lost to a `/tmp` clear. NOTHING in the cluster was lost, and the run dir is
+reconstructible -- record how, because it will happen again:
+
+- namespace: `gonk-e2e-opencode-e1a3c471` (the only `gonk-*` ns).
+- values: `helm get values -n <ns> gonk -o yaml` IS the overrides file, verbatim.
+- secrets/keys: all still in-cluster (`gonk-gc-write-key`, `gonk-litellm` key
+  `admin-key`, `gonk-gitlab` key `token`, `gonk-meter-api`, `gonk-webhook`);
+  nothing needs regenerating and nothing was only ever on local disk.
+- GitLab: project 75 = `agentic/gonk-e2e-1784441480`, hook id 3 -> intake, bot 49.
+
+Teardown is therefore: delete the ns, delete hook 3 on project 75, restore the
+GitLab local-network-webhook setting. Keep bot 49 and project 75.
+
+## Verified live, by hand, on 2026-07-24
+
+- Bailey/Ollama serves: `qwen3:14b` answered `/api/chat` in 21s, HTTP 200.
+- The METERED hop works end to end: LiteLLM `stub-local` -> `ollama_chat/qwen3:14b`
+  returned HTTP 200 in 12s WITH a usage block (so a spend row is written and the
+  attribution header rides along). The money path is real, not assumed.
+- The blocker-4 diagnosis is confirmed by the controller's own log, once a minute:
+  `gonk-sweep output: {"level":"ERROR","msg":"misconfiguration","err":"GONK_METER_TOKEN_FILE [redacted] unset"}`.
+  Note `[redacted]` -- that is Gas City's secret filter admitting it is the one
+  that removed the value.
 
 ## Blockers found by running the real path (each hid the next)
 
@@ -126,6 +152,20 @@ fix revealed the next. All fixed this session (commits on the branch):
 3. Formula orders (gonk-triage/scaffold/mention) had no `[order.params]` -> the
    supervisor rejects webhook orders with an empty params block and skips them at
    load -> RunOrder(gonk-triage) 404. (pack: add [order.params]).
+
+4. Gas City STRIPS secret-marked env from exec orders. `internal/execenv`'s
+   `IsSensitiveKey` flags any key containing TOKEN/SECRET/PASSWORD/API_KEY/... and
+   `FilterInherited` drops it before running an exec order -- and gonk-dispatch IS
+   an exec order. So `GONK_METER_TOKEN_FILE`, `GONK_LITELLM_KEY` and
+   `GONK_BOT_TOKEN` all arrived EMPTY: meter unreachable (exit 2, no pour ever),
+   and the session would have had no creds even if it had poured. `[order.env]`
+   is NOT the workaround it looks like -- `gc init` drops the entire block when it
+   copies the pack into `/city` (verified: `/opt/gonk/pack` has it, `/city` does
+   not). FIX: deliver every gonk-gate secret as a MARKER-FREE PATH env pointing at
+   a mounted file -- `GONK_METER_BEARER_FILE`, `GONK_LITELLM_KEY_FILE`,
+   `GONK_BOT_FILE` (note: not `*_TOKEN_FILE`, which would be stripped too) -- and
+   have gonk-gate read the file. Chart mounts the litellm + gitlab secrets on the
+   controller; the key material never sits in a controller env var.
 
 Deploy-time (not code): the webhook secret must be >= 32 bytes (intake fatals
 otherwise); `.agent/` added to project 75 main to reach `valid` deterministically
