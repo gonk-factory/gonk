@@ -423,6 +423,12 @@ metadata:
 # (agent_service_account = gc-agent). Its Role is pods:[get] ONLY -- an agent must
 # never create/exec/delete pods. THE CHART DOES NOT CREATE THE AGENT PODS; it
 # provisions the SA/Role they run under so their footprint is least-privilege.
+# Gas City's k8s session provider sets NO imagePullSecrets on the session pod
+# (internal/runtime/k8s/pod.go @ GASCITY_REF) -- so the pod inherits them from
+# THIS SA. Without this, a first-party agent image in the private
+# registry.orac.local pulls with ImagePullBackOff. Same list the four workloads use.
+imagePullSecrets:
+  - name: gitlab-registry-pull-creds
 ---
 # Source: gonk/templates/serviceaccount-gc-controller.yaml
 apiVersion: v1
@@ -1433,6 +1439,64 @@ spec:
               value: "/etc/gonk/secrets/gc-write-key/key"
             - name: GONK_GC_WRITE_KEY_ID
               value: "k1"
+            # K8S SESSION PROVIDER (gonk-aql). GC_SESSION_PROVIDER=k8s (controllerEnv)
+            # tells the supervisor to spawn agent SESSION pods, but the provider
+            # (internal/runtime/k8s/provider.go @ GASCITY_REF) needs to be told WHICH
+            # image, in WHICH namespace, under WHICH SA -- none of which the chart set
+            # before. GC_K8S_IMAGE is the one place componentImages.agent is consumed
+            # (it was dead config until now). PREBAKED=true skips the staging init
+            # container + workspace-ready wait: the agent image is self-contained
+            # (opencode + tools baked) and triage injects its context, so no rig
+            # clone is staged into the pod.
+            - name: GC_K8S_IMAGE
+              value: "registry.orac.local/agentic/gonk-project/gonk-agent:"
+            - name: GC_K8S_NAMESPACE
+              value: "gonk"
+            - name: GC_K8S_SERVICE_ACCOUNT
+              value: gc-agent
+            - name: GC_K8S_PREBAKED
+              value: "true"
+            # v1-minimal session-config delivery (gonk-aql). The in-controller
+            # gonk-gate `dispatch` reads these and forwards them to the agent
+            # session as order vars (GC_WEBHOOK_ARG_{LITELLM_URL,LITELLM_KEY,
+            # BOT_TOKEN}), because Gas City mounts no gonk secrets into session
+            # pods and controller env does not flow to sessions.
+            #
+            # EVERY SECRET HERE IS A *PATH*, NOT A VALUE, AND THE ENV NAME CARRIES
+            # NO SECRET MARKER. Gas City's internal/execenv.IsSensitiveKey flags any
+            # key containing TOKEN/SECRET/PASSWORD/API_KEY/... and FilterInherited
+            # STRIPS those from the environment of an exec order -- gonk-dispatch IS
+            # an exec order, so a `GONK_LITELLM_KEY` / `GONK_BOT_TOKEN` /
+            # `GONK_METER_TOKEN_FILE` env arrives EMPTY in gonk-gate no matter what
+            # the chart sets. (`[order.env]` in the pack is not a workaround either:
+            # `gc init` drops that block when it copies the pack into /city.) So the
+            # names below are deliberately marker-free -- KEY_FILE, BOT_FILE,
+            # BEARER_FILE -- and gonk-gate reads the file at the path. Renaming any
+            # of them to *_TOKEN* silently breaks dispatch again.
+            #
+            # The KEY MATERIAL still ends up in an order var (litellm_key/bot_token)
+            # on the way to the session pod: a DELIBERATE v1 compromise the v2 broker
+            # removes by keeping all creds out of the pod entirely.
+            - name: GONK_LITELLM_URL
+              value: "http://litellm.litellm.svc:4000"
+            - name: GONK_LITELLM_KEY_FILE
+              value: "/etc/gonk/secrets/litellm/admin-key"
+            - name: GONK_BOT_FILE
+              value: "/etc/gonk/secrets/gitlab-bot/token"
+            # The in-controller gonk-gate exec orders (gonk-dispatch, gonk-sweep)
+            # call gonk-meter /v1/policy/decide -- they need the meter URL and a
+            # bearer-token FILE, exactly like gonk-intake. Without these,
+            # `gc: order exec gonk-dispatch failed ... GONK_METER_TOKEN_FILE unset`
+            # and NO formula is ever poured (no session spawns). GONK_METER_BEARER_
+            # FILE is the marker-free alias gonk-gate falls back to (see above);
+            # GONK_METER_TOKEN_FILE is kept for the non-exec callers that do inherit
+            # it and for parity with gonk-intake.
+            - name: GONK_METER_URL
+              value: "http://gonk-meter:8080"
+            - name: GONK_METER_TOKEN_FILE
+              value: "/etc/gonk/secrets/meter-api/token"
+            - name: GONK_METER_BEARER_FILE
+              value: "/etc/gonk/secrets/meter-api/token"
           ports:
             # The per-city [api] listener (0.0.0.0:9443). This is what intake
             # dispatches to and what the Service targets. Port 8372 (the machine-wide
@@ -1484,6 +1548,21 @@ spec:
             - name: secret-gc-write-key
               mountPath: /etc/gonk/secrets/gc-write-key
               readOnly: true
+            # The meter bearer token for the in-controller gonk-gate exec orders
+            # (GONK_METER_TOKEN_FILE above points here).
+            - name: secret-meter-api
+              mountPath: /etc/gonk/secrets/meter-api
+              readOnly: true
+            # The LiteLLM virtual key and the GitLab bot token, as FILES, for the
+            # gonk-dispatch exec order to read and forward to the session (gonk-aql).
+            # They are files rather than env because Gas City strips secret-marked
+            # env from exec orders -- see the GONK_*_FILE comment above.
+            - name: secret-litellm
+              mountPath: /etc/gonk/secrets/litellm
+              readOnly: true
+            - name: secret-gitlab-bot
+              mountPath: /etc/gonk/secrets/gitlab-bot
+              readOnly: true
       volumes:
         # /city and /home/gonk MUST be writable by uid 65532 (smoke U2): gc init
         # writes the city into /city and gc writes ~/.gc under HOME. emptyDir, shared
@@ -1507,6 +1586,35 @@ spec:
                   items:
                     - key: key
                       path: key
+        - name: secret-meter-api
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-meter-api
+                  items:
+                    - key: token
+                      path: token
+        # Session creds the gonk-dispatch exec order forwards to the agent pod
+        # (gonk-aql): the LiteLLM virtual key and the GitLab bot token, 0400.
+        - name: secret-litellm
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-litellm
+                  items:
+                    - key: admin-key
+                      path: admin-key
+        - name: secret-gitlab-bot
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-gitlab
+                  items:
+                    - key: token
+                      path: token
         # The private-CA bundle (trust-manager publishes `trust-bundle` into every
         # namespace). gc clones the city's git remote from https://gitlab.orac.local,
         # whose cert is signed by the cluster CA; SSL_CERT_FILE names this path.

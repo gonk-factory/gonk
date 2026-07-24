@@ -1,6 +1,7 @@
 package gcapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -460,6 +461,59 @@ func TestParsePrivateKeyRaw64(t *testing.T) {
 	}
 	if !got.Public().(ed25519.PublicKey).Equal(pub) {
 		t.Fatal("64-byte key round-trip changed the public key")
+	}
+}
+
+// TestParsePrivateKeyKeepsWhitespaceBytes pins the fix for a real corruption
+// bug: ParsePrivateKey used to bytes.TrimSpace() its input unconditionally, so a
+// raw key whose first or last byte happened to be an ASCII whitespace value was
+// silently truncated and then rejected as "raw length 63". Key material is
+// uniform random, so that is ~4.6% of all keys -- an unreproducible startup
+// failure in the field. TestParsePrivateKeyRaw64 catches it only by luck (1 run
+// in ~22); this test catches it every run, for every whitespace byte, at both
+// ends, in both accepted lengths.
+func TestParsePrivateKeyKeepsWhitespaceBytes(t *testing.T) {
+	for _, ws := range []byte{'\t', '\n', '\v', '\f', '\r', ' '} {
+		for _, size := range []int{ed25519.SeedSize, ed25519.PrivateKeySize} {
+			for _, at := range []string{"first", "last"} {
+				key := bytes.Repeat([]byte{0xAB}, size)
+				if at == "first" {
+					key[0] = ws
+				} else {
+					key[size-1] = ws
+				}
+				got, err := ParsePrivateKey(key)
+				if err != nil {
+					t.Fatalf("ParsePrivateKey(%d-byte key, %s byte %#x) = %v", size, at, ws, err)
+				}
+				if len(got) != ed25519.PrivateKeySize {
+					t.Fatalf("ParsePrivateKey(%d-byte key, %s byte %#x) returned %d bytes, want %d",
+						size, at, ws, len(got), ed25519.PrivateKeySize)
+				}
+				// A 64-byte input must survive BYTE FOR BYTE; a 32-byte seed is
+				// expanded, so only its seed half is comparable.
+				if size == ed25519.PrivateKeySize && !bytes.Equal(got, key) {
+					t.Fatalf("ParsePrivateKey(64-byte key, %s byte %#x) changed the key bytes", at, ws)
+				}
+				if size == ed25519.SeedSize && !bytes.Equal(got.Seed(), key) {
+					t.Fatalf("ParsePrivateKey(32-byte seed, %s byte %#x) changed the seed bytes", at, ws)
+				}
+			}
+		}
+	}
+}
+
+// TestParsePrivateKeyStillTrimsTextFiles proves the trim fallback survives: a
+// key file written by a shell (`echo`, a Helm secret with a trailing newline) is
+// still accepted, which is why the trim existed in the first place.
+func TestParsePrivateKeyStillTrimsTextFiles(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	got, err := ParsePrivateKey(append(append([]byte(nil), priv...), '\n'))
+	if err != nil {
+		t.Fatalf("ParsePrivateKey(64-byte key + trailing newline) = %v", err)
+	}
+	if !bytes.Equal(got, priv) {
+		t.Fatal("trailing-newline key did not round-trip")
 	}
 }
 
