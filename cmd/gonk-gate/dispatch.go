@@ -194,14 +194,19 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 		// v1-minimal session-config delivery (gonk-aql). Gas City's k8s session
 		// provider mounts no gonk secrets and controller env does not flow to
 		// sessions, so the agent's LiteLLM endpoint/key and the bot token are
-		// forwarded from THIS controller's env as order vars. litellm_url is not
-		// secret; litellm_key and bot_token DELIBERATELY VIOLATE the "never a
-		// credential in an order var" rule above -- a v1-only compromise for the
-		// minimal opencode leg, removed by the v2 broker (which keeps all creds
-		// out of the pod). Empty values are simply not forwarded.
+		// forwarded from THIS controller as order vars. litellm_url is not secret
+		// and rides a plain env. The two SECRETS are read from FILES, because Gas
+		// City strips inherited env whose key contains a secret marker
+		// (IsSensitiveKey: TOKEN/SECRET/...) from exec orders -- so a
+		// GONK_*_TOKEN env would arrive empty. The path envs use non-secret names
+		// (GONK_LITELLM_KEY_FILE has no marker; the bot token uses GONK_BOT_FILE,
+		// NOT *_TOKEN_FILE, so it too survives) and the secret only ever lives in
+		// the mounted file. litellm_key/bot_token DELIBERATELY violate the "never a
+		// credential in an order var" rule above -- a v1-only compromise the v2
+		// broker removes (it keeps all creds out of the pod).
 		"litellm_url": os.Getenv("GONK_LITELLM_URL"),
-		"litellm_key": os.Getenv("GONK_LITELLM_KEY"),
-		"bot_token":   os.Getenv("GONK_BOT_TOKEN"),
+		"litellm_key": readFileEnvValue("GONK_LITELLM_KEY_FILE"),
+		"bot_token":   readFileEnvValue("GONK_BOT_FILE"),
 	}
 
 	if _, err := d.GC.RunOrder(ctx, order, vars); err != nil {

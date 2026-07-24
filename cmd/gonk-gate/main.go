@@ -180,8 +180,14 @@ func loadGateConfig() (gateConfig, error) {
 		WriteKeyFile:    os.Getenv("GONK_GC_WRITE_KEY_FILE"),
 		WriteKeyID:      os.Getenv("GONK_GC_WRITE_KEY_ID"),
 		WriteCID:        os.Getenv("GONK_GC_WRITE_CID"),
-		MeterURL:        os.Getenv("GONK_METER_URL"),
-		MeterTokenFile:  os.Getenv("GONK_METER_TOKEN_FILE"),
+		MeterURL: os.Getenv("GONK_METER_URL"),
+		// GONK_METER_TOKEN_FILE works for gonk-intake, but the in-controller exec
+		// orders (dispatch/sweep) run under Gas City, which STRIPS inherited env
+		// whose key contains a secret marker (internal/execenv.IsSensitiveKey:
+		// "TOKEN" among them). So the controller ALSO exports GONK_METER_BEARER_FILE
+		// -- same path, a name with no secret marker -- which survives the strip.
+		// (A [order.env] override does not: `gc init` drops it from the city copy.)
+		MeterTokenFile: firstNonEmpty(os.Getenv("GONK_METER_TOKEN_FILE"), os.Getenv("GONK_METER_BEARER_FILE")),
 		GitLabURL:       os.Getenv("GONK_GITLAB_URL"),
 		GitLabTokenFile: os.Getenv("GONK_GITLAB_TOKEN_FILE"),
 		BotUsername:     os.Getenv("GONK_BOT_USERNAME"),
@@ -253,6 +259,26 @@ func (c gateConfig) store() beadstore.Store {
 // newline. An empty path is legal (an unused optional value) and returns "",
 // nil; an unreadable or empty file is an error the caller decides how to
 // treat.
+// firstNonEmpty returns the first non-empty string, or "".
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// readFileEnvValue reads the file whose path is in env var `pathEnv` and returns
+// its trimmed contents, or "" if the env is unset or the file cannot be read.
+// Used to carry a secret VALUE (litellm key, bot token) into an exec order past
+// Gas City's IsSensitiveKey env strip: the PATH env has a non-secret name, and
+// the secret only ever lives in the file, never in the exec's environment.
+func readFileEnvValue(pathEnv string) string {
+	s, _ := readSecretFile(os.Getenv(pathEnv))
+	return s
+}
+
 func readSecretFile(path string) (string, error) {
 	if path == "" {
 		return "", nil

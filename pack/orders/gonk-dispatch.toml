@@ -64,13 +64,17 @@ rung = { required = false }
 model = { required = false }
 reservation_id = { required = false }
 
-# [order.env] — Gas City STRIPS inherited env whose key contains a secret marker
-# (internal/execenv.IsSensitiveKey: PASSWORD/TOKEN/SECRET/...). GONK_METER_TOKEN_FILE
-# contains "TOKEN", so it is dropped from the exec order env even though the
-# controller container sets it -> gonk-gate reports "GONK_METER_TOKEN_FILE unset"
-# and no formula is poured. An explicit [order.env] override is re-applied AFTER
-# filtering. The value is the chart mount PATH (secrets.mountRoot default
-# /etc/gonk/secrets), not a secret. GONK_METER_URL / GONK_GC_WRITE_KEY_FILE are
-# NOT stripped (no secret marker in the key) so they still inherit fine.
-[order.env]
-GONK_METER_TOKEN_FILE = "/etc/gonk/secrets/meter-api/token"
+# NO [order.env] HERE -- IT DOES NOT WORK, DO NOT ADD ONE BACK.
+#
+# Gas City STRIPS inherited env whose key contains a secret marker
+# (internal/execenv.IsSensitiveKey: PASSWORD/TOKEN/SECRET/API_KEY/...) before it
+# runs an exec order, so `GONK_METER_TOKEN_FILE` (contains "TOKEN") arrives EMPTY
+# no matter what the controller container sets. An [order.env] override reads like
+# the fix and is NOT one: `gc init` DROPS the whole [order.env] block when it
+# copies the pack from /opt/gonk/pack into /city -- verified live, the /city copy
+# of this file has no such block.
+#
+# The real fix is in the CHART: every secret gonk-gate needs is delivered as a
+# marker-free PATH env (GONK_METER_BEARER_FILE, GONK_LITELLM_KEY_FILE,
+# GONK_BOT_FILE) pointing at a mounted file, which survives the filter untouched.
+# See chart/gonk/templates/workload-gonk-controller.yaml.
