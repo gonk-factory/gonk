@@ -253,3 +253,41 @@ podman push --tls-verify=false localhost:5000/agentic/gonk-project/<img>:<tag>
   IS that verification.
 - Whether `opencode --prompt` (non-interactive) reliably drives `glab` to post a
   single comment against the stub model's output. May need prompt tuning.
+
+## State at 2026-07-24 handoff
+
+Blockers 4-9 fixed this session; agent SESSION PODS NOW SPAWN AND RUN. The chain
+dispatch -> meter decide -> pour -> routing -> session -> POD is proven live.
+
+8. `GC_SESSION_PROVIDER` is a CHART INVENTION -- the string exists nowhere in Gas
+   City. The runtime silently fell back to tmux: sessions logged
+   `outcome=success duration=33ms` while also logging `tmux server unreachable`,
+   and NO pod was ever created (zero pod events in the namespace). The real
+   override is `GC_SESSION` (cmd/gc `effectiveProviderName`), plus city.toml's
+   `[session] provider` (written by the bootstrap; `gc init` has no flag for it).
+   With both set, control-dispatcher and triage pods reach Running.
+9. The controller's `HOME=/home/gonk` (an emptyDir that exists only in the
+   controller pod) rides Gas City's session passthrough allow-list into every
+   agent pod, which died on `mkdir: cannot create directory '/home/gonk'`.
+   Overridden per-agent to `/tmp/gonk-home` (agent [env] beats the passthrough).
+
+### THE NEXT THING TO DEBUG (exact state)
+
+Triage pods reach Running but are reaped after ~60s and respawned. Inside a live
+pod: `tmux ls` -> `no server running on /tmp/tmux-65532/default`, and
+`/etc/gonk/overlay/` is EMPTY -- so gonk-agent-entrypoint NEVER RAN. The k8s
+provider is supposed to launch `tmux new-session -d -s <s> "$CMD"` in the pod
+(internal/runtime/k8s/pod.go). Start there: find what the pod's container is
+actually running, and why the provider's tmux launch is not happening (candidate:
+GC_K8S_PREBAKED=true skipping a step that also sets up the launch, or the pod
+command/args not being what the provider expects).
+
+### SECURITY: ROTATE THE BOT TOKEN
+
+`gc config explain` prints agent `[env]` values UNREDACTED, so the GitLab bot PAT
+(bot user 49) was printed in plaintext to a terminal and into a session
+transcript. ROTATE IT. This is a direct consequence of the v1 cred-injection
+compromise (creds in city agent config) and widens its blast radius: any operator
+running `gc config explain` sees the key and the token. Worth reconsidering in v2
+(the broker keeps creds out of the pod entirely) and worth a redaction bug
+upstream.
