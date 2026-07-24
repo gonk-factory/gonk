@@ -56,10 +56,35 @@ bot_token = ""
 description = "Label prefix applied to triage labels. Not sent by dispatch -- this default is the only source."
 default = "gonk::"
 
+# THE PROMPT IS THE ONLY PER-SESSION CHANNEL INTO THE AGENT POD. This is not a
+# style choice -- it is forced by Gas City at GASCITY_REF:
+#
+#   * GC_WEBHOOK_ARG_* is an EXEC-ORDER env overlay only
+#     (internal/orderdispatch/dispatch.go: "ExecEnv is the environment overlay
+#     applied when Order is an exec order"). gonk-triage is a FORMULA order.
+#   * A session pod's env is resolved.Env (STATIC agent/provider/city config)
+#     plus a fixed passthrough allow-list (internal/processenv: PATH, HOME,
+#     USER, TZ, CLAUDE_*, locale) plus Dolt/city path projections. No GONK_*,
+#     no per-session value, reaches it.
+#
+# So the two per-session values the harness needs BEFORE the model is called --
+# the rung's model and the attribution metadata -- ride in as HTML-comment
+# marker lines at the top of the rendered step. gonk-agent-entrypoint parses
+# them out of its own --prompt argument, strips them, and passes the remainder
+# to opencode, so the model never sees them.
+#
+# NOTHING SECRET GOES HERE. The LiteLLM key and the bot token are static
+# per-install values delivered as pod env; a credential in the prompt would be a
+# credential in the model's context window, in the session transcript, and in
+# every log line that echoes the prompt. v2's broker replaces this marker seam
+# with real context injection -- same shape, better plumbing.
 [[steps]]
 id = "triage"
 title = "Triage issue !{{issue_iid}} in {{project}}"
 description = """
+<!-- gonk:model:{{model}} -->
+<!-- gonk:meta:{{metadata_json}} -->
+
 Read issue !{{issue_iid}} in project `{{project}}` and triage it.
 
 Load `.agent/` from the repository first: it is the project's own context and

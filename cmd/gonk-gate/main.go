@@ -82,7 +82,7 @@ func main() {
 		}, trailersArgs{
 			CommitMsgFile: trailersCommitMsgFile(os.Args[2:]),
 			Model:         envArg("model"),
-			MetadataJSON:  os.Getenv("GC_WEBHOOK_ARG_METADATA_JSON"),
+			MetadataJSON:  envArg("metadata_json"),
 		}))
 	}
 
@@ -294,9 +294,22 @@ func readSecretFile(path string) (string, error) {
 	return s, nil
 }
 
-// envArg reads one of an order's declared [order.params]: Gas City namespaces
-// them into the exec's environment as GC_WEBHOOK_ARG_<NAME>.
+// envArg reads one of an order's declared [order.params]. Gas City namespaces
+// them into the exec's environment as GC_WEBHOOK_ARG_<name> -- WITH THE PARAM
+// NAME VERBATIM, NOT UPPERCASED. internal/webhookmatch/extract.go's ExecEnvVars
+// is a plain `out[ExecEnvArgPrefix+k] = v` over the declared param names, and
+// every gonk [order.params] key is lower_snake_case, so the real variable is
+// GC_WEBHOOK_ARG_trigger -- never GC_WEBHOOK_ARG_TRIGGER.
+//
+// This read USED to uppercase unconditionally, so EVERY arg came back "" and
+// gonk-dispatch died on `unknown trigger; pouring nothing` with trigger="" --
+// after meter had already been asked, i.e. it burned a decision and poured
+// nothing. Verbatim is tried first and the uppercase spelling is kept only as a
+// fallback, so a future Gas City that does normalize keys still works.
 func envArg(name string) string {
+	if v := os.Getenv("GC_WEBHOOK_ARG_" + name); v != "" {
+		return v
+	}
 	return os.Getenv("GC_WEBHOOK_ARG_" + strings.ToUpper(name))
 }
 
