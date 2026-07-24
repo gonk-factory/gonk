@@ -316,6 +316,20 @@ func TestDoctorChecksHaveRunnableScripts(t *testing.T) {
 	}
 }
 
+// deterministicAgents are the agents that are NOT model agents: no provider, no
+// prompt, no comment, no tokens. They are exempt from the prompt.template.md and
+// bead-marker rules below, which encode "an agent is a thing that talks to a
+// model and posts a marked comment" -- true for triage/scaffold/mention, false
+// for Gas City's control lane.
+//
+// control-dispatcher is the deterministic compiler-v2 workflow control worker
+// (prompt_mode = "none", start_command runs `gc convoy control --serve`). Giving
+// it a prompt template would be inventing a prompt for something that never
+// receives one.
+var deterministicAgents = map[string]bool{
+	"control-dispatcher": true,
+}
+
 // The DIRECTORY NAME is the agent name. Both files exist for every agent
 // this pack ships, and a stray `name` field inside agent.toml is IGNORED by
 // the loader -- which means someone will one day set it, believe it, and be
@@ -334,7 +348,7 @@ func TestEveryAgentDirHasBothFilesAndNoNameField(t *testing.T) {
 		found++
 		name := e.Name()
 		dir := filepath.Join(agentsDir, name)
-		if _, err := os.Stat(filepath.Join(dir, "prompt.template.md")); err != nil {
+		if _, err := os.Stat(filepath.Join(dir, "prompt.template.md")); err != nil && !deterministicAgents[name] {
 			t.Errorf("agents/%s has no prompt.template.md", name)
 		}
 		agentTOML := filepath.Join(dir, "agent.toml")

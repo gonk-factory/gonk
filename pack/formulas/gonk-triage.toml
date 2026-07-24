@@ -64,7 +64,7 @@ default = "gonk::"
 #     applied when Order is an exec order"). gonk-triage is a FORMULA order.
 #   * A session pod's env is resolved.Env (STATIC agent/provider/city config)
 #     plus a fixed passthrough allow-list (internal/processenv: PATH, HOME,
-#     USER, TZ, CLAUDE_*, locale) plus Dolt/city path projections. No GONK_*,
+#     USER, TZ, a few vendor-CLI keys, locale) plus Dolt/city projections. No GONK_*,
 #     no per-session value, reaches it.
 #
 # So the two per-session values the harness needs BEFORE the model is called --
