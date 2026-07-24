@@ -150,29 +150,42 @@ spec:
             # gonk-gate `dispatch` reads these and forwards them to the agent
             # session as order vars (GC_WEBHOOK_ARG_{LITELLM_URL,LITELLM_KEY,
             # BOT_TOKEN}), because Gas City mounts no gonk secrets into session
-            # pods and controller env does not flow to sessions. LITELLM_KEY and
-            # BOT_TOKEN are a DELIBERATE v1 compromise (a credential on the
-            # controller env and then in an order var) that the v2 broker removes.
+            # pods and controller env does not flow to sessions.
+            #
+            # EVERY SECRET HERE IS A *PATH*, NOT A VALUE, AND THE ENV NAME CARRIES
+            # NO SECRET MARKER. Gas City's internal/execenv.IsSensitiveKey flags any
+            # key containing TOKEN/SECRET/PASSWORD/API_KEY/... and FilterInherited
+            # STRIPS those from the environment of an exec order -- gonk-dispatch IS
+            # an exec order, so a `GONK_LITELLM_KEY` / `GONK_BOT_TOKEN` /
+            # `GONK_METER_TOKEN_FILE` env arrives EMPTY in gonk-gate no matter what
+            # the chart sets. (`[order.env]` in the pack is not a workaround either:
+            # `gc init` drops that block when it copies the pack into /city.) So the
+            # names below are deliberately marker-free -- KEY_FILE, BOT_FILE,
+            # BEARER_FILE -- and gonk-gate reads the file at the path. Renaming any
+            # of them to *_TOKEN* silently breaks dispatch again.
+            #
+            # The KEY MATERIAL still ends up in an order var (litellm_key/bot_token)
+            # on the way to the session pod: a DELIBERATE v1 compromise the v2 broker
+            # removes by keeping all creds out of the pod entirely.
             - name: GONK_LITELLM_URL
               value: {{ .Values.litellm.externalURL | quote }}
-            - name: GONK_LITELLM_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secrets.litellm.existingSecret | quote }}
-                  key: {{ .Values.secrets.litellm.keys.adminKey | quote }}
-            - name: GONK_BOT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secrets.gitlab.existingSecret | quote }}
-                  key: {{ .Values.secrets.gitlab.keys.token | quote }}
+            - name: GONK_LITELLM_KEY_FILE
+              value: {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "litellm" "key" .Values.secrets.litellm.keys.adminKey) | quote }}
+            - name: GONK_BOT_FILE
+              value: {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "gitlab-bot" "key" .Values.secrets.gitlab.keys.token) | quote }}
             # The in-controller gonk-gate exec orders (gonk-dispatch, gonk-sweep)
             # call gonk-meter /v1/policy/decide -- they need the meter URL and a
-            # bearer-token FILE (GONK_METER_TOKEN_FILE), exactly like gonk-intake.
-            # Without these, `gc: order exec gonk-dispatch failed ... GONK_METER_
-            # TOKEN_FILE unset` and NO formula is ever poured (no session spawns).
+            # bearer-token FILE, exactly like gonk-intake. Without these,
+            # `gc: order exec gonk-dispatch failed ... GONK_METER_TOKEN_FILE unset`
+            # and NO formula is ever poured (no session spawns). GONK_METER_BEARER_
+            # FILE is the marker-free alias gonk-gate falls back to (see above);
+            # GONK_METER_TOKEN_FILE is kept for the non-exec callers that do inherit
+            # it and for parity with gonk-intake.
             - name: GONK_METER_URL
               value: "http://gonk-meter:{{ .Values.meter.port }}"
             - name: GONK_METER_TOKEN_FILE
+              value: {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "meter-api" "key" .Values.secrets.meterAPI.keys.token) | quote }}
+            - name: GONK_METER_BEARER_FILE
               value: {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "meter-api" "key" .Values.secrets.meterAPI.keys.token) | quote }}
           ports:
             # The per-city [api] listener (0.0.0.0:9443). This is what intake
@@ -209,6 +222,12 @@ spec:
             # The meter bearer token for the in-controller gonk-gate exec orders
             # (GONK_METER_TOKEN_FILE above points here).
             {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "meter-api") | nindent 12 }}
+            # The LiteLLM virtual key and the GitLab bot token, as FILES, for the
+            # gonk-dispatch exec order to read and forward to the session (gonk-aql).
+            # They are files rather than env because Gas City strips secret-marked
+            # env from exec orders -- see the GONK_*_FILE comment above.
+            {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "litellm") | nindent 12 }}
+            {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "gitlab-bot") | nindent 12 }}
       volumes:
         # /city and /home/gonk MUST be writable by uid 65532 (smoke U2): gc init
         # writes the city into /city and gc writes ~/.gc under HOME. emptyDir, shared
@@ -225,6 +244,10 @@ spec:
         # gonk-gate to sign order-run POSTs; G22 requires it when gascity.enabled.
         {{- include "gonk.secretVolume" (dict "name" "gc-write-key" "secret" .Values.secrets.gcWriteKey.existingSecret "keys" (list .Values.secrets.gcWriteKey.key)) | nindent 8 }}
         {{- include "gonk.secretVolume" (dict "name" "meter-api" "secret" .Values.secrets.meterAPI.existingSecret "keys" (list .Values.secrets.meterAPI.keys.token)) | nindent 8 }}
+        # Session creds the gonk-dispatch exec order forwards to the agent pod
+        # (gonk-aql): the LiteLLM virtual key and the GitLab bot token, 0400.
+        {{- include "gonk.secretVolume" (dict "name" "litellm" "secret" .Values.secrets.litellm.existingSecret "keys" (list .Values.secrets.litellm.keys.adminKey)) | nindent 8 }}
+        {{- include "gonk.secretVolume" (dict "name" "gitlab-bot" "secret" .Values.secrets.gitlab.existingSecret "keys" (list .Values.secrets.gitlab.keys.token)) | nindent 8 }}
         {{- if .Values.gitlab.caCert.existingConfigMap }}
         # The private-CA bundle (trust-manager publishes `trust-bundle` into every
         # namespace). gc clones the city's git remote from https://gitlab.orac.local,
