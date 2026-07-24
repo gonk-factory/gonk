@@ -93,6 +93,24 @@ spec:
                 --dolt-database "bd_{{ .Values.dolt.database }}" \
                 --dolt-project-id "{{ .Values.dolt.database }}" \
                 --no-start /city
+              # ---- SELECT THE K8S SESSION PROVIDER -------------------------------
+              # THIS IS THE ONLY THING THAT MAKES AGENT SESSIONS RUN AS PODS, and it
+              # is CITY CONFIG, NOT ENV. config.SessionConfig is `toml:"session"` on
+              # the city config; Gas City has no GC_SESSION_PROVIDER at all (the
+              # string does not appear in its source at GASCITY_REF). The chart used
+              # to set that env, which did nothing: the runtime defaulted to tmux and
+              # every session "started" successfully while logging `tmux server
+              # unreachable: no tmux server running` and never creating a pod.
+              #
+              # Written here rather than passed to `gc init` because init has no flag
+              # for it. Appended only when absent so a re-run is idempotent; the
+              # GC_K8S_* details (image/namespace/SA/prebaked) stay env, which IS
+              # where the provider reads them.
+              if ! grep -q '^\[session\]' /city/city.toml; then
+                printf '\n[session]\nprovider = "k8s"\n' >> /city/city.toml
+                echo "bootstrap-city: selected the k8s session provider in city.toml"
+              fi
+
               # ---- STATIC SESSION CREDS (gonk-aql, v1-minimal) -------------------
               # An agent SESSION pod's env is resolved.Env -- the agent/city config
               # -- plus a fixed passthrough allow-list. Controller env does NOT

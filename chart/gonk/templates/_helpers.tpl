@@ -170,7 +170,13 @@ gonk-dolt.{{ .Release.Namespace }}.svc
   - HOME=/home/gonk on a writable volume -- the image's passwd home for uid 65532
     is `/` (read-only), so gc cannot write ~/.gc without this (smoke U2).
   - GC_DOLT_HOST/PORT point beads at the bundled/external Dolt.
-  - GC_SESSION_PROVIDER=k8s so the supervisor spawns agent SESSION pods.
+  - The session provider is NOT an env var. GC_SESSION_PROVIDER DOES NOT EXIST in
+    Gas City -- the string appears nowhere in its source at GASCITY_REF. Setting it
+    did nothing, the runtime silently defaulted to tmux, and sessions "started"
+    successfully while logging `tmux server unreachable: no tmux server running`
+    and never creating a pod. The real selector is city.toml's `[session] provider`
+    (config.SessionConfig, `toml:"session"`), written by the bootstrap
+    initContainer. Only the GC_K8S_* DETAILS (image/namespace/SA/prebaked) are env.
   - The draft's GC_DAEMON_SUPERVISOR_BIND / _ALLOW_MUTATIONS are OMITTED on
     purpose: smoke U1 proved no env moves the bind. The 0.0.0.0:9443 [api] bind and
     allow_mutations=true come from `gc init --bootstrap-profile k8s-cell`, never env.
@@ -182,8 +188,6 @@ gonk-dolt.{{ .Release.Namespace }}.svc
   value: {{ include "gonk.doltHost" . | quote }}
 - name: GC_DOLT_PORT
   value: {{ include "gonk.doltPort" . | quote }}
-- name: GC_SESSION_PROVIDER
-  value: k8s
 {{- if .Values.gitlab.caCert.existingConfigMap }}
 - name: SSL_CERT_FILE
   value: {{ .Values.gitlab.caCert.mountPath | quote }}
