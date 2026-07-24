@@ -1370,6 +1370,24 @@ spec:
                 --dolt-database "bd_gonk" \
                 --dolt-project-id "gonk" \
                 --no-start /city
+              # ---- SELECT THE K8S SESSION PROVIDER -------------------------------
+              # THIS IS THE ONLY THING THAT MAKES AGENT SESSIONS RUN AS PODS, and it
+              # is CITY CONFIG, NOT ENV. config.SessionConfig is `toml:"session"` on
+              # the city config; Gas City has no GC_SESSION_PROVIDER at all (the
+              # string does not appear in its source at GASCITY_REF). The chart used
+              # to set that env, which did nothing: the runtime defaulted to tmux and
+              # every session "started" successfully while logging `tmux server
+              # unreachable: no tmux server running` and never creating a pod.
+              #
+              # Written here rather than passed to `gc init` because init has no flag
+              # for it. Appended only when absent so a re-run is idempotent; the
+              # GC_K8S_* details (image/namespace/SA/prebaked) stay env, which IS
+              # where the provider reads them.
+              if ! grep -q '^\[session\]' /city/city.toml; then
+                printf '\n[session]\nprovider = "k8s"\n' >> /city/city.toml
+                echo "bootstrap-city: selected the k8s session provider in city.toml"
+              fi
+
               # ---- STATIC SESSION CREDS (gonk-aql, v1-minimal) -------------------
               # An agent SESSION pod's env is resolved.Env -- the agent/city config
               # -- plus a fixed passthrough allow-list. Controller env does NOT
@@ -1396,6 +1414,11 @@ spec:
               for agent_dir in /city/agents/*/; do
                 agent_toml="${agent_dir}agent.toml"
                 [ -f "$agent_toml" ] || continue
+                # NEVER give the control-dispatcher a credential. It is the
+                # providerless deterministic control lane -- it runs `gc`, never a
+                # model, and handing it the LiteLLM key and the bot token would put
+                # both in a pod that has no use for either.
+                case "$agent_dir" in */control-dispatcher/) continue ;; esac
                 grep -q '^\[env\]' "$agent_toml" || printf '\n[env]\n' >> "$agent_toml"
                 awk -v url='http://litellm.litellm.svc.cluster.local:4000' \
                     -v key="$LITELLM_KEY" -v bot="$BOT_TOKEN" \
@@ -1428,8 +1451,6 @@ spec:
               value: "gonk-dolt.gonk.svc"
             - name: GC_DOLT_PORT
               value: "3306"
-            - name: GC_SESSION_PROVIDER
-              value: k8s
             - name: SSL_CERT_FILE
               value: "/etc/ssl/orac/ca.crt"
           volumeMounts:
@@ -1475,8 +1496,6 @@ spec:
               value: "gonk-dolt.gonk.svc"
             - name: GC_DOLT_PORT
               value: "3306"
-            - name: GC_SESSION_PROVIDER
-              value: k8s
             - name: SSL_CERT_FILE
               value: "/etc/ssl/orac/ca.crt"
             # WRITE-AUTH (gonk-fsl / gonk-5we). GC_CITY_WRITE_PUBKEY turns on
@@ -1488,6 +1507,16 @@ spec:
             # gonk-intake.
             - name: GONK_CITY
               value: gonk
+            # WHERE THE IN-POD gonk-gate POSTS ITS POUR. gonk-dispatch runs inside
+            # THIS pod and calls POST /v0/city/gonk/order/gonk-triage/run on the
+            # city [api] -- so it needs the supervisor URL exactly like gonk-intake
+            # does. Without it gcapi builds a URL with no scheme or host and the
+            # pour dies on `unsupported protocol scheme ""` -- AFTER meter has
+            # already decided, so the budget decision is spent and nothing pours.
+            # Same helper as intake's (the bundled controller Service on 9443), so
+            # the two can never disagree about where the city is.
+            - name: GONK_SUPERVISOR_URL
+              value: "http://gonk-controller.gonk.svc:9443"
             - name: GC_CITY_WRITE_PUBKEY
               value: "k1:1hcioE4eYD4PsM66wVJ8oBErEfCTyNPt9Q/+ZT0drmk="
             - name: GONK_GC_WRITE_KEY_FILE
