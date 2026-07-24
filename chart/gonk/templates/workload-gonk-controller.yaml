@@ -93,6 +93,75 @@ spec:
                 --dolt-database "bd_{{ .Values.dolt.database }}" \
                 --dolt-project-id "{{ .Values.dolt.database }}" \
                 --no-start /city
+              # ---- SELECT THE K8S SESSION PROVIDER -------------------------------
+              # THIS IS THE ONLY THING THAT MAKES AGENT SESSIONS RUN AS PODS, and it
+              # is CITY CONFIG, NOT ENV. config.SessionConfig is `toml:"session"` on
+              # the city config; Gas City has no GC_SESSION_PROVIDER at all (the
+              # string does not appear in its source at GASCITY_REF). The chart used
+              # to set that env, which did nothing: the runtime defaulted to tmux and
+              # every session "started" successfully while logging `tmux server
+              # unreachable: no tmux server running` and never creating a pod.
+              #
+              # Written here rather than passed to `gc init` because init has no flag
+              # for it. Appended only when absent so a re-run is idempotent; the
+              # GC_K8S_* details (image/namespace/SA/prebaked) stay env, which IS
+              # where the provider reads them.
+              if ! grep -q '^\[session\]' /city/city.toml; then
+                printf '\n[session]\nprovider = "k8s"\n' >> /city/city.toml
+                echo "bootstrap-city: selected the k8s session provider in city.toml"
+              fi
+
+              # ---- STATIC SESSION CREDS (gonk-aql, v1-minimal) -------------------
+              # An agent SESSION pod's env is resolved.Env -- the agent/city config
+              # -- plus a fixed passthrough allow-list. Controller env does NOT
+              # reach it and neither does any per-session order arg (GC_WEBHOOK_ARG_*
+              # is an EXEC-order overlay). So the only way to hand the session its
+              # LiteLLM endpoint/key and bot token is to write them into the agent
+              # config in /city, here, from the mounted secret files.
+              #
+              # These are STATIC per-install values, which is exactly why this works;
+              # the per-session values (model, attribution metadata) cannot come this
+              # way and ride the prompt instead (see pack/formulas/gonk-triage.toml).
+              #
+              # THIS PUTS TWO CREDENTIALS IN A FILE IN /city -- a DELIBERATE v1
+              # compromise, the same one the pack documents, removed by the v2 broker
+              # (which keeps every cred out of the pod). /city is an emptyDir private
+              # to this pod, and the file is only readable by the runtime user.
+              #
+              # Inserted directly after the existing `[env]` header rather than
+              # appended: appending to EOF happens to land in [env] today only
+              # because [env] is the last table, and that is not a property worth
+              # depending on.
+              LITELLM_KEY=$(cat {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "litellm" "key" .Values.secrets.litellm.keys.adminKey) }})
+              BOT_TOKEN=$(cat {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "gitlab-bot" "key" .Values.secrets.gitlab.keys.token) }})
+              for agent_dir in /city/agents/*/; do
+                agent_toml="${agent_dir}agent.toml"
+                [ -f "$agent_toml" ] || continue
+                # NEVER give the control-dispatcher a credential. It is the
+                # providerless deterministic control lane -- it runs `gc`, never a
+                # model, and handing it the LiteLLM key and the bot token would put
+                # both in a pod that has no use for either.
+                case "$agent_dir" in */control-dispatcher/) continue ;; esac
+                grep -q '^\[env\]' "$agent_toml" || printf '\n[env]\n' >> "$agent_toml"
+                awk -v url='{{ .Values.litellm.externalURL }}' \
+                    -v key="$LITELLM_KEY" -v bot="$BOT_TOKEN" \
+                    -v host='{{ .Values.gitlab.url }}' '
+                  /^\[env\]/ && !seen {
+                    print
+                    printf "GONK_LITELLM_URL = \"%s\"\n", url
+                    printf "GONK_LITELLM_KEY = \"%s\"\n", key
+                    printf "GONK_BOT_TOKEN = \"%s\"\n", bot
+                    printf "GONK_GITLAB_URL = \"%s\"\n", host
+                    seen = 1
+                    next
+                  }
+                  { print }
+                ' "$agent_toml" > "${agent_toml}.new"
+                mv "${agent_toml}.new" "$agent_toml"
+                chmod 0600 "$agent_toml"
+              done
+              echo "bootstrap-city: injected static session creds into $(ls -d /city/agents/*/ | wc -l) agent config(s)"
+
               # NOTE: do NOT write ~/.gc/cities.toml here. Registering the city makes
               # `gc start --foreground /city` refuse it ("run `gc unregister /city`
               # before using --foreground") and crash-loop (gonk-fsl in-cluster
@@ -102,6 +171,10 @@ spec:
             {{- include "gonk.controllerEnv" . | nindent 12 }}
           volumeMounts:
             {{- include "gonk.controllerMounts" . | nindent 12 }}
+            # The bootstrap reads these to write the static session creds into the
+            # per-agent config in /city (see the cred block in args above).
+            {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "litellm") | nindent 12 }}
+            {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "gitlab-bot") | nindent 12 }}
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
       containers:
@@ -126,9 +199,86 @@ spec:
             # gonk-intake.
             - name: GONK_CITY
               value: gonk
+            # WHERE THE IN-POD gonk-gate POSTS ITS POUR. gonk-dispatch runs inside
+            # THIS pod and calls POST /v0/city/gonk/order/gonk-triage/run on the
+            # city [api] -- so it needs the supervisor URL exactly like gonk-intake
+            # does. Without it gcapi builds a URL with no scheme or host and the
+            # pour dies on `unsupported protocol scheme ""` -- AFTER meter has
+            # already decided, so the budget decision is spent and nothing pours.
+            # Same helper as intake's (the bundled controller Service on 9443), so
+            # the two can never disagree about where the city is.
+            - name: GONK_SUPERVISOR_URL
+              value: {{ include "gonk.supervisorURL" . | quote }}
             - name: GC_CITY_WRITE_PUBKEY
               value: {{ .Values.gascity.writeAuth.verifyKey | quote }}
             {{- include "gonk.gcWriteEnv" . | nindent 12 }}
+            # K8S SESSION PROVIDER (gonk-aql). GC_SESSION_PROVIDER=k8s (controllerEnv)
+            # tells the supervisor to spawn agent SESSION pods, but the provider
+            # (internal/runtime/k8s/provider.go @ GASCITY_REF) needs to be told WHICH
+            # image, in WHICH namespace, under WHICH SA -- none of which the chart set
+            # before. GC_K8S_IMAGE is the one place componentImages.agent is consumed
+            # (it was dead config until now). PREBAKED=true skips the staging init
+            # container + workspace-ready wait: the agent image is self-contained
+            # (opencode + tools baked) and triage injects its context, so no rig
+            # clone is staged into the pod.
+            - name: GC_K8S_IMAGE
+              value: {{ include "gonk.image" (dict "ctx" . "image" .Values.componentImages.agent) | quote }}
+            - name: GC_K8S_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: GC_K8S_SERVICE_ACCOUNT
+              value: gc-agent
+            - name: GC_K8S_PREBAKED
+              value: "true"
+            # v1-minimal session-config delivery (gonk-aql). The in-controller
+            # gonk-gate `dispatch` reads these and forwards them to the agent
+            # session as order vars (GC_WEBHOOK_ARG_{LITELLM_URL,LITELLM_KEY,
+            # BOT_TOKEN}), because Gas City mounts no gonk secrets into session
+            # pods and controller env does not flow to sessions.
+            #
+            # EVERY SECRET HERE IS A *PATH*, NOT A VALUE, AND THE ENV NAME CARRIES
+            # NO SECRET MARKER. Gas City's internal/execenv.IsSensitiveKey flags any
+            # key containing TOKEN/SECRET/PASSWORD/API_KEY/... and FilterInherited
+            # STRIPS those from the environment of an exec order -- gonk-dispatch IS
+            # an exec order, so a `GONK_LITELLM_KEY` / `GONK_BOT_TOKEN` /
+            # `GONK_METER_TOKEN_FILE` env arrives EMPTY in gonk-gate no matter what
+            # the chart sets. (`[order.env]` in the pack is not a workaround either:
+            # `gc init` drops that block when it copies the pack into /city.) So the
+            # names below are deliberately marker-free -- KEY_FILE, BOT_FILE,
+            # BEARER_FILE -- and gonk-gate reads the file at the path. Renaming any
+            # of them to *_TOKEN* silently breaks dispatch again.
+            #
+            # The KEY MATERIAL still ends up in an order var (litellm_key/bot_token)
+            # on the way to the session pod: a DELIBERATE v1 compromise the v2 broker
+            # removes by keeping all creds out of the pod entirely.
+            - name: GONK_LITELLM_URL
+              value: {{ .Values.litellm.externalURL | quote }}
+            - name: GONK_LITELLM_KEY_FILE
+              value: {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "litellm" "key" .Values.secrets.litellm.keys.adminKey) | quote }}
+            - name: GONK_BOT_FILE
+              value: {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "gitlab-bot" "key" .Values.secrets.gitlab.keys.token) | quote }}
+            # The in-controller gonk-gate exec orders (gonk-dispatch, gonk-sweep)
+            # call gonk-meter /v1/policy/decide -- they need the meter URL and a
+            # bearer-token FILE, exactly like gonk-intake. Without these,
+            # `gc: order exec gonk-dispatch failed ... GONK_METER_TOKEN_FILE unset`
+            # and NO formula is ever poured (no session spawns). GONK_METER_BEARER_
+            # FILE is the marker-free alias gonk-gate falls back to (see above);
+            # GONK_METER_TOKEN_FILE is kept for the non-exec callers that do inherit
+            # it and for parity with gonk-intake.
+            # The bead store gonk-gate records park/run/needs-human state in.
+            # WITHOUT IT gonk-gate falls back to an IN-MEMORY store that does not
+            # survive a single invocation -- its own warning says "fine for a
+            # smoke test, never for the controller" -- so a parked bead would
+            # never unpark and an outcome would never be reported, silently. The
+            # exec orders run inside this pod, where the city (and its bd store)
+            # is /city; `bd` is on PATH in the controller image.
+            - name: GONK_BEAD_REPO_DIR
+              value: /city
+            - name: GONK_METER_URL
+              value: "http://gonk-meter:{{ .Values.meter.port }}"
+            - name: GONK_METER_TOKEN_FILE
+              value: {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "meter-api" "key" .Values.secrets.meterAPI.keys.token) | quote }}
+            - name: GONK_METER_BEARER_FILE
+              value: {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "meter-api" "key" .Values.secrets.meterAPI.keys.token) | quote }}
           ports:
             # The per-city [api] listener (0.0.0.0:9443). This is what intake
             # dispatches to and what the Service targets. Port 8372 (the machine-wide
@@ -161,6 +311,15 @@ spec:
             # initContainer runs `gc init` and never signs). Same Secret gonk-intake
             # mounts; the chart creates none.
             {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "gc-write-key") | nindent 12 }}
+            # The meter bearer token for the in-controller gonk-gate exec orders
+            # (GONK_METER_TOKEN_FILE above points here).
+            {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "meter-api") | nindent 12 }}
+            # The LiteLLM virtual key and the GitLab bot token, as FILES, for the
+            # gonk-dispatch exec order to read and forward to the session (gonk-aql).
+            # They are files rather than env because Gas City strips secret-marked
+            # env from exec orders -- see the GONK_*_FILE comment above.
+            {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "litellm") | nindent 12 }}
+            {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "gitlab-bot") | nindent 12 }}
       volumes:
         # /city and /home/gonk MUST be writable by uid 65532 (smoke U2): gc init
         # writes the city into /city and gc writes ~/.gc under HOME. emptyDir, shared
@@ -176,6 +335,11 @@ spec:
         # from a pre-provisioned Secret (the chart creates none). Used by the in-pod
         # gonk-gate to sign order-run POSTs; G22 requires it when gascity.enabled.
         {{- include "gonk.secretVolume" (dict "name" "gc-write-key" "secret" .Values.secrets.gcWriteKey.existingSecret "keys" (list .Values.secrets.gcWriteKey.key)) | nindent 8 }}
+        {{- include "gonk.secretVolume" (dict "name" "meter-api" "secret" .Values.secrets.meterAPI.existingSecret "keys" (list .Values.secrets.meterAPI.keys.token)) | nindent 8 }}
+        # Session creds the gonk-dispatch exec order forwards to the agent pod
+        # (gonk-aql): the LiteLLM virtual key and the GitLab bot token, 0400.
+        {{- include "gonk.secretVolume" (dict "name" "litellm" "secret" .Values.secrets.litellm.existingSecret "keys" (list .Values.secrets.litellm.keys.adminKey)) | nindent 8 }}
+        {{- include "gonk.secretVolume" (dict "name" "gitlab-bot" "secret" .Values.secrets.gitlab.existingSecret "keys" (list .Values.secrets.gitlab.keys.token)) | nindent 8 }}
         {{- if .Values.gitlab.caCert.existingConfigMap }}
         # The private-CA bundle (trust-manager publishes `trust-bundle` into every
         # namespace). gc clones the city's git remote from https://gitlab.orac.local,

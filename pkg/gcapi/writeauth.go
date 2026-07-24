@@ -138,7 +138,19 @@ func ParsePrivateKey(data []byte) (ed25519.PrivateKey, error) {
 		}
 		return key, nil
 	}
-	raw := bytes.TrimSpace(data)
+	// TRIM ONLY IF TRIMMING IS NEEDED. bytes.TrimSpace over RAW key material is
+	// a corruption bug: an ed25519 key is 32/64 bytes of uniform random data, so
+	// its first or last byte is an ASCII whitespace value (\t \n \v \f \r space
+	// -- 6 of 256) about 4.6% of the time, and trimming those bytes turns a
+	// perfectly good key into a 63-byte "unrecognized private key" that no
+	// operator could diagnose. Exact-length input is therefore taken verbatim,
+	// and the trim is kept only as a fallback for the common text case (a file
+	// written with a trailing newline). Found by TestParsePrivateKeyRaw64, which
+	// generates a fresh key each run and so trips this roughly 1 run in 22.
+	raw := data
+	if len(raw) != ed25519.SeedSize && len(raw) != ed25519.PrivateKeySize {
+		raw = bytes.TrimSpace(data)
+	}
 	switch len(raw) {
 	case ed25519.SeedSize: // 32-byte seed
 		return ed25519.NewKeyFromSeed(raw), nil

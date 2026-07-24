@@ -63,3 +63,18 @@ discussion_id = { required = false }
 rung = { required = false }
 model = { required = false }
 reservation_id = { required = false }
+
+# NO [order.env] HERE -- IT DOES NOT WORK, DO NOT ADD ONE BACK.
+#
+# Gas City STRIPS inherited env whose key contains a secret marker
+# (internal/execenv.IsSensitiveKey: PASSWORD/TOKEN/SECRET/API_KEY/...) before it
+# runs an exec order, so `GONK_METER_TOKEN_FILE` (contains "TOKEN") arrives EMPTY
+# no matter what the controller container sets. An [order.env] override reads like
+# the fix and is NOT one: `gc init` DROPS the whole [order.env] block when it
+# copies the pack from /opt/gonk/pack into /city -- verified live, the /city copy
+# of this file has no such block.
+#
+# The real fix is in the CHART: every secret gonk-gate needs is delivered as a
+# marker-free PATH env (GONK_METER_BEARER_FILE, GONK_LITELLM_KEY_FILE,
+# GONK_BOT_FILE) pointing at a mounted file, which survives the filter untouched.
+# See chart/gonk/templates/workload-gonk-controller.yaml.

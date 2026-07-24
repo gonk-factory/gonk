@@ -18,6 +18,40 @@ description = "Reads a GitLab issue and posts exactly one triage comment plus la
 # per agent, rather than once at the pack level.
 min_active_sessions = 0
 
+# --- The opencode harness (gonk-aql / minimal opencode leg) --------------------
+# start_command is Gas City's escape hatch (internal/config/resolve.go step 1):
+# it sets the session command DIRECTLY, bypassing the provider catalog -- so we
+# do NOT depend on an "opencode" entry existing in the city's [providers]. The
+# command is gonk's own entrypoint (baked at /usr/local/bin/gonk-agent-entrypoint),
+# which renders overlay/opencode.json (the LiteLLM provider + attribution header)
+# from the session's GC_WEBHOOK_ARG_* env and then `exec opencode "$@"`.
+#
+# The escape hatch does NOT inherit the builtin opencode provider's settings, so
+# the two that matter are set explicitly here:
+#   - prompt_mode/prompt_flag: deliver the rendered formula step as
+#     `--prompt "<text>"`, appended after the command -> entrypoint forwards it
+#     to opencode ("exec opencode \"$@\"").
+#   - env OPENCODE_PERMISSION: auto-approve tool use, or a non-interactive
+#     session would block on the first `glab`/edit permission prompt forever.
+start_command = "gonk-agent-entrypoint"
+prompt_mode = "flag"
+prompt_flag = "--prompt"
+
+[env]
+# HOME MUST BE OVERRIDDEN HERE. Gas City's session passthrough allow-list
+# (internal/processenv/provider.go) copies the CONTROLLER's HOME into every
+# session pod -- and the controller's HOME is /home/gonk, an emptyDir that
+# exists only in the controller pod. In an agent pod that path is not writable,
+# so the session died instantly on
+#     mkdir: cannot create directory '/home/gonk': Permission denied
+# and the reconciler respawned it in a loop. Agent [env] beats the passthrough
+# baseline (cityAnchoredSessionEnv applies providerEnv over it), so this is the
+# place to fix it. /tmp is writable in the agent image for any uid.
+HOME = "/tmp/gonk-home"
+# opencode's permission gate: "*" -> allow, so the session can run glab
+# (read the issue, post the comment) without an interactive approval prompt.
+OPENCODE_PERMISSION = '{"*":"allow"}'
+
 # NOTE ON TURN/TOKEN CAPS: there is no [limits]/max_turns table on Gas City's
 # Agent (verified against internal/config/config.go -- no such field exists,
 # and inventing one here would be silently ignored by the loader, which is

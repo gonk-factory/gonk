@@ -27,3 +27,9 @@ trigger = "cooldown"
 interval = "30s"
 timeout = "300s"
 # NO `pool` -- exec orders may not have one.
+
+# NO [order.env] HERE -- IT DOES NOT WORK. See the same note in
+# pack/orders/gonk-dispatch.toml: Gas City strips secret-marked env from exec
+# orders, and `gc init` drops [order.env] entirely when it copies the pack into
+# /city. The meter bearer path reaches this order as GONK_METER_BEARER_FILE (a
+# marker-free env name) from the chart instead.
