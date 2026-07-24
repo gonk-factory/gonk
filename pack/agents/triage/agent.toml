@@ -38,6 +38,16 @@ prompt_mode = "flag"
 prompt_flag = "--prompt"
 
 [env]
+# HOME MUST BE OVERRIDDEN HERE. Gas City's session passthrough allow-list
+# (internal/processenv/provider.go) copies the CONTROLLER's HOME into every
+# session pod -- and the controller's HOME is /home/gonk, an emptyDir that
+# exists only in the controller pod. In an agent pod that path is not writable,
+# so the session died instantly on
+#     mkdir: cannot create directory '/home/gonk': Permission denied
+# and the reconciler respawned it in a loop. Agent [env] beats the passthrough
+# baseline (cityAnchoredSessionEnv applies providerEnv over it), so this is the
+# place to fix it. /tmp is writable in the agent image for any uid.
+HOME = "/tmp/gonk-home"
 # opencode's permission gate: "*" -> allow, so the session can run glab
 # (read the issue, post the comment) without an interactive approval prompt.
 OPENCODE_PERMISSION = '{"*":"allow"}'
