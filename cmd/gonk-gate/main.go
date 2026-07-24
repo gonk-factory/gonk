@@ -175,19 +175,19 @@ type gateConfig struct {
 
 func loadGateConfig() (gateConfig, error) {
 	cfg := gateConfig{
-		City:            os.Getenv("GONK_CITY"),
-		SupervisorURL:   os.Getenv("GONK_SUPERVISOR_URL"),
-		WriteKeyFile:    os.Getenv("GONK_GC_WRITE_KEY_FILE"),
-		WriteKeyID:      os.Getenv("GONK_GC_WRITE_KEY_ID"),
-		WriteCID:        os.Getenv("GONK_GC_WRITE_CID"),
-		MeterURL: os.Getenv("GONK_METER_URL"),
+		City:          os.Getenv("GONK_CITY"),
+		SupervisorURL: os.Getenv("GONK_SUPERVISOR_URL"),
+		WriteKeyFile:  os.Getenv("GONK_GC_WRITE_KEY_FILE"),
+		WriteKeyID:    os.Getenv("GONK_GC_WRITE_KEY_ID"),
+		WriteCID:      os.Getenv("GONK_GC_WRITE_CID"),
+		MeterURL:      os.Getenv("GONK_METER_URL"),
 		// GONK_METER_TOKEN_FILE works for gonk-intake, but the in-controller exec
 		// orders (dispatch/sweep) run under Gas City, which STRIPS inherited env
 		// whose key contains a secret marker (internal/execenv.IsSensitiveKey:
 		// "TOKEN" among them). So the controller ALSO exports GONK_METER_BEARER_FILE
 		// -- same path, a name with no secret marker -- which survives the strip.
 		// (A [order.env] override does not: `gc init` drops it from the city copy.)
-		MeterTokenFile: firstNonEmpty(os.Getenv("GONK_METER_TOKEN_FILE"), os.Getenv("GONK_METER_BEARER_FILE")),
+		MeterTokenFile:  firstNonEmpty(os.Getenv("GONK_METER_TOKEN_FILE"), os.Getenv("GONK_METER_BEARER_FILE")),
 		GitLabURL:       os.Getenv("GONK_GITLAB_URL"),
 		GitLabTokenFile: os.Getenv("GONK_GITLAB_TOKEN_FILE"),
 		BotUsername:     os.Getenv("GONK_BOT_USERNAME"),
@@ -255,10 +255,6 @@ func (c gateConfig) store() beadstore.Store {
 	return &beadstore.BdCLI{Bin: c.BdBin, Dir: c.BeadRepoDir}
 }
 
-// readSecretFile reads a mounted secret, trimming exactly one trailing
-// newline. An empty path is legal (an unused optional value) and returns "",
-// nil; an unreadable or empty file is an error the caller decides how to
-// treat.
 // firstNonEmpty returns the first non-empty string, or "".
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
@@ -279,6 +275,10 @@ func readFileEnvValue(pathEnv string) string {
 	return s
 }
 
+// readSecretFile reads a mounted secret, trimming exactly one trailing
+// newline. An empty path is legal (an unused optional value) and returns "",
+// nil; an unreadable or empty file is an error the caller decides how to
+// treat.
 func readSecretFile(path string) (string, error) {
 	if path == "" {
 		return "", nil
