@@ -188,6 +188,15 @@ gonk-dolt.{{ .Release.Namespace }}.svc
   value: {{ include "gonk.doltHost" . | quote }}
 - name: GC_DOLT_PORT
   value: {{ include "gonk.doltPort" . | quote }}
+# GC_SESSION -- the REAL session-provider env override. cmd/gc's
+# effectiveProviderName(cfg.Session.Provider) returns $GC_SESSION when set, so
+# this is the documented way to force a provider from the environment. (The
+# chart previously set GC_SESSION_PROVIDER, which EXISTS NOWHERE in Gas City;
+# the runtime silently fell back to tmux and never created a pod.) Belt and
+# braces with city.toml's [session] provider, written by the bootstrap: the
+# TOML is the durable declaration, this is the override the supervisor reads.
+- name: GC_SESSION
+  value: k8s
 {{- if .Values.gitlab.caCert.existingConfigMap }}
 - name: SSL_CERT_FILE
   value: {{ .Values.gitlab.caCert.mountPath | quote }}

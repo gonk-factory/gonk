@@ -1859,6 +1859,15 @@ spec:
               value: "gonk-dolt.gonk.svc"
             - name: GC_DOLT_PORT
               value: "3306"
+            # GC_SESSION -- the REAL session-provider env override. cmd/gc's
+            # effectiveProviderName(cfg.Session.Provider) returns $GC_SESSION when set, so
+            # this is the documented way to force a provider from the environment. (The
+            # chart previously set GC_SESSION_PROVIDER, which EXISTS NOWHERE in Gas City;
+            # the runtime silently fell back to tmux and never created a pod.) Belt and
+            # braces with city.toml's [session] provider, written by the bootstrap: the
+            # TOML is the durable declaration, this is the override the supervisor reads.
+            - name: GC_SESSION
+              value: k8s
             - name: SSL_CERT_FILE
               value: "/etc/ssl/orac/ca.crt"
           volumeMounts:
@@ -1904,6 +1913,15 @@ spec:
               value: "gonk-dolt.gonk.svc"
             - name: GC_DOLT_PORT
               value: "3306"
+            # GC_SESSION -- the REAL session-provider env override. cmd/gc's
+            # effectiveProviderName(cfg.Session.Provider) returns $GC_SESSION when set, so
+            # this is the documented way to force a provider from the environment. (The
+            # chart previously set GC_SESSION_PROVIDER, which EXISTS NOWHERE in Gas City;
+            # the runtime silently fell back to tmux and never created a pod.) Belt and
+            # braces with city.toml's [session] provider, written by the bootstrap: the
+            # TOML is the durable declaration, this is the override the supervisor reads.
+            - name: GC_SESSION
+              value: k8s
             - name: SSL_CERT_FILE
               value: "/etc/ssl/orac/ca.crt"
             # WRITE-AUTH (gonk-fsl / gonk-5we). GC_CITY_WRITE_PUBKEY turns on
