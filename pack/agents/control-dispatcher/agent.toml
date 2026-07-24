@@ -1,0 +1,37 @@
+# agents/control-dispatcher/agent.toml -- THE DIRECTORY NAME IS THE AGENT NAME,
+# and for THIS agent the name is load-bearing in Go: Gas City's
+# config.IsDeterministicControlDispatcher requires name == "control-dispatcher",
+# an EMPTY provider, and a start_command containing "convoy control --serve".
+# Rename the directory or give it a provider and the graph compiler stops
+# recognising it.
+#
+# WHY GONK NEEDS IT: gonk-triage (and scaffold/mention) declare
+# `formula_compiler = ">=2.0.0"` because [steps.check] is graph-v2-only. Every
+# graph-v2 formula routes its workflow-control beads through this deterministic
+# control lane, so a city without it accepts the pour and then fails routing:
+#
+#   gc: order gonk-triage: routing decoration failed:
+#       city control-dispatcher agent "control-dispatcher" not found
+#
+# -- observed live, and it is silent about the cause. A stock `gc init --template
+# gascity` city gets this agent from Gas City's own core pack; gonk deliberately
+# runs `gc init --preserve-existing` with the gonk pack.toml (so the core pack's
+# remote GitHub imports are NOT pulled), which is exactly why gonk must carry it.
+#
+# CONTENTS ARE COPIED VERBATIM from Gas City's core pack at the pinned
+# GASCITY_REF (internal/bootstrap/packs/core/agents/control-dispatcher/
+# agent.toml). Do not "clean it up": the shell is written the way it is so the
+# trace file lands under .gc/runtime, inside the controller's fsnotify exclusion.
+# A trace at city root fires markDirty() on every append and keeps the patrol
+# loop in continuous reconciliation. {{.Agent}} is Gas City's own template
+# placeholder for the qualified agent name -- NOT a gonk formula var.
+description = "Deterministic compiler-v2 workflow control worker"
+start_command = "sh -c 'export GC_WORKFLOW_TRACE=\"${GC_WORKFLOW_TRACE:-${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-${GC_CITY}/.gc/runtime/control-dispatcher-trace.log}}\"; trace_dir=\"${GC_WORKFLOW_TRACE%/*}\"; if [ \"$trace_dir\" = \"$GC_WORKFLOW_TRACE\" ]; then trace_dir=\".\"; elif [ -z \"$trace_dir\" ]; then trace_dir=\"/\"; fi; mkdir -p \"$trace_dir\"; exec \"${GC_BIN:-gc}\" convoy control --serve --follow {{.Agent}}'"
+prompt_mode = "none"
+process_names = ["gc"]
+max_active_sessions = 1
+
+# NO [env] BLOCK, AND NO PROVIDER. The chart's bootstrap injects the static
+# session creds (LiteLLM key, bot token) into every /city/agents/*/agent.toml
+# that has an [env] table -- this agent has none, deliberately: it runs `gc`, it
+# never calls a model, and it has no business holding a credential.

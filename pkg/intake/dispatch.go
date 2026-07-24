@@ -55,6 +55,16 @@ type OrderRequest struct {
 	SessionKey string `json:"session_key"`
 	BeadAnchor string `json:"bead_anchor"`
 
+	// BeadID is the marker/record id the gonk-dispatch order requires (required
+	// param `bead_id`). At Gate 1 the Gas City-internal bead does not exist yet
+	// (the poured formula creates it), so intake sends the deterministic
+	// BeadAnchor here: it is a stable, re-sling-safe identifier for the comment
+	// marker (`<!-- gonk:bead:... -->`) and the bead-store record. gonk-gate
+	// (Gate 2) reads it as GC_WEBHOOK_ARG_BEAD_ID; it is NEVER sent to meter
+	// (meter keys on bead_anchor). Without this field orderVars omits `bead_id`
+	// and every dispatch is rejected 422 "missing required param(s): bead_id".
+	BeadID string `json:"bead_id"`
+
 	// ConfigHash names the .gonk.yml that authorized this work.
 	ConfigHash string `json:"config_hash"`
 
@@ -398,6 +408,7 @@ func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) {
 			DiscussionID:  dec.DiscussionID,
 			SessionKey:    dec.SessionKey,
 			BeadAnchor:    dec.BeadAnchor,
+			BeadID:        dec.BeadAnchor, // Gate 1: no internal bead yet; use the anchor
 			ConfigHash:    entry.Classification.ConfigHash,
 			Rung:          resp.Rung,
 			Model:         resp.Model,
@@ -490,7 +501,7 @@ func (d *Dispatch) FireScaffold(ctx context.Context, e Entry) error {
 	}
 	o := OrderRequest{
 		Trigger: atags.TriggerScaffold, Project: project, ProjectID: e.Project.ID, Rig: rig,
-		SessionKey: session, BeadAnchor: anchor, ConfigHash: e.Classification.ConfigHash,
+		SessionKey: session, BeadAnchor: anchor, BeadID: anchor, ConfigHash: e.Classification.ConfigHash,
 		Rung: resp.Rung, Model: resp.Model, MetadataJSON: md,
 		KeyRef: resp.KeyRef, ReservationID: resp.ReservationID,
 	}

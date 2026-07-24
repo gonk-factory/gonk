@@ -16,3 +16,30 @@ trigger = "webhook"                   # fired via POST .../order/gonk-triage/run
 # never by scaffold's or mention's even though all three share this pack.
 pool = "triage"
 timeout = "20m"
+
+# [order.params] is REQUIRED for a webhook-trigger order at GASCITY_REF: the
+# supervisor rejects a webhook order with an empty params block ("webhook trigger
+# requires a non-empty [order.params]") and skips it at load, so gonk-dispatch's
+# RunOrder(gonk-triage) would 404. These mirror the vars gonk-gate dispatch passes
+# (cmd/gonk-gate/dispatch.go) and the formula's [vars]. Only the field is
+# `required` (internal/orders OrderParam has no description).
+[order.params]
+project = { required = true }
+project_id = { required = true }
+rig = { required = true }
+issue_iid = { required = true }
+bead_anchor = { required = true }
+city_bead_id = { required = true }
+session_key = { required = true }
+trigger = { required = true }
+config_hash = { required = false }
+rung = { required = false }
+model = { required = false }
+attempt = { required = false }
+reservation_id = { required = false }
+metadata_json = { required = false }
+key_secret_name = { required = false }
+key_secret_key = { required = false }
+litellm_url = { required = false }
+litellm_key = { required = false }
+bot_token = { required = false }
