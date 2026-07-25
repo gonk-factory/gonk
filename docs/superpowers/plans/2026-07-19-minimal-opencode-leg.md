@@ -345,3 +345,60 @@ documented channel; ExecEnvVars is the exec-order one and is NOT it).
 
 The agent never gets a usable prompt until this is fixed, which is why no triage
 comment has been posted yet even though the harness itself now works.
+
+## 2026-07-24 (later still): the empty-vars root cause is an UPSTREAM Gas City gap
+
+Traced to the source. gonk-triage is a graph.v2 formula (it uses [steps.check]).
+When dispatched as an ORDER, Gas City threads the caller vars ONLY into
+compile-time expansion (control flow, ranges) and then DROPS them:
+
+  cmd/gc/order_dispatch.go dispatchWisp() calls
+    molecule.Instantiate(ctx, store, recipe, molecule.Options{})   // <-- empty
+  so molecule buildRecipeApplyPlan does
+    vars := applyVarDefaults(opts.Vars /*nil*/, recipe.Vars)        // defaults ONLY
+  and stepToBead() substitutes {{issue_iid}} etc. against that -> blank.
+
+The cook/sling/drain paths all pass Options{Vars: ...} and stamp
+RuntimeVarsMetadata on the root; the ORDER path does neither. Gas City's own
+test TestPrepareOrderWispRecipeThreadsVarsToFormula asserts only that vars change
+the step COUNT (range expansion), never that step TEXT is substituted -- so the
+gap is real and untested. This is why only label_prefix (a var with a DEFAULT)
+rendered, and every caller-supplied value ({{issue_iid}}, {{project}}, and the
+{{model}}/{{meta}} prompt markers) came out empty.
+
+Confirmed minimal upstream fix (~2 lines): dispatchWisp passes
+Options{Vars: inv.Vars} (thread inv.Vars out of prepareOrderWispRecipe).
+applyVarDefaults layers caller-over-default, so this renders correctly.
+
+### Owner decision + what it costs
+
+Owner chose NOT to patch Gas City ("rebuild the prompt-delivery around defaults").
+Investigation shows that path is MORE invasive than the patch, not less, because
+per-issue delivery to the agent routes entirely through Gas City internals that
+substitution is the front of:
+
+- Only formula var DEFAULTS survive to the agent; defaults are static pack values
+  and cannot carry per-issue data (issue_iid changes per issue).
+- gonk-gate has all the data AND bd access to /city, so it CAN render and create
+  a bead directly -- but a hand-made `bd create ... --metadata gc.routed_to=triage`
+  bead sat Ready and NO pool session bound to it. Pool session<->bead binding uses
+  the graph.v2 control structure (gc.control_for, continuation_group=pool-workflow,
+  session_affinity, root/step refs -- see `bd show` of a claimed bead), which is
+  intricate and undocumented to reconstruct by hand.
+- The running system actively fights a direct approach: intake + gonk-sweep keep
+  pouring gonk-triage, so empty-var formula beads (triage-4/5/6...) regenerate
+  every ~30s and saturate the pool.
+
+So "around defaults" = reconstruct Gas City's pool-binding + var-substitution
+internals in gonk, which is more fork-like and more fragile against a GASCITY_REF
+bump than the 2-line patch it avoids. This is new information vs. when the
+decision was made; flagging it for reconsideration.
+
+### What IS proven working (the original ask)
+
+"opencode running in the job and returning properly to the caller" is DONE at the
+harness level: in a real agent pod on the real image, opencode ran a full loop
+against the metered LiteLLM path (provider=gonk model=stub-local -> qwen3:14b) and
+LiteLLM recorded real spend rows. The ONLY missing piece is delivering the
+specific issue's coordinates into the session, which is exactly what the upstream
+gap blocks.
