@@ -402,3 +402,18 @@ against the metered LiteLLM path (provider=gonk model=stub-local -> qwen3:14b) a
 LiteLLM recorded real spend rows. The ONLY missing piece is delivering the
 specific issue's coordinates into the session, which is exactly what the upstream
 gap blocks.
+
+## Upstream bug filed (2026-07-25)
+
+The order-dispatch var-substitution gap is filed against Gas City:
+  https://github.com/gastownhall/gascity/issues/4668
+  "Formula order dispatch drops caller vars from instantiated bead text"
+  (kind/bug, priority/p1), against GASCITY_REF 4fda5a28445f.
+
+The minimal opencode leg's last mile (delivering the specific issue to the
+triage session) is BLOCKED on this upstream fix. Everything up to it is proven
+working: dispatch -> meter decide -> pour -> routing -> session pod -> resident
+opencode -> metered LiteLLM -> qwen3:14b -> spend rows. When the fix lands (or a
+GASCITY_REF bump includes it), gonk-triage's {{issue_iid}}/{{project}} and the
+{{model}}/{{meta}} prompt markers will render, and the triage comment posts with
+no further gonk change.
