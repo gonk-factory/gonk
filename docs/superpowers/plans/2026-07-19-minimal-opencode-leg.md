@@ -417,3 +417,54 @@ opencode -> metered LiteLLM -> qwen3:14b -> spend rows. When the fix lands (or a
 GASCITY_REF bump includes it), gonk-triage's {{issue_iid}}/{{project}} and the
 {{model}}/{{meta}} prompt markers will render, and the triage comment posts with
 no further gonk change.
+
+## 2026-07-26: FULL LOOP PROVEN via a Gas City-native channel (no upstream patch)
+
+Owner asked: can we deliver the per-issue info to the pod via a *different*
+Gas City-supported mechanism (avoiding the #4668 formula-var gap)? YES -- proven
+end to end. The `gonk` bot posted a real triage comment on issue 11 (analysis +
+clarifying questions), produced by opencode in the real agent pod calling the
+metered model (LiteLLM -> qwen3:14b) and posting via glab, driven by a
+gonk-RENDERED prompt. Formula substitution was bypassed entirely.
+
+### The native mechanism (two parts)
+
+1. DELIVERY OF WORK: gonk-gate can create the triage work bead DIRECTLY via `bd`
+   (it has all the data + bd access to /city + renders in Go), routed to the pool
+   with metadata `gc.routed_to=triage`. PROVEN a pool session binds to such a
+   bead: hand-made bead go-ai2px was claimed by session go-u67sw (workdir
+   /workspace/go-ai2px-triage-issue-11-via-initial-message). The routed_pool_query
+   (`bd ready --metadata-field gc.routed_to=triage --unassigned ...`) surfaces it.
+
+2. DELIVERY OF PROMPT: two Gas City-native options, no substitution needed:
+   - `template_overrides` bead metadata = `{"initial_message":"<rendered prompt>"}`
+     -> delivered as the session's startup nudge (session_lifecycle_parallel.go
+     ~1100), gated on firstStart||forceFresh.
+   - `gc session submit <session> "<rendered prompt>"` -- a first-class verb that
+     injects a clean user message; grant-gated by the SAME X-GC-City-Write path
+     gonk-gate already signs RunOrder with (pkg/gcapi Signer). This is the robust
+     one (raw tmux send-keys mangles multiline/shell-y text; submit formats a
+     proper user message).
+
+The recommended production design (all gonk-side, no Gas City patch): gonk-gate,
+after meter Decide=run, renders the prompt in Go, creates the pool-routed work
+bead via bd carrying `initial_message` (and/or calls session submit once bound),
+and lets the existing pool/session machinery run opencode. #4668 stops being a
+blocker; it would just let us keep the tidier formula path if/when fixed.
+
+### NEW deployment blocker found (separate from #4668, gonk-side)
+
+The agent pod has NO orac private CA: `SSL_CERT_FILE=/etc/ssl/orac/ca.crt` is set
+in Dockerfile.agent but the file is never present, because Gas City's k8s
+provider mounts nothing into session pods (same class as blocker 6). So glab/git
+hit `x509: certificate signed by unknown authority` on gitlab.orac.local and the
+triage comment cannot post. Worked around for the proof by copying the CA
+(/etc/ssl/orac/ca.crt, 218KB, from the controller mount) into the pod. Real fix:
+deliver the CA to agent pods through a provider-supported channel -- candidates:
+bake the trust bundle into the agent image (env-specific, so a build-arg/opt),
+or a provider volume-mount mechanism if one exists. TODO: confirm the k8s
+provider's mount options.
+
+### Minor
+- The model dropped the closing `-->` on the marker line (`gk-test11>` not
+  `gk-test11 -->`). Prompt-tuning, not a mechanism problem.
