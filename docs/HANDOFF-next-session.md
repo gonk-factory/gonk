@@ -4,7 +4,19 @@ _Last updated: 2026-07-28 (session 2). Branch: `main` (we develop on main per ow
 
 ## TL;DR — where to start
 
-Build **C4** (bead `gonk-gf3`): the sweep side of the broker — read the agent's proposed-effects batch back and apply it. **C2 (`gonk-7v5`) is now CODE COMPLETE** (this session, 3 commits); its only remaining piece is a deploy-gated live observation folded into C7. Read `bd show gonk-gf3`, the "C2 done" section below, and `docs/superpowers/plans/2026-07-27-triage-broker-implementation.md` (Phase 4 Task 4.2).
+**The triage broker's whole software path (dispatch inject + sweep apply) is code-complete, tested, and pushed** as of session 2 (2026-07-28). What remains is a **live e2e deploy** (`gonk-dxo`, C7) — which needs a cluster + rebuilt images — plus one small P2 chart-hygiene item (`gonk-0y6`, C6, recipe on the bead). If you have a cluster: build+push images, `helm upgrade`, file a test issue, and confirm the broker posts a triage comment with zero creds in the agent pod. If not: do C6 (golden-testable, no cluster) or pick from the remaining P1s below.
+
+### Session 2 (2026-07-28) — what landed
+- **C2 `gonk-7v5`** (closed): dispatch creates the triage agent session directly (one signed `POST …/sessions` with a unique alias + the rendered prompt as `initial_message`), records the alias on `Record.SessionID`, and injects controller-fetched, 8 KiB-capped issue context. No formula (#4668 moot).
+- **C4 `gonk-gf3`** (closed): sweep reads `GetSessionOutput(peek)`, extracts the `GONK_BATCH_START/END` fence, `effects.ParseBatch`→`LoadShape`→`Validate`→`ValidateTargets`, and applies comment(+marker)+labels under the bot PAT. Apply result folds into `gate.Signals` so the whole ladder is reused. Mutation-tested.
+- **`gonk-uvv`** (closed, NEW bug found+fixed): the controller had **no** `GONK_GITLAB_URL` and no marker-free token file, so `cfg.gl()` built a tokenless client — every broker forge call (and v1 sweep's reads) would have 401'd. Fixed: `GitLabTokenFile` falls back to the marker-free `GONK_BOT_FILE`; chart adds `GONK_GITLAB_URL`. This was the real blocker for the broker working live.
+- **Closed 4 stale 2026-07-24 deploy bugs after verifying each is already fixed**: `gonk-4td` (envArg verbatim — added regression tests), `gonk-nke` (`GONK_BEAD_REPO_DIR=/city`), `gonk-aql` (`GC_K8S_IMAGE` wired), `gonk-tff` (dolt tag no longer the dead `v1.43.0`). The deploy is much closer than the tracker implied.
+
+### Remaining (no particular order)
+- **`gonk-0y6` (C6, P2)** — chart: stop injecting `GONK_BOT_TOKEN`/`GONK_GITLAB_URL` into agent configs. Exact recipe on the bead. Functionally non-blocking (entrypoint already ignores them); golden-testable, no cluster.
+- **`gonk-dxo` (C7, P1)** — live e2e zero-creds proof + the C2 return-read observation (does `initial_message` reach opencode; does the fence land in `GetSession(peek)`). Needs cluster + images.
+- **`gonk-qfk` (P1)** — likely SUPERSEDED by the broker (agent makes no forge/git calls; PREBAKED skips clone). Re-evaluate during C7; note on the bead.
+- Other P1s untouched: `gonk-4nk` (meter key split-brain), `gonk-wgq` (report LiteLLM OOM upstream), `gonk-6gs` (blocked on upstream #4668).
 
 ## C2 is done — what landed this session (all green, pushed)
 
