@@ -262,6 +262,30 @@ func TestRungMaxTurnsDefaultsCloudStingierThanLocal(t *testing.T) {
 	}
 }
 
+// The cloud allowance is DEFAULT OFF: an operator config that says nothing
+// about it denies paid cloud rungs to a human until someone opts in (spec 7.1).
+func TestCloudAllowanceDefaultsOff(t *testing.T) {
+	oc, err := Load([]byte(base("")))
+	if err != nil {
+		t.Fatalf("Load = %v", err)
+	}
+	if oc.CloudAllowed() {
+		t.Fatal("cloud allowance defaulted ON; a silent config must deny cloud rungs to a human")
+	}
+}
+
+// Setting the explicit allowance flag turns it on. This is the whole gate for
+// this slice; the instance/namespace/project hierarchy is a reserved follow-up.
+func TestCloudAllowanceEnabled(t *testing.T) {
+	oc, err := Load([]byte(base("cloud_allowance: { enabled: true }")))
+	if err != nil {
+		t.Fatalf("Load = %v", err)
+	}
+	if !oc.CloudAllowed() {
+		t.Fatal("cloud_allowance.enabled: true did not turn the allowance on")
+	}
+}
+
 // A cloud rung MUST be priced, because rung.Decide only applies the cost gate
 // to priced rungs -- an unpriced cloud rung would be free money.
 func TestCloudRungsMustBePriced(t *testing.T) {

@@ -31,6 +31,13 @@
         }
       }
     },
+    "cloud_allowance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
     "meter": {
       "type": "object",
       "additionalProperties": false,
