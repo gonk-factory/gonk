@@ -254,7 +254,7 @@ func TestRungMaxTurnsExplicitParses(t *testing.T) {
 func TestRungMaxTurnsDefaultsCloudStingierThanLocal(t *testing.T) {
 	local := RungSpec{Kind: KindLocal}.EffectiveMaxTurns()
 	cloud := RungSpec{Kind: KindCloud}.EffectiveMaxTurns()
-	if !(cloud < local) {
+	if cloud >= local {
 		t.Fatalf("cloud default turn cap (%d) must be stingier than local (%d)", cloud, local)
 	}
 	if local != DefaultLocalTurns || cloud != DefaultCloudTurns {
