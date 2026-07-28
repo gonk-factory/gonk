@@ -1,10 +1,23 @@
 # Handoff — next session
 
-_Last updated: 2026-07-28. Branch: `main` (we develop on main per owner's call). Everything below is committed and pushed._
+_Last updated: 2026-07-28 (session 2). Branch: `main` (we develop on main per owner's call). Everything below is committed and pushed._
 
 ## TL;DR — where to start
 
-Build **C2** (bead `gonk-7v5`): the triage broker's inject/correlate step. It is the one remaining hard knot; everything after it (C4 sweep → C6 chart → C7 e2e) is straightforward once C2 lands. The API paths and the return channel are already pinned (below). Read `bd show gonk-7v5` and `docs/superpowers/plans/2026-07-27-triage-broker-implementation.md` (Phase 0 S1/C2a + Phase 3/4) first.
+Build **C4** (bead `gonk-gf3`): the sweep side of the broker — read the agent's proposed-effects batch back and apply it. **C2 (`gonk-7v5`) is now CODE COMPLETE** (this session, 3 commits); its only remaining piece is a deploy-gated live observation folded into C7. Read `bd show gonk-gf3`, the "C2 done" section below, and `docs/superpowers/plans/2026-07-27-triage-broker-implementation.md` (Phase 4 Task 4.2).
+
+## C2 is done — what landed this session (all green, pushed)
+
+The create/correlate/inject linchpin resolved **more cleanly than the prior plan**: the earlier "no simple CreateSession REST call" was an incomplete search. The city-scoped `POST /v0/city/{city}/sessions` (huma `humaHandleSessionCreate`) for `kind:agent` is always-async and **accepts both a unique `alias` (the correlation marker) and a `message` (→ `template_overrides.initial_message`, the inject)** — so create + correlate + inject collapse into **one signed POST**. No formula (so #4668 is moot), no `ListSessions` scan, no separate submit.
+
+- `pkg/gcapi` (commit `e55827a`): `CreateSession` (signed exactly like `RunOrder`) + `GetSessionOutput` (UNSIGNED GET `?peek=true&peekLines=N`; 404 → `IsNotFound` so sweep can tell "no session for this alias" from a transport error). Extracted `doRequest` — RunOrder's tests guard the refactor.
+- `cmd/gonk-gate` dispatch (commit `f52bf78`): `issue-triage` → `runBrokerDispatch` — creates the `triage` agent session with alias `gonk.triage.p<pid>.i<iid>.a<attempt>` (colon-free per `session.ValidateAlias`, attempt-suffixed so re-slings don't collide), records it on `Record.SessionID`, injects the rendered prompt. **scaffold/mention still pour their formulas** (not ported). Anti-drift test preserved on the broker path.
+- Context injection (commit `397df6f`): the pod has **no forge creds**, so the controller fetches the issue (`dispatchDeps.Forge`, `cfg.gl()`) and splices title/labels/body into the prompt, **8 KiB size-capped** on a UTF-8 boundary. Best-effort: a fetch miss → reference-only prompt, logged, run proceeds. Added `glab.Issue.Description`.
+- Closed **`gonk-4td`** (P0): the `envArg` verbatim-name fix was already in `main.go`; added the missing regression tests.
+
+**The one thing C2 has NOT proven** (deferred to C7, needs a live cluster + rebuilt images): that `template_overrides.initial_message` actually reaches opencode as its first prompt, and that the `GONK_BATCH_START`/`END` fence lands in `GetSession(peek).LastOutput` at `peekLines=N`. C4 can be built now against `GetSessionOutput(peek).LastOutput` — that read is well-grounded from the gascity source.
+
+## (historical) The original C2 knot — kept for context
 
 ## What this project is doing right now
 
