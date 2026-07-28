@@ -48,7 +48,41 @@
 - [ ] **Step 3:** Measure the metadata-value size ceiling: write a ~16 KB value and confirm round-trip (or record the failing size). This fixes §5.1's size question.
 - [ ] **Step 4:** Record the outcome in this file under "S0 result." **If write fails:** stop and switch the return channel to the fallback (broker reads via the loopback supervisor API, or agent writes via `gc session submit`-style back-channel) — that changes Phase 4/5, so resolve it here first.
 
-**S0 result:** _(fill in: PASS/FAIL, size ceiling, any fallback taken)_
+**S0 result (2026-07-27): FAIL as designed → return channel redesigned.** The
+agent pod has no working `bd` (`no beads database found`) and no `gc`; the store
+topology is split (controller reads local `/city/.beads/dolt`; the pod only has
+env for the dolt *server* `gonk-dolt.svc:3306`). So the agent CANNOT write its
+batch to a bead from the pod. **Resolution:** the return channel becomes the
+agent's **session output**, read controller-side via `gc session peek`/`logs`
+(both verified present on the controller). This removes the pod's dependence on
+`bd` entirely and is gated, with the inject side, behind the new **S1** channel
+spike below. Phases 3/4 are rewritten against S1's outcome — do S1 before them.
+
+### Task 0.2 (S1): Channel spike — inject + return without pod bd
+
+> Supersedes the bd return channel. Gates Phases 3–6. The plan reviewer
+> independently flagged that `pkg/beadstore` has no routable-work-bead creation
+> API and the pool↔bead binding is undocumented graph.v2 machinery — so BOTH
+> directions need proving before building.
+
+- [ ] **Step 1:** From the controller, prove a controller-owned mechanism can
+  spawn a triage agent session it can correlate by id AND read its output:
+  evaluate `gc session new --template triage` (returns a session id) vs the
+  current pool/formula binding. Confirm the controller can deliver a prompt to
+  that session (`gc session submit`, or an `initial_message` at create) and read
+  the agent's final output back via `gc session peek`/`logs`.
+- [ ] **Step 2:** Prove the round-trip end-to-end: deliver a known prompt →
+  agent (opencode) emits a known JSON batch as its final output → controller
+  reads that exact JSON back. Pin the read command and how the batch is fenced in
+  the output (e.g. a sentinel-delimited final block) so parsing is deterministic.
+- [ ] **Step 3:** Decide correlation: session-id ↔ `beadstore.Record`
+  (`WorkBeadID` becomes `SessionID` if we drive sessions directly, or stays a
+  work-bead id if the formula path is kept). Record the decision here.
+- [ ] **Step 4:** Record the chosen inject + return mechanism. **Phases 3.2, 4.1,
+  4.2, and 5.1 are authored against this result** — do not build them until S1 is
+  recorded.
+
+**S1 result:** _(fill in: inject mechanism, return mechanism, correlation key)_
 
 ---
 
@@ -142,7 +176,11 @@ type Batch struct {
 // fails; it never half-applies.
 func ParseBatch(raw []byte) (Batch, error) {
 	var b Batch
-	dec := json.NewDecoder(bytesReader(raw))
+	dec := json.NewDecoder(bytes.NewReader(raw)) // import "bytes"
+	// DisallowUnknownFields is CORRECT and intentional: Effect is a superset
+	// struct, so {"kind":"comment","body":"x"} decodes cleanly and fields like
+	// `add`/`title` are known struct fields (never wrongly rejected); a genuinely
+	// unknown key IS rejected. Do not remove it.
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&b); err != nil {
 		return Batch{}, fmt.Errorf("effects: parse batch: %w", err)
@@ -356,15 +394,22 @@ max = -1   # -1 => unbounded (N)
   - next rung is **cloud**, allowance **on** → granted with the stingier cloud turn cap.
   - local ladder exhausted, no cloud allowance → needs-human.
 - [ ] **Step 2: Run → FAIL.**
-- [ ] **Step 3: Implement** the cost-class gate in the escalation branch of `Decide`: when the chosen next rung has `Kind==KindCloud`, require `cfg.CloudAllowed()` (or a per-request human grant); otherwise return the defer/deny decision that maps to `needs-human` (reuse the existing defer/deny path — do NOT invent a new outcome). Local→local escalations pass through and are marked for logging. Carry `MaxTurns` into the decision so the session gets the rung's turn cap. **Do not change the budget arithmetic** (N4) — this gate sits in front of the existing reservation logic.
+- [ ] **Step 3: Implement** the cost-class gate in the escalation branch of `Decide`: when the chosen next rung has `Kind==KindCloud`, require `cfg.CloudAllowed()` (or a per-request human grant); otherwise return the defer/deny decision that maps to `needs-human` (reuse the existing Deny→`StateNeedsHuman` path in `dispatch.go` — do NOT invent a new outcome). Local→local escalations pass through and are marked for logging. Carry `MaxTurns` into the decision so the session gets the rung's turn cap. **Do not change the budget arithmetic** (N4) — this gate sits in front of the existing reservation logic. **Note (reviewer):** the `Reason` set in `decide.go:48-61` is a bounded wire-contract/Prometheus-label list — add a new reason value (e.g. `cloud-not-allowed`) there, and add a field to `rung.Input` to carry `cfg.CloudAllowed()` into `Decide` (it has none today). Both are small but required.
 - [ ] **Step 4: Run → PASS.** Also run the full `pkg/rung` + `pkg/meterapi` suites to confirm no regression.
 - [ ] **Step 5: Commit** — `git commit -am "feat(rung): cost-class-gated escalation (free local, gated cloud)"`
 
 ---
 
-## Phase 3 — Correlation: `WorkBeadID` + dispatch creates the work bead
+## Phase 3 — Correlation + inject (AUTHORED AGAINST S1)
 
-> Depends on **S0 PASS**. §4.1, §8, §9.
+> Depends on **S1** (Task 0.2). The bd return channel is dead (S0); the inject
+> mechanism and correlation key come from S1's recorded result. Task 3.2 below is
+> written for the "keep the formula, add correlation" path; if S1 chooses direct
+> `gc session new`, rewrite 3.2 to record the session id instead. **Reviewer
+> gap to close in S1:** there is no `pkg/beadstore` API to create a routable work
+> bead, and `pkg/gcapi` exposes only `RunOrder` — S1 must pin the concrete
+> mechanism (exact `gc`/`bd` argv, whether graph.v2 control refs are needed) or
+> choose the session-driven path that avoids bead creation entirely.
 
 ### Task 3.1: Add `WorkBeadID` to `beadstore.Record`
 
@@ -406,7 +451,7 @@ max = -1   # -1 => unbounded (N)
 
 ### Task 4.2: Sweep reads the batch, validates, applies/escalates/rejects
 
-**Files:** `cmd/gonk-gate/sweep.go`, `cmd/gonk-gate/sweep_test.go`.
+**Files:** `cmd/gonk-gate/sweep.go`, `cmd/gonk-gate/sweep_test.go`, **`pkg/glab/notes.go` (add `CreateIssueNote`)** — the reviewer confirmed `pkg/glab` has no comment-POST method today (`notes.go` is read-only; `write.go` has labels but no note-create), so the broker's comment-apply needs a new `CreateIssueNote(projectID, iid, body)` write method. Labels use the existing `write.go` `AddIssueLabel`.
 
 > Today sweep verifies triage by reading the comment marker back from GitLab (`artifact.go`). This inverts it: read the batch from the bead, shape-check, apply.
 
