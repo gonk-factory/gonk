@@ -232,6 +232,36 @@ func TestMaxInfraRetriesDefault(t *testing.T) {
 	}
 }
 
+// An explicit max_turns on a rung parses and survives into the catalog, and
+// EffectiveMaxTurns returns the operator's number verbatim when one is set.
+func TestRungMaxTurnsExplicitParses(t *testing.T) {
+	oc, err := Load([]byte("version: 1\ninstance: { ladder: [a] }\n" +
+		"rungs: [{name: a, kind: local, model: m, est_tokens: \"200K\", synthetic_usd_per_1m_tokens: 0.2, max_turns: 7}]"))
+	if err != nil {
+		t.Fatalf("Load = %v", err)
+	}
+	if got := oc.Catalog["a"].MaxTurns; got != 7 {
+		t.Fatalf("catalog max_turns = %d, want 7", got)
+	}
+	if got := oc.Catalog["a"].EffectiveMaxTurns(); got != 7 {
+		t.Fatalf("EffectiveMaxTurns = %d, want the explicit 7", got)
+	}
+}
+
+// When a rung sets no max_turns, the cap defaults from its Kind, and the CLOUD
+// default is deliberately stingier (smaller) than the LOCAL one: a local retry
+// is free, a cloud turn is paid (spec 7.1).
+func TestRungMaxTurnsDefaultsCloudStingierThanLocal(t *testing.T) {
+	local := RungSpec{Kind: KindLocal}.EffectiveMaxTurns()
+	cloud := RungSpec{Kind: KindCloud}.EffectiveMaxTurns()
+	if !(cloud < local) {
+		t.Fatalf("cloud default turn cap (%d) must be stingier than local (%d)", cloud, local)
+	}
+	if local != DefaultLocalTurns || cloud != DefaultCloudTurns {
+		t.Fatalf("defaults local=%d cloud=%d, want %d/%d", local, cloud, DefaultLocalTurns, DefaultCloudTurns)
+	}
+}
+
 // A cloud rung MUST be priced, because rung.Decide only applies the cost gate
 // to priced rungs -- an unpriced cloud rung would be free money.
 func TestCloudRungsMustBePriced(t *testing.T) {
