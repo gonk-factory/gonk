@@ -79,8 +79,13 @@ From the 2026-07-19 draft (D1–D6 there) and the 2026-07-27 brainstorm:
   dependency here.
 - **D2. Return via the beads store.** The agent writes its proposed-effects JSON
   onto its own work bead via `bd`; the broker reads it from the shared Dolt
-  store. This is the only channel shared between the agent pod and the
-  controller, and it is the one proven on 2026-07-26. (Resolves draft OQ3.)
+  store. The beads store is the only channel shared between the agent pod and the
+  controller. **Proven scope (2026-07-26):** the *injection* direction — the
+  controller creates a pool-routed work bead via `bd`, a session binds to it, and
+  the agent runs — is proven. The *return* direction — the agent pod *writing* a
+  bead field the controller reads back — is **not yet proven** and is gated
+  behind an early spike (§12, S0). (Resolves draft OQ3; the mechanics are pinned
+  in §5.1 and §8.)
 - **D3. Broker folded into the controller.** Inject rides in `gonk-gate dispatch`;
   validate + apply ride in `gonk-sweep`. The bot PAT lives only controller-side
   (already true for intake), never in a pod. (Resolves draft OQ4; see §4.)
@@ -114,6 +119,20 @@ two places that already do that work:
 Plus one new package, `pkg/effects` (the typed batch + validator + a thin apply
 helper over the GitLab client).
 
+**Dispatch creates the work bead directly; the `gonk-triage` formula is retired
+for triage.** Today `gonk-gate dispatch` pours the `gonk-triage` *formula* order,
+which creates the pool work bead asynchronously — so dispatch never learns the
+bead's id, and the formula's `{{var}}` substitution is broken upstream
+(gastownhall/gascity#4668). This slice replaces that: after the meter `/decide`,
+dispatch **creates the pool-routed work bead itself via `bd`** (the native
+mechanism proven on 2026-07-26 — a task bead with `gc.routed_to=triage` that a
+session binds to), so it *knows the bead id* and records it in the dispatch's
+`beadstore.Record` (§9). The formula's two roles are absorbed: its pool routing
+becomes the `gc.routed_to` metadata dispatch sets directly, and its `[steps.check]`
+verification loop is replaced by the broker's shape gate + `gonk-sweep`. This
+also removes the #4668 dependency entirely — nothing here needs formula var
+substitution. (Resolves the reviewer's §4.1 ambiguity: direct bead, not formula.)
+
 The draft preferred a standalone `cmd/gonk-broker` (the meter precedent: an
 irreversible decision decoupled from the pod lifecycle). We diverge because the
 apply authority *already* lives controller-side (intake's onboarding writes, the
@@ -131,18 +150,20 @@ and the sweep-side apply move out cleanly; nothing here blocks that.
 2. **Inject.** The broker (dispatch side) fetches the context triage needs — the
    issue body + existing labels, `.agent/` (thin loader), the `.gonk.yml` policy
    — using the controller's PAT + CA, size-capped on injection (§11, OQ5). It
-   renders `prompt + context + model + attribution atags` and delivers it to the
-   session through the **bd channel**: a pool-routed work bead carrying
-   `template_overrides.initial_message` (fallback `gc session submit`). The agent
-   reads none of this from GitLab.
+   **creates the pool-routed work bead** (`gc.routed_to=triage`) via `bd`,
+   records that bead's id in the `beadstore.Record` (§9), renders
+   `prompt + context + model + attribution atags`, and delivers it on that bead
+   via `template_overrides.initial_message` (fallback `gc session submit`). The
+   agent reads none of this from GitLab.
 3. **Produce.** The agent pod spawns on the single opencode harness image. Its
    env carries only the LiteLLM key — **no PAT, no bot token, no orac CA.** It
    runs opencode over the injected context and writes its **proposed-effects JSON
-   batch onto its own work bead via `bd`**, then closes the bead. It makes no
-   external API call.
-4. **Validate.** The broker (sweep side) reads the batch from the bead and runs
-   it through `pkg/effects`: schema-valid JSON, target-bound to the injected
-   context, and shape-matching `triage`'s expected-effect-shape.
+   batch onto its own work bead via `bd`** (the exact field is pinned in §5.1),
+   then closes the bead. It makes no external API call.
+4. **Validate.** The broker (sweep side) finds the finished session's work bead
+   by the id recorded at inject time (§9), reads the batch from the pinned field,
+   and runs it through `pkg/effects`: schema-valid JSON, target-bound to the
+   injected context, and shape-matching `triage`'s expected-effect-shape.
 5. **Decide + apply.** On a valid, in-shape batch the broker posts the comment
    (stamping the `<!-- gonk:bead:… -->` marker itself) and sets the labels, under
    its own PAT. On no-batch or a shape violation it applies nothing and decides
@@ -180,6 +201,24 @@ An **effect batch** is the ordered list a run returns. It is:
   propose an effect on a resource it was never handed. A create-type effect
   (`new_issue`, later `merge_request`) binds to a **parent** resource from the
   session context, so a follow-up is always anchored, never free-floating.
+
+### 5.1 Where the batch is written and read (the return field)
+
+The agent writes the batch to a **dedicated metadata key on its own work bead**,
+`gonk.effects` (JSON string), via `bd update --metadata`, then closes the bead.
+The broker reads that exact key back with `bd show`/the store — write path and
+read path are the same key, deterministically. Metadata is the same surface the
+injection uses (`template_overrides`), so this needs no new `bd` capability
+beyond what S0 (§12) verifies.
+
+For triage the batch is small (one comment body plus a few labels, ~1–4 KB), well
+within a metadata value. The plan MUST confirm the Dolt/`bd` metadata-value size
+ceiling as part of S0; if a future effect kind (a `code` diff, Phase 5) can
+exceed it, the contract's fallback is the bead `notes` free-text field, chosen
+then. For this slice, `gonk.effects` metadata is the pinned mechanism.
+
+An agent that writes no `gonk.effects` key (or writes invalid JSON) is the
+**no-batch** signal of §7 — it is a normal, expected outcome, not a crash.
 
 ## 6. The deterministic shape gate
 
@@ -269,11 +308,22 @@ is a follow-up.
   `gc session submit`. Proven on 2026-07-26 to bind a session and drive opencode.
 - **Produce.** The agent writes its proposed-effects JSON onto its own work bead
   via `bd`, then closes it. Touches no external API.
-- **Return (effects out).** `gonk-sweep` reads the batch from the bead, runs
-  `pkg/effects`, and applies under the controller PAT.
+- **Return (effects out).** `gonk-sweep` locates the finished session's work bead
+  by the id captured at inject time (the new `beadstore.Record.WorkBeadID`, §9),
+  reads the `gonk.effects` metadata key (§5.1), runs `pkg/effects`, and applies
+  under the controller PAT.
 
 The batch travels as data on a bead the agent already owns; no new transport, and
 the batch is inspectable and testable at rest.
+
+**Correlation (the reviewer's gap).** Three bead identities are in play: the
+gonk `beadstore.Record` (keyed by `BeadAnchor`), intake's `BeadID` (equal to the
+anchor), and the *pool-routed work bead* the session actually binds to (a fresh
+`bd` bead like `go-ai2px`). `beadstore.Record` today has no field linking a
+Record to that work bead, so `gonk-sweep` cannot find "the finished session's
+work bead." This slice adds that link (§9): dispatch creates the work bead, so it
+has the id, and stamps it on the Record. Sweep reads the Record, follows
+`WorkBeadID` to the work bead, and reads the batch. No heuristic matching.
 
 ## 9. What changes
 
@@ -285,8 +335,17 @@ the batch is inspectable and testable at rest.
 - **New `pkg/effects`.** Types, the schema validator, the cardinality shape
   validator, target-binding checks, and a thin apply helper over the GitLab
   client.
-- **`gonk-gate`.** `dispatch` grows the inject step (fetch context + bd
-  delivery). `sweep` grows the validate + apply + decide step.
+- **`gonk-gate`.** `dispatch` grows the inject step (fetch context, **create the
+  pool-routed work bead directly** — no longer pours the `gonk-triage` formula,
+  §4.1 — and bd delivery). `sweep` grows the validate + apply + decide step.
+- **`beadstore.Record`** gains a `WorkBeadID string` field: the id of the
+  pool-routed work bead dispatch created for this session, stamped at inject time
+  so `gonk-sweep` can follow it to the returned batch (§8). A default-empty value
+  keeps existing records valid.
+- **Pack.** `pack/orders/gonk-triage.toml` (the formula order) is no longer on
+  the triage path; whether it is deleted or left dormant is a plan detail. The
+  `gonk-triage` *formula* and its `control-dispatcher` dependency are not used by
+  triage after this slice.
 - **Chart.** Drop the agent-pod PAT/CA wiring (a net simplification). The
   controller keeps its PAT + CA (already mounted).
 - **Meter / `opercfg`.** Add the per-rung turn cap and the (default-off) cloud
@@ -344,6 +403,18 @@ kinds keep either path available.
 
 ## 12. Testing and proof
 
+- **S0. Gating spike: agent-pod `bd`→Dolt WRITE round-trip.** *Before the
+  contract depends on it,* prove that a session pod's baked `bd` can write the
+  `gonk.effects` metadata key on its own work bead and that the controller reads
+  the exact value back from Dolt. The 2026-07-26 proof only exercised the pod
+  *reading/binding* a bead (and confirmed the provider projects Dolt host/port
+  into the pod via `projectedPodDoltEnv`), never a pod *write*; and the same proof
+  showed the provider mounts nothing else into session pods, so pod connectivity
+  is verified per-thing, not assumed. This spike also fixes the metadata-value
+  size ceiling (§5.1). Mirrors the CA-mount lesson: verify the pod's outbound
+  path before building on it. If it fails, the fallback is the broker reading via
+  the loopback supervisor API rather than the pod writing Dolt directly — decided
+  in the plan, not here.
 - **T1. `pkg/effects` unit tests.** Batch schema validation; target-binding
   (existing-resource and create-type/parent-bound); the shape validator against
   per-kind cardinality maps — including every safety case as an explicit test
@@ -367,11 +438,17 @@ kinds keep either path available.
 
 ## 13. Milestones (walking skeleton)
 
-1. `pkg/effects` contract + shape validator (T1).
+0. **S0 gating spike** — agent-pod `bd`→Dolt write round-trip + metadata size
+   ceiling (§12, S0). Gates everything that depends on the return channel.
+1. `pkg/effects` contract + shape validator (T1). *Independently landable* — pure
+   package, no infra.
 2. Meter: per-rung turn cap + default-off cloud allowance + the local-free /
-   cloud-gated `/decide` rule (T6).
-3. Broker skeleton in `gonk-gate`/`gonk-sweep`: inject → run (stub) → validate →
-   apply (T2, T3).
-4. Harness image + pack: agent emits the effect batch to its bead; strip the
-   forge creds/CA from the pod (T3, and the mount-absent assertion of T4).
-5. Triage port + the zero-creds proof, in the throwaway e2e (T4, T5).
+   cloud-gated `/decide` rule (T6). *Independently landable* — cleanly separable
+   from the broker work; can merge on its own.
+3. `beadstore.Record.WorkBeadID` + dispatch creates the work bead directly and
+   records its id (§4.1, §9).
+4. Broker skeleton in `gonk-gate`/`gonk-sweep`: inject → run (stub) → validate →
+   apply, following `WorkBeadID` to the batch (T2, T3).
+5. Harness image + pack: agent emits the effect batch to `gonk.effects`; strip
+   the forge creds/CA from the pod (T3, and the mount-absent assertion of T4).
+6. Triage port + the zero-creds proof, in the throwaway e2e (T4, T5).
