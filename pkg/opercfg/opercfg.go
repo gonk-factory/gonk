@@ -67,6 +67,16 @@ const (
 	KindCloud Kind = "cloud"
 )
 
+// Default per-attempt turn caps, applied to a rung that sets no explicit
+// max_turns. The CLOUD default is deliberately STINGIER (smaller) than the
+// local one: a local retry costs no real money, so we can afford to let a local
+// attempt work longer, whereas every cloud turn is paid (spec 7.1). Changing
+// their RELATIVE order (cloud < local) is a policy change, not a tuning tweak.
+const (
+	DefaultLocalTurns = 30
+	DefaultCloudTurns = 12
+)
+
 // RungSpec is one rung of the ladder: the LiteLLM model it dispatches to, and
 // what one attempt at it is estimated to consume. The estimates are what a
 // reservation reserves (ADR-004).
@@ -98,6 +108,27 @@ type RungSpec struct {
 	// The operator MUST configure the same number in LiteLLM's model list. That
 	// agreement is unverifiable from here; Plan 06 checks it.
 	SyntheticUSDPer1MTokens float64 `yaml:"synthetic_usd_per_1m_tokens"`
+
+	// MaxTurns caps how many agent turns one attempt at this rung may take. When
+	// unset (0), it defaults from Kind via EffectiveMaxTurns -- a stingier cap for
+	// paid cloud rungs than for free local ones (spec 7.1). Read it through
+	// EffectiveMaxTurns, never the raw field, so an unset rung still gets its cap.
+	MaxTurns int `yaml:"max_turns"`
+}
+
+// EffectiveMaxTurns is the per-attempt turn cap actually in force for this rung:
+// the operator's explicit max_turns when positive, otherwise the Kind default
+// (DefaultCloudTurns for a cloud rung, the more generous DefaultLocalTurns for a
+// local one). This is the ONLY correct way to read the cap -- the raw MaxTurns
+// field is 0 for the (common) unset case.
+func (r RungSpec) EffectiveMaxTurns() int {
+	if r.MaxTurns > 0 {
+		return r.MaxTurns
+	}
+	if r.Kind == KindCloud {
+		return DefaultCloudTurns
+	}
+	return DefaultLocalTurns
 }
 
 // PricePerToken is what LiteLLM's USD counter will be charged per token for this

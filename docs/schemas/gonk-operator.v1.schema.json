@@ -26,7 +26,8 @@
           "model": { "type": "string", "minLength": 1 },
           "est_cost_usd": { "type": "number", "minimum": 0 },
           "est_tokens": { "$ref": "#/$defs/tokenQuantity" },
-          "synthetic_usd_per_1m_tokens": { "type": "number", "exclusiveMinimum": 0 }
+          "synthetic_usd_per_1m_tokens": { "type": "number", "exclusiveMinimum": 0 },
+          "max_turns": { "type": "integer", "minimum": 1 }
         }
       }
     },
