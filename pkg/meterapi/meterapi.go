@@ -285,6 +285,11 @@ const (
 	ReasonPerTaskTokensExhausted = "per-task-tokens-exhausted"
 	ReasonMonthlyTokensExhausted = "monthly-tokens-exhausted"
 	ReasonMonthlyCostExhausted   = "monthly-cost-exhausted"
+	// ReasonCloudNotAllowed: the next rung is a PAID cloud rung and no cloud
+	// allowance is granted for this scope, so meter denies rather than spend real
+	// money on a model's say-so (spec 7.1). It rides the existing deny->needs-human
+	// path; a human (or a pre-approved allowance) is what unblocks it.
+	ReasonCloudNotAllowed = "cloud-not-allowed"
 )
 
 // DecideRequest asks meter which rung the next attempt runs at.

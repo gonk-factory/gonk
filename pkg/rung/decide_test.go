@@ -90,6 +90,11 @@ func baseInput(t *testing.T) Input {
 		Window:          spend.MonthWindow(at("2026-07-13T10:00:00Z")),
 		MaxSpendStale:   5 * time.Minute,
 		MaxInfraRetries: 5,
+		// The cost-class gate (Phase 2.3) denies a cloud rung unless an allowance
+		// is granted. The base case grants it, so every pre-existing cloud
+		// escalation/defer row keeps its expected outcome; the gate's OWN behaviour
+		// is proven by the dedicated tests below, which set this explicitly.
+		CloudAllowed: true,
 	}
 }
 
@@ -519,6 +524,86 @@ func decideCases() []decideCase {
 			},
 			want: Decision{Kind: Deny, Attempt: 1, Reason: ReasonInvalidConfig},
 		},
+	}
+}
+
+// --- Phase 2 Task 2.3: cost-class-gated escalation -------------------------
+
+// A local->local escalation is free: granted regardless of the cloud allowance,
+// and flagged as a logged escalation so meter can record that the ladder climbed.
+// It carries the (generous) local turn cap.
+func TestDecideLocalEscalationGrantedAndLogged(t *testing.T) {
+	in := baseInput(t)
+	in.CloudAllowed = false // a local rung must not need the cloud allowance
+	in.Catalog["qwen-local-2"] = opercfg.RungSpec{
+		Name: "qwen-local-2", Kind: opercfg.KindLocal, Model: "qwen-b",
+		EstCostUSD: 0, EstTokens: 200_000, SyntheticUSDPer1MTokens: 0.20,
+	}
+	inst := instancePolicy()
+	inst.Ladder = []string{"qwen-local", "qwen-local-2", "glm", "sonnet"}
+	proj := projectPolicy()
+	proj.Ladder = []string{"qwen-local", "qwen-local-2"}
+	in.Effective = effective(t, inst, gonkcfg.Policy{}, proj)
+	in.Prior = []Attempt{{Attempt: 1, Rung: "qwen-local", Outcome: OutcomeGateFailed}}
+
+	got := Decide(in)
+	if got.Kind != Run || got.Rung != "qwen-local-2" {
+		t.Fatalf("want Run qwen-local-2, got %+v", got)
+	}
+	if !got.Escalated {
+		t.Fatal("a ladder-climbing decision must be flagged as a logged escalation")
+	}
+	if got.MaxTurns != opercfg.DefaultLocalTurns {
+		t.Fatalf("local rung turn cap = %d, want %d", got.MaxTurns, opercfg.DefaultLocalTurns)
+	}
+}
+
+// A cloud escalation with the allowance OFF must not spend: it denies (the Deny
+// that dispatch maps to needs-human) with the bounded cloud-not-allowed reason.
+// No reservation is minted -- the gate returns before the money section.
+func TestDecideCloudEscalationDeniedWhenAllowanceOff(t *testing.T) {
+	in := baseInput(t)
+	in.CloudAllowed = false
+	in.Prior = []Attempt{{Attempt: 1, Rung: "qwen-local", Outcome: OutcomeGateFailed}}
+	got := Decide(in)
+	if got.Kind != Deny || got.Reason != ReasonCloudNotAllowed {
+		t.Fatalf("want Deny/%s, got %+v", ReasonCloudNotAllowed, got)
+	}
+}
+
+// With the allowance ON, the same cloud escalation is granted, and it carries
+// the stingier cloud turn cap -- tighter than a local rung's.
+func TestDecideCloudEscalationGrantedWhenAllowanceOn(t *testing.T) {
+	in := baseInput(t)
+	in.CloudAllowed = true
+	in.Prior = []Attempt{{Attempt: 1, Rung: "qwen-local", Outcome: OutcomeGateFailed}}
+	got := Decide(in)
+	if got.Kind != Run || got.Rung != "glm" {
+		t.Fatalf("want Run glm, got %+v", got)
+	}
+	if got.MaxTurns != opercfg.DefaultCloudTurns {
+		t.Fatalf("cloud rung turn cap = %d, want %d", got.MaxTurns, opercfg.DefaultCloudTurns)
+	}
+	if got.MaxTurns >= opercfg.DefaultLocalTurns {
+		t.Fatalf("cloud turn cap %d is not stingier than local %d", got.MaxTurns, opercfg.DefaultLocalTurns)
+	}
+}
+
+// The local ladder exhausted with no cloud allowance lands on needs-human: an
+// all-local ladder with nowhere left to climb denies (ladder-exhausted), which
+// dispatch maps to needs-human -- we never auto-cross into paid cloud.
+func TestDecideLocalLadderExhaustedNoCloudNeedsHuman(t *testing.T) {
+	in := baseInput(t)
+	in.CloudAllowed = false
+	inst := instancePolicy()
+	inst.Ladder = []string{"qwen-local", "glm", "sonnet"}
+	proj := projectPolicy()
+	proj.Ladder = []string{"qwen-local"} // a single, all-local rung
+	in.Effective = effective(t, inst, gonkcfg.Policy{}, proj)
+	in.Prior = []Attempt{{Attempt: 1, Rung: "qwen-local", Outcome: OutcomeGateFailed}}
+	got := Decide(in)
+	if got.Kind != Deny || got.Reason != ReasonLadderExhausted {
+		t.Fatalf("want Deny/%s, got %+v", ReasonLadderExhausted, got)
 	}
 }
 
