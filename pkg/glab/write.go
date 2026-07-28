@@ -98,3 +98,20 @@ func (c *Client) AddIssueLabel(ctx context.Context, projectID, issueIID int64, l
 		query:  map[string]string{"add_labels": label},
 	}, nil)
 }
+
+// CreateIssueNote posts one comment (a "note") to an issue and returns the note
+// GitLab created, so the caller can read back its id. It is the broker's
+// comment-apply write: the read side (ListIssueNotes, notes.go) scans notes for
+// the bot's marker; this is how the bot posts one. Like AddIssueLabel it takes
+// the numeric project id and the issue IID, not a path.
+func (c *Client) CreateIssueNote(ctx context.Context, projectID, issueIID int64, body string) (*Note, error) {
+	var n Note
+	if err := c.getJSON(ctx, request{
+		method: "POST",
+		path:   fmt.Sprintf("/api/v4/projects/%d/issues/%d/notes", projectID, issueIID),
+		query:  map[string]string{"body": body},
+	}, &n); err != nil {
+		return nil, err
+	}
+	return &n, nil
+}

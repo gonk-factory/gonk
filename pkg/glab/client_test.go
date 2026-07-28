@@ -228,3 +228,34 @@ func TestAddIssueLabel(t *testing.T) {
 		t.Errorf("add_labels = %q, want gonk::denied", gotLabels)
 	}
 }
+
+// CreateIssueNote is the broker's comment-apply write: it POSTs one note to the
+// issue's notes collection with the given body, and returns the created note so
+// the caller can read back its id. Mirrors AddIssueLabel's param style (numeric
+// project id + issue iid + a plain string), and CreateIssue's created-object
+// return.
+func TestCreateIssueNote(t *testing.T) {
+	var gotMethod, gotPath, gotBody string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotBody = r.URL.Query().Get("body")
+		_, _ = fmt.Fprint(w, `{"id":99,"body":"hello from the broker"}`)
+	}))
+	n, err := c.CreateIssueNote(context.Background(), 42, 7, "hello from the broker")
+	if err != nil {
+		t.Fatalf("CreateIssueNote = %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/api/v4/projects/42/issues/7/notes" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotBody != "hello from the broker" {
+		t.Errorf("body = %q, want %q", gotBody, "hello from the broker")
+	}
+	if n == nil || n.ID != 99 {
+		t.Fatalf("note = %+v, want id 99", n)
+	}
+}
