@@ -23,9 +23,15 @@ type Server struct {
 	// recorded: a request answered with an injected failure (see Fail) was not
 	// actually accepted by the supervisor, so it must not appear here.
 	Poured []Pour
+	// Created is append-only, in request order: every accepted CreateSession
+	// (POST /v0/city/{city}/sessions). The triage broker (C2) creates sessions
+	// directly instead of pouring the gonk-triage formula, so dispatch tests
+	// assert against this rather than Poured.
+	Created []CreatedSession
 	// Fail maps an order name to a count of remaining 5xx responses: each
 	// matching request decrements the count and answers 502 instead of being
-	// recorded, until the count reaches zero.
+	// recorded, until the count reaches zero. The key "sessions" injects
+	// failures on the CreateSession route.
 	Fail map[string]int
 
 	srv  *httptest.Server
@@ -37,6 +43,16 @@ type Server struct {
 type Pour struct {
 	Order string
 	Vars  map[string]string
+}
+
+// CreatedSession is one accepted CreateSession request, recorded verbatim so a
+// test can assert the kind/name/alias/message dispatch sent.
+type CreatedSession struct {
+	Kind    string
+	Name    string
+	Alias   string
+	Message string
+	Async   bool
 }
 
 // New starts an httptest.Server backing a fresh, empty fake supervisor.
@@ -95,11 +111,32 @@ func parseRunPath(p string) (city, order string, ok bool) {
 	return city, order, true
 }
 
-// handle answers exactly the one route gcapi.Client speaks:
-// POST /v0/city/{cityName}/order/{name}/run.
+// parseSessionsPath extracts city from "/v0/city/{city}/sessions", mirroring
+// the route gcapi.Client.CreateSession builds. Anything else returns ok=false.
+func parseSessionsPath(p string) (city string, ok bool) {
+	const prefix = "/v0/city/"
+	const suffix = "/sessions"
+	rest, found := strings.CutPrefix(p, prefix)
+	if !found {
+		return "", false
+	}
+	city, found = strings.CutSuffix(rest, suffix)
+	if !found || city == "" || strings.Contains(city, "/") {
+		return "", false
+	}
+	return city, true
+}
+
+// handle answers the two routes gcapi.Client speaks:
+// POST /v0/city/{cityName}/order/{name}/run  and
+// POST /v0/city/{cityName}/sessions.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.NotFound(w, r)
+		return
+	}
+	if _, ok := parseSessionsPath(r.URL.Path); ok {
+		s.handleCreateSession(w, r)
 		return
 	}
 	city, order, ok := parseRunPath(r.URL.Path)
@@ -133,5 +170,45 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		Status:     "queued",
 		ScopedName: city + "/" + order,
 		TrackingID: trackingID,
+	})
+}
+
+// handleCreateSession mirrors gascity's always-async agent create: it records
+// the request and answers 202 with {status, request_id, event_cursor}. Fail
+// keyed on "sessions" injects a 502 (not recorded), exercising the client's
+// retry path.
+func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Kind    string `json:"kind"`
+		Name    string `json:"name"`
+		Alias   string `json:"alias"`
+		Message string `json:"message"`
+		Async   bool   `json:"async"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	if s.Fail["sessions"] > 0 {
+		s.Fail["sessions"]--
+		s.mu.Unlock()
+		http.Error(w, "injected failure", http.StatusBadGateway)
+		return
+	}
+	s.next++
+	reqID := fmt.Sprintf("req-%d", s.next)
+	s.Created = append(s.Created, CreatedSession{
+		Kind: body.Kind, Name: body.Name, Alias: body.Alias, Message: body.Message, Async: body.Async,
+	})
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(gcapi.CreateSessionResult{
+		Status:      "accepted",
+		RequestID:   reqID,
+		EventCursor: "0",
 	})
 }
