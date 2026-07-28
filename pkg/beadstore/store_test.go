@@ -32,6 +32,48 @@ func TestMemoryRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSessionIDRoundTrips is the correlation-field guarantee: dispatch stamps
+// the Gas City session id on the record at inject, and sweep reads it back to
+// locate the returned effects batch. If Put->Get drops SessionID, the sweeper
+// cannot find the session it dispatched.
+func TestSessionIDRoundTrips(t *testing.T) {
+	s := NewMemory()
+	ctx := context.Background()
+	rec := Record{
+		BeadAnchor: "gonk:42:issue:7",
+		State:      StateRunning,
+		SessionID:  "gcs-9f8e7d6c",
+	}
+	if err := s.Put(ctx, rec); err != nil {
+		t.Fatalf("Put = %v", err)
+	}
+	got, ok, err := s.Get(ctx, "gonk:42:issue:7")
+	if err != nil || !ok {
+		t.Fatalf("Get = %+v, %v, %v", got, ok, err)
+	}
+	if got.SessionID != "gcs-9f8e7d6c" {
+		t.Fatalf("SessionID = %q, want %q -- dispatch<->sweep correlation is broken", got.SessionID, "gcs-9f8e7d6c")
+	}
+}
+
+// TestSessionIDEmptyIsBackwardCompatible: a pre-broker record never had a
+// SessionID and must still load cleanly with an empty one -- the field is
+// additive, not a new required key.
+func TestSessionIDEmptyIsBackwardCompatible(t *testing.T) {
+	s := NewMemory()
+	ctx := context.Background()
+	if err := s.Put(ctx, Record{BeadAnchor: "gonk:1:issue:1", State: StateDone}); err != nil {
+		t.Fatalf("Put = %v", err)
+	}
+	got, ok, err := s.Get(ctx, "gonk:1:issue:1")
+	if err != nil || !ok {
+		t.Fatalf("Get = %+v, %v, %v", got, ok, err)
+	}
+	if got.SessionID != "" {
+		t.Fatalf("SessionID = %q, want empty on a record that never set it", got.SessionID)
+	}
+}
+
 // The sweeper's whole job is "find the beads that need me". Two queries, and they
 // must not overlap: a running bead is not a parked bead.
 func TestListByState(t *testing.T) {
