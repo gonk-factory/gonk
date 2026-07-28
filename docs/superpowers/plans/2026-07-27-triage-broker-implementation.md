@@ -82,7 +82,27 @@ spike below. Phases 3/4 are rewritten against S1's outcome — do S1 before them
   4.2, and 5.1 are authored against this result** — do not build them until S1 is
   recorded.
 
-**S1 result:** _(fill in: inject mechanism, return mechanism, correlation key)_
+**S1 result (2026-07-27):**
+- **Inject + correlation:** `gc session new <template> --json --no-attach` creates a
+  controller-owned session and returns its **session id** — that is the
+  correlation key (so `beadstore.Record` gains `SessionID`, not a work-bead id).
+  This avoids the undocumented pool↔bead graph.v2 binding entirely. Prompt
+  delivery to that session: `gc session submit <id> "<prompt>"` (grant-signed, the
+  same X-GC-City-Write path `gcapi` already uses for RunOrder) or an initial
+  message at create.
+- **Return:** `gc session logs <id> --json` reads the session's **structured JSONL
+  transcript** (persisted, parseable — `peek` reads only the live tmux pane and is
+  NOT used). The agent emits its proposed-effects batch as its final message,
+  sentinel-fenced (`GONK_BATCH_START`/`GONK_BATCH_END`), and the controller
+  extracts + `effects.ParseBatch`es it. The **pod needs no `bd`/`gc`** — the
+  controller reads the transcript. This is the definitive replacement for the
+  dead bd return channel (S0).
+- **RESIDUAL (fold into Phase 3, task C2a):** live-confirm that opencode's final
+  message actually lands in the `gc session logs --json` transcript and the
+  fenced batch is extractable, against the pinned opencode version. Narrow,
+  well-defined; do it as the first concrete integration step before wiring sweep.
+- `gcapi` needs two new client methods (`SessionNew`, `SessionLogs`/`SessionSubmit`)
+  over the same signed API surface as `RunOrder` — add them in Phase 3.
 
 ---
 
