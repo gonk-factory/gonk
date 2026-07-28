@@ -161,22 +161,47 @@ type MeterConfig struct {
 	EnforceLadderOrder bool
 }
 
+// CloudAllowance is the human-approved permission to cross the cost-class
+// boundary into PAID cloud rungs. It is DEFAULT OFF: with no allowance, meter's
+// escalation gate denies a cloud rung to a human rather than spending real money
+// on a model's say-so (spec 7.1, "no LLM/no broker judges money").
+//
+// EXTENSION POINT (do not repurpose Enabled): this slice carries a single
+// instance-level boolean only. The richer instance/namespace/project allowance
+// hierarchy from spec 7.1 is a reserved follow-up -- when it lands, add the
+// scoped fields HERE and teach CloudAllowed to fold them, so the one boolean
+// stays the "instance default" leaf of that hierarchy rather than being replaced.
+type CloudAllowance struct {
+	Enabled bool
+}
+
 // OperatorConfig is the validated operator layer.
 type OperatorConfig struct {
-	Instance gonkcfg.Policy
-	Groups   map[string]gonkcfg.Policy
-	Catalog  map[string]RungSpec
-	Meter    MeterConfig
+	Instance       gonkcfg.Policy
+	Groups         map[string]gonkcfg.Policy
+	Catalog        map[string]RungSpec
+	Meter          MeterConfig
+	CloudAllowance CloudAllowance
+}
+
+// CloudAllowed reports whether crossing into paid cloud rungs is permitted for
+// this instance. Default off -- see CloudAllowance. rung.Decide reads this
+// (carried through rung.Input) to gate escalation onto a cloud rung.
+func (oc *OperatorConfig) CloudAllowed() bool {
+	return oc.CloudAllowance.Enabled
 }
 
 // rawConfig is the on-disk shape. Durations are strings in YAML ("5m") and
 // time.Duration in the parsed struct, so the two shapes are separate types.
 type rawConfig struct {
-	Version  int                       `yaml:"version"`
-	Instance gonkcfg.Policy            `yaml:"instance"`
-	Groups   map[string]gonkcfg.Policy `yaml:"groups"`
-	Rungs    []RungSpec                `yaml:"rungs"`
-	Meter    struct {
+	Version        int                       `yaml:"version"`
+	Instance       gonkcfg.Policy            `yaml:"instance"`
+	Groups         map[string]gonkcfg.Policy `yaml:"groups"`
+	Rungs          []RungSpec                `yaml:"rungs"`
+	CloudAllowance struct {
+		Enabled bool `yaml:"enabled"`
+	} `yaml:"cloud_allowance"`
+	Meter struct {
 		MaxSpendStaleness  *string `yaml:"max_spend_staleness"`
 		ReservationTTL     *string `yaml:"reservation_ttl"`
 		MaxClockSkew       *string `yaml:"max_clock_skew"`
@@ -210,9 +235,10 @@ func Load(raw []byte) (*OperatorConfig, error) {
 	}
 
 	oc := &OperatorConfig{
-		Instance: rc.Instance,
-		Groups:   rc.Groups,
-		Catalog:  make(map[string]RungSpec, len(rc.Rungs)),
+		Instance:       rc.Instance,
+		Groups:         rc.Groups,
+		Catalog:        make(map[string]RungSpec, len(rc.Rungs)),
+		CloudAllowance: CloudAllowance{Enabled: rc.CloudAllowance.Enabled},
 		Meter: MeterConfig{ // fail-closed defaults
 			MaxSpendStaleness:  5 * time.Minute,
 			ReservationTTL:     60 * time.Minute,
