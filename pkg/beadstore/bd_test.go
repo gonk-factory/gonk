@@ -160,6 +160,65 @@ func TestBdCLIGetDecodesTheTextFieldNotBody(t *testing.T) {
 	}
 }
 
+// TestBdCLISessionIDSurvivesTheCommentRoundTrip proves the correlation field
+// crosses the bd boundary: Put JSON-encodes the whole Record into the
+// gonk-state comment, and getByID must decode SessionID back out. This is the
+// BdCLI mirror of the Memory round-trip -- the field must survive the one hop
+// that actually leaves this process.
+func TestBdCLISessionIDSurvivesTheCommentRoundTrip(t *testing.T) {
+	rec := Record{BeadAnchor: "gonk:5:issue:2", State: StateRunning, SessionID: "gcs-abc123"}
+	payload, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	marker := gonkStateMarkerPrefix + string(payload) + gonkStateMarkerSuffix
+	commentsJSON, err := json.Marshal([]map[string]string{{"text": marker}})
+	if err != nil {
+		t.Fatalf("marshal comments: %v", err)
+	}
+
+	f := &fakeBd{t: t}
+	f.push([]byte(`[{"id":"bd-5"}]`), nil) // findBeadID
+	f.push(commentsJSON, nil)              // comments <id> --json
+
+	b := &BdCLI{Run: f.run}
+	got, ok, err := b.Get(context.Background(), "gonk:5:issue:2")
+	if err != nil || !ok {
+		t.Fatalf("Get = %+v, %v, %v", got, ok, err)
+	}
+	if got.SessionID != "gcs-abc123" {
+		t.Fatalf("SessionID = %q, want %q -- dispatch<->sweep correlation lost across the bd comment", got.SessionID, "gcs-abc123")
+	}
+}
+
+// TestBdCLIGetLoadsPreBrokerCommentWithoutSessionID is the backward-compat
+// guarantee: a gonk-state comment written before SessionID existed has no such
+// JSON key, and must still decode -- with an empty SessionID, not an error.
+func TestBdCLIGetLoadsPreBrokerCommentWithoutSessionID(t *testing.T) {
+	// A pre-broker marker: whole-struct JSON that predates the field entirely.
+	marker := gonkStateMarkerPrefix + `{"BeadAnchor":"gonk:6:issue:1","State":"done","Attempt":1}` + gonkStateMarkerSuffix
+	commentsJSON, err := json.Marshal([]map[string]string{{"text": marker}})
+	if err != nil {
+		t.Fatalf("marshal comments: %v", err)
+	}
+
+	f := &fakeBd{t: t}
+	f.push([]byte(`[{"id":"bd-6"}]`), nil) // findBeadID
+	f.push(commentsJSON, nil)              // comments <id> --json
+
+	b := &BdCLI{Run: f.run}
+	got, ok, err := b.Get(context.Background(), "gonk:6:issue:1")
+	if err != nil || !ok {
+		t.Fatalf("Get = %+v, %v, %v -- a pre-broker comment must still load", got, ok, err)
+	}
+	if got.SessionID != "" {
+		t.Fatalf("SessionID = %q, want empty on a pre-broker record", got.SessionID)
+	}
+	if got.State != StateDone || got.Attempt != 1 {
+		t.Fatalf("got %+v, want state=done attempt=1", got)
+	}
+}
+
 // TestBdCLIListUsesTheJSONFlagNotFormat pins List's argv shape too, so a
 // future edit cannot quietly reintroduce `--format json`.
 func TestBdCLIListUsesTheJSONFlagNotFormat(t *testing.T) {
