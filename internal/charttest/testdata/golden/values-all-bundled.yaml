@@ -1388,48 +1388,47 @@ spec:
                 echo "bootstrap-city: selected the k8s session provider in city.toml"
               fi
 
-              # ---- STATIC SESSION CREDS (gonk-aql, v1-minimal) -------------------
+              # ---- STATIC SESSION INFERENCE CONFIG (gonk-aql) --------------------
               # An agent SESSION pod's env is resolved.Env -- the agent/city config
               # -- plus a fixed passthrough allow-list. Controller env does NOT
               # reach it and neither does any per-session order arg (GC_WEBHOOK_ARG_*
               # is an EXEC-order overlay). So the only way to hand the session its
-              # LiteLLM endpoint/key and bot token is to write them into the agent
-              # config in /city, here, from the mounted secret files.
+              # LiteLLM endpoint/key is to write them into the agent config in /city,
+              # here, from the mounted secret file.
               #
               # These are STATIC per-install values, which is exactly why this works;
               # the per-session values (model, attribution metadata) cannot come this
               # way and ride the prompt instead (see pack/formulas/gonk-triage.toml).
               #
-              # THIS PUTS TWO CREDENTIALS IN A FILE IN /city -- a DELIBERATE v1
-              # compromise, the same one the pack documents, removed by the v2 broker
-              # (which keeps every cred out of the pod). /city is an emptyDir private
-              # to this pod, and the file is only readable by the runtime user.
+              # gonk-0y6 / v2 broker: the agent pod holds NO forge credentials. It
+              # makes no glab/git calls -- the controller-side broker fetches issue
+              # context (dispatch) and applies the validated batch (sweep) under the
+              # bot PAT. So the ONLY cred written here is the LiteLLM key the agent
+              # needs to call inference; the bot token and the forge URL are gone
+              # (they used to be injected as GONK_BOT_TOKEN/GONK_GITLAB_URL). /city is
+              # an emptyDir private to this pod, and the file is 0600.
               #
               # Inserted directly after the existing `[env]` header rather than
               # appended: appending to EOF happens to land in [env] today only
               # because [env] is the last table, and that is not a property worth
               # depending on.
               LITELLM_KEY=$(cat /etc/gonk/secrets/litellm/admin-key)
-              BOT_TOKEN=$(cat /etc/gonk/secrets/gitlab-bot/token)
               for agent_dir in /city/agents/*/; do
                 agent_toml="${agent_dir}agent.toml"
                 [ -f "$agent_toml" ] || continue
                 # NEVER give the control-dispatcher a credential. It is the
                 # providerless deterministic control lane -- it runs `gc`, never a
-                # model, and handing it the LiteLLM key and the bot token would put
-                # both in a pod that has no use for either.
+                # model, and handing it the LiteLLM key would put it in a pod that
+                # has no use for it.
                 case "$agent_dir" in */control-dispatcher/) continue ;; esac
                 grep -q '^\[env\]' "$agent_toml" || printf '\n[env]\n' >> "$agent_toml"
                 awk -v url='http://litellm.litellm.svc:4000' \
-                    -v key="$LITELLM_KEY" -v bot="$BOT_TOKEN" \
-                    -v host='https://gitlab.orac.local' \
+                    -v key="$LITELLM_KEY" \
                     -v model='stub-local' '
                   /^\[env\]/ && !seen {
                     print
                     printf "GONK_LITELLM_URL = \"%s\"\n", url
                     printf "GONK_LITELLM_KEY = \"%s\"\n", key
-                    printf "GONK_BOT_TOKEN = \"%s\"\n", bot
-                    printf "GONK_GITLAB_URL = \"%s\"\n", host
                     if (model != "") printf "GONK_MODEL = \"%s\"\n", model
                     seen = 1
                     next
@@ -1439,7 +1438,7 @@ spec:
                 mv "${agent_toml}.new" "$agent_toml"
                 chmod 0600 "$agent_toml"
               done
-              echo "bootstrap-city: injected static session creds into $(ls -d /city/agents/*/ | wc -l) agent config(s)"
+              echo "bootstrap-city: injected LiteLLM config into $(ls -d /city/agents/*/ | wc -l) agent config(s)"
 
               # NOTE: do NOT write ~/.gc/cities.toml here. Registering the city makes
               # `gc start --foreground /city` refuse it ("run `gc unregister /city`
@@ -1475,13 +1474,13 @@ spec:
               mountPath: /etc/ssl/orac/ca.crt
               subPath: tls-ca-bundle.pem
               readOnly: true
-            # The bootstrap reads these to write the static session creds into the
-            # per-agent config in /city (see the cred block in args above).
+            # The bootstrap reads this to write the static LiteLLM config into the
+            # per-agent config in /city (see the inference-config block in args
+            # above). gonk-0y6: the gitlab-bot secret is NO LONGER mounted here --
+            # the agent pod holds no forge creds; only the controller container
+            # mounts the bot PAT (for the broker's own dispatch/sweep forge calls).
             - name: secret-litellm
               mountPath: /etc/gonk/secrets/litellm
-              readOnly: true
-            - name: secret-gitlab-bot
-              mountPath: /etc/gonk/secrets/gitlab-bot
               readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
