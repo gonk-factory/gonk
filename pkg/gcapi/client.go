@@ -84,16 +84,24 @@ type RunResult struct {
 // a Secret NAME, never key material, but there is no reason to echo caller
 // input into a string that ends up in every log line that captures err.Error().
 type APIError struct {
+	Method string // GET or POST; empty is treated as POST for back-compat
 	Status int
 	Path   string
 	Body   string
 }
 
+func (e *APIError) method() string {
+	if e.Method == "" {
+		return http.MethodPost
+	}
+	return e.Method
+}
+
 func (e *APIError) Error() string {
 	if hint := e.authHint(); hint != "" {
-		return fmt.Sprintf("gascity: POST %s: %d: %s [%s]", e.Path, e.Status, e.Body, hint)
+		return fmt.Sprintf("gascity: %s %s: %d: %s [%s]", e.method(), e.Path, e.Status, e.Body, hint)
 	}
-	return fmt.Sprintf("gascity: POST %s: %d: %s", e.Path, e.Status, e.Body)
+	return fmt.Sprintf("gascity: %s %s: %d: %s", e.method(), e.Path, e.Status, e.Body)
 }
 
 // authHint turns a write-auth / CSRF / host rejection into a diagnostic string,
@@ -183,7 +191,7 @@ type runBody struct {
 // which Gas City namespaces into an exec order's environment as GC_WEBHOOK_ARG_*.
 func (c *Client) RunOrder(ctx context.Context, name string, vars map[string]string) (*RunResult, error) {
 	if c.City == "" {
-		return nil, errors.New("gascity: city name is empty (set GONK_CITY -- there is no default, and an empty one builds a route that silently is not the one you meant)")
+		return nil, errEmptyCity
 	}
 	if name == "" {
 		return nil, errors.New("gascity: order name is empty")
@@ -196,26 +204,62 @@ func (c *Client) RunOrder(ctx context.Context, name string, vars map[string]stri
 	if err != nil {
 		return nil, fmt.Errorf("gascity: encode vars: %w", err)
 	}
+	body, err := c.doRequest(ctx, http.MethodPost, path, "", payload)
+	if err != nil {
+		return nil, err
+	}
+	var out RunResult
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("gascity: POST %s: decode: %w", path, err)
+	}
+	return &out, nil
+}
+
+// errEmptyCity: the city name is part of every route. An empty one silently
+// builds "/v0/city//..." -- a different route that may 404 or match something
+// else. Refuse it at the door, on every call.
+var errEmptyCity = errors.New("gascity: city name is empty (set GONK_CITY -- there is no default, and an empty one builds a route that silently is not the one you meant)")
+
+// doRequest is the ONE transport path all supervisor calls share: bounded retry
+// on 429/5xx, the size cap, error mapping, and -- for mutating requests when a
+// Signer is configured -- a FRESH per-attempt X-GC-City-Write grant.
+//
+// method is GET or POST. For POST, payload is the JSON body and is signed; for
+// GET, payload is nil and the request is NEVER signed (city reads admit by
+// network position -- their routes declare no 401/403 -- and signing a read
+// would be a category error). rawQuery is the already-encoded query string
+// (without '?'); it is part of both the request URL and the grant digest.
+func (c *Client) doRequest(ctx context.Context, method, path, rawQuery string, payload []byte) ([]byte, error) {
+	fullURL := c.BaseURL + path
+	if rawQuery != "" {
+		fullURL += "?" + rawQuery
+	}
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(payload))
+		var bodyReader io.Reader
+		if payload != nil {
+			bodyReader = bytes.NewReader(payload)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", c.UserAgent)
+		if payload != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
 
 		// Mint a FRESH grant every attempt: new jti/iat/exp, and the req digest
 		// recomputed over the exact method/path/query/body on the wire. Doing
 		// this inside the loop is required -- the server's replay guard is
 		// single-use per jti, so a reused token on a retry would be rejected.
 		// We digest req.URL.Path / req.URL.RawQuery (what the server derives
-		// from the wire), not the pre-escape strings.
-		if c.Signer != nil {
+		// from the wire), not the pre-escape strings. GET reads are unsigned.
+		if c.Signer != nil && method != http.MethodGet {
 			token, err := c.Signer.mintGrant(req.Method, req.URL.Path, req.URL.RawQuery, c.City, payload, time.Now())
 			if err != nil {
-				return nil, fmt.Errorf("gascity: POST %s: %w", path, err)
+				return nil, fmt.Errorf("gascity: %s %s: %w", method, path, err)
 			}
 			req.Header.Set("X-GC-Request", "true")
 			req.Header.Set("X-GC-City-Write", token)
@@ -223,23 +267,19 @@ func (c *Client) RunOrder(ctx context.Context, name string, vars map[string]stri
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
-			lastErr = fmt.Errorf("gascity: POST %s: %w", path, err)
+			lastErr = fmt.Errorf("gascity: %s %s: %w", method, path, err)
 		} else {
 			body, rerr := readCapped(resp.Body, maxResponseBytes)
 			_ = resp.Body.Close()
 			switch {
 			case rerr != nil:
-				return nil, fmt.Errorf("gascity: POST %s: %w", path, rerr)
+				return nil, fmt.Errorf("gascity: %s %s: %w", method, path, rerr)
 			case resp.StatusCode >= 200 && resp.StatusCode < 300:
-				var out RunResult
-				if err := json.Unmarshal(body, &out); err != nil {
-					return nil, fmt.Errorf("gascity: POST %s: decode: %w", path, err)
-				}
-				return &out, nil
+				return body, nil
 			case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
-				lastErr = &APIError{Status: resp.StatusCode, Path: path, Body: truncate(body)}
+				lastErr = &APIError{Method: method, Status: resp.StatusCode, Path: path, Body: truncate(body)}
 			default:
-				return nil, &APIError{Status: resp.StatusCode, Path: path, Body: truncate(body)}
+				return nil, &APIError{Method: method, Status: resp.StatusCode, Path: path, Body: truncate(body)}
 			}
 		}
 		if attempt >= c.MaxRetries {

@@ -149,21 +149,53 @@ Do not build C5 (agent emit format) until this observation is recorded here.
   wrapper reusing the exact X-GC-City-Write signing it already does for RunOrder.
 - Return read: `GetSession(id, peek=true, peekLines)` → `SessionView` with the
   last-output preview. gonk's `pkg/gcapi` adds a `GetSessionOutput` wrapper.
-- **OPEN DESIGN QUESTION — create/correlate.** There is NO simple `CreateSession`
-  REST call; `gc session new` (cmd_session.go) goes through
-  `config.ResolveSessionCreateTransport` (transport resolution), not a plain POST.
-  Two viable approaches, decide in C2:
-  1. **Reuse pool-spawn + correlate-by-marker (preferred first attempt).** Keep
-     the existing supervisor pool spawning the triage session; dispatch stamps a
-     UNIQUE marker (e.g. the bead anchor as a session alias / metadata) and finds
-     the session via `ListSessions`, recording its id in `Record.SessionID`. No
-     new create path; correlation is explicit, not heuristic.
-  2. Drive the transport create path directly (heavier; couples gonk to
-     `ResolveSessionCreateTransport`).
-  Resolve this first in C2, then submit+read are already specified above.
+- **RESOLVED (2026-07-28) — create/correlate/inject via one signed POST.** The
+  earlier "no simple CreateSession REST call" was an incomplete search. There ARE
+  two create routes in gascity at GASCITY_REF:
+  - `POST /v0/sessions` (legacy plain handler, `server.go:310` → `handleSessionCreate`)
+    — this is the one that rejects `message`+`async` ("message is not supported
+    with async session creation"). NOT the one we use.
+  - **`POST /v0/city/{city}/sessions`** (huma, `humaHandleSessionCreate`, registered
+    in `supervisor_city_routes.go` OperationID `create-session`) — the city-scoped
+    route. For `kind:"agent"` it is **always async** (returns `202 {status,
+    request_id, event_cursor}`, spawns the session in a goroutine) and **DOES
+    accept `message`**, storing it as `template_overrides.initial_message` via
+    `sessionTemplateOverridesMetadata` (that IS the inject). It also takes a unique
+    `alias` (validated by `session.ValidateAlias`, rejected if already taken).
+
+  **Decision:** dispatch issues ONE signed `POST /v0/city/{city}/sessions` with
+  `kind:"agent"`, `name:"triage"` (dir-name = agent-name; bare name resolves via
+  `resolveSessionTemplateWithBareNameFallback`), `alias:<marker>`, `message:<rendered
+  prompt>`, `async:true`. This **creates + correlates + injects in one call** — no
+  formula (so #4668 is moot), no `ListSessions` scan, no separate `SubmitSession`,
+  no create→commandable race. `GetSession`/`ListSessions` resolve by alias, so the
+  alias is the durable correlation handle; we record it verbatim in
+  `Record.SessionID` and sweep reads back via `GetSession(alias, peek=true,
+  peekLines=N)` → `SessionView.LastOutput`.
+
+  **Alias/marker format:** `session.ValidateAlias` allows `^[a-zA-Z0-9][a-zA-Z0-9_.-]*
+  (/…)*$`, max 64, no colons, no `s-`/`gc-N`/`human`. The bead anchor
+  (`gonk:{pid}:issue:{iid}`) has colons, so the marker is
+  **`gonk.triage.p<projectID>.i<issueIID>.a<attempt>`** — deterministic, well
+  under 64 chars, and the `.a<attempt>` suffix makes it conflict-free across
+  re-slings (a same-anchor retry gets a fresh alias). Stored verbatim in
+  `Record.SessionID`; sweep reads it back (does not reconstruct).
+
+  **Reads are unsigned GETs.** The city GET routes (`session/{id}`, `sessions`)
+  declare no 401/403 in their error sets — admission is by network position, same
+  as the read model. `CreateSession` (POST, mutating) IS signed exactly like
+  `RunOrder` (X-GC-City-Write grant + X-GC-Request CSRF, fresh per attempt).
+
+  **Known limitation (defer):** async create can fail after the 202 (emits
+  `request.failed` on the event stream, which dispatch does not watch). A failed
+  create then surfaces to sweep as "no session by that alias" → the existing
+  no-output re-sling path. Acceptable for v1; watching the event stream by
+  `request_id`/`event_cursor` is a later hardening, not needed now.
 
 **Return-read observation:** _(fill in from the first C2 integration run:
-does GetSession peek hold the full fenced batch at peekLines=N; exact read call)_
+does GetSession peek hold the full fenced batch at peekLines=N; does
+`template_overrides.initial_message` reach opencode as its first prompt; exact
+read call)_
 
 ---
 
