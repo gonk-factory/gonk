@@ -123,8 +123,28 @@ gascity `internal/api`), then the very first integration run OBSERVES which of
 the batch — and THAT observation pins the read for C4 and the emit format for C5.**
 Do not build C5 (agent emit format) until this observation is recorded here.
 
+**Gas City session API paths (from `internal/api/client.go` at GASCITY_REF):**
+- **Submit prompt:** `POST /v0/city/{city}/session/{id}/messages` (the SendMessage
+  path; grant-signed like RunOrder).
+- **Return read:** `GET /v0/city/{city}/session/{id}?peek=true&peekLines=N` →
+  `GetSession` returns a `SessionView` including the **last-output preview**. This
+  is the clean structured return read — a single authenticated GET, NOT the
+  flaky `gc session logs` (which needs a session_key and reads reconciler traces).
+  The one thing C2's first run must confirm: `peekLines` large enough to hold the
+  whole sentinel-fenced batch (it is a *preview*; size it, or confirm no
+  truncation).
+- **List/state:** `GET /v0/city/{city}/sessions` (state/template filters).
+- **REMAINING C2 UNKNOWN — session create/correlate.** No direct `CreateSession`
+  was found in `client.go`; `gc session new` may hit a create route not yet
+  located, OR the broker reuses the existing pool/formula spawn and correlates by
+  reading `GET /sessions` for the session bound to this dispatch. C2's first task:
+  locate the create route in gascity `internal/api` (grep the `session.create`
+  handler + the `gc session new` command's client call) OR settle on
+  pool-spawn+correlate. This is the last integration unknown; everything else in
+  C2 is specified.
+
 **Return-read observation:** _(fill in from the first C2 integration run:
-which mechanism holds the batch, and the exact read call)_
+does GetSession peek hold the full fenced batch at peekLines=N; exact read call)_
 
 ---
 
