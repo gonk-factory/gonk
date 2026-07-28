@@ -143,6 +143,25 @@ Do not build C5 (agent emit format) until this observation is recorded here.
   pool-spawn+correlate. This is the last integration unknown; everything else in
   C2 is specified.
 
+**C2 client methods (confirmed in gascity `internal/api/client.go`):**
+- Inject/submit: `SubmitSession(id, message string, intent SubmitIntent)` →
+  `POST /v0/city/{city}/session/{id}/messages`. gonk's `pkg/gcapi` adds a thin
+  wrapper reusing the exact X-GC-City-Write signing it already does for RunOrder.
+- Return read: `GetSession(id, peek=true, peekLines)` → `SessionView` with the
+  last-output preview. gonk's `pkg/gcapi` adds a `GetSessionOutput` wrapper.
+- **OPEN DESIGN QUESTION — create/correlate.** There is NO simple `CreateSession`
+  REST call; `gc session new` (cmd_session.go) goes through
+  `config.ResolveSessionCreateTransport` (transport resolution), not a plain POST.
+  Two viable approaches, decide in C2:
+  1. **Reuse pool-spawn + correlate-by-marker (preferred first attempt).** Keep
+     the existing supervisor pool spawning the triage session; dispatch stamps a
+     UNIQUE marker (e.g. the bead anchor as a session alias / metadata) and finds
+     the session via `ListSessions`, recording its id in `Record.SessionID`. No
+     new create path; correlation is explicit, not heuristic.
+  2. Drive the transport create path directly (heavier; couples gonk to
+     `ResolveSessionCreateTransport`).
+  Resolve this first in C2, then submit+read are already specified above.
+
 **Return-read observation:** _(fill in from the first C2 integration run:
 does GetSession peek hold the full fenced batch at peekLines=N; exact read call)_
 
