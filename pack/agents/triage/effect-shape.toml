@@ -1,0 +1,15 @@
+# Expected-effect-shape for the triage agent (spec §6.1).
+#
+# Broker data, NOT Gas City pack data: the broker reads this from the baked pack
+# (/opt/gonk/pack/agents/triage/), never agent.toml. Per-kind cardinality
+# {min,max}; a kind absent here is forbidden ({0,0}). max = -1 means unbounded.
+#
+# triage -> comment {1,1}, label {0,N}, everything else {0,0}.
+
+[comment]
+min = 1
+max = 1
+
+[label]
+min = 0
+max = -1  # unbounded (N)
