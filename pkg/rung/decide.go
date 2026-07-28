@@ -58,6 +58,7 @@ const (
 	ReasonPerTaskTokensExhausted = meterapi.ReasonPerTaskTokensExhausted
 	ReasonMonthlyTokensExhausted = meterapi.ReasonMonthlyTokensExhausted
 	ReasonMonthlyCostExhausted   = meterapi.ReasonMonthlyCostExhausted
+	ReasonCloudNotAllowed        = meterapi.ReasonCloudNotAllowed
 )
 
 // ActionFor maps an atags trigger onto the .gonk.yml action that gates it.
@@ -99,6 +100,12 @@ type Input struct {
 
 	Trigger string // atags trigger; gates against Effective.Actions
 
+	// CloudAllowed carries opercfg.OperatorConfig.CloudAllowed() -- the human-
+	// approved permission to cross into PAID cloud rungs. Default false. When the
+	// next rung is a cloud rung and this is false, Decide denies to needs-human
+	// rather than spend real money (spec 7.1). It has NO effect on local rungs.
+	CloudAllowed bool
+
 	Prior []Attempt    // this bead's attempt history, oldest first
 	Spend budget.Spend // observed + reserved, for THIS project and THIS bead
 
@@ -123,6 +130,15 @@ type Decision struct {
 	Reason     string    `json:"reason"`
 	Detail     string    `json:"detail"`
 	RetryAfter time.Time `json:"retry_after,omitzero"`
+	// MaxTurns is the target rung's per-attempt turn cap, carried onto a Run so
+	// the session is bounded by the rung's budget (stingier for cloud). Zero on a
+	// defer/deny, which spawns no session.
+	MaxTurns int `json:"max_turns,omitempty"`
+	// Escalated marks a Run that CLIMBED the ladder (a gate failure pushed it past
+	// the cheapest rung). It is purely for logging -- meter records that an
+	// escalation happened; it does not change what runs. Never set on the first
+	// rung, nor on a defer/deny.
+	Escalated bool `json:"escalated,omitempty"`
 }
 
 // Decide is the whole policy. Read it top to bottom: the gates are ordered from
@@ -198,6 +214,19 @@ func Decide(in Input) Decision {
 			fmt.Sprintf("rung %q failed on infrastructure %d times in a row", target, n))
 	}
 
+	// 4b. The cost-class gate (spec 7.1). It sits IN FRONT OF the money section:
+	// crossing into a PAID cloud rung needs a human-approved allowance, full stop
+	// -- we never let the budget arithmetic alone authorise real spend on a model's
+	// say-so. A local rung is free and passes straight through (its escalation is
+	// logged, below). With no allowance, a cloud rung DENIES to needs-human here,
+	// before any reservation is contemplated, so no headroom is minted for a run
+	// that will not happen. This does NOT touch the reservation arithmetic (N4);
+	// it decides whether that arithmetic is even reached.
+	if spec.Kind == opercfg.KindCloud && !in.CloudAllowed {
+		return deny(ReasonCloudNotAllowed,
+			fmt.Sprintf("rung %q is a paid cloud rung and no cloud allowance is granted for this scope; a human must approve crossing into paid spend", target))
+	}
+
 	// 5. Money. Every check below is against ceiling - (observed + RESERVED):
 	//    the reservation is what makes this survive spend-log lag and two
 	//    sessions racing the same headroom.
@@ -249,7 +278,18 @@ func Decide(in Input) Decision {
 				target, spec.EstCostUSD, costStr(rem.MonthlyCostUSD)), in.Window.End)
 	}
 
-	return Decision{Kind: Run, Rung: target, Model: spec.Model, Attempt: attempt}
+	return Decision{
+		Kind:    Run,
+		Rung:    target,
+		Model:   spec.Model,
+		Attempt: attempt,
+		// The rung's turn cap rides the decision so the session is bounded by it.
+		MaxTurns: spec.EffectiveMaxTurns(),
+		// idx is the count of prior GATE failures; idx > 0 means this attempt has
+		// climbed the ladder past the cheapest rung, i.e. it is an escalation worth
+		// logging (both local->local and an allowed cloud crossing).
+		Escalated: idx > 0,
+	}
 }
 
 // Reserve is what a Run decision commits: the estimated consumption held against
