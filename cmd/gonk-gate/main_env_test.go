@@ -28,6 +28,42 @@ func TestEnvArgUppercaseIsOnlyAFallback(t *testing.T) {
 	}
 }
 
+// gonk-uvv: the controller's gonk-gate exec orders (dispatch/sweep) run under
+// Gas City, which strips TOKEN-marked env -- so GONK_GITLAB_TOKEN_FILE arrives
+// empty and cfg.gl() would build a tokenless client that 401s on every broker
+// forge write. loadGateConfig must fall back to the marker-free GONK_BOT_FILE
+// (the same bot PAT path the controller mounts), mirroring the meter bearer-file
+// fallback.
+func TestGitLabTokenFileFallsBackToBotFile(t *testing.T) {
+	t.Setenv("GONK_CITY", "gonk-city")
+	t.Setenv("GONK_METER_TOKEN_FILE", "/secrets/meter/token")
+	t.Setenv("GONK_GITLAB_TOKEN_FILE", "") // stripped in an exec order
+	t.Setenv("GONK_BOT_FILE", "/secrets/gitlab-bot/token")
+
+	cfg, err := loadGateConfig()
+	if err != nil {
+		t.Fatalf("loadGateConfig: %v", err)
+	}
+	if cfg.GitLabTokenFile != "/secrets/gitlab-bot/token" {
+		t.Fatalf("GitLabTokenFile = %q, want the marker-free GONK_BOT_FILE fallback", cfg.GitLabTokenFile)
+	}
+}
+
+func TestGitLabTokenFilePrefersExplicit(t *testing.T) {
+	t.Setenv("GONK_CITY", "gonk-city")
+	t.Setenv("GONK_METER_TOKEN_FILE", "/secrets/meter/token")
+	t.Setenv("GONK_GITLAB_TOKEN_FILE", "/secrets/explicit/token")
+	t.Setenv("GONK_BOT_FILE", "/secrets/gitlab-bot/token")
+
+	cfg, err := loadGateConfig()
+	if err != nil {
+		t.Fatalf("loadGateConfig: %v", err)
+	}
+	if cfg.GitLabTokenFile != "/secrets/explicit/token" {
+		t.Fatalf("GitLabTokenFile = %q, want the explicit GONK_GITLAB_TOKEN_FILE to win", cfg.GitLabTokenFile)
+	}
+}
+
 func TestEnvArgInt64(t *testing.T) {
 	t.Setenv("GC_WEBHOOK_ARG_project_id", "75")
 	if got := envArgInt64("project_id"); got != 75 {

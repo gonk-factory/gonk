@@ -191,9 +191,16 @@ func loadGateConfig() (gateConfig, error) {
 		// "TOKEN" among them). So the controller ALSO exports GONK_METER_BEARER_FILE
 		// -- same path, a name with no secret marker -- which survives the strip.
 		// (A [order.env] override does not: `gc init` drops it from the city copy.)
-		MeterTokenFile:  firstNonEmpty(os.Getenv("GONK_METER_TOKEN_FILE"), os.Getenv("GONK_METER_BEARER_FILE")),
-		GitLabURL:       os.Getenv("GONK_GITLAB_URL"),
-		GitLabTokenFile: os.Getenv("GONK_GITLAB_TOKEN_FILE"),
+		MeterTokenFile: firstNonEmpty(os.Getenv("GONK_METER_TOKEN_FILE"), os.Getenv("GONK_METER_BEARER_FILE")),
+		GitLabURL:      os.Getenv("GONK_GITLAB_URL"),
+		// Same exec-order strip as the meter token above: GONK_GITLAB_TOKEN_FILE
+		// carries the "TOKEN" marker, so execenv.IsSensitiveKey strips it from
+		// dispatch/sweep (both exec orders) and cfg.gl() would get an empty path
+		// -> glab.New with no token -> every broker forge write 401s. The
+		// controller also exports the SAME bot-token path under the marker-free
+		// name GONK_BOT_FILE (used by the v1 formula var); reuse it as the
+		// fallback so the broker's own bot-PAT access survives the strip.
+		GitLabTokenFile: firstNonEmpty(os.Getenv("GONK_GITLAB_TOKEN_FILE"), os.Getenv("GONK_BOT_FILE")),
 		BotUsername:     os.Getenv("GONK_BOT_USERNAME"),
 		BdBin:           os.Getenv("GONK_BD_BIN"),
 		BeadRepoDir:     os.Getenv("GONK_BEAD_REPO_DIR"),

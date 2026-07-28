@@ -2002,6 +2002,16 @@ spec:
               value: "/etc/gonk/secrets/litellm/admin-key"
             - name: GONK_BOT_FILE
               value: "/etc/gonk/secrets/gitlab-bot/token"
+            # The v2 broker's OWN forge access: the in-controller gonk-gate
+            # dispatch (issue-context fetch) and sweep (apply the validated batch
+            # -- comment + labels -- under the bot PAT) build a glab client from
+            # cfg.gl(). It needs the forge URL and a token FILE. GONK_GITLAB_URL is
+            # marker-free, so it survives the exec-order env strip; the TOKEN-marked
+            # GONK_GITLAB_TOKEN_FILE would NOT, so gonk-gate falls back to the
+            # marker-free GONK_BOT_FILE above (same bot PAT). Without GONK_GITLAB_URL
+            # here, cfg.gl() has an empty base URL and every broker forge call fails.
+            - name: GONK_GITLAB_URL
+              value: "https://gitlab.orac.local"
             # The in-controller gonk-gate exec orders (gonk-dispatch, gonk-sweep)
             # call gonk-meter /v1/policy/decide -- they need the meter URL and a
             # bearer-token FILE, exactly like gonk-intake. Without these,
