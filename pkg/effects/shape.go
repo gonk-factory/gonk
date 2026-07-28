@@ -46,3 +46,19 @@ func Validate(b Batch, s Shape) error {
 	}
 	return nil
 }
+
+// ValidateTargets is the target-binding gate: a run cannot propose an effect on
+// a resource it was never handed. Every effect naming an existing resource
+// (TargetIID != 0) must name an iid in the session's injected context; a
+// TargetIID of 0 means "the session's primary target" and is always allowed.
+// (Create-type kinds like new_issue bind to a parent -- for this slice their
+// parent-binding detail is deferred with new_issue's apply path, so a 0 target
+// is accepted as the primary target.)
+func ValidateTargets(b Batch, allowed map[int64]bool) error {
+	for i, e := range b.Effects {
+		if e.TargetIID != 0 && !allowed[e.TargetIID] {
+			return fmt.Errorf("effects: effect %d (kind %q) targets iid %d not in injected context", i, e.Kind, e.TargetIID)
+		}
+	}
+	return nil
+}

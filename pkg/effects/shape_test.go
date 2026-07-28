@@ -33,3 +33,17 @@ func TestShapeRejectsMissingRequiredComment(t *testing.T) {
 		t.Fatal("want reject: comment min 1 but got 0")
 	}
 }
+
+func TestTargetBindingRejectsUnhandedResource(t *testing.T) {
+	b := Batch{Effects: []Effect{{Kind: KindComment, Body: "x", TargetIID: 999}}}
+	if err := ValidateTargets(b, map[int64]bool{11: true}); err == nil {
+		t.Fatal("want reject: effect targets iid 999 not in context {11}")
+	}
+}
+
+func TestTargetBindingAcceptsPrimaryAndHanded(t *testing.T) {
+	b := Batch{Effects: []Effect{{Kind: KindComment, Body: "x"}, {Kind: KindLabel, Add: []string{"l"}, TargetIID: 11}}}
+	if err := ValidateTargets(b, map[int64]bool{11: true}); err != nil {
+		t.Fatalf("want accept, got %v", err)
+	}
+}
