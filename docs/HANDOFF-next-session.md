@@ -2,6 +2,12 @@
 
 _Last updated: 2026-07-28 (session 2). Branch: `main` (we develop on main per owner's call). Everything below is committed and pushed._
 
+## ⚠️ 2026-07-28 (session 3): broker slice CODE + CHART COMPLETE; C7 blocked on a homelab infra incident
+
+**All broker code is merged** (`main@a677e09`): C2, C4, **C6** (`gonk-0y6`, chart drops agent-pod forge creds), **`gonk-uvv`** (controller's own `GONK_GITLAB_URL` + bot-PAT fallback — was a real broker blocker), and a CI **lint fix** (`opercfg` staticcheck nit that was failing every image build). The overlay controller image `v0.1.0-a677e095b958` is built and correct (`helm upgrade --dry-run` clean).
+
+**C7 (`gonk-dxo`) is blocked on a cluster infra incident, not code** — filed as **`gonk-1lu`**. Four failure modes, all egress/networking: CI image builds hang at the zot-mirror→Docker Hub pull; local full builds fail on `proxy.golang.org` resets; registry pushes 499 through Ingress; and `kubectl port-forward` to the registry won't bind (same class as the CI runner "pod watcher not synced"). **The exact finish-recipe (offline `gonk-gate` overlay build → push → `helm upgrade` → test issue in project 75) is on `gonk-dxo`.** Once the registry-push path is healthy, C7 is ~20 min of work.
+
 ## TL;DR — where to start
 
 **The triage broker's whole software path (dispatch inject + sweep apply) is code-complete, tested, and pushed** as of session 2 (2026-07-28). What remains is a **live e2e deploy** (`gonk-dxo`, C7) — which needs a cluster + rebuilt images — plus one small P2 chart-hygiene item (`gonk-0y6`, C6, recipe on the bead). If you have a cluster: build+push images, `helm upgrade`, file a test issue, and confirm the broker posts a triage comment with zero creds in the agent pod. If not: do C6 (golden-testable, no cluster) or pick from the remaining P1s below.
