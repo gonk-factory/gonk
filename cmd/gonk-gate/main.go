@@ -97,7 +97,7 @@ func main() {
 	switch os.Args[1] {
 	case "dispatch":
 		code = runDispatch(ctx, dispatchDeps{
-			Meter: cfg.meter(), GC: cfg.gc(), Store: cfg.store(), Log: log,
+			Meter: cfg.meter(), GC: cfg.gc(), Store: cfg.store(), Forge: cfg.gl(), Log: log,
 			Args: dispatchArgs{
 				Project:       envArg("project"),
 				ProjectID:     envArgInt64("project_id"),
