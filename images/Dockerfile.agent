@@ -75,8 +75,9 @@ RUN curl -fsSL -o bd.tar.gz \
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 
 # git: the rig clone and the prepare-commit-msg hook (Task 8).
-# ca-certificates: TLS to gitlab.orac.local and litellm (both behind the
-# private CA -- SSL_CERT_FILE below, never InsecureSkipVerify).
+# ca-certificates: TLS trust roots for the one endpoint the agent talks to,
+# LiteLLM. Under the broker design the agent never reaches the forge, so no
+# forge CA is trusted here (that egress lives in the broker, not this pod).
 # jq: entrypoint.sh renders overlay/opencode.json with it -- guarantees valid
 # JSON (correct escaping of the verbatim atags metadata blob) instead of
 # hand-built string concatenation.
@@ -96,17 +97,13 @@ COPY images/agent/entrypoint.sh        /usr/local/bin/gonk-agent-entrypoint
 COPY images/agent/prepare-commit-msg   /usr/local/share/gonk/prepare-commit-msg
 RUN chmod +x /usr/local/bin/gonk-agent-entrypoint /usr/local/share/gonk/prepare-commit-msg
 
-# THE PRIVATE CA. gitlab.orac.local and gonk's own services serve certs from the
-# cluster's private CA. trust-manager publishes ConfigMap `trust-bundle`
-# (key tls-ca-bundle.pem) into EVERY namespace; the chart mounts it here
-# (Plan 05).
-#
-# *** NEVER DISABLE TLS VERIFICATION. *** The fix is to TRUST the CA, and Go, git
-# and curl all honour SSL_CERT_FILE with no code change. An agent pod that will
-# talk to anything answering on 443 is an agent pod that can be phished off the
-# metered path.
-ENV SSL_CERT_FILE=/etc/ssl/orac/ca.crt
-ENV GIT_SSL_CAINFO=/etc/ssl/orac/ca.crt
+# No forge CA is trusted here. Under the broker design (spec 9/10) the agent pod
+# never reaches gitlab.orac.local -- the broker reads the issue and posts the
+# comment on its behalf -- so the orac private CA is NOT mounted or trusted in
+# this image (the /etc/ssl/orac/ca.crt file this image used to point at via
+# SSL_CERT_FILE/GIT_SSL_CAINFO was never even mounted). If the agent's one
+# remaining egress, LiteLLM, is ever served from a private CA, that trust is a
+# chart-level mount concern for that endpoint, not a baked-in image ENV.
 
 # No /etc/passwd entry for 65532 (this base image is plain debian, not
 # distroless) -- HOME must be explicit or git/opencode fall back to "/" and
