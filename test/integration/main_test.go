@@ -61,6 +61,12 @@ version: 1
 instance:
   enabled: true
   ladder: [qwen-local, glm, sonnet]
+# The integration ladder climbs into cloud rungs (glm, sonnet); these tests
+# predate and are not about the cloud-allowance gate (Stream B), so cloud is
+# allowed here. Tests that specifically want cloud denied override via
+# WithOperatorYAML. The gate's own behavior is covered in pkg/rung/decide_test.go.
+cloud_allowance:
+  enabled: true
 rungs:
   - { name: qwen-local, kind: local, model: stub-local,  est_cost_usd: 0,    est_tokens: "50K",  synthetic_usd_per_1m_tokens: 0.25 }
   - { name: glm,        kind: cloud, model: stub-cloud,   est_cost_usd: 0.40, est_tokens: "200K" }

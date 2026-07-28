@@ -545,6 +545,10 @@ func (s *Service) Decide(ctx context.Context, req meterapi.DecideRequest) (rung.
 		MaxSpendStale:   cfg.Meter.MaxSpendStaleness,
 		KeyRetryBackoff: cfg.Meter.KeyRetryBackoff,
 		MaxInfraRetries: cfg.Meter.MaxInfraRetries,
+		// CloudAllowed gates crossing into a paid cloud rung (Stream B). Sourced
+		// deterministically from the operator config's cloud allowance (default
+		// off); rung.Decide denies a cloud rung to needs-human when false.
+		CloudAllowed: cfg.CloudAllowed(),
 	}
 
 	// A cold start or a skewed clock means we do not trust our own numbers.
