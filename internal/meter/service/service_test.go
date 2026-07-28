@@ -36,6 +36,12 @@ version: 1
 instance:
   enabled: true
   ladder: [qwen-local, glm, sonnet]
+# These service tests exercise idempotency/serialization/budget on a ladder that
+# climbs into the cloud rungs (glm, sonnet); they predate and are not about the
+# cloud-allowance gate (Stream B), so cloud is allowed here. The gate's own
+# behavior is covered by pkg/rung/decide_test.go.
+cloud_allowance:
+  enabled: true
 groups:
   agentic:
     budget: { monthly_cost_usd: 50 }
