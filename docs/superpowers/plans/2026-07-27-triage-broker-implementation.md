@@ -101,8 +101,30 @@ spike below. Phases 3/4 are rewritten against S1's outcome — do S1 before them
   message actually lands in the `gc session logs --json` transcript and the
   fenced batch is extractable, against the pinned opencode version. Narrow,
   well-defined; do it as the first concrete integration step before wiring sweep.
-- `gcapi` needs two new client methods (`SessionNew`, `SessionLogs`/`SessionSubmit`)
-  over the same signed API surface as `RunOrder` — add them in Phase 3.
+- `gcapi` needs new client methods (`SessionNew`, `SessionSubmit`, and a session
+  read) over the same signed API surface as `RunOrder` — add them in Phase 3.
+
+**C2a follow-up (2026-07-27) — the return read is NOT yet pinned; resolve by
+build-and-observe, not manual spike.** Live probing found:
+- `gc session logs <id>` needs a **session_key** (a manually-created session
+  lacked one and it errored "workdir fallback ambiguous"); the on-disk `.jsonl`
+  under `/city/.gc/runtime` is the **reconciler trace**, NOT opencode output.
+- `gc session list --json` carries a **`last_output`** field per session (empty
+  for idle sessions) — a candidate structured read of the agent's final output.
+- `gc session peek --json` reads the **live tmux pane** (ephemeral; empty for
+  dormant sessions).
+None of these could be CONFIRMED to capture opencode's fenced batch, because
+producing output requires driving a session with a real prompt via grant-signed
+`gc session submit` — which is the C2 inject code itself (chicken-and-egg). So:
+**C2 builds the grant-signed `gcapi` session methods first (reusing the exact
+X-GC-City-Write signing `RunOrder` already does; find the session API paths in
+gascity `internal/api`), then the very first integration run OBSERVES which of
+{`last_output`, `gc session logs` with a real session_key, `peek`} actually holds
+the batch — and THAT observation pins the read for C4 and the emit format for C5.**
+Do not build C5 (agent emit format) until this observation is recorded here.
+
+**Return-read observation:** _(fill in from the first C2 integration run:
+which mechanism holds the batch, and the exact read call)_
 
 ---
 
