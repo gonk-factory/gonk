@@ -31,6 +31,15 @@ type sweepDeps struct {
 	Store beadstore.Store
 	Log   *slog.Logger
 
+	// Apply is the WRITE side of pkg/glab the v2 broker uses to apply a
+	// validated proposed-effects batch under the bot PAT. Only the broker path
+	// (a running record with a SessionID for a ported trigger) uses it.
+	// Satisfied by *glab.Client.
+	Apply brokerApplier
+	// PackDir is the baked pack root (/opt/gonk/pack) the broker reads
+	// effect-shape.toml from. Defaulted in withDefaults.
+	PackDir string
+
 	// BotUsername authenticates the marker-carrying comment (a human quoting
 	// the marker must not satisfy the gate).
 	BotUsername string
@@ -57,6 +66,9 @@ func (d *sweepDeps) withDefaults() sweepDeps {
 	}
 	if out.SpendDeadline <= 0 {
 		out.SpendDeadline = 60 * time.Second
+	}
+	if out.PackDir == "" {
+		out.PackDir = "/opt/gonk/pack"
 	}
 	return out
 }
@@ -125,11 +137,36 @@ func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
 	signals.Aborted = aborted
 
 	if !signals.ArtifactUnknown && !signals.Aborted {
-		present, unknown, _ := artifactPresent(ctx, d.GL, d.BotUsername, kind, rec.ProjectID, rec.IssueIID, rec.BeadID)
-		if unknown {
-			signals.ArtifactUnknown = true
+		if agent, isBroker := agentForTrigger[rec.Trigger]; isBroker && rec.SessionID != "" {
+			// v2 broker: sweep itself reads+validates+applies the agent's batch,
+			// so the apply RESULT is the artifact signal -- no re-read of GitLab.
+			// (A running record with no SessionID is a pre-v2 bead; it falls to
+			// the artifactPresent path below.)
+			applied, violation, aerr := applyBrokerBatch(ctx, d, agent, rec)
+			switch {
+			case aerr != nil:
+				// Could not read the session or load our shape: an UNKNOWN.
+				// Uncertainty must not escalate (AD-6) -- classify as such.
+				signals.ArtifactUnknown = true
+				d.Log.Warn("sweep: broker batch read/apply error", "bead", rec.BeadAnchor, "err", aerr)
+			case applied:
+				signals.ArtifactPresent = true
+			default:
+				// Present-but-invalid or no batch: nothing applied. The bead
+				// falls to the ladder (spend>0 => escalate/needs-human; else
+				// retry). Record the violation for observability.
+				if violation != "" {
+					d.Log.Warn("sweep: triage batch rejected, applied nothing",
+						"bead", rec.BeadAnchor, "violation", violation)
+				}
+			}
 		} else {
-			signals.ArtifactPresent = present
+			present, unknown, _ := artifactPresent(ctx, d.GL, d.BotUsername, kind, rec.ProjectID, rec.IssueIID, rec.BeadID)
+			if unknown {
+				signals.ArtifactUnknown = true
+			} else {
+				signals.ArtifactPresent = present
+			}
 		}
 	}
 
