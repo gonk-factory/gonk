@@ -161,19 +161,11 @@ if [ ! -f "${GONK_LITELLM_KEY_FILE}" ]; then
 	exit 1
 fi
 
-# glab auth for the direct-post path: the triage prompt has opencode read the
-# issue and post the comment via glab. glab honours GITLAB_HOST + GITLAB_TOKEN.
-# (v2: the broker posts and the agent holds no GitLab token.)
-# GONK_BOT_TOKEN is STATIC pod env, same reasoning as the LiteLLM key.
-_bot="${GONK_BOT_TOKEN:-${GC_WEBHOOK_ARG_BOT_TOKEN:-}}"
-if [ -n "${_bot}" ]; then
-	export GITLAB_HOST="${GITLAB_HOST:-${GONK_GITLAB_HOST:-gitlab.orac.local}}"
-	export GITLAB_TOKEN="${GITLAB_TOKEN:-${_bot}}"
-	log "configured glab for ${GITLAB_HOST}"
-else
-	log "no bot token -- glab is unauthenticated; the triage comment will not post"
-fi
-unset _bot
+# NO forge credentials in the agent pod (broker design, spec 9/10). The agent
+# never talks to GitLab: the broker reads the issue and posts the triage comment
+# on its behalf. So there is deliberately no glab auth here, and the pod holds no
+# GONK_BOT_TOKEN / GITLAB_HOST / GITLAB_TOKEN. Its only secret is the LiteLLM
+# virtual key materialized above.
 
 OVERLAY_PATH="${GONK_OPENCODE_OVERLAY:-/etc/gonk/overlay/opencode.json}"
 mkdir -p "$(dirname "${OVERLAY_PATH}")"
