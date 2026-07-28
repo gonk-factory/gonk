@@ -69,7 +69,11 @@ type Record struct {
 	// `running` record once this is non-zero: a zero value means "still
 	// running, nothing to do this tick", not "ended at the epoch".
 	SessionEndedAt time.Time
-	UpdatedAt      time.Time
+	// SessionID is the Gas City session id (from `gc session new`) the broker
+	// dispatched for this bead; stamped at inject, read by sweep to locate the
+	// returned effects batch. Empty on pre-broker records.
+	SessionID string
+	UpdatedAt time.Time
 }
 
 type Store interface {
