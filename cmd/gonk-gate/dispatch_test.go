@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,6 +48,9 @@ func baseDispatchArgs() dispatchArgs {
 	}
 }
 
+// The formula pour path is still live for triggers not yet ported to the v2
+// broker (scaffold, mention). This asserts it hands the formula EXACTLY what
+// meter said. (Triage is ported -- see TestDispatchCreatesTriageSessionOnRun.)
 func TestDispatchPoursOnRun(t *testing.T) {
 	gc := gcapitest.New(t)
 	store := beadstore.NewMemory()
@@ -57,17 +61,22 @@ func TestDispatchPoursOnRun(t *testing.T) {
 		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 	}}
 
+	args := baseDispatchArgs()
+	args.Trigger = "scaffold" // a non-ported trigger still pours its formula
 	code := runDispatch(context.Background(), dispatchDeps{
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store,
-		Args: baseDispatchArgs(),
+		Args: args,
 	})
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
 
-	// It poured the TRIGGER'S formula-order, exactly once.
-	if len(gc.Poured) != 1 || gc.Poured[0].Order != "gonk-triage" {
-		t.Fatalf("poured = %+v, want one gonk-triage", gc.Poured)
+	// It poured the TRIGGER'S formula-order, exactly once -- and created no session.
+	if len(gc.Created) != 0 {
+		t.Fatalf("a non-ported trigger must not create a broker session: %+v", gc.Created)
+	}
+	if len(gc.Poured) != 1 || gc.Poured[0].Order != "gonk-scaffold" {
+		t.Fatalf("poured = %+v, want one gonk-scaffold", gc.Poured)
 	}
 	// And it handed the formula EXACTLY what meter said -- the rung, the model, the
 	// reservation, the key_ref, and atags VERBATIM. Meter mints the metadata; the
@@ -97,6 +106,72 @@ func TestDispatchPoursOnRun(t *testing.T) {
 	}
 }
 
+// C2 (the triage broker): on a `run`, the triage trigger no longer pours the
+// gonk-triage formula -- it creates the triage AGENT session directly, stamps a
+// unique, re-sling-stable alias (the correlation key recorded on the bead), and
+// injects the rendered prompt as the session's initial message. The prompt
+// carries meter's model + attribution as marker lines (the entrypoint parses
+// them), references the issue, instructs the fenced proposed-effects batch, and
+// forbids any external API call (the pod holds no forge creds). No formula, so
+// #4668's formula-var drop is moot.
+func TestDispatchCreatesTriageSessionOnRun(t *testing.T) {
+	gc := gcapitest.New(t)
+	store := beadstore.NewMemory()
+	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "some-model-from-the-catalog",
+		Attempt: 1, ReservationID: "rsv-1",
+		Metadata: map[string]string{"gonk_project": "group/repo", "gonk_rung": "cheap"},
+		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
+	}}
+
+	code := runDispatch(context.Background(), dispatchDeps{
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store,
+		Args: baseDispatchArgs(),
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+
+	// It created exactly one triage agent session, and poured no formula.
+	if len(gc.Poured) != 0 {
+		t.Fatalf("the broker path must NOT pour a formula: %+v", gc.Poured)
+	}
+	if len(gc.Created) != 1 {
+		t.Fatalf("created = %+v, want exactly one triage session", gc.Created)
+	}
+	cs := gc.Created[0]
+	if cs.Kind != "agent" || cs.Name != "triage" || !cs.Async {
+		t.Fatalf("created session = %+v, want kind=agent name=triage async=true", cs)
+	}
+	// The alias is the correlation marker: deterministic, colon-free (bead
+	// anchors have colons; aliases forbid them), attempt-suffixed so a re-sling
+	// never collides with the prior attempt's session.
+	const wantAlias = "gonk.triage.p42.i3.a1"
+	if cs.Alias != wantAlias {
+		t.Fatalf("alias = %q, want %q", cs.Alias, wantAlias)
+	}
+	// The prompt carries the per-session marker lines the entrypoint parses...
+	if !strings.Contains(cs.Message, "<!-- gonk:model:some-model-from-the-catalog -->") {
+		t.Fatalf("prompt missing model marker:\n%s", cs.Message)
+	}
+	if !strings.Contains(cs.Message, `"gonk_rung":"cheap"`) {
+		t.Fatalf("prompt missing attribution metadata marker:\n%s", cs.Message)
+	}
+	// ...references the issue, instructs the fenced batch, forbids external calls.
+	if !strings.Contains(cs.Message, "!3") || !strings.Contains(cs.Message, "group/repo") {
+		t.Fatalf("prompt missing issue reference:\n%s", cs.Message)
+	}
+	if !strings.Contains(cs.Message, "GONK_BATCH_START") || !strings.Contains(cs.Message, "GONK_BATCH_END") {
+		t.Fatalf("prompt missing batch sentinels:\n%s", cs.Message)
+	}
+
+	// The alias is recorded on the bead so sweep can read the session back.
+	rec, _, _ := store.Get(context.Background(), "gonk:42:issue:3")
+	if rec.State != beadstore.StateRunning || rec.SessionID != wantAlias || rec.Rung != "cheap" || rec.Attempt != 1 {
+		t.Fatalf("record = %+v", rec)
+	}
+}
+
 // Every pour targets a formula order (gonk-triage/gonk-scaffold/gonk-mention).
 // Gas City's graphv2.PrepareInvocation hard-rejects a caller-supplied vars map
 // that contains the key "bead_id" (or "convoy_id", or the deprecated alias
@@ -113,9 +188,11 @@ func TestDispatchNeverSendsAReservedFormulaVarName(t *testing.T) {
 		ReservationID: "rsv-1",
 	}}
 
+	args := baseDispatchArgs()
+	args.Trigger = "scaffold" // guards the still-live formula pour path
 	code := runDispatch(context.Background(), dispatchDeps{
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
-		Args: baseDispatchArgs(),
+		Args: args,
 	})
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
@@ -195,26 +272,39 @@ func TestDispatchStopsOnDeny(t *testing.T) {
 // unmetered. See "The two call sites MUST agree" at the top of this plan.
 func TestDispatchAlwaysDecidesEvenWhenVarsCarryARung(t *testing.T) {
 	gc := gcapitest.New(t)
+	store := beadstore.NewMemory()
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
 		Decision: meterapi.DecisionRun, Rung: "expensive", Model: "m2", Attempt: 2, ReservationID: "rsv-2",
 		Metadata: map[string]string{"gonk_rung": "expensive"},
 	}}
-	args := baseDispatchArgs()
+	args := baseDispatchArgs()   // issue-triage -> the broker path
 	args.Rung = "cheap"          // intake's hint, from a PREVIOUS decision
 	args.ReservationID = "rsv-1" // stale
 	args.Model = "m1"            // stale
 
-	code := runDispatch(context.Background(), dispatchDeps{Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(), Args: args})
+	code := runDispatch(context.Background(), dispatchDeps{Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store, Args: args})
 	if code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
 	if fm.calls != 1 {
 		t.Fatalf("meter /decide called %d times, want exactly 1 -- THE GATE MUST ALWAYS ASK", fm.calls)
 	}
-	v := gc.Poured[0].Vars
-	if v["rung"] != "expensive" || v["reservation_id"] != "rsv-2" || v["model"] != "m2" {
-		t.Fatalf("the gate used the STALE order vars instead of meter's live answer: %+v\n"+
-			"This is the bug that makes ladder escalations spend unmetered.", v)
+	// The broker path must use meter's LIVE answer, never the stale order-var
+	// hints: the created session's model marker + the bead's recorded
+	// rung/model/reservation are meter's, and the alias carries meter's attempt.
+	if len(gc.Created) != 1 {
+		t.Fatalf("created = %+v, want one", gc.Created)
+	}
+	if !strings.Contains(gc.Created[0].Message, "<!-- gonk:model:m2 -->") {
+		t.Fatalf("session prompt used a stale model instead of meter's m2:\n%s", gc.Created[0].Message)
+	}
+	if gc.Created[0].Alias != "gonk.triage.p42.i3.a2" { // meter's Attempt=2, not a caller value
+		t.Fatalf("alias = %q, want attempt 2 from meter", gc.Created[0].Alias)
+	}
+	rec, _, _ := store.Get(context.Background(), "gonk:42:issue:3")
+	if rec.Rung != "expensive" || rec.ReservationID != "rsv-2" || rec.Model != "m2" {
+		t.Fatalf("the gate recorded the STALE order vars instead of meter's live answer: %+v\n"+
+			"This is the bug that makes ladder escalations spend unmetered.", rec)
 	}
 }
 

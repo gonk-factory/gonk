@@ -153,6 +153,16 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 		return 1
 	}
 
+	// ---- v2 broker path. -----------------------------------------------------
+	// A ported trigger (agentForTrigger) does NOT pour a formula: it creates the
+	// agent session directly, injects the rendered prompt, and correlates by a
+	// session alias recorded on the bead. The agent holds no forge creds and
+	// posts nothing; gonk-sweep validates + applies its proposed-effects batch.
+	// scaffold/mention are not ported yet and fall through to the formula pour.
+	if agent, ok := agentForTrigger[a.Trigger]; ok {
+		return runBrokerDispatch(ctx, d, agent, *dec, base)
+	}
+
 	// ---- Pour, with METER'S answer. Never with the caller's. ----------------
 	md, err := json.Marshal(dec.Metadata)
 	if err != nil {
