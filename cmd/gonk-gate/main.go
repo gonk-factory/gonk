@@ -115,8 +115,8 @@ func main() {
 		})
 	case "sweep":
 		code = runSweep(ctx, sweepDeps{
-			Meter: cfg.meter(), GC: cfg.gc(), GL: cfg.gl(), Store: cfg.store(), Log: log,
-			BotUsername: cfg.BotUsername,
+			Meter: cfg.meter(), GC: cfg.gc(), GL: cfg.gl(), Apply: cfg.gl(), Store: cfg.store(), Log: log,
+			BotUsername: cfg.BotUsername, PackDir: cfg.PackDir,
 		})
 	case "check":
 		code = runCheck(ctx, checkDeps{
@@ -171,6 +171,10 @@ type gateConfig struct {
 	// for a smoke test, never in the controller.
 	BdBin       string
 	BeadRepoDir string
+
+	// PackDir is the baked pack root the broker reads effect-shape.toml from.
+	// GONK_PACK_DIR, default /opt/gonk/pack (where Dockerfile.controller bakes it).
+	PackDir string
 }
 
 func loadGateConfig() (gateConfig, error) {
@@ -193,6 +197,7 @@ func loadGateConfig() (gateConfig, error) {
 		BotUsername:     os.Getenv("GONK_BOT_USERNAME"),
 		BdBin:           os.Getenv("GONK_BD_BIN"),
 		BeadRepoDir:     os.Getenv("GONK_BEAD_REPO_DIR"),
+		PackDir:         firstNonEmpty(os.Getenv("GONK_PACK_DIR"), "/opt/gonk/pack"),
 	}
 	if cfg.BotUsername == "" {
 		cfg.BotUsername = "gonk"

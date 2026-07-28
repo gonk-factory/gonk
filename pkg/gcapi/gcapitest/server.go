@@ -33,6 +33,10 @@ type Server struct {
 	// recorded, until the count reaches zero. The key "sessions" injects
 	// failures on the CreateSession route.
 	Fail map[string]int
+	// SessionOutputs maps a session id/alias to the last_output the fake returns
+	// for a peek GET (GetSessionOutput). A key that is absent answers 404, so a
+	// caller exercises the IsNotFound path.
+	SessionOutputs map[string]string
 
 	srv  *httptest.Server
 	mu   sync.Mutex
@@ -127,10 +131,34 @@ func parseSessionsPath(p string) (city string, ok bool) {
 	return city, true
 }
 
-// handle answers the two routes gcapi.Client speaks:
-// POST /v0/city/{cityName}/order/{name}/run  and
-// POST /v0/city/{cityName}/sessions.
+// parseSessionGetPath extracts (city, id) from "/v0/city/{city}/session/{id}",
+// mirroring the route gcapi.Client.GetSessionOutput builds.
+func parseSessionGetPath(p string) (city, id string, ok bool) {
+	const prefix = "/v0/city/"
+	const mid = "/session/"
+	rest, found := strings.CutPrefix(p, prefix)
+	if !found {
+		return "", "", false
+	}
+	city, id, found = strings.Cut(rest, mid)
+	if !found || city == "" || id == "" || strings.Contains(city, "/") {
+		return "", "", false
+	}
+	return city, id, true
+}
+
+// handle answers the routes gcapi.Client speaks:
+// POST /v0/city/{cityName}/order/{name}/run, POST /v0/city/{cityName}/sessions,
+// and GET /v0/city/{cityName}/session/{id}.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		if _, id, ok := parseSessionGetPath(r.URL.Path); ok {
+			s.handleGetSession(w, id)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.NotFound(w, r)
 		return
@@ -210,5 +238,22 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Status:      "accepted",
 		RequestID:   reqID,
 		EventCursor: "0",
+	})
+}
+
+// handleGetSession answers a peek read: it returns a SessionView carrying the
+// configured last_output for id, or 404 when no output is registered (so a
+// caller exercises GetSessionOutput's IsNotFound path).
+func (s *Server) handleGetSession(w http.ResponseWriter, id string) {
+	s.mu.Lock()
+	out, ok := s.SessionOutputs[id]
+	s.mu.Unlock()
+	if !ok {
+		http.Error(w, `{"detail":"session not found"}`, http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(gcapi.SessionView{
+		ID: id, State: "idle", LastOutput: out,
 	})
 }
