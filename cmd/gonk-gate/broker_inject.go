@@ -4,11 +4,29 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
 	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi"
+	"gitlab.orac.local/agentic/gonk-project/pkg/glab"
 	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
 )
+
+// issueReader is the sliver of pkg/glab the broker's inject needs: read the
+// issue the controller is about to triage. Because the agent pod holds NO forge
+// credentials (the broker's whole point), the agent cannot fetch the issue
+// itself -- the CONTROLLER fetches it here (with its own PAT) and splices the
+// context into the prompt. Satisfied by *glab.Client.
+type issueReader interface {
+	GetIssue(ctx context.Context, projectID, issueIID int64) (*glab.Issue, error)
+}
+
+// maxIssueBodyBytes caps the issue description spliced into the prompt. An issue
+// body is untrusted, caller-controlled input of unbounded size; it must not be
+// able to blow the model's context or the session-create request body. Over-cap
+// bodies are truncated with an explicit marker (§11 OQ5).
+const maxIssueBodyBytes = 8 << 10 // 8 KiB
 
 // agentForTrigger maps a trigger to the broker AGENT that handles it. A trigger
 // in this set is dispatched via the v2 broker: dispatch creates the agent
@@ -52,17 +70,24 @@ func brokerSessionAlias(projectID, issueIID int64, attempt int) string {
 // external API: with the broker, the agent has no forge credentials, so it must
 // not (and cannot) post anything itself.
 //
-// NOTE (Task 4.1): the issue's body and current labels are NOT yet injected
-// here. Because the pod has no forge creds it cannot fetch them itself, so a
-// working triage needs the controller to fetch them (with its own PAT) and
-// splice them into this prompt. That is the next increment; this function is the
-// seam. The exact emit wording may be tightened after C2's first live run
-// confirms the fenced batch survives the GetSession(peek) read (C5).
-func renderTriagePrompt(project string, issueIID int64, model, metadataJSON string) string {
+// The issue's title/body/labels are injected as issueContext (built by
+// buildIssueContext from a controller-side fetch) because the pod cannot fetch
+// them itself. issueContext is empty only when the fetch was unavailable or
+// failed -- a degraded, reference-only prompt. The exact emit wording may be
+// tightened after C2's first live run confirms the fenced batch survives the
+// GetSession(peek) read (C5).
+func renderTriagePrompt(project string, issueIID int64, model, metadataJSON, issueContext string) string {
+	context := issueContext
+	if strings.TrimSpace(context) == "" {
+		context = "(issue context unavailable -- triage from the issue reference alone)"
+	}
 	return fmt.Sprintf(`<!-- gonk:model:%s -->
 <!-- gonk:meta:%s -->
 
-Triage GitLab issue !%d in project `+"`%s`"+`.
+Triage GitLab issue !%d in project `+"`%s`"+`. Here is the issue, already
+fetched for you -- do NOT fetch anything yourself:
+
+%s
 
 Decide the labels (each prefixed `+"`gonk::`"+`) and one short triage comment: a
 brief analysis of what the issue asks for, with anything genuinely ambiguous
@@ -78,7 +103,49 @@ GONK_BATCH_START
 GONK_BATCH_END
 
 Emit exactly one comment effect and zero or more label effects. Nothing after
-GONK_BATCH_END.`, model, metadataJSON, issueIID, project)
+GONK_BATCH_END.`, model, metadataJSON, issueIID, project, context)
+}
+
+// buildIssueContext fetches the issue and renders its title/labels/body into the
+// prompt-embeddable block, with the body size-capped. It is best-effort: on any
+// error (no reader configured, forge unreachable, issue gone) it returns "" and
+// a non-nil err for the caller to log -- dispatch proceeds with a reference-only
+// prompt rather than failing the whole run over a context fetch.
+func buildIssueContext(ctx context.Context, r issueReader, projectID, issueIID int64) (string, error) {
+	if r == nil {
+		return "", fmt.Errorf("no issue reader configured")
+	}
+	iss, err := r.GetIssue(ctx, projectID, issueIID)
+	if err != nil {
+		return "", err
+	}
+	body := capBody(iss.Description, maxIssueBodyBytes)
+	labels := "(none)"
+	if len(iss.Labels) > 0 {
+		labels = strings.Join(iss.Labels, ", ")
+	}
+	return fmt.Sprintf("Title: %s\nState: %s\nCurrent labels: %s\n\n%s",
+		iss.Title, iss.State, labels, body), nil
+}
+
+// capBody truncates an untrusted issue body to at most max bytes, appending a
+// visible marker so the agent (and a human reading the transcript) knows the
+// body was cut. Truncation backs up to a rune boundary so the block stays valid
+// UTF-8 (a multibyte rune may straddle max).
+func capBody(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := s[:max]
+	for len(cut) > 0 {
+		r, size := utf8.DecodeLastRuneInString(cut)
+		if r == utf8.RuneError && size <= 1 {
+			cut = cut[:len(cut)-1] // a partial/continuation byte at the cut point
+			continue
+		}
+		break
+	}
+	return fmt.Sprintf("%s\n\n[... issue body truncated by gonk: over %d bytes ...]", cut, max)
 }
 
 // runBrokerDispatch is the v2 broker's inject step: create the agent session,
@@ -95,7 +162,17 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 		return 1
 	}
 	alias := brokerSessionAlias(a.ProjectID, a.IssueIID, dec.Attempt)
-	prompt := renderTriagePrompt(a.Project, a.IssueIID, dec.Model, string(md))
+
+	// Fetch the issue context controller-side (the pod has no forge creds).
+	// Best-effort: a fetch failure degrades to a reference-only prompt rather
+	// than failing the run -- a re-sling can try again, and the agent still has
+	// the issue reference.
+	issueContext, err := buildIssueContext(ctx, d.Forge, a.ProjectID, a.IssueIID)
+	if err != nil {
+		d.Log.Warn("triage context fetch failed; injecting reference-only prompt",
+			"err", err, "bead", a.BeadAnchor, "issue", a.IssueIID)
+	}
+	prompt := renderTriagePrompt(a.Project, a.IssueIID, dec.Model, string(md), issueContext)
 
 	if _, err := d.GC.CreateSession(ctx, gcapi.CreateSessionRequest{
 		Kind:    "agent",

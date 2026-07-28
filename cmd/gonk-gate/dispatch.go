@@ -58,6 +58,11 @@ type dispatchDeps struct {
 	Meter *meterAPI // gonk-gate's thin wrapper over pkg/meterapi (see meter.go)
 	GC    *gcapi.Client
 	Store beadstore.Store
+	// Forge reads the issue the broker is about to triage, so the controller can
+	// splice its context into the injected prompt (the agent pod has no forge
+	// creds). Optional: nil (or a fetch failure) degrades to a reference-only
+	// prompt. Only the broker path uses it. Satisfied by *glab.Client.
+	Forge issueReader
 	Log   *slog.Logger
 	Args  dispatchArgs
 }

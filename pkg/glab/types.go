@@ -107,11 +107,12 @@ type MROptions struct {
 }
 
 type Issue struct {
-	IID    int64    `json:"iid"`
-	Title  string   `json:"title"`
-	State  string   `json:"state"`
-	Labels []string `json:"labels"`
-	WebURL string   `json:"web_url"`
+	IID         int64    `json:"iid"`
+	Title       string   `json:"title"`
+	State       string   `json:"state"`
+	Labels      []string `json:"labels"`
+	WebURL      string   `json:"web_url"`
+	Description string   `json:"description"` // the issue body; the broker splices it into the triage prompt
 }
 
 type IssueOptions struct {
