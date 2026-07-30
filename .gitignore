@@ -6,6 +6,9 @@
 # git worktrees for plan execution
 /.worktrees/
 
+# graphify knowledge-graph build output (regenerable: /graphify . --update)
+/graphify-out/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
