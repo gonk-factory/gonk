@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
@@ -174,12 +175,20 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 	}
 	prompt := renderTriagePrompt(a.Project, a.IssueIID, dec.Model, string(md), issueContext)
 
+	// NOTE the create carries NO Message. It used to, and that is exactly the
+	// bug: `message` becomes template_overrides.initial_message, which Gas City
+	// puts on runtime.Config.PromptSuffix for the PROVIDER to append to the
+	// launch command -- and internal/runtime/k8s never does (tmux/acp/herdr/
+	// t3bridge do). Every gonk session is a k8s pod, so the prompt was silently
+	// dropped and the agent sat at opencode's idle splash forever, never
+	// finishing and so never being swept. The prompt is delivered by the submit
+	// below instead. Do NOT "restore" Message here once upstream (gonk-drf) is
+	// fixed: that would deliver the prompt twice.
 	if _, err := d.GC.CreateSession(ctx, gcapi.CreateSessionRequest{
-		Kind:    "agent",
-		Name:    agent,
-		Alias:   alias,
-		Message: prompt,
-		Async:   true,
+		Kind:  "agent",
+		Name:  agent,
+		Alias: alias,
+		Async: true,
 	}); err != nil {
 		if gcapi.IsNotFound(err) {
 			// A 404 on the sessions route is a wrong GONK_CITY (OD-1) or an
@@ -188,6 +197,16 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 			return 2
 		}
 		d.Log.Error("create-session failed", "agent", agent, "alias", alias, "err", err)
+		return 1
+	}
+
+	if err := deliverPrompt(ctx, d, alias, prompt); err != nil {
+		// An undelivered prompt is a real failure, not a warning: the session
+		// exists but will idle forever and never be swept. Fail as infra so the
+		// existing re-sling decides again and retries with a fresh
+		// attempt-suffixed alias.
+		d.Log.Error("prompt delivery failed; session will idle -- re-sling will retry",
+			"agent", agent, "alias", alias, "bead", a.BeadAnchor, "err", err)
 		return 1
 	}
 
@@ -202,4 +221,44 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 	d.Log.Info("triage session created", "agent", agent, "alias", alias,
 		"bead", a.BeadAnchor, "rung", dec.Rung, "attempt", dec.Attempt)
 	return 0
+}
+
+// deliverPrompt submits the rendered prompt to the freshly-created session,
+// retrying while the supervisor still answers 404.
+//
+// The retry is not defensive padding: agent-kind create is ALWAYS-async
+// upstream (202 with no session id), so the session genuinely does not exist
+// for the first attempts -- a live run took ~31s from create to session start.
+// Only a 404 is retried; any other error is terminal, because retrying a 401 or
+// a 5xx here just burns the order's timeout budget.
+//
+// The bound must stay comfortably inside gonk-dispatch's own 120s order timeout
+// (pack/orders/gonk-dispatch.toml) -- overshooting it turns a recoverable
+// delivery failure into a killed order with no bead update.
+func deliverPrompt(ctx context.Context, d dispatchDeps, alias, prompt string) error {
+	attempts, backoff := d.SubmitAttempts, d.SubmitBackoff
+	if attempts <= 0 {
+		attempts = defaultSubmitAttempts
+	}
+	if backoff == nil {
+		backoff = defaultSubmitBackoff
+	}
+	var err error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff(i)):
+			}
+		}
+		err = d.GC.SubmitSession(ctx, alias, prompt, gcapi.SubmitIntentDefault)
+		if err == nil {
+			return nil
+		}
+		if !gcapi.IsNotFound(err) {
+			return err
+		}
+	}
+	return fmt.Errorf("session %q never materialized for prompt delivery after %d attempts: %w", alias, attempts, err)
 }

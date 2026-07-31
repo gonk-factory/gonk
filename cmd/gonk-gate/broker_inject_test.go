@@ -46,7 +46,12 @@ func TestDispatchInjectsIssueContext(t *testing.T) {
 	if len(gc.Created) != 1 {
 		t.Fatalf("created = %+v, want one", gc.Created)
 	}
-	msg := gc.Created[0].Message
+	// The prompt rides the SUBMIT, not the create: k8s-backed sessions never
+	// receive template_overrides.initial_message (gonk-u1p.1 / gonk-drf).
+	if len(gc.Submitted) != 1 {
+		t.Fatalf("submitted = %+v, want one", gc.Submitted)
+	}
+	msg := gc.Submitted[0].Message
 	for _, want := range []string{
 		"fetched for you",
 		"Login button does nothing on Safari", // title
@@ -79,8 +84,11 @@ func TestDispatchProceedsWhenContextFetchFails(t *testing.T) {
 	if len(gc.Created) != 1 {
 		t.Fatalf("created = %+v, want one even on a context miss", gc.Created)
 	}
-	if !strings.Contains(gc.Created[0].Message, "issue context unavailable") {
-		t.Fatalf("prompt should carry the degraded marker:\n%s", gc.Created[0].Message)
+	if len(gc.Submitted) != 1 {
+		t.Fatalf("submitted = %+v, want one even on a context miss", gc.Submitted)
+	}
+	if !strings.Contains(gc.Submitted[0].Message, "issue context unavailable") {
+		t.Fatalf("prompt should carry the degraded marker:\n%s", gc.Submitted[0].Message)
 	}
 }
 

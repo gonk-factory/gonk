@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
 	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi"
@@ -65,7 +66,28 @@ type dispatchDeps struct {
 	Forge issueReader
 	Log   *slog.Logger
 	Args  dispatchArgs
+	// SubmitAttempts / SubmitBackoff bound the wait for an async-created session
+	// to exist before its prompt can be submitted (see deliverPrompt). Zero
+	// values mean the production defaults; tests set them to keep the retry
+	// path fast and deterministic.
+	SubmitAttempts int
+	SubmitBackoff  func(attempt int) time.Duration
 }
+
+const (
+	// defaultSubmitAttempts x defaultSubmitBackoff must stay well inside
+	// gonk-dispatch's 120s order timeout. A live run took ~31s from create to
+	// session start, so 20 x 3s = 60s leaves room for both the session to
+	// appear and the rest of the order to finish.
+	defaultSubmitAttempts = 20
+	submitBackoffInterval = 3 * time.Second
+)
+
+// defaultSubmitBackoff is deliberately flat, not exponential: we are waiting on
+// a roughly fixed pod-start latency, not backing off a struggling server, and an
+// exponential curve would spend most of the budget asleep past the moment the
+// session actually appeared.
+func defaultSubmitBackoff(int) time.Duration { return submitBackoffInterval }
 
 // runDispatch is GATE 2: the only code path in gonk that pours a formula.
 //
