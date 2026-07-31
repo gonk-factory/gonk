@@ -37,6 +37,14 @@ type Server struct {
 	// for a peek GET (GetSessionOutput). A key that is absent answers 404, so a
 	// caller exercises the IsNotFound path.
 	SessionOutputs map[string]string
+	// SessionRunning marks a session as STILL WORKING. A static output map
+	// cannot express "not finished yet", which is exactly the state the broker
+	// read path was getting wrong (gonk-u1p.2): sweep polls every 30s, a triage
+	// session takes minutes, and reading a mid-flight session as "produced no
+	// batch" escalates the bead to a pricier rung while the agent is still
+	// going. An entry here answers the peek with running=true/state=running so
+	// a caller must decide what to do about it.
+	SessionRunning map[string]bool
 	// Submitted is append-only, in request order: every accepted SubmitSession
 	// (POST /v0/city/{city}/session/{id}/submit). gonk delivers the agent's
 	// prompt here rather than as create-time initial_message, because Gas City's
@@ -340,13 +348,18 @@ func (s *Server) handleSubmitSession(w http.ResponseWriter, r *http.Request, id 
 func (s *Server) handleGetSession(w http.ResponseWriter, id string) {
 	s.mu.Lock()
 	out, ok := s.SessionOutputs[id]
+	running := s.SessionRunning[id]
 	s.mu.Unlock()
 	if !ok {
 		http.Error(w, `{"detail":"session not found"}`, http.StatusNotFound)
 		return
 	}
+	state := "idle"
+	if running {
+		state = "running"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(gcapi.SessionView{
-		ID: id, State: "idle", LastOutput: out,
+		ID: id, State: state, Running: running, LastOutput: out,
 	})
 }

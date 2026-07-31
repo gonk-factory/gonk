@@ -21,6 +21,12 @@ const (
 	// live run confirms this is enough (or resizes it) -- see the plan's
 	// "Return-read observation".
 	brokerPeekLines = 400
+	// sessionStateRunning is gascity's SessionView.State for a session that is
+	// still working. Checked alongside the boolean Running so a server that
+	// populates only one of the two still reads as unfinished -- failing "safe"
+	// here means declining to judge, which costs one more 30s sweep, whereas
+	// failing the other way escalates a live session onto a pricier rung.
+	sessionStateRunning = "running"
 )
 
 // brokerApplier is the WRITE side of pkg/glab the broker uses to apply a
@@ -74,20 +80,12 @@ func extractBatch(output string) ([]byte, bool) {
 // first write. The single comment (shape guarantees exactly one) is applied
 // first and MUST succeed; labels follow and a label failure does not un-apply
 // the comment (it is already the human-visible triage result).
-func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadstore.Record) (applied bool, violation string, err error) {
+// The caller fetches the SessionView (see brokerSessionView) and passes it in,
+// so the finished/not-finished decision and this read share ONE fetch and
+// cannot disagree.
+func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadstore.Record, view *gcapi.SessionView) (applied bool, violation string, err error) {
 	if d.Apply == nil {
 		return false, "", fmt.Errorf("broker applier not configured")
-	}
-
-	view, gerr := d.GC.GetSessionOutput(ctx, rec.SessionID, brokerPeekLines)
-	if gerr != nil {
-		if gcapi.IsNotFound(gerr) {
-			// No session for this alias: the async create may have failed, or the
-			// session never materialized. There is nothing to read -- treat it as
-			// "produced no batch" (re-sling is correct), not an unknown.
-			return false, "no session for alias " + rec.SessionID, nil
-		}
-		return false, "", gerr // transport error -> unknown -> retry
 	}
 
 	raw, ok := extractBatch(view.LastOutput)
@@ -145,4 +143,32 @@ func targetIID(e effects.Effect, rec beadstore.Record) int64 {
 		return e.TargetIID
 	}
 	return rec.IssueIID
+}
+
+// brokerSessionView fetches the session the bead's alias names and decides
+// whether there is anything to judge yet.
+//
+// It returns (nil, nil) when the session is STILL RUNNING: that is not a
+// failure and not an absent artifact, it is "not knowable yet". gonk-sweep is a
+// 30s cooldown order while a triage session takes minutes, so this is the
+// expected answer for most of a session's life -- and treating it as "the agent
+// produced no batch" would report a gate failure and re-sling the bead onto a
+// more expensive rung while the original agent is still working (gonk-u1p.2).
+//
+// A 404 is NOT running-ness: no session exists for this alias at all (the async
+// create failed, or it was reaped), so there genuinely is nothing coming. That
+// is returned as a view with no output, which the caller judges as "no batch"
+// -- a re-sling is the correct response there.
+func brokerSessionView(ctx context.Context, d sweepDeps, rec beadstore.Record) (*gcapi.SessionView, error) {
+	view, err := d.GC.GetSessionOutput(ctx, rec.SessionID, brokerPeekLines)
+	if err != nil {
+		if gcapi.IsNotFound(err) {
+			return &gcapi.SessionView{ID: rec.SessionID}, nil
+		}
+		return nil, err // transport error -> unknown -> retry next tick
+	}
+	if view.Running || view.State == sessionStateRunning {
+		return nil, nil
+	}
+	return view, nil
 }
