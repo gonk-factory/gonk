@@ -37,6 +37,31 @@ type Server struct {
 	// for a peek GET (GetSessionOutput). A key that is absent answers 404, so a
 	// caller exercises the IsNotFound path.
 	SessionOutputs map[string]string
+	// Submitted is append-only, in request order: every accepted SubmitSession
+	// (POST /v0/city/{city}/session/{id}/submit). gonk delivers the agent's
+	// prompt here rather than as create-time initial_message, because Gas City's
+	// k8s runtime provider never composes PromptSuffix onto the launch command
+	// (gonk-u1p.1 / upstream gonk-drf), so dispatch tests assert the prompt
+	// against this rather than against Created.
+	Submitted []SubmittedMessage
+	// SubmitNotFoundUntil maps an id/alias to a count of remaining 404s: each
+	// matching submit decrements the count and answers 404 instead of being
+	// recorded, until it reaches zero. Create is async upstream, so the session
+	// legitimately may not exist for the first few submits -- this models that
+	// window so a caller's retry loop is exercised rather than assumed.
+	SubmitNotFoundUntil map[string]int
+	// SubmitAttemptsSeen counts EVERY submit request reaching the fake, including
+	// ones answered with a 404 or an injected failure. A caller that treats a
+	// non-404 as retryable would burn its whole budget here, so a test can assert
+	// the attempt count rather than only the outcome.
+	SubmitAttemptsSeen int
+	// SubmitFail is a count of remaining 401s on the submit route, decremented
+	// per request. Unlike SubmitNotFoundUntil these are NOT the async-create
+	// window -- they model a hard rejection that must be terminal, not retried.
+	// 401 specifically (not 5xx) because gcapi.Client retries 5xx internally, so
+	// a 5xx count would measure the CLIENT's retries; a 4xx is terminal there,
+	// which makes SubmitAttemptsSeen isolate the CALLER's own retry loop.
+	SubmitFail int
 
 	srv  *httptest.Server
 	mu   sync.Mutex
@@ -57,6 +82,14 @@ type CreatedSession struct {
 	Alias   string
 	Message string
 	Async   bool
+}
+
+// SubmittedMessage is one accepted SubmitSession request, recorded verbatim so
+// a test can assert which session got which prompt, with which intent.
+type SubmittedMessage struct {
+	ID      string
+	Message string
+	Intent  string
 }
 
 // New starts an httptest.Server backing a fresh, empty fake supervisor.
@@ -147,8 +180,26 @@ func parseSessionGetPath(p string) (city, id string, ok bool) {
 	return city, id, true
 }
 
+// parseSessionSubmitPath extracts (city, id) from
+// "/v0/city/{city}/session/{id}/submit", mirroring the route
+// gcapi.Client.SubmitSession builds. Checked BEFORE the bare session path so a
+// submit is not mistaken for a read of a session literally named "{id}/submit".
+func parseSessionSubmitPath(p string) (city, id string, ok bool) {
+	const suffix = "/submit"
+	rest, found := strings.CutSuffix(p, suffix)
+	if !found {
+		return "", "", false
+	}
+	city, id, ok = parseSessionGetPath(rest)
+	if !ok || strings.Contains(id, "/") {
+		return "", "", false
+	}
+	return city, id, true
+}
+
 // handle answers the routes gcapi.Client speaks:
 // POST /v0/city/{cityName}/order/{name}/run, POST /v0/city/{cityName}/sessions,
+// POST /v0/city/{cityName}/session/{id}/submit,
 // and GET /v0/city/{cityName}/session/{id}.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
@@ -161,6 +212,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodPost {
 		http.NotFound(w, r)
+		return
+	}
+	if _, id, ok := parseSessionSubmitPath(r.URL.Path); ok {
+		s.handleSubmitSession(w, r, id)
 		return
 	}
 	if _, ok := parseSessionsPath(r.URL.Path); ok {
@@ -239,6 +294,44 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		RequestID:   reqID,
 		EventCursor: "0",
 	})
+}
+
+// handleSubmitSession mirrors gascity's async submit: it records the message
+// and answers 202. SubmitNotFoundUntil[id] answers 404 first (not recorded),
+// modelling the window between an async create being accepted and the session
+// actually existing.
+func (s *Server) handleSubmitSession(w http.ResponseWriter, r *http.Request, id string) {
+	var body struct {
+		Message string `json:"message"`
+		Intent  string `json:"intent"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	s.SubmitAttemptsSeen++
+	if s.SubmitFail > 0 {
+		s.SubmitFail--
+		s.mu.Unlock()
+		http.Error(w, "injected rejection", http.StatusUnauthorized)
+		return
+	}
+	if s.SubmitNotFoundUntil[id] > 0 {
+		s.SubmitNotFoundUntil[id]--
+		s.mu.Unlock()
+		http.Error(w, `{"detail":"session not found"}`, http.StatusNotFound)
+		return
+	}
+	s.next++
+	reqID := fmt.Sprintf("req-%d", s.next)
+	s.Submitted = append(s.Submitted, SubmittedMessage{ID: id, Message: body.Message, Intent: body.Intent})
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "request_id": reqID})
 }
 
 // handleGetSession answers a peek read: it returns a SessionView carrying the

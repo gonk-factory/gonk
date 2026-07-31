@@ -150,7 +150,13 @@ func TestDispatchCreatesTriageSessionOnRun(t *testing.T) {
 	if cs.Alias != wantAlias {
 		t.Fatalf("alias = %q, want %q", cs.Alias, wantAlias)
 	}
-	// The prompt carries the per-session marker lines the entrypoint parses...
+	// The prompt is delivered by the submit (the create-time inject is dropped
+	// by the k8s provider -- gonk-u1p.1), and carries the per-session marker
+	// lines the entrypoint parses...
+	if len(gc.Submitted) != 1 {
+		t.Fatalf("submitted = %+v, want one", gc.Submitted)
+	}
+	cs.Message = gc.Submitted[0].Message
 	if !strings.Contains(cs.Message, "<!-- gonk:model:some-model-from-the-catalog -->") {
 		t.Fatalf("prompt missing model marker:\n%s", cs.Message)
 	}
@@ -295,8 +301,11 @@ func TestDispatchAlwaysDecidesEvenWhenVarsCarryARung(t *testing.T) {
 	if len(gc.Created) != 1 {
 		t.Fatalf("created = %+v, want one", gc.Created)
 	}
-	if !strings.Contains(gc.Created[0].Message, "<!-- gonk:model:m2 -->") {
-		t.Fatalf("session prompt used a stale model instead of meter's m2:\n%s", gc.Created[0].Message)
+	if len(gc.Submitted) != 1 {
+		t.Fatalf("submitted = %+v, want one", gc.Submitted)
+	}
+	if !strings.Contains(gc.Submitted[0].Message, "<!-- gonk:model:m2 -->") {
+		t.Fatalf("session prompt used a stale model instead of meter's m2:\n%s", gc.Submitted[0].Message)
 	}
 	if gc.Created[0].Alias != "gonk.triage.p42.i3.a2" { // meter's Attempt=2, not a caller value
 		t.Fatalf("alias = %q, want attempt 2 from meter", gc.Created[0].Alias)
