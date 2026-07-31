@@ -69,12 +69,10 @@ func TestSweepBrokerAppliesValidBatch(t *testing.T) {
 	gl.AddIssue(p.ID, 3, "opened")
 
 	gc := gcapitest.New(t)
-	gc.SessionOutputs = map[string]string{
-		"gonk.triage.p42.i3.a1": "thinking...\n" +
-			"GONK_BATCH_START\n" +
-			`{"effects":[{"kind":"comment","body":"Looks like a Safari-only CSS bug."},{"kind":"label","add":["gonk::bug","gonk::frontend"]}]}` +
-			"\nGONK_BATCH_END\n",
-	}
+	gc.FinishSession("gonk.triage.p42.i3.a1", "thinking...\n"+
+		"GONK_BATCH_START\n"+
+		`{"effects":[{"kind":"comment","body":"Looks like a Safari-only CSS bug."},{"kind":"label","add":["gonk::bug","gonk::frontend"]}]}`+
+		"\nGONK_BATCH_END\n")
 	applier := &recordingApplier{}
 
 	store := beadstore.NewMemory()
@@ -130,11 +128,9 @@ func TestSweepBrokerRejectsOutOfShapeBatch(t *testing.T) {
 	gl.AddIssue(p.ID, 3, "opened")
 
 	gc := gcapitest.New(t)
-	gc.SessionOutputs = map[string]string{
-		"gonk.triage.p42.i3.a1": "GONK_BATCH_START\n" +
-			`{"effects":[{"kind":"comment","body":"one"},{"kind":"comment","body":"two"}]}` +
-			"\nGONK_BATCH_END",
-	}
+	gc.FinishSession("gonk.triage.p42.i3.a1", "GONK_BATCH_START\n"+
+		`{"effects":[{"kind":"comment","body":"one"},{"kind":"comment","body":"two"}]}`+
+		"\nGONK_BATCH_END")
 	applier := &recordingApplier{}
 
 	store := beadstore.NewMemory()
@@ -174,9 +170,7 @@ func TestSweepBrokerNoBatchAppliesNothing(t *testing.T) {
 	gl.AddIssue(p.ID, 3, "opened")
 
 	gc := gcapitest.New(t)
-	gc.SessionOutputs = map[string]string{
-		"gonk.triage.p42.i3.a1": "I could not decide. Sorry.",
-	}
+	gc.FinishSession("gonk.triage.p42.i3.a1", "I could not decide. Sorry.")
 	applier := &recordingApplier{}
 
 	store := beadstore.NewMemory()

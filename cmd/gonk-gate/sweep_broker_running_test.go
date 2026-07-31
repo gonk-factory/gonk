@@ -28,10 +28,7 @@ func TestSweepBrokerDoesNotJudgeAStillRunningSession(t *testing.T) {
 
 	gc := gcapitest.New(t)
 	// The agent is mid-flight: output so far, no fence yet.
-	gc.SessionOutputs = map[string]string{
-		"gonk.triage.p42.i3.a1": "reading the issue...\nthinking...\n",
-	}
-	gc.SessionRunning = map[string]bool{"gonk.triage.p42.i3.a1": true}
+	gc.RunSession("gonk.triage.p42.i3.a1", "reading the issue...\nthinking...\n")
 	applier := &recordingApplier{}
 
 	store := beadstore.NewMemory()
@@ -82,11 +79,9 @@ func TestSweepBrokerJudgesABeadThatWasNeverStampedEnded(t *testing.T) {
 	gl.AddIssue(p.ID, 3, "opened")
 
 	gc := gcapitest.New(t)
-	gc.SessionOutputs = map[string]string{
-		"gonk.triage.p42.i3.a1": "GONK_BATCH_START\n" +
-			`{"effects":[{"kind":"comment","body":"CSV export times out over 10k rows."},{"kind":"label","add":["gonk::bug"]}]}` +
-			"\nGONK_BATCH_END\n",
-	}
+	gc.FinishSession("gonk.triage.p42.i3.a1", "GONK_BATCH_START\n"+
+		`{"effects":[{"kind":"comment","body":"CSV export times out over 10k rows."},{"kind":"label","add":["gonk::bug"]}]}`+
+		"\nGONK_BATCH_END\n")
 	// Session is NOT running -> finished -> judgeable.
 	applier := &recordingApplier{}
 
