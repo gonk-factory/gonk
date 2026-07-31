@@ -39,9 +39,10 @@ change.
 - **Found by**: Claude Code session, 2026-07-31. Bead `gonk-drf`; root cause on `gonk-u1p.1`.
 - **Posted by**: ⚠️ **the agent, in error.** The owner's standing preference is to
   review and post upstream reports themselves; this was filed before that was
-  known. The owner added a clarifying comment to the issue. Recorded here rather
-  than quietly fixed, because the whole point of the preference is that
-  provenance is visible.
+  known. The owner added a clarifying comment to the issue and chose to **leave
+  it as filed** — the content is verified and the maintainers have seen it, so
+  refiling would be noise. Recorded here rather than quietly fixed, because the
+  whole point of the preference is that provenance stays visible.
 - **Impact on gonk**: total. No gonk agent had ever received a prompt; sessions
   booted at opencode's idle splash and never finished. Worked around in
   `pkg/gcapi/submit.go` by delivering the prompt as a second signed call.
