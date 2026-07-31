@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -33,18 +34,14 @@ type Server struct {
 	// recorded, until the count reaches zero. The key "sessions" injects
 	// failures on the CreateSession route.
 	Fail map[string]int
-	// SessionOutputs maps a session id/alias to the last_output the fake returns
-	// for a peek GET (GetSessionOutput). A key that is absent answers 404, so a
-	// caller exercises the IsNotFound path.
-	SessionOutputs map[string]string
-	// SessionRunning marks a session as STILL WORKING. A static output map
-	// cannot express "not finished yet", which is exactly the state the broker
-	// read path was getting wrong (gonk-u1p.2): sweep polls every 30s, a triage
-	// session takes minutes, and reading a mid-flight session as "produced no
-	// batch" escalates the bead to a pricier rung while the agent is still
-	// going. An entry here answers the peek with running=true/state=running so
-	// a caller must decide what to do about it.
-	SessionRunning map[string]bool
+	// sessions is the session LIFECYCLE, keyed by id/alias. A session is a state
+	// machine, not a string: three separate production bugs (gonk-u1p.1/.2/.5)
+	// lived in the create -> prompt -> finish -> read chain and NONE was visible
+	// to the flat output map this replaces, because a map cannot express "not
+	// finished yet" -- the exact state the broker read path was getting wrong.
+	// Drive it with RunSession/FinishSession/CrashSession; an unknown key 404s,
+	// so a caller still exercises the IsNotFound path.
+	sessions map[string]*fakeSession
 	// Submitted is append-only, in request order: every accepted SubmitSession
 	// (POST /v0/city/{city}/session/{id}/submit). gonk delivers the agent's
 	// prompt here rather than as create-time initial_message, because Gas City's
@@ -211,8 +208,13 @@ func parseSessionSubmitPath(p string) (city, id string, ok bool) {
 // and GET /v0/city/{cityName}/session/{id}.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
+		if _, id, ok := parseSessionTranscriptPath(r.URL.Path); ok {
+			s.handleGetTranscript(w, id)
+			return
+		}
 		if _, id, ok := parseSessionGetPath(r.URL.Path); ok {
-			s.handleGetSession(w, id)
+			n, _ := strconv.Atoi(r.URL.Query().Get("peekLines"))
+			s.handleGetSession(w, id, n)
 			return
 		}
 		http.NotFound(w, r)
@@ -293,6 +295,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	s.Created = append(s.Created, CreatedSession{
 		Kind: body.Kind, Name: body.Name, Alias: body.Alias, Message: body.Message, Async: body.Async,
 	})
+	// An accepted agent create spawns the session in the background, so it comes
+	// into existence RUNNING with no output. A test moves it on with
+	// FinishSession/CrashSession -- nothing here ever produces a finished
+	// session implicitly, which is what makes the lifecycle assertable.
+	if body.Alias != "" {
+		s.putSessionLocked(body.Alias, SessionRunning, "")
+	}
 	s.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -345,21 +354,179 @@ func (s *Server) handleSubmitSession(w http.ResponseWriter, r *http.Request, id 
 // handleGetSession answers a peek read: it returns a SessionView carrying the
 // configured last_output for id, or 404 when no output is registered (so a
 // caller exercises GetSessionOutput's IsNotFound path).
-func (s *Server) handleGetSession(w http.ResponseWriter, id string) {
+func (s *Server) handleGetSession(w http.ResponseWriter, id string, peekLines int) {
 	s.mu.Lock()
-	out, ok := s.SessionOutputs[id]
-	running := s.SessionRunning[id]
+	sess, ok := s.sessions[id]
+	var state, out string
+	var running bool
+	if ok {
+		state, out, running = string(sess.State), sess.output, sess.State == SessionRunning
+	}
 	s.mu.Unlock()
 	if !ok {
 		http.Error(w, `{"detail":"session not found"}`, http.StatusNotFound)
 		return
 	}
-	state := "idle"
-	if running {
-		state = "running"
-	}
+	// peek is a PREVIEW WINDOW, not the transcript: it returns at most the last
+	// peekLines lines. Modelling the truncation is the point -- the production
+	// read path pulls the effects batch out of a 400-line preview, so a batch
+	// pushed past the window by a chatty agent is silently unreadable
+	// (gonk-u1p.3). A fake that always returned everything could not show that.
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(gcapi.SessionView{
-		ID: id, State: state, Running: running, LastOutput: out,
+		ID: id, State: state, Running: running, LastOutput: tailLines(out, peekLines),
 	})
+}
+
+// --- session lifecycle -------------------------------------------------------
+
+// SessionState is the slice of gascity's session lifecycle gonk reacts to. The
+// values match gascity's SessionView.State strings, because production reads
+// them (broker_apply.go compares against "running").
+type SessionState string
+
+const (
+	// SessionRunning is a session that is still working. Its output is not the
+	// final word and must not be judged -- see gonk-u1p.2.
+	SessionRunning SessionState = "running"
+	// SessionStopped is a session that finished normally. Only now is its
+	// output the output of record.
+	SessionStopped SessionState = "stopped"
+	// SessionCrashed is a session that died. Upstream emits session.crashed
+	// alongside session.stopped; it is terminal too, but carries no batch.
+	SessionCrashed SessionState = "crashed"
+)
+
+type fakeSession struct {
+	State  SessionState
+	output string
+}
+
+// putSessionLocked upserts a session. Caller holds s.mu.
+func (s *Server) putSessionLocked(id string, state SessionState, output string) {
+	if s.sessions == nil {
+		s.sessions = map[string]*fakeSession{}
+	}
+	sess, ok := s.sessions[id]
+	if !ok {
+		sess = &fakeSession{}
+		s.sessions[id] = sess
+	}
+	sess.State = state
+	if output != "" {
+		sess.output = output
+	}
+}
+
+// RunSession puts a session in the RUNNING state with the partial output it has
+// produced so far. Use it to assert that a caller declines to judge mid-flight;
+// a test that wants a judgeable session wants FinishSession instead.
+func (s *Server) RunSession(id, partialOutput string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.putSessionLocked(id, SessionRunning, partialOutput)
+}
+
+// FinishSession transitions a session to STOPPED with its final output -- the
+// moment its output becomes the output of record and may be judged. It
+// upserts, so a test may declare an already-finished session without creating
+// one first.
+func (s *Server) FinishSession(id, output string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.putSessionLocked(id, SessionStopped, output)
+}
+
+// CrashSession transitions a session to CRASHED: terminal, so it is judgeable,
+// but it produced no batch.
+func (s *Server) CrashSession(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.putSessionLocked(id, SessionCrashed, "")
+}
+
+// SessionStateOf reports a session's current state ("" when unknown), so a
+// round-trip test can assert the lifecycle it drove actually happened.
+func (s *Server) SessionStateOf(id string) SessionState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.sessions[id]; ok {
+		return sess.State
+	}
+	return ""
+}
+
+// handleGetTranscript answers GET /v0/city/{city}/session/{id}/transcript with
+// the session's FULL output, untruncated.
+//
+// This is deliberately different from the peek preview above: upstream's
+// transcript is the output of record and resolves even for closed sessions
+// (resolveSessionIDAllowClosedWithConfig), whereas peek returns a bounded
+// window. gonk currently reads the batch out of the window (gonk-u1p.3), so the
+// gap between these two handlers is exactly the bug surface.
+func (s *Server) handleGetTranscript(w http.ResponseWriter, id string) {
+	s.mu.Lock()
+	sess, ok := s.sessions[id]
+	var out, state string
+	if ok {
+		out, state = sess.output, string(sess.State)
+	}
+	s.mu.Unlock()
+	if !ok {
+		http.Error(w, `{"detail":"session not found"}`, http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id": id, "state": state, "transcript": out,
+	})
+}
+
+// parseSessionTranscriptPath extracts (city, id) from
+// "/v0/city/{city}/session/{id}/transcript".
+func parseSessionTranscriptPath(p string) (city, id string, ok bool) {
+	rest, found := strings.CutSuffix(p, "/transcript")
+	if !found {
+		return "", "", false
+	}
+	city, id, ok = parseSessionGetPath(rest)
+	if !ok || strings.Contains(id, "/") {
+		return "", "", false
+	}
+	return city, id, true
+}
+
+// tailLines returns at most the last n lines of s, modelling peek's preview
+// window. n <= 0 means "no limit" (the server default when the caller omits
+// peekLines).
+func tailLines(s string, n int) string {
+	if n <= 0 || s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
+// GetJSON does a raw GET against the fake and decodes the JSON body. It exists
+// for routes gonk does not yet have a client method for (the transcript --
+// gonk-u1p.3), so the fake's own behaviour stays testable without pulling an
+// unused method into pkg/gcapi.
+func (s *Server) GetJSON(t *testing.T, path string) map[string]any {
+	t.Helper()
+	resp, err := http.Get(s.srv.URL + path)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: status %d", path, resp.StatusCode)
+	}
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("GET %s: decode: %v", path, err)
+	}
+	return out
 }

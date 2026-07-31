@@ -2,6 +2,8 @@ package gcapitest_test
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi"
@@ -90,5 +92,82 @@ func TestFakeClientIsWiredToTheFake(t *testing.T) {
 	}
 	if _, err := gcapi.New(s.URL(), "gonk-city").RunOrder(context.Background(), "gonk-dispatch", nil); err != nil {
 		t.Fatalf("a client built directly against the fake's URL should work identically: %v", err)
+	}
+}
+
+// The fake models peek as a bounded PREVIEW WINDOW while the transcript route
+// returns the whole output. That divergence is not incidental: production reads
+// the effects batch out of a 400-line peek (gonk-u1p.3), so a batch pushed past
+// the window by a chatty agent is silently unreadable -- the bead is judged "no
+// batch" and re-slung onto a pricier rung. A fake that always returned
+// everything could not express the bug, so it could never be tested.
+func TestFakePeekIsAWindowButTranscriptIsWhole(t *testing.T) {
+	s := gcapitest.New(t)
+	c := s.Client("gonk-city")
+
+	// A batch buried under far more chatter than a small peek window admits.
+	var b strings.Builder
+	for i := 0; i < 50; i++ {
+		fmt.Fprintf(&b, "tool call %d\n", i)
+	}
+	b.WriteString("GONK_BATCH_START\n{\"effects\":[]}\nGONK_BATCH_END\n")
+	s.FinishSession("alias-1", b.String())
+
+	// A window smaller than the chatter still shows the TAIL, so a batch at the
+	// very end survives...
+	view, err := c.GetSessionOutput(context.Background(), "alias-1", 5)
+	if err != nil {
+		t.Fatalf("GetSessionOutput = %v", err)
+	}
+	if strings.Contains(view.LastOutput, "tool call 0") {
+		t.Fatalf("peek returned the whole output, so it is not modelling a window:\n%s", view.LastOutput)
+	}
+	if !strings.Contains(view.LastOutput, "GONK_BATCH_START") {
+		t.Fatalf("a trailing batch should survive a tail window:\n%s", view.LastOutput)
+	}
+
+	// ...but a window of 2 lines cuts into the fence itself, which is exactly
+	// the silent-truncation failure mode.
+	view, err = c.GetSessionOutput(context.Background(), "alias-1", 2)
+	if err != nil {
+		t.Fatalf("GetSessionOutput = %v", err)
+	}
+	if strings.Contains(view.LastOutput, "GONK_BATCH_START") {
+		t.Fatalf("a 2-line window must not contain the whole fence:\n%s", view.LastOutput)
+	}
+
+	// The transcript route is the output of record: untruncated, fence intact.
+	body := s.GetJSON(t, "/v0/city/gonk-city/session/alias-1/transcript")
+	tr, _ := body["transcript"].(string)
+	if !strings.Contains(tr, "tool call 0") || !strings.Contains(tr, "GONK_BATCH_END") {
+		t.Fatalf("transcript should be whole:\n%s", tr)
+	}
+	if got, _ := body["state"].(string); got != string(gcapitest.SessionStopped) {
+		t.Fatalf("transcript state = %q, want stopped", got)
+	}
+}
+
+// A running session is not judgeable and must be distinguishable from one that
+// finished with no output -- the distinction a flat output map could not make.
+func TestFakeDistinguishesRunningFromFinished(t *testing.T) {
+	s := gcapitest.New(t)
+	c := s.Client("gonk-city")
+
+	s.RunSession("alias-1", "thinking...\n")
+	view, err := c.GetSessionOutput(context.Background(), "alias-1", 0)
+	if err != nil {
+		t.Fatalf("GetSessionOutput = %v", err)
+	}
+	if !view.Running || view.State != string(gcapitest.SessionRunning) {
+		t.Fatalf("running session read as running=%v state=%q", view.Running, view.State)
+	}
+
+	s.FinishSession("alias-1", "done\n")
+	view, err = c.GetSessionOutput(context.Background(), "alias-1", 0)
+	if err != nil {
+		t.Fatalf("GetSessionOutput = %v", err)
+	}
+	if view.Running || view.State != string(gcapitest.SessionStopped) {
+		t.Fatalf("stopped session read as running=%v state=%q", view.Running, view.State)
 	}
 }
