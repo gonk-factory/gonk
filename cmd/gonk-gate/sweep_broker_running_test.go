@@ -156,3 +156,42 @@ func TestSweepBrokerFindsABatchBuriedBeyondThePeekWindow(t *testing.T) {
 		t.Fatalf("wrong comment body:\n%s", applier.notes[0].Body)
 	}
 }
+
+// A session that never finishes must still be REAPED. Declining to judge a
+// running session (gonk-u1p.2) is right, but it cannot mean waiting forever:
+// a wedged agent -- one that never received its prompt, say -- would hold its
+// reservation until TTL and leave the bead in StateRunning permanently, with
+// no outcome ever reported. The reservation IS the deadline.
+func TestSweepBrokerReapsARunningSessionPastItsReservation(t *testing.T) {
+	gl := glabtest.New(t)
+	gl.Me = glab.User{ID: 1, Username: "gonk"}
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	gl.AddIssue(p.ID, 3, "opened")
+
+	gc := gcapitest.New(t)
+	// Still running, and it has produced nothing -- a wedged agent.
+	gc.RunSession("gonk.triage.p42.i3.a1", "")
+	applier := &recordingApplier{}
+
+	store := beadstore.NewMemory()
+	rec := brokerRunningRecord(p.ID)
+	rec.ReservationExpiresAt = time.Now().Add(-time.Minute) // expired a minute ago
+	_ = store.Put(context.Background(), rec)
+	fm := &fakeOutcomeMeter{outcomeNext: "retry"}
+
+	code := runSweep(context.Background(), sweepDeps{
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), GL: gl.Client(), Apply: applier,
+		Store: store, BotUsername: "gonk", PackDir: repoPackDir,
+		SpendPollInterval: time.Millisecond, SpendDeadline: 10 * time.Millisecond,
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if reqs := fm.requests(); len(reqs) != 1 {
+		t.Fatalf("outcomes = %+v, want exactly one -- a session past its reservation must be reaped, not waited on", reqs)
+	}
+	// Nothing to apply: it produced no batch.
+	if len(applier.notes) != 0 {
+		t.Fatalf("applied something from a wedged session: %+v", applier.notes)
+	}
+}
