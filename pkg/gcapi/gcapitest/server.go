@@ -209,7 +209,7 @@ func parseSessionSubmitPath(p string) (city, id string, ok bool) {
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		if _, id, ok := parseSessionTranscriptPath(r.URL.Path); ok {
-			s.handleGetTranscript(w, id)
+			s.handleGetTranscript(w, id, r.URL.Query().Get("tail") == "0")
 			return
 		}
 		if _, id, ok := parseSessionGetPath(r.URL.Path); ok {
@@ -464,7 +464,7 @@ func (s *Server) SessionStateOf(id string) SessionState {
 // (resolveSessionIDAllowClosedWithConfig), whereas peek returns a bounded
 // window. gonk currently reads the batch out of the window (gonk-u1p.3), so the
 // gap between these two handlers is exactly the bug surface.
-func (s *Server) handleGetTranscript(w http.ResponseWriter, id string) {
+func (s *Server) handleGetTranscript(w http.ResponseWriter, id string, allSegments bool) {
 	s.mu.Lock()
 	sess, ok := s.sessions[id]
 	var out, state string
@@ -476,9 +476,28 @@ func (s *Server) handleGetTranscript(w http.ResponseWriter, id string) {
 		http.Error(w, `{"detail":"session not found"}`, http.StatusNotFound)
 		return
 	}
+	// Shape mirrors gascity's sessionTranscriptGetResponse EXACTLY: the
+	// transcript is structured turns, not a flat string. Inventing a convenient
+	// shape here would make the test pass and production fail -- the precise
+	// class of bug this fake exists to catch. Output is emitted as one assistant
+	// turn, which is enough to carry the fenced batch.
+	//
+	// tail: "0 returns all segments"; omitting it returns only the most recent.
+	// The fake honours the distinction so a caller that forgets tail=0 sees a
+	// truncated transcript rather than silently getting everything.
+	turns := []map[string]any{}
+	if out != "" {
+		if allSegments {
+			turns = append(turns, map[string]any{"role": "assistant", "text": out})
+		} else {
+			turns = append(turns, map[string]any{"role": "assistant", "text": tailLines(out, 1)})
+		}
+	}
+	_ = state
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"id": id, "state": state, "transcript": out,
+		"id": id, "template": "triage", "provider": "open-code",
+		"format": "conversation", "turns": turns,
 	})
 }
 

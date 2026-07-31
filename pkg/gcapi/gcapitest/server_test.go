@@ -137,13 +137,19 @@ func TestFakePeekIsAWindowButTranscriptIsWhole(t *testing.T) {
 	}
 
 	// The transcript route is the output of record: untruncated, fence intact.
-	body := s.GetJSON(t, "/v0/city/gonk-city/session/alias-1/transcript")
-	tr, _ := body["transcript"].(string)
-	if !strings.Contains(tr, "tool call 0") || !strings.Contains(tr, "GONK_BATCH_END") {
-		t.Fatalf("transcript should be whole:\n%s", tr)
+	// Read through the real client so the fake's SHAPE is exercised too -- the
+	// response is structured turns, not a flat string, and a fake that invented
+	// a convenient shape would pass here and fail in production.
+	tr, err := c.GetSessionTranscript(context.Background(), "alias-1")
+	if err != nil {
+		t.Fatalf("GetSessionTranscript = %v", err)
 	}
-	if got, _ := body["state"].(string); got != string(gcapitest.SessionStopped) {
-		t.Fatalf("transcript state = %q, want stopped", got)
+	if len(tr.Turns) == 0 {
+		t.Fatal("transcript returned no turns")
+	}
+	whole := tr.Text()
+	if !strings.Contains(whole, "tool call 0") || !strings.Contains(whole, "GONK_BATCH_END") {
+		t.Fatalf("transcript should be whole:\n%s", whole)
 	}
 }
 
@@ -169,5 +175,37 @@ func TestFakeDistinguishesRunningFromFinished(t *testing.T) {
 	}
 	if view.Running || view.State != string(gcapitest.SessionStopped) {
 		t.Fatalf("stopped session read as running=%v state=%q", view.Running, view.State)
+	}
+}
+
+// tail=0 means "all segments" upstream; omitting it returns only the most
+// recent. GetSessionTranscript must send tail=0 -- a caller that forgets it
+// reads a fragment and believes it read everything, which is the same silent
+// truncation the peek window causes, one layer up.
+func TestFakeTranscriptRequiresTailZeroForEverything(t *testing.T) {
+	s := gcapitest.New(t)
+	c := s.Client("gonk-city")
+	s.FinishSession("alias-1", "line one\nline two\nGONK_BATCH_START\n{}\nGONK_BATCH_END")
+
+	// The client asks for tail=0 and therefore sees all of it.
+	tr, err := c.GetSessionTranscript(context.Background(), "alias-1")
+	if err != nil {
+		t.Fatalf("GetSessionTranscript = %v", err)
+	}
+	if !strings.Contains(tr.Text(), "line one") {
+		t.Fatalf("client did not request every segment (tail=0):\n%s", tr.Text())
+	}
+
+	// Without it, the fake returns only the last segment -- proving the fake
+	// actually distinguishes the two, so the assertion above has teeth.
+	body := s.GetJSON(t, "/v0/city/gonk-city/session/alias-1/transcript")
+	turns, _ := body["turns"].([]any)
+	if len(turns) != 1 {
+		t.Fatalf("turns = %v, want one", turns)
+	}
+	first, _ := turns[0].(map[string]any)
+	text, _ := first["text"].(string)
+	if strings.Contains(text, "line one") {
+		t.Fatalf("a tail-less read should NOT return everything:\n%s", text)
 	}
 }

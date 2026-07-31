@@ -88,9 +88,28 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 		return false, "", fmt.Errorf("broker applier not configured")
 	}
 
-	raw, ok := extractBatch(view.LastOutput)
+	// The BATCH comes from the transcript, not from view.LastOutput: peek is a
+	// bounded preview window (brokerPeekLines), so an agent that keeps talking
+	// after the fence pushes it out of view and the batch reads as absent --
+	// silently costing a re-sling onto a pricier rung with the agent's work
+	// thrown away (gonk-u1p.3). The view is still what told us the session
+	// finished; it is simply the wrong place to read the output of record from.
+	tr, terr := d.GC.GetSessionTranscript(ctx, rec.SessionID)
+	if terr != nil {
+		if gcapi.IsNotFound(terr) {
+			return false, "no session for alias " + rec.SessionID, nil
+		}
+		return false, "", terr // transport error -> unknown -> retry
+	}
+	if tr.Pagination != nil && tr.Pagination.HasMore {
+		// We read a fragment. Say so rather than judging on it: "no batch"
+		// derived from a partial transcript is the same silent loss in a new
+		// costume. Unknown -> retry, never escalate.
+		return false, "", fmt.Errorf("transcript for %q is paginated; refusing to judge a partial read", rec.SessionID)
+	}
+	raw, ok := extractBatch(tr.Text())
 	if !ok {
-		return false, "no GONK_BATCH_START/END fence in session output", nil
+		return false, "no GONK_BATCH_START/END fence in session transcript", nil
 	}
 	batch, perr := effects.ParseBatch(raw)
 	if perr != nil {

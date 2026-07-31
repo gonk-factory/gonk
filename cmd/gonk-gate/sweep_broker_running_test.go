@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,5 +105,54 @@ func TestSweepBrokerJudgesABeadThatWasNeverStampedEnded(t *testing.T) {
 	}
 	if len(applier.labels) != 1 || applier.labels[0].Label != "gonk::bug" {
 		t.Fatalf("labels = %+v, want gonk::bug", applier.labels)
+	}
+}
+
+// gonk-u1p.3. The batch must be read from the session's TRANSCRIPT, not from
+// the bounded peek preview. An agent that keeps talking after the fence pushes
+// it out of a brokerPeekLines window; reading from the window then reports "no
+// batch" and re-slings the bead onto a more expensive rung, having thrown away
+// work the agent actually did.
+//
+// The chatter here is deliberately longer than brokerPeekLines, so this test
+// fails against a peek-based read and passes against a transcript-based one.
+func TestSweepBrokerFindsABatchBuriedBeyondThePeekWindow(t *testing.T) {
+	gl := glabtest.New(t)
+	gl.Me = glab.User{ID: 1, Username: "gonk"}
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	gl.AddIssue(p.ID, 3, "opened")
+
+	var out strings.Builder
+	out.WriteString("GONK_BATCH_START\n" +
+		`{"effects":[{"kind":"comment","body":"Unbounded export query."},{"kind":"label","add":["gonk::bug"]}]}` +
+		"\nGONK_BATCH_END\n")
+	// ...and then the agent rambles well past the preview window.
+	for i := 0; i < brokerPeekLines+50; i++ {
+		fmt.Fprintf(&out, "post-batch chatter line %d\n", i)
+	}
+
+	gc := gcapitest.New(t)
+	gc.FinishSession("gonk.triage.p42.i3.a1", out.String())
+	applier := &recordingApplier{}
+
+	store := beadstore.NewMemory()
+	rec := brokerRunningRecord(p.ID)
+	_ = store.Put(context.Background(), rec)
+	fm := &fakeOutcomeMeter{outcomeNext: "done"}
+
+	code := runSweep(context.Background(), sweepDeps{
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), GL: gl.Client(), Apply: applier,
+		Store: store, BotUsername: "gonk", PackDir: repoPackDir,
+		SpendPollInterval: time.Millisecond, SpendDeadline: 10 * time.Millisecond,
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if len(applier.notes) != 1 {
+		t.Fatalf("notes = %+v, want the batch found despite %d lines of trailing chatter",
+			applier.notes, brokerPeekLines+50)
+	}
+	if !strings.Contains(applier.notes[0].Body, "Unbounded export query") {
+		t.Fatalf("wrong comment body:\n%s", applier.notes[0].Body)
 	}
 }
