@@ -124,6 +124,13 @@ func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
 		return
 	}
 
+	// The reservation is the DEADLINE, and it is computed BEFORE the
+	// still-running check below: declining to judge a working session must not
+	// mean waiting on it forever. A wedged agent -- one that never received its
+	// prompt, say -- would otherwise hold its reservation to TTL and leave the
+	// bead in StateRunning permanently, with no outcome ever reported.
+	expired := !rec.ReservationExpiresAt.IsZero() && d.Now().After(rec.ReservationExpiresAt)
+
 	var view *gcapi.SessionView
 	if broker {
 		v, err := brokerSessionView(ctx, d, rec)
@@ -133,25 +140,31 @@ func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
 			d.Log.Warn("sweep: could not read broker session", "bead", rec.BeadAnchor, "err", err)
 			return
 		}
-		if v == nil {
-			// Still working. Nothing to judge, nothing to report -- exactly like
-			// the v1 guard above. Reporting an outcome here would re-sling a live
-			// session onto a pricier rung every 30s.
+		switch {
+		case v == nil && !expired:
+			// Still working, still inside its reservation. Nothing to judge and
+			// nothing to report -- exactly like the v1 guard above. Reporting an
+			// outcome here would re-sling a live session every 30s.
 			d.Log.Info("sweep: session still running; nothing to judge yet",
 				"bead", rec.BeadAnchor, "session", rec.SessionID)
 			return
-		}
-		view = v
-		// We have now OBSERVED the finish, which is what the stamp means. It
-		// feeds gatherSpend's staleness comparison below.
-		if rec.SessionEndedAt.IsZero() {
-			rec.SessionEndedAt = d.Now()
+		case v == nil:
+			// Running PAST its reservation: wedged. Reap it. view stays nil so
+			// no batch is read, and ReservationExpired is what classifies it.
+			d.Log.Warn("sweep: session still running past its reservation; reaping rather than waiting",
+				"bead", rec.BeadAnchor, "session", rec.SessionID,
+				"reservation_expired_at", rec.ReservationExpiresAt)
+		default:
+			view = v
+			// We have now OBSERVED the finish, which is what the stamp means. It
+			// feeds gatherSpend's staleness comparison below.
+			if rec.SessionEndedAt.IsZero() {
+				rec.SessionEndedAt = d.Now()
+			}
 		}
 	}
 
-	signals := gate.Signals{
-		ReservationExpired: !rec.ReservationExpiresAt.IsZero() && d.Now().After(rec.ReservationExpiresAt),
-	}
+	signals := gate.Signals{ReservationExpired: expired}
 
 	kind := artifactKindForTrigger[rec.Trigger]
 	// Aborted (a human closed the bead) is only meaningful for an issue-scoped
@@ -169,7 +182,11 @@ func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
 	signals.Aborted = aborted
 
 	if !signals.ArtifactUnknown && !signals.Aborted {
-		if broker {
+		switch {
+		case broker && view == nil:
+			// Reaped mid-flight above: there is no finished session to read a
+			// batch from, and ReservationExpired already settles Classify.
+		case broker:
 			// v2 broker: sweep itself reads+validates+applies the agent's batch,
 			// so the apply RESULT is the artifact signal -- no re-read of GitLab.
 			// (A running record with no SessionID is a pre-v2 bead; it falls to
@@ -192,7 +209,7 @@ func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
 						"bead", rec.BeadAnchor, "violation", violation)
 				}
 			}
-		} else {
+		default:
 			present, unknown, _ := artifactPresent(ctx, d.GL, d.BotUsername, kind, rec.ProjectID, rec.IssueIID, rec.BeadID)
 			if unknown {
 				signals.ArtifactUnknown = true
