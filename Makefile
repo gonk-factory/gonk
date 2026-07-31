@@ -5,10 +5,17 @@ include images/versions.env
 # (Task 5 Step 5 / Task 7 Step 4).
 GONK_TAG ?= $(GONK_VERSION)-$(shell git rev-parse --short=12 HEAD)
 
+# TARGETARCH: the Dockerfiles fail closed if this is unset rather than guess
+# which architecture to fetch prebuilt binaries for (opencode/glab/bd/dolt).
+# podman does auto-populate it, but pass it explicitly so a cross-build is a
+# visible flag rather than an accident of which machine you ran make on.
+# Defaults to THIS host's arch, which is what a local `make images` wants.
+TARGETARCH ?= $(shell go env GOARCH)
+
 # PODMAN, and --network=host: the CNI bridge is broken on this box
 # (docs/environment.md). Do not "fix" it by removing the flag.
 PODMAN := podman
-BUILD  := $(PODMAN) build --network=host
+BUILD  := $(PODMAN) build --network=host --build-arg TARGETARCH=$(TARGETARCH)
 
 .PHONY: images agent-image controller-image intake-image meter-image meter-testclock-image push pack-validate no-latest lint-pack scan
 

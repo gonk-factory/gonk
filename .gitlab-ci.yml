@@ -126,8 +126,15 @@ no-latest:
 # BUILD_TAGS=testclock to a SEPARATE `-testclock` tag and is NEVER the plain
 # meter tag (a clock a file can move must never ship as production).
 # -----------------------------------------------------------------------------
+# Arch legs. Each builds NATIVELY on a node of its own arch (see
+# homelab/ci-templates!1 for why emulation is not an option here: no binfmt
+# DaemonSet, and rootless BuildKit needs pod annotations the runner will not
+# let a job overwrite). Per-arch images are pushed as $GONK_TAG-<arch>; the
+# *-index jobs publish the real $GONK_TAG as an OCI index over them.
 .gonk-kaniko:
   stage: images
+  variables:
+    BUILD_ARCH: "amd64"
   image:
     name: gcr.io/kaniko-project/executor:v1.24.0-debug
     entrypoint: [""]
@@ -139,7 +146,9 @@ no-latest:
   # Serialize the image builds: the template pins every job to node johnny, and
   # five parallel kaniko pods there would contend for memory. One at a time gives
   # each build johnny's full headroom (and warms the shared layer cache in order).
-  resource_group: gonk-images
+  # Per-ARCH so the amd64 and arm64 pools do not serialise against each other:
+  # they run on different nodes and contend for nothing.
+  resource_group: gonk-images-$BUILD_ARCH
   before_script:
     # Same pins the Makefile uses -- one source of truth (images/versions.env).
     - set -a; . images/versions.env; set +a
@@ -153,14 +162,16 @@ no-latest:
         "$CI_REGISTRY" "$AUTH" "$INTERNAL_REGISTRY_HOST" "$AUTH" \
         > /kaniko/.docker/config.json
 
-agent-image:
+agent-image-amd64:
   extends: .gonk-kaniko
   script:
     - >-
       /kaniko/executor
       --context "$CI_PROJECT_DIR"
       --dockerfile "$CI_PROJECT_DIR/images/Dockerfile.agent"
-      --destination "$INTERNAL_REGISTRY_REPO/gonk-agent:$GONK_TAG"
+      --destination "$INTERNAL_REGISTRY_REPO/gonk-agent:$GONK_TAG-$BUILD_ARCH"
+      --custom-platform=linux/$BUILD_ARCH
+      --build-arg TARGETARCH=$BUILD_ARCH
       --build-arg GONK_TAG=$GONK_TAG
       --build-arg GO_VERSION=$GO_VERSION
       --build-arg DEBIAN_BASE=$DEBIAN_BASE
@@ -175,14 +186,16 @@ agent-image:
       --insecure-registry=$INTERNAL_REGISTRY_HOST
       --skip-tls-verify
 
-controller-image:
+controller-image-amd64:
   extends: .gonk-kaniko
   script:
     - >-
       /kaniko/executor
       --context "$CI_PROJECT_DIR"
       --dockerfile "$CI_PROJECT_DIR/images/Dockerfile.controller"
-      --destination "$INTERNAL_REGISTRY_REPO/gonk-controller:$GONK_TAG"
+      --destination "$INTERNAL_REGISTRY_REPO/gonk-controller:$GONK_TAG-$BUILD_ARCH"
+      --custom-platform=linux/$BUILD_ARCH
+      --build-arg TARGETARCH=$BUILD_ARCH
       --build-arg GONK_TAG=$GONK_TAG
       --build-arg GO_VERSION=$GO_VERSION
       --build-arg DEBIAN_BASE=$DEBIAN_BASE
@@ -197,14 +210,16 @@ controller-image:
       --insecure-registry=$INTERNAL_REGISTRY_HOST
       --skip-tls-verify
 
-intake-image:
+intake-image-amd64:
   extends: .gonk-kaniko
   script:
     - >-
       /kaniko/executor
       --context "$CI_PROJECT_DIR"
       --dockerfile "$CI_PROJECT_DIR/images/Dockerfile.intake"
-      --destination "$INTERNAL_REGISTRY_REPO/gonk-intake:$GONK_TAG"
+      --destination "$INTERNAL_REGISTRY_REPO/gonk-intake:$GONK_TAG-$BUILD_ARCH"
+      --custom-platform=linux/$BUILD_ARCH
+      --build-arg TARGETARCH=$BUILD_ARCH
       --build-arg GONK_TAG=$GONK_TAG
       --build-arg GO_VERSION=$GO_VERSION
       --build-arg DISTROLESS_BASE=$DISTROLESS_BASE
@@ -216,14 +231,16 @@ intake-image:
       --insecure-registry=$INTERNAL_REGISTRY_HOST
       --skip-tls-verify
 
-meter-image:
+meter-image-amd64:
   extends: .gonk-kaniko
   script:
     - >-
       /kaniko/executor
       --context "$CI_PROJECT_DIR"
       --dockerfile "$CI_PROJECT_DIR/images/Dockerfile.meter"
-      --destination "$INTERNAL_REGISTRY_REPO/gonk-meter:$GONK_TAG"
+      --destination "$INTERNAL_REGISTRY_REPO/gonk-meter:$GONK_TAG-$BUILD_ARCH"
+      --custom-platform=linux/$BUILD_ARCH
+      --build-arg TARGETARCH=$BUILD_ARCH
       --build-arg GONK_TAG=$GONK_TAG
       --build-arg GO_VERSION=$GO_VERSION
       --build-arg DISTROLESS_BASE=$DISTROLESS_BASE
@@ -238,14 +255,16 @@ meter-image:
 # The e2e-only testclock meter: SAME Dockerfile, BUILD_TAGS=testclock, a distinct
 # `-testclock` tag. Never the plain meter tag (Makefile meter-testclock-image;
 # test/images/servers_smoke_test.go asserts the two images differ exactly here).
-meter-testclock-image:
+meter-testclock-image-amd64:
   extends: .gonk-kaniko
   script:
     - >-
       /kaniko/executor
       --context "$CI_PROJECT_DIR"
       --dockerfile "$CI_PROJECT_DIR/images/Dockerfile.meter"
-      --destination "$INTERNAL_REGISTRY_REPO/gonk-meter:$GONK_TAG-testclock"
+      --destination "$INTERNAL_REGISTRY_REPO/gonk-meter:$GONK_TAG-testclock-$BUILD_ARCH"
+      --custom-platform=linux/$BUILD_ARCH
+      --build-arg TARGETARCH=$BUILD_ARCH
       --build-arg GONK_TAG=$GONK_TAG
       --build-arg GO_VERSION=$GO_VERSION
       --build-arg DISTROLESS_BASE=$DISTROLESS_BASE
@@ -257,6 +276,94 @@ meter-testclock-image:
       --insecure-registry=$ZOT_MIRROR
       --insecure-registry=$INTERNAL_REGISTRY_HOST
       --skip-tls-verify
+
+# -----------------------------------------------------------------------------
+# arm64 legs + index publication.
+#
+# The arm64 leg of each image, and then the job that publishes the REAL tag
+# ($GONK_TAG, no arch suffix) as an OCI image index over the two legs. Nothing
+# should ever deploy a $GONK_TAG-<arch> tag directly -- those exist only as
+# index inputs.
+#
+# Why native legs rather than one emulated multi-platform build: emulation needs
+# a privileged binfmt DaemonSet (this cluster has none) and rootless BuildKit
+# wants pod annotations the runner will not let a job overwrite. See
+# homelab/ci-templates!1.
+# -----------------------------------------------------------------------------
+.gonk-arm64:
+  variables:
+    BUILD_ARCH: "arm64"
+    KUBERNETES_NODE_SELECTOR_ARCH: "kubernetes.io/arch=arm64"
+    # bailey is the only arm64 node with build-sized headroom (127Gi; orac01-04
+    # are ~7Gi with cold image caches, which leaves build pods Pending).
+    KUBERNETES_NODE_SELECTOR_HOSTNAME: "kubernetes.io/hostname=bailey"
+    # bailey carries orac.local/gpu-only=true:NoSchedule -- without tolerating
+    # it the pod selects bailey but never lands, sitting Pending forever.
+    KUBERNETES_NODE_TOLERATIONS_GPU: "orac.local/gpu-only=true:NoSchedule"
+
+agent-image-arm64:
+  extends: [agent-image-amd64, .gonk-arm64]
+
+controller-image-arm64:
+  extends: [controller-image-amd64, .gonk-arm64]
+
+intake-image-arm64:
+  extends: [intake-image-amd64, .gonk-arm64]
+
+meter-image-arm64:
+  extends: [meter-image-amd64, .gonk-arm64]
+
+meter-testclock-image-arm64:
+  extends: [meter-testclock-image-amd64, .gonk-arm64]
+
+# GONK_TAG is computed, not static, so the tag overrides are exported in
+# before_script (which shares a shell with the template's script:) rather than
+# set as `variables:`.
+.gonk-index:
+  extends: .manifest-merge
+  stage: images
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+  before_script:
+    - set -a; . images/versions.env; set +a
+    - export GONK_TAG="${GONK_VERSION}-$(printf %s "$CI_COMMIT_SHA" | cut -c1-12)"
+    - export MULTIARCH_SOURCE_TAG="${MULTIARCH_SOURCE_TAG:-$GONK_TAG}"
+    - export MULTIARCH_TAGS="${MULTIARCH_TAGS:-$GONK_TAG}"
+
+agent-index:
+  extends: .gonk-index
+  needs: [agent-image-amd64, agent-image-arm64]
+  variables:
+    IMAGE: gonk-agent
+
+controller-index:
+  extends: .gonk-index
+  needs: [controller-image-amd64, controller-image-arm64]
+  variables:
+    IMAGE: gonk-controller
+
+intake-index:
+  extends: .gonk-index
+  needs: [intake-image-amd64, intake-image-arm64]
+  variables:
+    IMAGE: gonk-intake
+
+meter-index:
+  extends: .gonk-index
+  needs: [meter-image-amd64, meter-image-arm64]
+  variables:
+    IMAGE: gonk-meter
+
+meter-testclock-index:
+  extends: .gonk-index
+  needs: [meter-testclock-image-amd64, meter-testclock-image-arm64]
+  variables:
+    IMAGE: gonk-meter
+  before_script:
+    - set -a; . images/versions.env; set +a
+    - export GONK_TAG="${GONK_VERSION}-$(printf %s "$CI_COMMIT_SHA" | cut -c1-12)"
+    - export MULTIARCH_SOURCE_TAG="$GONK_TAG-testclock"
+    - export MULTIARCH_TAGS="$GONK_TAG-testclock"
 
 image-scan:
   stage: images

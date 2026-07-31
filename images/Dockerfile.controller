@@ -45,13 +45,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /fetch
 
+# Target architecture for the fetched binaries. podman/BuildKit auto-populate
+# TARGETARCH from the build host (verified locally); kaniko's behaviour here is
+# deliberately NOT relied upon -- CI passes it explicitly as
+# --build-arg TARGETARCH=$BUILD_ARCH. The guard below fails the build rather
+# than silently fetching amd64 binaries into an arm64 image, a mistake that
+# otherwise only surfaces as "exec format error" in a running pod (gonk-owi).
+ARG TARGETARCH
+RUN test -n "${TARGETARCH}" || (echo "TARGETARCH is unset -- refusing to guess the fetch architecture (gonk-owi)" && exit 1)
+
 ARG BD_VERSION
 RUN test -n "${BD_VERSION}" || (echo "BD_VERSION is unset" && exit 1)
-RUN curl -fsSL -o bd.tar.gz \
-      "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
-    && echo "b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34  bd.tar.gz" | sha256sum -c - \
-    && tar xzf bd.tar.gz bd \
-    && chmod +x bd
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) BD_SHA=b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34 ;; \
+      arm64) BD_SHA=e64eb6f5f998c9eae3ef9ec786f5f1c907ab3ed04fe220ebf265ca9952e21b2f ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o bd.tar.gz \
+      "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_${TARGETARCH}.tar.gz"; \
+    echo "${BD_SHA}  bd.tar.gz" | sha256sum -c -; \
+    tar xzf bd.tar.gz bd; \
+    chmod +x bd
 
 # dolt: the CLI the embedded exec:gc-beads-bd provider drives to inspect and
 # initialize the city's beads store (gonk-fsl). Fetched + checksum-verified here
@@ -60,12 +75,21 @@ RUN curl -fsSL -o bd.tar.gz \
 # deps.env / install-dolt-archive.sh at GASCITY_REF (re-verified by download).
 ARG DOLT_VERSION
 RUN test -n "${DOLT_VERSION}" || (echo "DOLT_VERSION is unset" && exit 1)
-RUN curl -fsSL -o dolt.tar.gz \
-      "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-amd64.tar.gz" \
-    && echo "15983e811341ed94e5d47fbfc41d2f57d8c7aa65eee511d25a3c3fd5477e28e7  dolt.tar.gz" | sha256sum -c - \
-    && tar xzf dolt.tar.gz dolt-linux-amd64/bin/dolt \
-    && mv dolt-linux-amd64/bin/dolt dolt \
-    && chmod +x dolt
+# NOTE dolt's tarball has an ARCH-SPECIFIC top-level directory
+# (dolt-linux-arm64/bin/dolt vs dolt-linux-amd64/bin/dolt), so the extract path
+# is parameterized too -- not just the download URL.
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) DOLT_SHA=15983e811341ed94e5d47fbfc41d2f57d8c7aa65eee511d25a3c3fd5477e28e7 ;; \
+      arm64) DOLT_SHA=3edb3e5d05889f654dca548a8b6eb367551d4418ee0be5a79d94ea1c0f40ae8d ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o dolt.tar.gz \
+      "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-${TARGETARCH}.tar.gz"; \
+    echo "${DOLT_SHA}  dolt.tar.gz" | sha256sum -c -; \
+    tar xzf dolt.tar.gz "dolt-linux-${TARGETARCH}/bin/dolt"; \
+    mv "dolt-linux-${TARGETARCH}/bin/dolt" dolt; \
+    chmod +x dolt
 
 # ---- runtime -----------------------------------------------------------------
 FROM ${DEBIAN_BASE}
