@@ -113,8 +113,40 @@ func runSweep(ctx context.Context, d sweepDeps) int {
 // session has not ended yet (SessionEndedAt is the zero value): "still
 // running" is not this tick's job.
 func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
-	if rec.SessionEndedAt.IsZero() {
+	// The v1 path has no session to consult, so it still waits for the stamp.
+	// The BROKER path does not: nothing in this tree has ever stamped
+	// SessionEndedAt (gonk-u1p.5), so gating on it skipped every broker bead
+	// forever. The live SessionView is both available and more truthful -- it is
+	// the session itself saying whether it is done.
+	agent, isBroker := agentForTrigger[rec.Trigger]
+	broker := isBroker && rec.SessionID != ""
+	if !broker && rec.SessionEndedAt.IsZero() {
 		return
+	}
+
+	var view *gcapi.SessionView
+	if broker {
+		v, err := brokerSessionView(ctx, d, rec)
+		if err != nil {
+			// Could not read the session: unknown. Try again next tick rather
+			// than classify on no information.
+			d.Log.Warn("sweep: could not read broker session", "bead", rec.BeadAnchor, "err", err)
+			return
+		}
+		if v == nil {
+			// Still working. Nothing to judge, nothing to report -- exactly like
+			// the v1 guard above. Reporting an outcome here would re-sling a live
+			// session onto a pricier rung every 30s.
+			d.Log.Info("sweep: session still running; nothing to judge yet",
+				"bead", rec.BeadAnchor, "session", rec.SessionID)
+			return
+		}
+		view = v
+		// We have now OBSERVED the finish, which is what the stamp means. It
+		// feeds gatherSpend's staleness comparison below.
+		if rec.SessionEndedAt.IsZero() {
+			rec.SessionEndedAt = d.Now()
+		}
 	}
 
 	signals := gate.Signals{
@@ -137,12 +169,12 @@ func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
 	signals.Aborted = aborted
 
 	if !signals.ArtifactUnknown && !signals.Aborted {
-		if agent, isBroker := agentForTrigger[rec.Trigger]; isBroker && rec.SessionID != "" {
+		if broker {
 			// v2 broker: sweep itself reads+validates+applies the agent's batch,
 			// so the apply RESULT is the artifact signal -- no re-read of GitLab.
 			// (A running record with no SessionID is a pre-v2 bead; it falls to
 			// the artifactPresent path below.)
-			applied, violation, aerr := applyBrokerBatch(ctx, d, agent, rec)
+			applied, violation, aerr := applyBrokerBatch(ctx, d, agent, rec, view)
 			switch {
 			case aerr != nil:
 				// Could not read the session or load our shape: an UNKNOWN.
