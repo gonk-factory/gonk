@@ -39,6 +39,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /fetch
 
+# Target architecture for the fetched binaries. podman/BuildKit auto-populate
+# TARGETARCH from the build host (verified locally); kaniko's behaviour here is
+# deliberately NOT relied upon -- CI passes it explicitly as
+# --build-arg TARGETARCH=$BUILD_ARCH. The guard below fails the build rather
+# than silently fetching amd64 binaries into an arm64 image, a mistake that
+# otherwise only surfaces as "exec format error" in a running pod (gonk-owi).
+ARG TARGETARCH
+RUN test -n "${TARGETARCH}" || (echo "TARGETARCH is unset -- refusing to guess the fetch architecture (gonk-owi)" && exit 1)
+
 ARG OPENCODE_VERSION
 RUN test -n "${OPENCODE_VERSION}" || (echo "OPENCODE_VERSION is unset -- refusing to build an agent on a floating opencode (OD-3)" && exit 1)
 # opencode ships a self-contained static Linux binary release (no npm/node
@@ -49,27 +58,48 @@ RUN test -n "${OPENCODE_VERSION}" || (echo "OPENCODE_VERSION is unset -- refusin
 # design intent is agent-pod egress to GitLab and LiteLLM ONLY -- an opencode
 # that fetched its provider adapter from the npm registry at session start
 # would need a third egress target this pack never asked for.
-RUN curl -fsSL -o opencode.tar.gz \
-      "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz" \
-    && echo "60f27b2679f00a511b6539f97e02448afaf58d9c66e2448285ea0c517ca84583  opencode.tar.gz" | sha256sum -c - \
-    && tar xzf opencode.tar.gz \
-    && chmod +x opencode
+# NOTE opencode calls the x86-64 asset "x64", not "amd64" -- TARGETARCH cannot
+# be interpolated into the filename directly. Checksums are per-arch; both were
+# computed from the real published artifacts at this exact tag.
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) OC_ARCH=x64;   OC_SHA=60f27b2679f00a511b6539f97e02448afaf58d9c66e2448285ea0c517ca84583 ;; \
+      arm64) OC_ARCH=arm64; OC_SHA=da0a631174eba380b2a1d51f9d364fa3812da433e72743c72471d4b5da59c69d ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o opencode.tar.gz \
+      "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-${OC_ARCH}.tar.gz"; \
+    echo "${OC_SHA}  opencode.tar.gz" | sha256sum -c -; \
+    tar xzf opencode.tar.gz; \
+    chmod +x opencode
 
 ARG GLAB_VERSION
 RUN test -n "${GLAB_VERSION}" || (echo "GLAB_VERSION is unset" && exit 1)
-RUN curl -fsSL -o glab.tar.gz \
-      "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/packages/generic/glab/${GLAB_VERSION}/glab_${GLAB_VERSION}_linux_amd64.tar.gz" \
-    && echo "cb3eb9d6b05eedef24a028b52354f12fb9a07ecfa0b5581eb161176585bc8213  glab.tar.gz" | sha256sum -c - \
-    && tar xzf glab.tar.gz bin/glab \
-    && chmod +x bin/glab
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) GLAB_SHA=cb3eb9d6b05eedef24a028b52354f12fb9a07ecfa0b5581eb161176585bc8213 ;; \
+      arm64) GLAB_SHA=681031c6477dc7eb53b07a4641e2defc6795cf7ffb18ddc6cf8bdbc1211ed782 ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o glab.tar.gz \
+      "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/packages/generic/glab/${GLAB_VERSION}/glab_${GLAB_VERSION}_linux_${TARGETARCH}.tar.gz"; \
+    echo "${GLAB_SHA}  glab.tar.gz" | sha256sum -c -; \
+    tar xzf glab.tar.gz bin/glab; \
+    chmod +x bin/glab
 
 ARG BD_VERSION
 RUN test -n "${BD_VERSION}" || (echo "BD_VERSION is unset" && exit 1)
-RUN curl -fsSL -o bd.tar.gz \
-      "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
-    && echo "b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34  bd.tar.gz" | sha256sum -c - \
-    && tar xzf bd.tar.gz bd \
-    && chmod +x bd
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) BD_SHA=b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34 ;; \
+      arm64) BD_SHA=e64eb6f5f998c9eae3ef9ec786f5f1c907ab3ed04fe220ebf265ca9952e21b2f ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o bd.tar.gz \
+      "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_${TARGETARCH}.tar.gz"; \
+    echo "${BD_SHA}  bd.tar.gz" | sha256sum -c -; \
+    tar xzf bd.tar.gz bd; \
+    chmod +x bd
 
 # ---- runtime -----------------------------------------------------------------
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
