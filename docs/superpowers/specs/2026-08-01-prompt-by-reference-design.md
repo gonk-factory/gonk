@@ -85,31 +85,84 @@ schema and dashboard for exactly the same guarantee. If prompt hand-off later
 grows beyond a keyed blob, splitting it out is a cheap refactor; starting there
 is not.
 
-### The credential problem — the crux of this design
+### The key IS the capability — no credential in the pod
 
-**gonk-meter's API is bearer-authenticated with one admin token**
-(`internal/meter/service/http.go`, `bearerAuth`). That token also unlocks
+**Decided 2026-08-01 (owner).** The prompt is keyed by an alias carrying 128
+bits of entropy, and holding that alias is what authorises the fetch. Nothing
+secret is distributed to the agent pod at all.
+
+```
+gonk.triage.p75.i18.a1.k7m2q9x4nf3bt8wc5rj6ydzp1h
+└──── 22 chars, unchanged ────┘└─ 26 chars, 128 bits base32 ─┘
+```
+
+**Why this is available.** The alias is caller-chosen: gonk mints it, and it
+arrives in the pod as `GC_ALIAS` (verified live). `session.ValidateAlias`
+accepts `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$` up to 64 characters
+(`internal/session/names.go:39,44`); the current alias is 22, so 26 more fit
+with room to spare.
+
+**Why it authorises anything.** A peer agent pod cannot enumerate aliases. The
+agent NetworkPolicy permits egress to DNS, LiteLLM, GitLab and gonk-meter — and
+*not* the city API — so there is no route by which one session can discover
+another's alias. The unguessable half is therefore secret from precisely the
+party we care about.
+
+**What this deliberately avoids.** The obvious alternative was a shared
+prompt-reader bearer token mounted into every agent pod. That was rejected:
+gonk-meter's API is bearer-authenticated with **one admin token**
+(`internal/meter/service/http.go`, `bearerAuth`) which also unlocks
 `PUT/DELETE /v1/projects/{project}`, `POST /v1/policy/decide` and
-`POST /admin/spend/sync`.
+`POST /admin/spend/sync`. Any design that puts a meter credential in the agent
+pod has to prove, per route, that it is strictly weaker — and an agent that can
+rewrite project registrations can rewrite its own budget, which would make the
+meter decorative. Not shipping a credential is a stronger guarantee than
+scoping one correctly.
 
-**The agent pod must never hold it.** An agent that can rewrite project
-registrations can rewrite its own budget, which would make the meter decorative.
-The pod holds no forge credentials by design (broker spec §9/10); its only
-secret today is the LiteLLM virtual key.
+**What this does NOT protect against, stated plainly.** This is a secret in a
+*name*. The alias appears in gonk's own logs, in city events, on session lists,
+and in bead titles. Anyone with city-API read access or log access can read it
+and fetch that prompt. It defends against a peer agent pod; it does not defend
+against an operator, a log aggregator, or anything else with a view of the
+control plane. For a single-tenant install where the prompt contains issue text
+the operator can already read, that is the right trade. **It would not be, the
+moment gonk is multi-tenant.**
 
-So the prompt route needs its own, strictly weaker credential:
+**The upgrade path, if that changes.** The agent pod carries a projected
+ServiceAccount token whose claims are a real, unforgeable per-pod identity —
+verified live on `s-go-4m4`:
 
-- **A separate token slot**, distinct from the admin bearer, valid **only** for
-  `GET /v1/prompt/{alias}`. Every other route rejects it. This is a
-  route-scoped principal, not a second copy of the admin token.
-- Delivered to the pod the same way the LiteLLM key is: written into the
-  agent's `[env]` by `bootstrap-city`, then **materialised by the entrypoint
-  into a `0600` file and unset**, so it never reaches `ps`, `/proc/<pid>/environ`
-  or a child process. The entrypoint already has this exact pattern.
-- **It is a bearer token, so it is a namespace-wide reader.** Any agent pod can
-  fetch any alias's prompt. That is acceptable for a single-tenant install and
-  it must be written down rather than implied — see Open question 1 for the
-  per-session capability that would close it.
+```
+sub:      system:serviceaccount:gonk:gc-agent
+pod.name: s-go-4m4
+pod.uid:  d10657cc-4cf1-443b-bed5-21116a68c13f
+```
+
+gonk-meter could verify it with a TokenReview and bind each prompt row to a pod
+name/UID, leaking nothing into logs. It is not the choice here because it costs
+`system:auth-delegator` (cluster-scoped) on the meter, and because we do not own
+the agent pod spec — Gas City builds it, so we cannot request a bound token with
+a custom audience and would be accepting API-server-audience tokens for our own
+service, with a one-year lifetime. Worth revisiting only if the threat model
+grows past "another pod in this namespace".
+
+### Consequence: the alias stops being deterministic
+
+`brokerSessionAlias`'s comment currently calls it "deterministic and
+re-sling-stable EXCEPT for the attempt suffix". That property goes away.
+
+**Checked, and nothing depends on it** (2026-08-01): `brokerSessionAlias` has
+exactly one production call site, `cmd/gonk-gate/broker_inject.go:202`. Sweep
+resolves the session through the stored `Record.SessionID`
+(`cmd/gonk-gate/sweep.go:122`), never by recomputing the alias. Every other
+reference is in tests.
+
+Two things follow. The attempt suffix is no longer load-bearing for collision
+avoidance — a random alias cannot collide — though it stays as useful
+provenance. And the tests that recompute `brokerSessionAlias(42, 3, 1)` must
+instead capture `gc.Created[0].Alias`, which is the better assertion anyway:
+it checks what was actually sent rather than re-running the generator and
+agreeing with itself.
 
 ### One-shot, TTL, and the confirmation signal
 
@@ -129,8 +182,9 @@ So the prompt route needs its own, strictly weaker credential:
 
 `images/agent/entrypoint.sh` is ours, so this half needs nothing from upstream:
 
-1. Fetch `GET /v1/prompt/$GC_ALIAS` with the scoped token, retrying with backoff
-   while the answer is `404` (the pod can legitimately beat the controller).
+1. Fetch `GET /v1/prompt/$GC_ALIAS`, retrying with backoff while the answer is
+   `404` (the pod can legitimately beat the controller). No credential is
+   presented — the alias is the capability.
 2. On success, hand the prompt to opencode **as an argument, not as keys**.
 3. Restore the model/metadata seam: the row carries `model` and `metadata`
    alongside the prompt text, so the overlay is rendered from per-session values
@@ -182,14 +236,18 @@ Recommended sequencing:
 
 ## Open questions
 
-1. **Per-session capability instead of a shared reader token?** A one-time,
-   high-entropy claim ticket minted per dispatch would make a pod able to fetch
-   exactly its own prompt and nothing else. The obstacle is getting the ticket
-   *into* the pod — that is the same delivery problem, one level down. The pod
-   does hold `GC_INSTANCE_TOKEN`, a per-session secret, but gascity mints it and
-   `SessionView` does not expose it, so the controller cannot pre-authorise
-   against it. **Recommendation: ship the scoped shared token, write the
-   limitation down, revisit if gonk ever becomes multi-tenant.**
+1. ~~Per-session capability instead of a shared reader token?~~ **DECIDED
+   2026-08-01: entropy in the alias** (see above). Recorded here because two
+   candidates were checked and rejected on evidence, and should not be
+   re-litigated:
+   - **The session id** (`go-4m4`) is short and low-entropy, and gonk does not
+     have it when it stores the prompt — agent create is async and returns no
+     id. Not a secret and not available in time.
+   - **`GC_INSTANCE_TOKEN`** *is* a real secret: `crypto/rand` 16 bytes → 128
+     bits, per-incarnation, present in the pod env
+     (`internal/session/lifecycle.go:21`). But no API route exposes it
+     (`grep` over `internal/api/` finds nothing), so the controller can never
+     learn it to pre-authorise against. Dead end.
 2. **Does the prompt row belong in the ledger Postgres?** It is not ledger data
    and it holds issue text, which argues for a separate table with its own
    retention. The alternative — in-memory in the meter — is disqualified by the
