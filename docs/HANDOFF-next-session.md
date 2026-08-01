@@ -51,10 +51,27 @@ cannot be made safe by escaping at the sender.
 
 ### Where to start
 
-- **`gonk-e9m` (P1)** — the keystroke/injection boundary. The durable fix is to
-  stop delivering prompts as keystrokes: give the pod its prompt out-of-band and
-  have `gonk-agent-entrypoint` hand it to opencode.
-- **`gonk-m6t` (P2)** — needs the *same channel*, so design them together.
+**The design and plan are written — start by reading them, not by re-deriving.**
+
+- [`specs/2026-08-01-prompt-by-reference-design.md`](superpowers/specs/2026-08-01-prompt-by-reference-design.md)
+  — approved 2026-08-01. Prompt-by-reference: dispatch stores the rendered
+  prompt in gonk-meter keyed by alias, the entrypoint fetches it by `GC_ALIAS`
+  at startup. No keystrokes anywhere. Includes the channels already **ruled out
+  by experiment**, so don't re-test them.
+- [`plans/2026-08-01-prompt-by-reference-implementation.md`](superpowers/plans/2026-08-01-prompt-by-reference-implementation.md)
+  — six tasks, T1→T6, none started. Update its status boxes as you go.
+- The crux to get right is **T2's credential scoping**: the meter's bearer token
+  also unlocks `PUT/DELETE /v1/projects` and `/v1/policy/decide`. An agent pod
+  holding it could rewrite its own budget. The prompt route needs a strictly
+  weaker, route-scoped principal.
+
+Both closed by that plan:
+
+- **`gonk-e9m` (P1)** — the keystroke/injection boundary. Bang-stripping today
+  is a mitigation; T5 deletes it, and T6 proves the channel with a bang in the
+  issue body.
+- **`gonk-m6t` (P2)** — the same row carries `model` + `metadata`, restoring the
+  attribution seam.
   Per-bead attribution no longer reaches the pod; spend rows are attributed
   per-install. Ruled out by experiment: create `options` (select-only, rejects
   free text), file staging (skipped — `GC_K8S_PREBAKED=true`), session env (no
