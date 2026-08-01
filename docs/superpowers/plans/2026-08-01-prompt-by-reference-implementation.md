@@ -2,7 +2,7 @@
 
 _Design: [`2026-08-01-prompt-by-reference-design.md`](../specs/2026-08-01-prompt-by-reference-design.md).
 Beads: `gonk-e9m` (P1, the injection boundary), `gonk-m6t` (P2, attribution).
-Status: **NOT STARTED** — design approved 2026-08-01, no code written._
+Status: **T0 PASSED 2026-08-01** (spike only, no product code written). T1-T6 not started._
 
 Update the status boxes below as tasks land. A task is done when its
 verification line has actually been run, not when the code looks right — that
@@ -19,7 +19,47 @@ follow-on moves and are deliberately *not* bundled — see the design's
 
 ---
 
-### T0 — SPIKE FIRST: is argument handling actually inert? · `[ ]`
+### T0 — SPIKE FIRST: is argument handling actually inert? · `[x] PASS, 2026-08-01`
+
+**RESULT: inert. The assumption holds and the sequencing below stands.**
+
+Run in a live agent pod (`s-go-8oj`), opencode 1.18.3, qwen3-14b via LiteLLM:
+
+| test | result |
+|---|---|
+| `opencode run "see issue !42 and reply … SPIKE"` | bang passed through as text, answered `SPIKE`, exit 0 |
+| `opencode --prompt "see issue !42 … TANGO2"` (TUI) | message rendered with the **bang intact**, no `$` prefix, answered `TANGO2` |
+| `--prompt` with a realistic multi-line triage prompt containing 5 bangs (`fails!!`, `ASAP!!!`, `MR !77`), backticks and JSON braces | **every character arrived intact**; model emitted a `GONK_BATCH_START`/`END` fence |
+
+So the composer's shell-mode trigger is an *interactive keystroke* behaviour, not
+an input-parsing one: text that arrives as an argument is never typed, never
+passes the composer's key handling, and is not interpreted. `--prompt` is a real
+global flag (`opencode --help`, "prompt to use") — worth stating because an
+earlier truncated `--help` capture in this repo's notes suggested otherwise.
+
+**Sequencing consequence**: `opencode run` stays a *later* improvement, not a
+prerequisite. It is still worth doing (plain stdout beats parsing a box-drawn
+pane) but it is no longer on the critical path for security.
+
+---
+
+#### Three things this spike turned up that were not the question
+
+1. **opencode fails OPEN to a cloud provider.** The first attempt did not reach
+   the overlay config, and opencode silently fell back to a built-in default
+   (`Build · Big Pickle OpenCode Zen`) — and the call **succeeded**, from the
+   agent pod, with no gonk credential and outside LiteLLM entirely. gonk's whole
+   metering story assumes the pod's only route to a model is the virtual key.
+   Filed as `gonk-ob5` (P1).
+2. **The pod reached `github.com`.** The model chose a `WebFetch` against
+   `https://github.com/anomalyco/opencode/issues/42` and it worked. More
+   evidence for the unenforced-NetworkPolicy finding, and a reminder that
+   "do NOT fetch anything yourself" in a prompt is a request, not a control.
+3. **`tmux new-session` does not inherit the caller's environment** when a tmux
+   server is already running — it attaches to the existing server, which keeps
+   the env it started with. This silently produced finding 1 during the spike.
+   Anything driving opencode through tmux must pass env explicitly
+   (`tmux -e`, or wrap in `sh -c 'export …; exec …'`).
 
 **One hour, before anything else is built.** The entire plan assumes that
 handing opencode the prompt as an argument avoids the composer, and that

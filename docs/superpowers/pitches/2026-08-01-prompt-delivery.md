@@ -223,3 +223,26 @@ a dead key. That defence does not depend on the CNI — which matters, given not
    lookup. **Added to T2.**
 
 Citation fix: the `send-keys` pair is `carrier.go:83-87`, not `74-88`.
+
+---
+
+## T0 spike result — 2026-08-01
+
+The evaluation's note 2 (front-load the argument-inertness spike) was actioned
+immediately. **It passes: argument delivery is inert.**
+
+Live, in agent pod `s-go-8oj` on opencode 1.18.3 / qwen3-14b via LiteLLM, a
+realistic multi-line triage prompt carrying five bangs (`fails!!`, `ASAP!!!`,
+`MR !77`), backticks and JSON braces arrived **completely intact** through
+`--prompt` and produced a `GONK_BATCH_START`/`END` fence. `opencode run`
+behaves the same way. The composer's shell-mode trigger is an *interactive
+keystroke* behaviour; text that arrives as an argument is never typed and never
+passes the composer's key handling.
+
+So the sequencing in the plan stands, and `opencode run` remains a later
+improvement rather than a prerequisite. The one hour was worth spending: had it
+failed, T1–T5 would have been built on a false premise.
+
+It also surfaced an unrelated P1 — `gonk-ob5`, opencode failing **open** to a
+built-in cloud provider when its config is unreachable, which succeeded from the
+agent pod with no gonk credential and outside LiteLLM.
