@@ -70,6 +70,11 @@ Plus a live reproduction: the session pod's command decoded to the bare
 - That the omission is an oversight rather than a deliberate constraint. Nothing
   documents it either way; `Capabilities()` simply doesn't mention prompts.
 
+**Overreach to avoid repeating**: the filed body ended "Happy to send a PR if the
+approach looks right." That commits the *owner* to work. An agent drafting for a
+human to post must not offer labour on their behalf. Both 2026-08-01 drafts were
+checked against this rule.
+
 ### Re-checked 2026-08-01, still correct
 
 Session 5 overturned a *different* gonk claim (see below) and, in the process,
@@ -124,9 +129,31 @@ this ledger did its job on #4891 and was not applied to the follow-on claim. An
 inference about *cause* deserves the same treatment as a claim about source —
 and cause is the one that needs a live reproduction, not a grep.
 
-**Overreach to avoid repeating**: the filed body ended "Happy to send a PR if the
-approach looks right." That commits the *owner* to work. An agent drafting for a
-human to post must not offer labour on their behalf.
+---
+
+## gascity — session messages are delivered as keystrokes into a TUI (DRAFTED, NOT POSTED)
+
+- **Found by**: session 5, 2026-08-01. Bead `gonk-e9m` (P1).
+- **Posted by**: nobody yet. Draft:
+  [`gascity-keystroke-delivery-injection.md`](gascity-keystroke-delivery-injection.md).
+- **Impact on gonk**: every triage session wedged. The prompt embeds untrusted
+  GitLab issue text, so this is a text-injection boundary, not just a bug.
+  Mitigated in gonk by stripping bangs; the durable fix is
+  [prompt-by-reference](../superpowers/specs/2026-08-01-prompt-by-reference-design.md).
+- Carries its own evidence (source at the pinned ref + a live reproduction) and
+  is the stronger of the two drafts. The remediation suggestions in it are
+  **inferred** and flagged as such — bracketed paste is untested.
+
+## opencode — a bang anywhere in delivered input switches to shell mode (DRAFTED, NOT POSTED)
+
+- **Found by**: session 5, 2026-08-01. Bead `gonk-e9m`.
+- **Posted by**: nobody yet. Draft:
+  [`opencode-shell-mode-on-programmatic-input.md`](opencode-shell-mode-on-programmatic-input.md).
+- **Weaker draft, deliberately.** It is a behaviour report from an unusual
+  integration, not a defect we can prove: a leading-`!` shell escape is a normal
+  TUI affordance, and we did not read opencode's input handling to learn which
+  rule was intended. **Check the behaviour against current opencode before
+  posting** — we pin 1.18.3 and did not verify `latest`.
 
 ---
 
