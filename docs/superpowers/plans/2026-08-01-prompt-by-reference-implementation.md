@@ -50,7 +50,17 @@ pane) but it is no longer on the critical path for security.
    (`Build · Big Pickle OpenCode Zen`) — and the call **succeeded**, from the
    agent pod, with no gonk credential and outside LiteLLM entirely. gonk's whole
    metering story assumes the pod's only route to a model is the virtual key.
-   Filed as `gonk-ob5` (P1).
+   Filed as `gonk-ob5` (P1). **Follow-up 2026-08-01: this is fixable by config,
+   and the exposure is wider than the spike suggested.** opencode's schema has
+   `enabled_providers` / `disabled_providers` (in the binary, not in `--help`).
+   An allowlist of `["gonk"]` reduces `opencode models` from 7 built-ins + ours
+   to just ours, and — proven with an A/B control — blocks an *explicit*
+   `-m opencode/big-pickle` override, which the unguarded pod answers happily.
+   Note the built-ins were present **even with our overlay loaded**: the
+   exposure was never limited to the config-missing case. Config alone is still
+   not enough, because it cannot guard its own absence — the entrypoint must
+   also assert that opencode actually resolved a gonk-only provider list before
+   handing over. Full three-layer fix on the bead.
 2. **The pod reached `github.com`.** The model chose a `WebFetch` against
    `https://github.com/anomalyco/opencode/issues/42` and it worked. More
    evidence for the unenforced-NetworkPolicy finding, and a reminder that
