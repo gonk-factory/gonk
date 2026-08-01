@@ -10,13 +10,35 @@ distinction is what this whole line of work has been about.
 
 ## Sequencing rationale
 
-T1–T4 land the channel with opencode **still in TUI mode**. That is the
+T0 tests the assumption everything else rests on. T1–T4 then land the channel
+with opencode **still in TUI mode**. That is the
 security-relevant win and it leaves the read path untouched, so it can be proven
 in one live run. T5 removes the mitigation, which is the real proof. T6+ are the
 follow-on moves and are deliberately *not* bundled — see the design's
 "Interactive TUI or `opencode run`?".
 
 ---
+
+### T0 — SPIKE FIRST: is argument handling actually inert? · `[ ]`
+
+**One hour, before anything else is built.** The entire plan assumes that
+handing opencode the prompt as an argument avoids the composer, and that
+assumption is currently only tested at T6 — after five tasks of work.
+
+If opencode seeds its composer buffer from `--prompt` (entirely plausible for a
+TUI), then a bang in an argument hits the same shell-mode trigger, this design
+does not solve the problem, and the real fix is `opencode run` **first** — which
+inverts the sequencing below.
+
+**Do**: in a scratch pod from the agent image, run
+`opencode --prompt 'see issue !42 and reply with exactly the word SPIKE'` and
+then the same via `opencode run`. Watch for the `$` composer prefix and a
+`/bin/sh` error.
+
+**If the argument path is not inert**: stop, and re-sequence around
+`opencode run` — which also means the read path (sweep captures the live tmux
+pane) has to move at the same time, so the plan gets bigger before it gets
+smaller. Better to learn that now than at T6.
 
 ### T1 — prompt store in gonk-meter · `[ ]`
 
@@ -55,9 +77,11 @@ exactly the kind of change that goes wrong quietly. Two rules:
    path must still demand the admin bearer. Go 1.22 pattern-matching makes this
    expressible; the exempt check in `bearerAuth` switches on `r.URL.Path` alone
    today, so it needs method awareness or it will hand write access away.
-2. **Reject a short alias.** A prompt fetched by an alias with no entropy is an
-   unauthenticated read by design. The handler must require the alias to carry
-   its nonce, so a caller cannot ask for `gonk.triage.p75.i18.a1` and be served.
+2. **Reject a nonce-free alias, by strict format.** The handler cannot measure
+   entropy, only shape: require the final dot-separated label to be exactly 26
+   base32 characters. This is also the cheap guard that keeps an unauthenticated
+   route from turning into a free database lookup on the same listener that
+   serves budget decisions — check the shape before touching the store.
 
 **Verify** — this is the test that matters most in the plan:
 - an exhaustive table over every route × method asserting exactly one
@@ -102,6 +126,16 @@ misread.
   the overlay is rendered per-session again — **this is what closes `gonk-m6t`**.
 - **Exit non-zero, loudly, if no prompt arrives in the window.** An idle agent
   that looks healthy is the failure mode this whole line of work exists to end.
+- **Distinguish `410` from a `404` timeout, with different exit codes and
+  diagnostics.** They mean opposite things: `404`-until-timeout is "never
+  delivered"; `410` is "already consumed", which means either a respawn or a
+  theft. Gas City relaunches a dead agent into the warm pod and re-runs the
+  start command, and gonk has already hit a respawn loop in production (the
+  `HOME`/XDG saga in `pack/agents/triage/agent.toml`). So after any crash past
+  the fetch, the entrypoint will get `410` and exit, and the session will churn
+  until sweep reaps it at the reservation deadline. That is not worse than today
+  — a respawned session loses its submitted prompt now too — but it must be
+  legible in the logs rather than looking like a delivery bug.
 
 **Verify**: the entrypoint's existing shell tests, plus a new case for the
 no-prompt path asserting a non-zero exit and the diagnostic. Then live: the pod
@@ -118,6 +152,10 @@ comes up with the prompt already in hand.
   create call returns.
 - Replace the running-gate + submit + event-correlation delivery path with
   polling `fetched_at`. Keep `awaitCreate` (a create can still fail silently).
+- **`fetched_at` proves the entrypoint fetched, not that opencode accepted.**
+  It is strictly better than the event correlation it replaces, but it is not
+  terminal success — keep dispatch's session-health checks rather than treating
+  the receipt as proof the agent is working.
 - **DELETE `sanitizeForKeystrokeDelivery` and its test.** Leaving it would mean
   shipping a channel whose safety we never actually exercised, and quietly
   losing every `!` in every issue for no reason.

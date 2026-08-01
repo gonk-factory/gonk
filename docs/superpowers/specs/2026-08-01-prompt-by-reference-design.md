@@ -102,11 +102,40 @@ accepts `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$` up to 64 characters
 (`internal/session/names.go:39,44`); the current alias is 22, so 26 more fit
 with room to spare.
 
-**Why it authorises anything.** A peer agent pod cannot enumerate aliases. The
-agent NetworkPolicy permits egress to DNS, LiteLLM, GitLab and gonk-meter — and
-*not* the city API — so there is no route by which one session can discover
-another's alias. The unguessable half is therefore secret from precisely the
-party we care about.
+**Why it authorises anything — CORRECTED 2026-08-01 after review.**
+
+The first version of this section said "a peer agent pod cannot enumerate
+aliases, because the agent NetworkPolicy permits egress to DNS, LiteLLM, GitLab
+and gonk-meter and not the city API." **That was wrong, and it was wrong about
+something this repo already documents.** `networkpolicy-gonk-agent.yaml`'s own
+banner says it outright: Flannel does not implement NetworkPolicy and the Cilium
+HelmRelease is suspended, so *right now an agent pod can reach anything*. The
+policy is written and unenforced. Gas City's read-auth is opt-in besides
+(`internal/api/readauth.go` — with no key configured the middleware is not
+installed). A prompt-injected agent pod today can very likely reach the city API
+and list sessions.
+
+So network isolation is **not** what makes this safe. What does:
+
+**The capability is already spent before untrusted text ever runs.** The
+entrypoint fetches the prompt and the row goes to `410` *before* opencode
+starts. The first moment attacker-controlled issue text reaches a model is
+strictly after the capability it might exfiltrate has been consumed. Stealing
+`GC_ALIAS` out of a running agent yields a dead key.
+
+That makes the exposure window the seconds between `PUT` and the entrypoint's
+fetch, during which the alias exists only in the controller's own memory and
+logs — no agent has booted yet with it. A thief would have to already be
+running, already know to look, and win a race against a pod that fetches on
+startup.
+
+**And theft is loud.** One-shot means a stolen prompt is a prompt the legitimate
+entrypoint then fails to get: it receives `410`, exits non-zero, and the session
+dies visibly instead of quietly triaging with someone else's context. The design
+has no silent-compromise mode.
+
+This argument does not depend on the CNI, which is the point — it holds today,
+and it keeps holding when Cilium lands.
 
 **What this deliberately avoids.** The obvious alternative was a shared
 prompt-reader bearer token mounted into every agent pod. That was rejected:
@@ -120,13 +149,31 @@ meter decorative. Not shipping a credential is a stronger guarantee than
 scoping one correctly.
 
 **What this does NOT protect against, stated plainly.** This is a secret in a
-*name*. The alias appears in gonk's own logs, in city events, on session lists,
-and in bead titles. Anyone with city-API read access or log access can read it
-and fetch that prompt. It defends against a peer agent pod; it does not defend
-against an operator, a log aggregator, or anything else with a view of the
-control plane. For a single-tenant install where the prompt contains issue text
-the operator can already read, that is the right trade. **It would not be, the
-moment gonk is multi-tenant.**
+*name*, and names travel. The alias reaches:
+
+- gonk's own logs and Gas City's city events;
+- session lists and `SessionView` responses;
+- **the agent pod's k8s label** — `SanitizeLabel` leaves the alias intact and 49
+  chars is under the 63-char cap (`internal/runtime/k8s/pod.go`), so
+  `kubectl get pods --show-labels` prints the capability;
+- **`.beads/issues.jsonl`, which is committed and pushed.** `Record.SessionID`
+  stores the alias and the bead export is a tracked file — verified: aliases
+  from this session are already in it. Under this design the capability would be
+  pushed to a git remote.
+
+Anyone with control-plane read, log access, or the git remote can read it. What
+saves this is not secrecy from those parties but the time-bounding above: by the
+time any of those surfaces has the alias, the row it unlocks is already `410`.
+The leak is of a **spent** capability.
+
+That is a real distinction and not a hand-wave, but it is also the whole
+argument — so it must hold. Two things follow for the implementation: the
+one-shot consume must be atomic (T1), and the entrypoint must not log the alias
+into a pane that sweep captures (T4).
+
+For a single-tenant install where the prompt is issue text the operator can
+already read, this is the right trade. **It would not be, the moment gonk is
+multi-tenant** — at which point the SA-token upgrade path below is the answer.
 
 **The upgrade path, if that changes.** The agent pod carries a projected
 ServiceAccount token whose claims are a real, unforgeable per-pod identity —
