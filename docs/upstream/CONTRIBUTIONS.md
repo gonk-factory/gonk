@@ -70,6 +70,60 @@ Plus a live reproduction: the session pod's command decoded to the bare
 - That the omission is an oversight rather than a deliberate constraint. Nothing
   documents it either way; `Capabilities()` simply doesn't mention prompts.
 
+### Re-checked 2026-08-01, still correct
+
+Session 5 overturned a *different* gonk claim (see below) and, in the process,
+re-verified this one from scratch at the same ref. All three load-bearing claims
+hold: zero `PromptSuffix`/`PromptFlag` hits anywhere in `internal/runtime/k8s/`,
+`agentCommandB64` still encodes `cfg.Command` verbatim, `Capabilities()` still
+declares only `CanReportActivity`. **Nothing in #4891 needs correcting.**
+
+**New evidence worth adding as a comment** — the system stamps a marker
+asserting the prompt *was* delivered, on the path where it is dropped:
+
+| claim | evidence |
+|---|---|
+| `promptDelivery` sets `Delivered=true` for a flag-mode provider purely because a prompt flag is configured | `cmd/gc/prompt_delivery.go:48-55` |
+| that flag stamps `GC_STARTUP_PROMPT_DELIVERED=1` into the session env | `cmd/gc/template_resolve.go:829-838` |
+| a consumer trusts it to suppress re-delivery (hook path) | `cmd/gc/cmd_prime.go:492` |
+| **live**: an agent pod that never received a prompt had it set | `GC_STARTUP_PROMPT_DELIVERED=1` in `s-go-d3y`'s env, opencode idle at its splash |
+
+So the marker records a *routing decision*, not a delivery. On k8s it is
+asserting something false — which is why this failed silently for so long rather
+than surfacing anywhere. (The `cmd_prime.go` consumer is gated on the managed
+hook + `SessionStart`, so it does not bite gonk; flagged as the reason a false
+marker is not merely cosmetic.)
+
+---
+
+## gastownhall/gascity — `Provider.Nudge`/`SendKeys` discard the carrier error (NOT POSTED, and the framing must change)
+
+- **Found by**: session 4. Recorded on `gonk-u1p.7`, which proposed adding it to
+  #4891 or filing a second report. **It was never posted — and it is as well.**
+- **Status**: the code fact is real; the causal story attached to it was wrong.
+
+`internal/runtime/k8s/provider.go:535` does discard the carrier's error and
+return `nil` unconditionally, and `SendKeys` (line 541) does the same. That is a
+genuine latent bug: a delivery failure is unreportable.
+
+**But session 4 inferred from it that prompt delivery was failing there, and it
+was not.** Proven live 2026-08-01: running the carrier's exact two-step
+`send-keys` by hand typed into the live opencode TUI and the model answered. The
+real defect was in gonk's own `deliverPrompt` (`gonk-u1p.7`, fixed). Had this
+been posted as filed, it would have asserted a failure mode we had not observed
+and blamed upstream for our bug.
+
+**If it is ever posted, it must be reframed** as what it is — an unreportable
+error path — with no claim about what it causes, and paired with the sharper
+finding it is actually adjacent to: `Nudge` delivers text as *keystrokes* into
+whatever TUI occupies the pane, which is a text-injection boundary for any
+TUI-backed provider (`gonk-e9m`).
+
+**Lesson recorded rather than quietly dropped**: the verified/inferred split in
+this ledger did its job on #4891 and was not applied to the follow-on claim. An
+inference about *cause* deserves the same treatment as a claim about source —
+and cause is the one that needs a live reproduction, not a grep.
+
 **Overreach to avoid repeating**: the filed body ended "Happy to send a PR if the
 approach looks right." That commits the *owner* to work. An agent drafting for a
 human to post must not offer labour on their behalf.
