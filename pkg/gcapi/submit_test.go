@@ -32,7 +32,7 @@ func TestSubmitSessionPostsMessageToSubmitRoute(t *testing.T) {
 		_, _ = fmt.Fprint(w, `{"status":"accepted","request_id":"r","event_cursor":"0"}`)
 	}))
 
-	if err := c.SubmitSession(context.Background(), "gonk.triage.p75.i16.a1", "do the thing", SubmitIntentDefault); err != nil {
+	if _, err := c.SubmitSession(context.Background(), "gonk.triage.p75.i16.a1", "do the thing", SubmitIntentDefault); err != nil {
 		t.Fatalf("SubmitSession = %v", err)
 	}
 	if want := "/v0/city/gonk-city/session/gonk.triage.p75.i16.a1/submit"; gotPath != want {
@@ -59,7 +59,7 @@ func TestSubmitSessionEscapesTheAlias(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = fmt.Fprint(w, `{}`)
 	}))
-	if err := c.SubmitSession(context.Background(), "gonk.triage.p75.i16.a1", "m", SubmitIntentDefault); err != nil {
+	if _, err := c.SubmitSession(context.Background(), "gonk.triage.p75.i16.a1", "m", SubmitIntentDefault); err != nil {
 		t.Fatalf("SubmitSession = %v", err)
 	}
 	if want := "/v0/city/gonk-city/session/gonk.triage.p75.i16.a1/submit"; gotPath != want {
@@ -67,15 +67,16 @@ func TestSubmitSessionEscapesTheAlias(t *testing.T) {
 	}
 }
 
-// Create is async (202, no session id), so the session may not exist yet when
-// the first submit lands. A 404 MUST stay distinguishable as IsNotFound so the
-// caller can retry rather than treat it as a hard failure.
-func TestSubmitSessionNotFoundIsRetryable(t *testing.T) {
+// A 404 must stay distinguishable as IsNotFound. NOTE this is NOT the
+// async-create window: upstream resolves the session after answering 202, so a
+// missing session is never a 404 here (proven live -- see gonk-u1p.7). A 404 on
+// this route means a wrong city or an unrouted path.
+func TestSubmitSessionNotFoundIsDistinguishable(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = fmt.Fprint(w, `{"detail":"no such session"}`)
 	}))
-	err := c.SubmitSession(context.Background(), "missing-alias", "m", SubmitIntentDefault)
+	_, err := c.SubmitSession(context.Background(), "missing-alias", "m", SubmitIntentDefault)
 	if err == nil {
 		t.Fatal("SubmitSession = nil, want error")
 	}
@@ -108,7 +109,7 @@ func TestSubmitSessionIsSigned(t *testing.T) {
 	}))
 	c.Signer = signer
 
-	if err := c.SubmitSession(context.Background(), "alias", "hi", SubmitIntentDefault); err != nil {
+	if _, err := c.SubmitSession(context.Background(), "alias", "hi", SubmitIntentDefault); err != nil {
 		t.Fatalf("SubmitSession = %v", err)
 	}
 	if !seen {
@@ -121,13 +122,13 @@ func TestSubmitSessionRejectsEmptyInputs(t *testing.T) {
 		t.Fatal("server must not be called on invalid input")
 		w.WriteHeader(http.StatusAccepted)
 	}))
-	if err := c.SubmitSession(context.Background(), "", "m", SubmitIntentDefault); err == nil {
+	if _, err := c.SubmitSession(context.Background(), "", "m", SubmitIntentDefault); err == nil {
 		t.Error("empty id: err = nil, want error")
 	}
 	// Upstream validates message with minLength:1 + pattern \S, so a
 	// whitespace-only prompt is a 422 there. Reject locally instead of
 	// spending a signed round-trip to learn it.
-	if err := c.SubmitSession(context.Background(), "alias", "   ", SubmitIntentDefault); err == nil {
+	if _, err := c.SubmitSession(context.Background(), "alias", "   ", SubmitIntentDefault); err == nil {
 		t.Error("blank message: err = nil, want error")
 	}
 }

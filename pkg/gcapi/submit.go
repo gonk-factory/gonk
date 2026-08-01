@@ -54,6 +54,21 @@ type submitSessionRequest struct {
 	Intent  SubmitIntent `json:"intent,omitempty"`
 }
 
+// SubmitResult is the 202 async-accepted body.
+//
+// IT IS NOT A DELIVERY RECEIPT. The route resolves the session and delivers the
+// message in a goroutine AFTER answering, so a submit against a session that
+// does not exist yet is answered 202 exactly like one that lands. RequestID and
+// EventCursor are the correlation handle: pass them to
+// [Client.AwaitRequestOutcome] to learn what actually happened. Treating this
+// 202 as proof of delivery is gonk-u1p.7 -- every agent sat at an idle splash
+// while dispatch reported success.
+type SubmitResult struct {
+	Status      string `json:"status"`
+	RequestID   string `json:"request_id"`
+	EventCursor string `json:"event_cursor"`
+}
+
 // SubmitSession delivers a message to an existing session. idOrAlias may be a
 // session id, an alias, or a runtime session_name -- upstream resolves all
 // three -- so the unique alias stamped at CreateSession is a sufficient handle
@@ -61,20 +76,25 @@ type submitSessionRequest struct {
 //
 // It is a mutation and is signed exactly like RunOrder and CreateSession.
 //
+// The returned SubmitResult reports only that the request was ACCEPTED. Callers
+// that need to know whether the prompt landed must follow it with
+// [Client.AwaitRequestOutcome]; see SubmitResult.
+//
 // A 404 is returned as an *APIError (IsNotFound == true) rather than being
-// flattened: create is async, so the session legitimately may not exist yet on
-// the first attempt and the caller is expected to retry rather than fail.
-func (c *Client) SubmitSession(ctx context.Context, idOrAlias, message string, intent SubmitIntent) error {
+// flattened. Note that the submit route itself does not 404 on a missing
+// session -- resolution happens after the 202 -- so this covers a wrong city or
+// an unrouted path, not the async-create window.
+func (c *Client) SubmitSession(ctx context.Context, idOrAlias, message string, intent SubmitIntent) (*SubmitResult, error) {
 	if c.City == "" {
-		return errEmptyCity
+		return nil, errEmptyCity
 	}
 	if idOrAlias == "" {
-		return fmt.Errorf("gascity: SubmitSession: id or alias is required")
+		return nil, fmt.Errorf("gascity: SubmitSession: id or alias is required")
 	}
 	// Upstream validates minLength:1 + pattern \S. Reject a blank prompt here
 	// rather than spend a signed round-trip to be told the same thing.
 	if strings.TrimSpace(message) == "" {
-		return fmt.Errorf("gascity: SubmitSession: message must contain a non-whitespace character")
+		return nil, fmt.Errorf("gascity: SubmitSession: message must contain a non-whitespace character")
 	}
 	if intent == "" {
 		intent = SubmitIntentDefault
@@ -83,10 +103,15 @@ func (c *Client) SubmitSession(ctx context.Context, idOrAlias, message string, i
 		url.PathEscape(c.City), url.PathEscape(idOrAlias))
 	payload, err := json.Marshal(submitSessionRequest{Message: message, Intent: intent})
 	if err != nil {
-		return fmt.Errorf("gascity: SubmitSession: encode body: %w", err)
+		return nil, fmt.Errorf("gascity: SubmitSession: encode body: %w", err)
 	}
-	if _, err := c.doRequest(ctx, http.MethodPost, path, "", payload); err != nil {
-		return err
+	body, err := c.doRequest(ctx, http.MethodPost, path, "", payload)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	var out SubmitResult
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("gascity: POST %s: decode: %w", path, err)
+	}
+	return &out, nil
 }
