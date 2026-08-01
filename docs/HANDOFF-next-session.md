@@ -93,6 +93,24 @@ of it — the old value killed the delivery it was waiting for.
   `GC_WEBHOOK_ARG_*` set. Full real dispatch path, no chart release, no pod
   recreation — which sidesteps both traps below entirely.
 
+### Deploy state at handoff — READ THIS BEFORE TRUSTING THE CLUSTER
+
+**The fix is committed and pushed but NOT DEPLOYED.** HEAD is `3b04f0bf77c3`;
+the running controller is still `v0.1.0-d0443ac159e7`. Every live result above
+was produced by a hand-copied `gonk-gate` binary at `/tmp/gonk-gate-new` inside
+the controller pod — which is *gone* the moment that pod restarts. **The
+webhook path in the cluster right now still has the old, broken dispatch.**
+
+Roll forward the same way as session 4: wait for the pipeline on HEAD, then bump
+the four tags in `steve/gitops`
+`clusters/orac/apps/gonk/helmrelease-gonk.yaml` and commit straight to main.
+
+Also parked in `ns gonk`: **eight agent pods**, most of them wedged from this
+session's experiments. `go-4m4` is the good one (issue 21, completed with a
+fence). `go-8oj` and `go-55a` are the shell-mode wedge, preserved as evidence
+for `gonk-e9m`. `go-d3y`/`go-57b` were the manual test rigs. Reap them when the
+reaping fix (`fc77fb4`) actually ships. Test issues 18–21 exist in project 75.
+
 
 ## 2026-07-31 (session 4): deployed and running; ONE blocker left, and it is upstream
 
