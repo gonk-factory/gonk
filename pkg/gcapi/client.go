@@ -59,6 +59,10 @@ type Client struct {
 	// the X-GC-Request CSRF header) on every mutating request. When nil, no
 	// grant headers are sent -- the loopback / network-position path, unchanged.
 	Signer *Signer
+	// OutcomePollInterval paces AwaitRequestOutcome's scan of the city event
+	// log. Zero means defaultOutcomePollInterval; tests set it to keep the
+	// correlation path instant.
+	OutcomePollInterval time.Duration
 }
 
 func New(baseURL, city string) *Client {

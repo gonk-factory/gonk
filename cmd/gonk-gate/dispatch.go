@@ -72,15 +72,53 @@ type dispatchDeps struct {
 	// path fast and deterministic.
 	SubmitAttempts int
 	SubmitBackoff  func(attempt int) time.Duration
+	// SubmitAwaitTimeout bounds how long ONE attempt waits for the submit's
+	// TERMINAL EVENT before giving up on observing it. The 202 says nothing
+	// about delivery, so this is the wait for the only answer that exists.
+	SubmitAwaitTimeout time.Duration
+	// SubmitDeadline is the hard cap on the whole deliver-and-confirm loop,
+	// regardless of how the attempts and timeouts above divide it up. It is what
+	// actually keeps dispatch inside its order timeout.
+	SubmitDeadline time.Duration
+	// CreateAwaitTimeout bounds the wait for the CREATE's terminal event. It is
+	// separate from SubmitAwaitTimeout because the two events behave nothing
+	// alike: a create failure is immediate validation, a create success waits on
+	// the pod. See awaitCreate.
+	CreateAwaitTimeout time.Duration
 }
 
 const (
-	// defaultSubmitAttempts x defaultSubmitBackoff must stay well inside
-	// gonk-dispatch's 120s order timeout. A live run took ~31s from create to
-	// session start, so 20 x 3s = 60s leaves room for both the session to
-	// appear and the rest of the order to finish.
-	defaultSubmitAttempts = 20
+	// The retry loop exists for the async-create window: agent-kind create
+	// returns 202 with no session id and the pod takes its time. MEASURED on
+	// orac 2026-08-01: ~90s from create to a commandable session. 40 x 3s = 120s
+	// of patience covers that with margin.
+	defaultSubmitAttempts = 40
 	submitBackoffInterval = 3 * time.Second
+	// defaultSubmitAwaitTimeout is sized from MEASURED latency, not guessed
+	// (live, ns gonk, 2026-08-01): the two outcomes are wildly asymmetric.
+	//   - resolve_failed  ~262ms  -- nothing is delivered, so nothing is slow;
+	//                               this is the case the retry loop spins on.
+	//   - success        ~10.8s   -- the message is exec'd into the pod's tmux
+	//                               and only then does the event land.
+	// So the retry loop stays fast while a genuine delivery gets room. The
+	// success latency is also LOAD-DEPENDENT -- the supervisor serializes
+	// delivery behind a session mutation lock, and the same submit confirmed in
+	// 10.8s idle and 51.2s while another session was mid-turn. A timeout here
+	// means the outcome is UNKNOWN, which fails the dispatch, so it must clear
+	// the loaded case comfortably rather than the idle one.
+	defaultSubmitAwaitTimeout = 90 * time.Second
+	// defaultSubmitDeadline keeps the whole loop inside gonk-dispatch's order
+	// timeout (pack/orders/gonk-dispatch.toml, 300s) with room for the meter
+	// call, the issue fetch and the create that precede it. Overshooting it
+	// turns a recoverable delivery failure into a killed order with no bead
+	// update. It bounds the CONTEXT, so it caps in-flight requests too.
+	defaultSubmitDeadline = 240 * time.Second
+	// defaultCreateAwaitTimeout is short ON PURPOSE. It is a fast check for a
+	// create that FAILED (validation, emitted immediately), not a wait for one
+	// that succeeded (emitted only after the pod is commandable -- measured live
+	// as NOT within 45s). Waiting longer would buy nothing and spend the budget
+	// that deliverPrompt needs, since the retry loop covers the same window.
+	defaultCreateAwaitTimeout = 3 * time.Second
 )
 
 // defaultSubmitBackoff is deliberately flat, not exponential: we are waiting on

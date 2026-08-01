@@ -49,28 +49,87 @@ type Server struct {
 	// (gonk-u1p.1 / upstream gonk-drf), so dispatch tests assert the prompt
 	// against this rather than against Created.
 	Submitted []SubmittedMessage
-	// SubmitNotFoundUntil maps an id/alias to a count of remaining 404s: each
-	// matching submit decrements the count and answers 404 instead of being
-	// recorded, until it reaches zero. Create is async upstream, so the session
-	// legitimately may not exist for the first few submits -- this models that
-	// window so a caller's retry loop is exercised rather than assumed.
-	SubmitNotFoundUntil map[string]int
+	// SubmitUnresolvedUntil maps an id/alias to a count of remaining
+	// resolve_failed outcomes: each matching submit decrements the count and is
+	// answered 202 (like every submit) but emits request.failed with
+	// error_code=resolve_failed instead of being recorded, until it reaches zero.
+	//
+	// This models the async-create window AS IT ACTUALLY IS. An earlier version
+	// of this fake answered 404 there, which upstream never does -- the route
+	// resolves the session in a goroutine AFTER answering 202 -- and that
+	// fiction is exactly why the round-trip test could not see gonk-u1p.7.
+	SubmitUnresolvedUntil map[string]int
+	// SubmitInactiveUntil is the same shape for the OTHER retryable outcome:
+	// the session resolved but its runtime is not live yet, which upstream
+	// reports as error_code=submit_failed with session.ErrSessionInactive's
+	// text. Retryable for the same reason -- the pod is still starting.
+	SubmitInactiveUntil map[string]int
+	// SubmitSilent accepts submits with a 202 and emits NO terminal event, so a
+	// caller has to face the one answer it cannot get: the outcome is unknown.
+	// That must never be read as success -- and must not be resubmitted either,
+	// since the message may well have landed.
+	SubmitSilent bool
+	// CreateFailWith, when non-empty, makes every create answer 202 and then
+	// emit request.failed with that error_message and error_code=create_failed.
+	CreateFailWith string
+	// NotRunningUntil maps an id/alias to a count of remaining reads that report
+	// running=false: each GetSession decrements it. Agent create is async, so a
+	// freshly created session is start_pending for a while -- and a default
+	// submit into a start_pending session is PARKED on the nudge queue rather
+	// than delivered (proven live: the parked copy never arrived). Modelling the
+	// window is what forces a caller to wait for the runtime instead of firing a
+	// prompt into a session that cannot receive one.
+	NotRunningUntil map[string]int
+	// CreateSilent accepts creates with a 202 and emits no terminal event,
+	// modelling the NORMAL case for a real pod: upstream emits the create's
+	// success event only after WaitForSessionCommandable, so a session whose pod
+	// is still starting has said nothing yet. That must not read as a failure.
+	CreateSilent bool
 	// SubmitAttemptsSeen counts EVERY submit request reaching the fake, including
-	// ones answered with a 404 or an injected failure. A caller that treats a
-	// non-404 as retryable would burn its whole budget here, so a test can assert
-	// the attempt count rather than only the outcome.
+	// ones whose outcome event is a failure and ones answered with an injected
+	// rejection. A caller that retries something terminal would burn its whole
+	// budget here, so a test can assert the attempt count, not only the outcome.
 	SubmitAttemptsSeen int
 	// SubmitFail is a count of remaining 401s on the submit route, decremented
-	// per request. Unlike SubmitNotFoundUntil these are NOT the async-create
+	// per request. Unlike SubmitUnresolvedUntil these are NOT the async-create
 	// window -- they model a hard rejection that must be terminal, not retried.
 	// 401 specifically (not 5xx) because gcapi.Client retries 5xx internally, so
 	// a 5xx count would measure the CLIENT's retries; a 4xx is terminal there,
 	// which makes SubmitAttemptsSeen isolate the CALLER's own retry loop.
 	SubmitFail int
 
-	srv  *httptest.Server
-	mu   sync.Mutex
-	next int
+	srv    *httptest.Server
+	mu     sync.Mutex
+	next   int
+	seq    uint64
+	events []wireEvent
+}
+
+// wireEvent is one row of the fake's city event log, in gascity's list shape.
+// The log exists because the ONLY place an async request's outcome is reported
+// is this stream -- the 202 says nothing (see gcapi.SubmitResult).
+type wireEvent struct {
+	Seq     uint64       `json:"seq"`
+	Type    string       `json:"type"`
+	Subject string       `json:"subject,omitempty"`
+	Payload eventPayload `json:"payload"`
+}
+
+type eventPayload struct {
+	RequestID    string `json:"request_id"`
+	Operation    string `json:"operation,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
+	Queued       bool   `json:"queued,omitempty"`
+	Intent       string `json:"intent,omitempty"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+// recordEventLocked appends one terminal event and returns its seq. Callers
+// hold s.mu.
+func (s *Server) recordEventLocked(eventType, subject string, payload eventPayload) {
+	s.seq++
+	s.events = append(s.events, wireEvent{Seq: s.seq, Type: eventType, Subject: subject, Payload: payload})
 }
 
 // Pour is one accepted order-run request.
@@ -169,6 +228,22 @@ func parseSessionsPath(p string) (city string, ok bool) {
 	return city, true
 }
 
+// parseEventsPath extracts city from "/v0/city/{city}/events", mirroring the
+// route gcapi.Client.listEvents builds.
+func parseEventsPath(p string) (city string, ok bool) {
+	const prefix = "/v0/city/"
+	const suffix = "/events"
+	rest, found := strings.CutPrefix(p, prefix)
+	if !found {
+		return "", false
+	}
+	city, found = strings.CutSuffix(rest, suffix)
+	if !found || city == "" || strings.Contains(city, "/") {
+		return "", false
+	}
+	return city, true
+}
+
 // parseSessionGetPath extracts (city, id) from "/v0/city/{city}/session/{id}",
 // mirroring the route gcapi.Client.GetSessionOutput builds.
 func parseSessionGetPath(p string) (city, id string, ok bool) {
@@ -208,6 +283,10 @@ func parseSessionSubmitPath(p string) (city, id string, ok bool) {
 // and GET /v0/city/{cityName}/session/{id}.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
+		if _, ok := parseEventsPath(r.URL.Path); ok {
+			s.handleEventList(w, r)
+			return
+		}
 		if _, id, ok := parseSessionTranscriptPath(r.URL.Path); ok {
 			s.handleGetTranscript(w, id, r.URL.Query().Get("tail") == "0")
 			return
@@ -292,6 +371,24 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.next++
 	reqID := fmt.Sprintf("req-%d", s.next)
+	cursor := s.seq
+
+	// Create is async in the HANDLER too: it answers 202 and only then validates
+	// and spawns, so its real outcome is a terminal event exactly like submit's.
+	// CreateFailWith models that half -- observed live as a taken alias answering
+	// 202 and then emitting create_failed while dispatch logged success.
+	if s.CreateFailWith != "" {
+		s.recordEventLocked("request.failed", "", eventPayload{
+			RequestID:    reqID,
+			Operation:    "session.create",
+			ErrorCode:    "create_failed",
+			ErrorMessage: s.CreateFailWith,
+		})
+		s.mu.Unlock()
+		writeAccepted(w, reqID, cursor)
+		return
+	}
+
 	s.Created = append(s.Created, CreatedSession{
 		Kind: body.Kind, Name: body.Name, Alias: body.Alias, Message: body.Message, Async: body.Async,
 	})
@@ -302,21 +399,38 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if body.Alias != "" {
 		s.putSessionLocked(body.Alias, SessionRunning, "")
 	}
+	if !s.CreateSilent {
+		s.recordEventLocked("request.result.session.create", body.Alias, eventPayload{
+			RequestID: reqID,
+			SessionID: body.Alias,
+		})
+	}
 	s.mu.Unlock()
 
+	writeAccepted(w, reqID, cursor)
+}
+
+// writeAccepted answers the 202 every async session route returns: an
+// acknowledgement plus the correlation handle, and nothing about the outcome.
+func writeAccepted(w http.ResponseWriter, reqID string, cursor uint64) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(gcapi.CreateSessionResult{
 		Status:      "accepted",
 		RequestID:   reqID,
-		EventCursor: "0",
+		EventCursor: strconv.FormatUint(cursor, 10),
 	})
 }
 
-// handleSubmitSession mirrors gascity's async submit: it records the message
-// and answers 202. SubmitNotFoundUntil[id] answers 404 first (not recorded),
-// modelling the window between an async create being accepted and the session
-// actually existing.
+// handleSubmitSession mirrors gascity's async submit EXACTLY: it answers 202
+// unconditionally -- resolution and delivery happen after the response -- and
+// reports the real outcome only as a terminal event on the city log.
+//
+// So a submit for a session that does not exist yet looks IDENTICAL on the wire
+// to one that lands. That is not a quirk of this fake; it is the observed
+// upstream behaviour (proven live 2026-08-01, gonk-u1p.7), and modelling it any
+// other way lets a caller that ignores the event stream pass its tests and drop
+// every prompt in production.
 func (s *Server) handleSubmitSession(w http.ResponseWriter, r *http.Request, id string) {
 	var body struct {
 		Message string `json:"message"`
@@ -329,26 +443,96 @@ func (s *Server) handleSubmitSession(w http.ResponseWriter, r *http.Request, id 
 
 	s.mu.Lock()
 	s.SubmitAttemptsSeen++
+	// SubmitFail is a TRANSPORT-level rejection (no grant, wrong host), which
+	// really is answered synchronously upstream. It is the one submit failure
+	// that never reaches the event log.
 	if s.SubmitFail > 0 {
 		s.SubmitFail--
 		s.mu.Unlock()
 		http.Error(w, "injected rejection", http.StatusUnauthorized)
 		return
 	}
-	if s.SubmitNotFoundUntil[id] > 0 {
-		s.SubmitNotFoundUntil[id]--
-		s.mu.Unlock()
-		http.Error(w, `{"detail":"session not found"}`, http.StatusNotFound)
-		return
-	}
 	s.next++
 	reqID := fmt.Sprintf("req-%d", s.next)
-	s.Submitted = append(s.Submitted, SubmittedMessage{ID: id, Message: body.Message, Intent: body.Intent})
+	cursor := s.seq
+
+	// A default-intent submit into a session that is not running yet is PARKED,
+	// not delivered: upstream answers ok with queued=true and hands the message
+	// to the nudge queue. Modelled here because "accepted" and "delivered" part
+	// company exactly there.
+	parked := false
+	if sess, ok := s.sessions[id]; ok && sess.State == SessionRunning && s.NotRunningUntil[id] > 0 {
+		parked = true
+	}
+
+	switch {
+	case parked:
+		s.recordEventLocked("request.result.session.submit", id, eventPayload{
+			RequestID: reqID,
+			SessionID: id,
+			Queued:    true,
+			Intent:    body.Intent,
+		})
+	case s.SubmitSilent:
+		// Accepted, and then nothing is ever said about it.
+	case s.SubmitUnresolvedUntil[id] > 0:
+		s.SubmitUnresolvedUntil[id]--
+		s.recordEventLocked("request.failed", "", eventPayload{
+			RequestID:    reqID,
+			Operation:    "session.submit",
+			ErrorCode:    "resolve_failed",
+			ErrorMessage: fmt.Sprintf("session not found: %q", id),
+		})
+	case s.SubmitInactiveUntil[id] > 0:
+		s.SubmitInactiveUntil[id]--
+		s.recordEventLocked("request.failed", "", eventPayload{
+			RequestID:    reqID,
+			Operation:    "session.submit",
+			ErrorCode:    "submit_failed",
+			ErrorMessage: fmt.Sprintf("session is not active: %s", id),
+		})
+	default:
+		s.Submitted = append(s.Submitted, SubmittedMessage{ID: id, Message: body.Message, Intent: body.Intent})
+		s.recordEventLocked("request.result.session.submit", id, eventPayload{
+			RequestID: reqID,
+			SessionID: id,
+			Intent:    body.Intent,
+		})
+	}
 	s.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "request_id": reqID})
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":       "accepted",
+		"request_id":   reqID,
+		"event_cursor": strconv.FormatUint(cursor, 10),
+	})
+}
+
+// handleEventList answers GET /v0/city/{city}/events, newest first, optionally
+// filtered by type -- the read gcapi.AwaitRequestOutcome uses to learn what an
+// async request actually did.
+func (s *Server) handleEventList(w http.ResponseWriter, r *http.Request) {
+	eventType := r.URL.Query().Get("type")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+
+	s.mu.Lock()
+	items := make([]wireEvent, 0, len(s.events))
+	for i := len(s.events) - 1; i >= 0; i-- { // newest first, as upstream orders it
+		if eventType != "" && s.events[i].Type != eventType {
+			continue
+		}
+		items = append(items, s.events[i])
+		if limit > 0 && len(items) >= limit {
+			break
+		}
+	}
+	total := len(items)
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "total": total})
 }
 
 // handleGetSession answers a peek read: it returns a SessionView carrying the
@@ -361,6 +545,10 @@ func (s *Server) handleGetSession(w http.ResponseWriter, id string, peekLines in
 	var running bool
 	if ok {
 		state, out, running = string(sess.State), sess.output, sess.State == SessionRunning
+		if running && s.NotRunningUntil[id] > 0 {
+			s.NotRunningUntil[id]--
+			state, running = "start_pending", false
+		}
 	}
 	s.mu.Unlock()
 	if !ok {

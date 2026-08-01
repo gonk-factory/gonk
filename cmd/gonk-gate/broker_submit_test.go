@@ -73,18 +73,45 @@ func TestDispatchDeliversPromptViaSubmitNotCreate(t *testing.T) {
 	}
 }
 
+// THE REGRESSION TEST FOR gonk-u1p.7.
+//
 // Agent-kind create is always-async upstream: it returns 202 with no session id
-// and spawns in the background. The session therefore does NOT exist for the
-// first submits, so a 404 must be retried rather than treated as a failure.
+// and spawns in the background, so the session does NOT exist for the first
+// submits. Upstream does not report that with a 404 -- the submit route answers
+// 202 BEFORE it resolves anything -- it reports it as a request.failed event
+// with error_code=resolve_failed.
+//
+// Dispatch must therefore read the OUTCOME, not the status code. A version that
+// trusts the 202 passes every other test in this file and drops the prompt of
+// every real agent, because the first "success" here is a lie.
 func TestDispatchRetriesSubmitUntilSessionMaterializes(t *testing.T) {
 	gc := gcapitest.New(t)
-	gc.SubmitNotFoundUntil = map[string]int{brokerSessionAlias(42, 3, 1): 2}
+	gc.SubmitUnresolvedUntil = map[string]int{brokerSessionAlias(42, 3, 1): 2}
 
 	if code := runDispatchForSubmit(t, gc); code != 0 {
-		t.Fatalf("exit = %d, want 0 (the 404s are the async-create window, not a failure)", code)
+		t.Fatalf("exit = %d, want 0 (the resolve_failed outcomes are the async-create window, not a failure)", code)
 	}
 	if len(gc.Submitted) != 1 {
 		t.Fatalf("submitted = %d, want exactly one accepted prompt after the retries", len(gc.Submitted))
+	}
+	if gc.SubmitAttemptsSeen != 3 {
+		t.Fatalf("submit attempted %d times, want 3 -- two dropped, then one that landed. "+
+			"Fewer means dispatch believed a 202 that delivered nothing", gc.SubmitAttemptsSeen)
+	}
+}
+
+// The other retryable outcome: the session resolved but its pod is not live
+// yet, which upstream reports as submit_failed carrying ErrSessionInactive's
+// text. Same window, different half of it.
+func TestDispatchRetriesWhileTheSessionIsNotLiveYet(t *testing.T) {
+	gc := gcapitest.New(t)
+	gc.SubmitInactiveUntil = map[string]int{brokerSessionAlias(42, 3, 1): 1}
+
+	if code := runDispatchForSubmit(t, gc); code != 0 {
+		t.Fatalf("exit = %d, want 0 (an inactive session is a pod still starting)", code)
+	}
+	if len(gc.Submitted) != 1 {
+		t.Fatalf("submitted = %d, want exactly one accepted prompt", len(gc.Submitted))
 	}
 }
 
@@ -95,7 +122,7 @@ func TestDispatchRetriesSubmitUntilSessionMaterializes(t *testing.T) {
 // whole change exists to fix).
 func TestDispatchFailsWhenPromptNeverDelivers(t *testing.T) {
 	gc := gcapitest.New(t)
-	gc.SubmitNotFoundUntil = map[string]int{brokerSessionAlias(42, 3, 1): 99}
+	gc.SubmitUnresolvedUntil = map[string]int{brokerSessionAlias(42, 3, 1): 99}
 
 	if code := runDispatchForSubmit(t, gc); code != 1 {
 		t.Fatalf("exit = %d, want 1 (infra) when the prompt could not be delivered", code)
@@ -109,12 +136,115 @@ func TestDispatchFailsWhenPromptNeverDelivers(t *testing.T) {
 // latency, which a fake supervisor does not have.
 func zeroBackoff(int) time.Duration { return 0 }
 
-// A non-404 is terminal, NOT retryable. Only the 404 window is the async-create
-// race; retrying a 502 or a 401 just burns the order's 120s timeout budget and
-// turns a fast, legible failure into a killed order. Asserting the ATTEMPT COUNT
-// (not merely the exit code) is what pins this: without the IsNotFound guard the
-// loop would spend every attempt and still exit 1, passing an outcome-only test.
-func TestDispatchDoesNotRetryNonNotFoundSubmitErrors(t *testing.T) {
+// A prompt must not be fired into a session whose runtime is not up yet.
+//
+// Upstream parks a default-intent submit on the nudge queue when the session is
+// still start_pending, answering ok with queued=true. PROVEN LIVE 2026-08-01:
+// that parked prompt NEVER arrived -- session go-57b took one, its pod came up
+// healthy, and opencode sat at the idle splash indefinitely. So dispatch waits
+// for running=true rather than accepting a queued receipt.
+//
+// The queued=true assertion is the real one here: a version that submits
+// immediately still exits 0, because upstream calls parking a success.
+func TestDispatchWaitsForTheRuntimeBeforeSubmitting(t *testing.T) {
+	gc := gcapitest.New(t)
+	alias := brokerSessionAlias(42, 3, 1)
+	gc.NotRunningUntil = map[string]int{alias: 2}
+
+	if code := runDispatchForSubmit(t, gc); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if len(gc.Submitted) != 1 {
+		t.Fatalf("submitted = %d, want exactly one prompt", len(gc.Submitted))
+	}
+	if gc.SubmitAttemptsSeen != 1 {
+		t.Fatalf("submit attempted %d times, want 1 -- the prompt must be HELD BACK until the "+
+			"runtime is up, not fired into a start_pending session and parked", gc.SubmitAttemptsSeen)
+	}
+}
+
+// CREATE is async in the handler too, so its 202 is not a receipt either. A
+// create that fails outright -- a taken alias, an unknown agent -- is still
+// answered 202 and reports the failure only as request.failed/create_failed.
+//
+// Observed live 2026-08-01: a colliding alias did exactly that while dispatch
+// logged "triage session created" and went on to submit a prompt into a session
+// it had not created. Dispatch must fail here, and must not go on to submit.
+func TestDispatchFailsWhenTheCreateSilentlyFailed(t *testing.T) {
+	gc := gcapitest.New(t)
+	gc.CreateFailWith = `session alias already exists: "gonk.triage.p42.i3.a1" already belongs to go-d3y`
+
+	if code := runDispatchForSubmit(t, gc); code != 1 {
+		t.Fatalf("exit = %d, want 1 (infra): the session was never created", code)
+	}
+	if gc.SubmitAttemptsSeen != 0 {
+		t.Fatalf("submit attempted %d times, want 0 -- there is no session to submit to",
+			gc.SubmitAttemptsSeen)
+	}
+}
+
+// A create whose success event has not arrived yet is the NORMAL case, not a
+// failure: upstream emits it only after the pod is commandable (measured live
+// as not within 45s), while a create that genuinely failed says so immediately.
+// So dispatch must carry on and let the delivery retry loop wait out the pod
+// start -- treating silence as failure would fail every healthy slow start.
+func TestDispatchProceedsWhenTheCreateHasNotReportedYet(t *testing.T) {
+	gc := gcapitest.New(t)
+	gc.CreateSilent = true
+
+	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
+	}}
+	code := runDispatch(context.Background(), dispatchDeps{
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
+		Forge: stubForge{iss: &glab.Issue{IID: 3, Title: "t", State: "opened"}}, Args: baseDispatchArgs(),
+		SubmitAttempts: 3, SubmitBackoff: zeroBackoff,
+		CreateAwaitTimeout: 20 * time.Millisecond,
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: a pod still starting is not a failed create", code)
+	}
+	if len(gc.Submitted) != 1 {
+		t.Fatalf("submitted = %d, want 1 -- delivery must proceed", len(gc.Submitted))
+	}
+}
+
+// An outcome that never arrives is UNKNOWN, and unknown is not success: the run
+// must fail rather than record StateRunning for a session that may be idling.
+//
+// It must also not RESUBMIT. The message may well have landed -- the terminal
+// event is what is missing, not necessarily the delivery -- so a retry here
+// risks handing the agent its prompt twice while still learning nothing. Asserting
+// the attempt count is what pins that half.
+func TestDispatchFailsWhenTheOutcomeIsNeverReported(t *testing.T) {
+	gc := gcapitest.New(t)
+	gc.SubmitSilent = true
+
+	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
+	}}
+	code := runDispatch(context.Background(), dispatchDeps{
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
+		Forge: stubForge{iss: &glab.Issue{IID: 3, Title: "t", State: "opened"}}, Args: baseDispatchArgs(),
+		SubmitAttempts: 3, SubmitBackoff: zeroBackoff,
+		SubmitAwaitTimeout: 50 * time.Millisecond,
+	})
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (infra): an unobserved outcome is not a delivered prompt", code)
+	}
+	if gc.SubmitAttemptsSeen != 1 {
+		t.Fatalf("submit attempted %d times, want exactly 1 -- an unknown outcome must not be resubmitted",
+			gc.SubmitAttemptsSeen)
+	}
+}
+
+// A transport-level rejection is terminal, NOT retryable. Only the async-create
+// window is a race; retrying a 502 or a 401 just burns the order's 120s timeout
+// budget and turns a fast, legible failure into a killed order. Asserting the
+// ATTEMPT COUNT (not merely the exit code) is what pins this: without the guard
+// the loop would spend every attempt and still exit 1, passing an outcome-only
+// test.
+func TestDispatchDoesNotRetryTransportRejections(t *testing.T) {
 	gc := gcapitest.New(t)
 	gc.SubmitFail = 99 // a persistently broken supervisor, not a missing session
 
@@ -122,7 +252,7 @@ func TestDispatchDoesNotRetryNonNotFoundSubmitErrors(t *testing.T) {
 		t.Fatalf("exit = %d, want 1 (infra)", code)
 	}
 	if gc.SubmitAttemptsSeen != 1 {
-		t.Fatalf("submit attempted %d times, want exactly 1 -- a non-404 must not be retried",
+		t.Fatalf("submit attempted %d times, want exactly 1 -- a hard rejection must not be retried",
 			gc.SubmitAttemptsSeen)
 	}
 }

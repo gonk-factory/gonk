@@ -151,20 +151,26 @@ func TestDispatchCreatesTriageSessionOnRun(t *testing.T) {
 		t.Fatalf("alias = %q, want %q", cs.Alias, wantAlias)
 	}
 	// The prompt is delivered by the submit (the create-time inject is dropped
-	// by the k8s provider -- gonk-u1p.1), and carries the per-session marker
-	// lines the entrypoint parses...
+	// by the k8s provider -- gonk-u1p.1).
 	if len(gc.Submitted) != 1 {
 		t.Fatalf("submitted = %+v, want one", gc.Submitted)
 	}
 	cs.Message = gc.Submitted[0].Message
-	if !strings.Contains(cs.Message, "<!-- gonk:model:some-model-from-the-catalog -->") {
-		t.Fatalf("prompt missing model marker:\n%s", cs.Message)
+	// IT MUST CARRY NO "!". opencode's composer treats a bang as its shell-mode
+	// trigger, and a prompt typed in as keystrokes then runs as a shell command
+	// instead of reaching the model -- which is what wedged every live triage
+	// session. See sanitizeForKeystrokeDelivery.
+	if strings.Contains(cs.Message, "!") {
+		t.Fatalf("prompt contains a bang, which opencode reads as shell mode:\n%s", cs.Message)
 	}
-	if !strings.Contains(cs.Message, `"gonk_rung":"cheap"`) {
-		t.Fatalf("prompt missing attribution metadata marker:\n%s", cs.Message)
+	// The marker lines are gone with it: they began "<!--", and the pod cannot
+	// read them on this delivery path anyway (they were parsed from --prompt,
+	// which the k8s provider never composes).
+	if strings.Contains(cs.Message, "gonk:model:") || strings.Contains(cs.Message, "gonk:meta:") {
+		t.Fatalf("prompt still carries entrypoint marker lines:\n%s", cs.Message)
 	}
-	// ...references the issue, instructs the fenced batch, forbids external calls.
-	if !strings.Contains(cs.Message, "!3") || !strings.Contains(cs.Message, "group/repo") {
+	// It references the issue, instructs the fenced batch, forbids external calls.
+	if !strings.Contains(cs.Message, "#3") || !strings.Contains(cs.Message, "group/repo") {
 		t.Fatalf("prompt missing issue reference:\n%s", cs.Message)
 	}
 	if !strings.Contains(cs.Message, "GONK_BATCH_START") || !strings.Contains(cs.Message, "GONK_BATCH_END") {
@@ -296,16 +302,18 @@ func TestDispatchAlwaysDecidesEvenWhenVarsCarryARung(t *testing.T) {
 		t.Fatalf("meter /decide called %d times, want exactly 1 -- THE GATE MUST ALWAYS ASK", fm.calls)
 	}
 	// The broker path must use meter's LIVE answer, never the stale order-var
-	// hints: the created session's model marker + the bead's recorded
-	// rung/model/reservation are meter's, and the alias carries meter's attempt.
+	// hints: the bead's recorded rung/model/reservation are meter's, and the
+	// alias carries meter's attempt.
+	//
+	// The recorded model is the load-bearing assertion now that the prompt no
+	// longer carries a model marker. It is also the better one: the RECORD is
+	// what the ladder, the reservation and sweep all read, whereas the marker was
+	// only ever advisory text the pod could not consume on this path.
 	if len(gc.Created) != 1 {
 		t.Fatalf("created = %+v, want one", gc.Created)
 	}
 	if len(gc.Submitted) != 1 {
 		t.Fatalf("submitted = %+v, want one", gc.Submitted)
-	}
-	if !strings.Contains(gc.Submitted[0].Message, "<!-- gonk:model:m2 -->") {
-		t.Fatalf("session prompt used a stale model instead of meter's m2:\n%s", gc.Submitted[0].Message)
 	}
 	if gc.Created[0].Alias != "gonk.triage.p42.i3.a2" { // meter's Attempt=2, not a caller value
 		t.Fatalf("alias = %q, want attempt 2 from meter", gc.Created[0].Alias)
