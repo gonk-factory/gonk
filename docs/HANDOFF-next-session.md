@@ -1,6 +1,98 @@
 # Handoff — next session
 
-_Last updated: 2026-07-31 (session 4). Branch: `main` (we develop on main per owner's call). Everything below is committed and pushed._
+_Last updated: 2026-08-01 (session 5). Branch: `main` (we develop on main per owner's call). Everything below is committed and pushed._
+
+## 2026-08-01 (session 5): THE AGENT WORKS. A gonk-spawned opencode session completed the loop.
+
+Issue 21 → dispatch → session `go-4m4` → the agent read the issue, wrote a real
+triage analysis, and emitted a well-formed `GONK_BATCH_START`/`END` fence. That
+is the first time any agent has finished. Verified live on ns `gonk`.
+
+### Session 4's diagnosis was wrong, and it is worth knowing why
+
+`gonk-u1p.7` said both prompt-delivery mechanisms were broken upstream and that
+the only way forward was option (c) — carry the prompt in out-of-band. That was
+inference from source reading. Three experiments against the live cluster
+overturned it in about twenty minutes:
+
+1. **tmux delivery works.** Running the carrier's exact two-step `send-keys` by
+   hand typed into the live opencode TUI and the model answered (`PONG`, 5.3s).
+   `Provider.Nudge` really does swallow the carrier's error — but the carrier
+   was not failing.
+2. **`SubmitSession` works.** A probe making the exact signed POST that
+   `cmd/gonk-gate` makes delivered a prompt; the model answered in 498ms. The
+   shipped fix was not merely "correct against the contract" — it was the
+   unblock all along.
+3. **The bug was ours.** `POST .../submit` resolves the session *after*
+   answering 202, so a submit to a session that does not exist yet looks
+   identical to one that lands. `deliverPrompt` retried only on 404 — a status
+   that route never returns.
+
+**The lesson worth carrying: read the source to form the hypothesis, then go and
+run it.** `gcapitest` had encoded the *assumed* contract (a 404 window upstream
+does not have), so the round-trip test confirmed the assumption instead of the
+behaviour. A fake built from a spec you have not exercised will agree with you.
+
+### The second bug: the prompt was being executed, not asked
+
+Gas City delivers messages as tmux `send-keys -l` — **keystrokes into a TUI** —
+and opencode's composer treats `!` as its shell-mode trigger. gonk's prompt
+opened with `<!-- gonk:model:... -->` and said `issue !18`, so the entire prompt
+ran as a shell command. opencode created an empty session and sat on a spinner
+with no LLM request in its log. Reproduced minimally: `"...see issue !42 and
+reply with GOLF"` → `$ ...see issue 42...` → `/bin/sh: 1: Hello: not found`.
+Multi-line text, backticks and JSON braces were each tested and are fine — the
+bang alone does it, anywhere in the string.
+
+Mitigated by stripping bangs before submit and dropping the marker lines. **This
+is a mitigation, not a fix** — see `gonk-e9m`. gonk hands attacker-influenced
+issue text to a component that types it into a terminal, and a keystroke channel
+cannot be made safe by escaping at the sender.
+
+### Where to start
+
+- **`gonk-e9m` (P1)** — the keystroke/injection boundary. The durable fix is to
+  stop delivering prompts as keystrokes: give the pod its prompt out-of-band and
+  have `gonk-agent-entrypoint` hand it to opencode.
+- **`gonk-m6t` (P2)** — needs the *same channel*, so design them together.
+  Per-bead attribution no longer reaches the pod; spend rows are attributed
+  per-install. Ruled out by experiment: create `options` (select-only, rejects
+  free text), file staging (skipped — `GC_K8S_PREBAKED=true`), session env (no
+  env field on the create body). **What works: the pod knows its own
+  `GC_ALIAS`** (verified in the live pod env), and it already has netpol egress
+  to `gonk-meter`. Prompt-by-reference is the shape.
+- **`gonk-9lp` (P3)** — qwen3-14b emitted `"add":"gonk::bug","gonk::needs-..."`
+  instead of an array. The shape gate catches it, which is the design working;
+  worth tightening the prompt before blaming the ladder.
+
+### Facts measured live (do not re-derive these)
+
+| thing | value |
+|---|---|
+| pod create → commandable session | ~90s |
+| submit → terminal event, idle | 10.8s |
+| submit → terminal event, agent mid-turn | 36–51s |
+| submit → `resolve_failed` event | 262ms |
+| create → `create_failed` event | sub-second |
+
+The asymmetry is structural, not noise: a create *failure* is plain validation
+and fires immediately, a create *success* waits on `WaitForSessionCommandable`
+(up to 120s upstream). `gonk-dispatch`'s order timeout went 120s → 300s because
+of it — the old value killed the delivery it was waiting for.
+
+### Debugging recipes that paid off
+
+- **Read the city event log.** `GET /v0/city/{city}/events?type=...&limit=N` is
+  unsigned and is the *only* place an async request's outcome exists. Every
+  silent failure in this session was already being reported there.
+- **A throwaway signed probe.** Build a tiny binary against `pkg/gcapi`,
+  `kubectl cp` it into the controller pod, run it there — it reads the mounted
+  write key, so no secret leaves the cluster, and you get the exact signed call
+  gonk-gate makes without a deploy.
+- **`kubectl cp` the rebuilt `gonk-gate` and run it by hand** with
+  `GC_WEBHOOK_ARG_*` set. Full real dispatch path, no chart release, no pod
+  recreation — which sidesteps both traps below entirely.
+
 
 ## 2026-07-31 (session 4): deployed and running; ONE blocker left, and it is upstream
 
