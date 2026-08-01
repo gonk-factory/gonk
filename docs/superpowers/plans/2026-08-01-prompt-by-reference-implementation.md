@@ -36,48 +36,67 @@ prompt and the one-shot guarantee is decorative.
 **Verify**: `storetest` passes for memory and postgres; a concurrent
 `TakePrompt` test proves exactly one caller wins.
 
-### T2 — route + scoped credential · `[ ]`
+### T2 — routes, and the one deliberate auth exemption · `[ ]`
 
 `internal/meter/service/http.go`:
 
-- `PUT /v1/prompt/{alias}` — admin bearer only (the controller writes).
-- `GET /v1/prompt/{alias}` — **the scoped prompt-reader token only**.
-- `GET /v1/prompt/{alias}/status` — admin bearer; reports `fetched_at`.
+- `PUT /v1/prompt/{alias}` — **admin bearer**, as every other write. The
+  controller stores.
+- `GET /v1/prompt/{alias}` — **no bearer**. The 128-bit alias *is* the
+  capability (design: "The key IS the capability"), so this route joins
+  `/healthz`, `/readyz` and `/metrics` in `bearerAuth`'s exempt switch.
+- `GET /v1/prompt/{alias}/status` — **admin bearer**; reports `fetched_at`.
 
-**The load-bearing security property**: the prompt-reader token must be rejected
-by *every other route*. `bearerAuth` today is one flat token set over the whole
-mux; this needs a per-route principal, not a second token bolted into the same
-slot. Get this wrong and the agent pod can rewrite project budgets.
+**This is the security-critical task.** Adding an unauthenticated route to a
+service that otherwise guards project registration and policy decisions is
+exactly the kind of change that goes wrong quietly. Two rules:
 
-**Verify**: a table test asserting the reader token gets `401` on
-`PUT /v1/projects/{p}`, `DELETE /v1/projects/{p}`, `POST /v1/policy/decide`,
-`POST /admin/spend/sync` and `GET /v1/cost/*` — and `200` on exactly one route.
-Add it to the existing auth test so a future route is caught by default.
-Also: second `GET` of a consumed prompt is `410`, not a replay.
+1. The exemption is for `GET` on that path **only** — `PUT`/`DELETE` to the same
+   path must still demand the admin bearer. Go 1.22 pattern-matching makes this
+   expressible; the exempt check in `bearerAuth` switches on `r.URL.Path` alone
+   today, so it needs method awareness or it will hand write access away.
+2. **Reject a short alias.** A prompt fetched by an alias with no entropy is an
+   unauthenticated read by design. The handler must require the alias to carry
+   its nonce, so a caller cannot ask for `gonk.triage.p75.i18.a1` and be served.
 
-### T3 — chart: mint and deliver the reader token · `[ ]`
+**Verify** — this is the test that matters most in the plan:
+- an exhaustive table over every route × method asserting exactly one
+  unauthenticated `200`, and `401` everywhere else, so a future route is caught
+  by default;
+- `PUT` and `DELETE` on the prompt path still `401` without the bearer;
+- a nonce-free alias is refused;
+- a second `GET` of a consumed prompt is `410`, not a replay.
 
-- Generate/accept a `promptReader` token in the meter secret next to the admin
-  bearer; meter gets it as `GONK_METER_PROMPT_TOKEN_FILE` (marker-free path env
-  — `TOKEN` in the name is stripped from exec-order env, see
-  `pack/orders/gonk-dispatch.toml`'s warning).
-- `bootstrap-city` writes `GONK_PROMPT_URL` + `GONK_PROMPT_TOKEN` into each
-  agent's `[env]`, in the same `awk` block that already injects
-  `GONK_LITELLM_KEY` — and with the same `case */control-dispatcher/) continue`
-  exclusion, since the control lane runs no model and needs no prompt.
+### T3 — chart: point agents at the meter · `[ ]`
+
+Much smaller than it would have been with a token to mint and rotate — there is
+no credential to distribute.
+
+- `bootstrap-city` adds `GONK_PROMPT_URL` to each agent's `[env]`, in the same
+  `awk` block that already injects `GONK_LITELLM_URL`, with the same
+  `case */control-dispatcher/) continue` exclusion (the control lane runs no
+  model and fetches no prompt).
+- Do **not** rely on `GONK_METER_SERVICE_HOST`/`_PORT`. The kubelet does inject
+  them (confirmed live in an agent pod), but service env vars only exist if the
+  Service predates the pod, which is a startup-ordering dependency nobody should
+  have to reason about. Inject the URL explicitly.
 
 **Verify**: `go test -tags chart ./internal/charttest/...`; golden files show
-the reader token in agent configs and **not** in the control-dispatcher's; the
-admin bearer appears in neither.
+`GONK_PROMPT_URL` in agent configs and not in the control-dispatcher's, and **no
+new secret anywhere** — if a token appears in this diff, the design was
+misread.
 
 ### T4 — entrypoint fetches its own prompt · `[ ]`
 
 `images/agent/entrypoint.sh`:
 
-- Materialise `GONK_PROMPT_TOKEN` into a `0600` file and unset it — reuse the
-  existing LiteLLM-key pattern verbatim; the key never enters a child's env.
 - `GET $GONK_PROMPT_URL/v1/prompt/$GC_ALIAS`, retrying with backoff on `404`
-  (the pod can beat the controller), bounded.
+  (the pod can beat the controller), bounded. **No credential** — the alias in
+  `GC_ALIAS` is the capability, so there is no token to materialise here and the
+  LiteLLM-key file dance does not apply.
+- Treat the alias as secret in the entrypoint's own logging: it already logs
+  freely, and `set -x` or an error path echoing the URL would publish the
+  capability into the pane, which is captured and read by sweep.
 - Feed the prompt to opencode **as an argument**.
 - Restore the model/metadata seam from the row's `model`/`metadata` fields, so
   the overlay is rendered per-session again — **this is what closes `gonk-m6t`**.
@@ -92,6 +111,9 @@ comes up with the prompt already in hand.
 
 `cmd/gonk-gate/broker_inject.go`:
 
+- Give `brokerSessionAlias` a 128-bit base32 suffix (crypto/rand). Total length
+  ~49 chars against `ValidateAlias`'s 64-char cap. Its doc comment currently
+  promises determinism — rewrite it, and say why the entropy is load-bearing.
 - `PUT` the prompt **before** `CreateSession` — the pod can be up before the
   create call returns.
 - Replace the running-gate + submit + event-correlation delivery path with
@@ -106,6 +128,14 @@ comes up with the prompt already in hand.
 **Verify**: `gcapitest` grows a prompt-store fake; dispatch tests assert the
 `PUT` precedes the create and that an unfetched prompt fails the dispatch.
 
+**Test-shape change this forces**: five tests currently recompute
+`brokerSessionAlias(42, 3, 1)` and compare. With a random suffix they must
+capture `gc.Created[0].Alias` instead — which is the better assertion anyway,
+since it checks what was actually sent rather than re-running the generator and
+agreeing with itself. Checked 2026-08-01: no *production* code reconstructs the
+alias (one call site, `broker_inject.go:202`; sweep uses the stored
+`Record.SessionID`), so this is a test-only change.
+
 ### T6 — live proof · `[ ]`
 
 A real GitLab issue through the deployed stack — **not** a hand-copied binary
@@ -114,6 +144,10 @@ A real GitLab issue through the deployed stack — **not** a hand-copied binary
 **This is the acceptance criterion.** With T5 done there is no bang-stripping,
 so a `!` surviving into a delivered prompt and *not* running a shell is the
 whole point. Recipe and traps: `docs/HANDOFF-next-session.md`.
+
+Check one thing by hand while you are in there: that a second `GET` of the same
+alias returns `410`, from inside a pod. The one-shot guarantee is the only thing
+standing between "unauthenticated read" and "replayable unauthenticated read".
 
 ---
 
@@ -125,8 +159,9 @@ whole point. Recipe and traps: `docs/HANDOFF-next-session.md`.
   open past the run. Do it after T6, on its own.
 - **Replace the pane read** with the agent posting its batch back. Bigger; moves
   sweep, the fence contract and `gonk-u1p.3`'s peek-window handling at once.
-- **Per-session capability** instead of a shared reader token (design, Open
-  question 1).
+- **Pod-identity auth** (SA token + TokenReview) instead of the capability
+  alias, if gonk ever goes multi-tenant or the alias-in-logs exposure stops
+  being acceptable. Design has the verified claims and the costs.
 
 ## Traps (from the handoff — read before touching the cluster)
 
