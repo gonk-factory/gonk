@@ -1,6 +1,91 @@
 # Handoff — next session
 
-_Last updated: 2026-07-28 (session 2). Branch: `main` (we develop on main per owner's call). Everything below is committed and pushed._
+_Last updated: 2026-07-31 (session 4). Branch: `main` (we develop on main per owner's call). Everything below is committed and pushed._
+
+## 2026-07-31 (session 4): deployed and running; ONE blocker left, and it is upstream
+
+**Start here: `gonk-u1p.7`.** Everything else in the broker slice now works. The
+agent still never receives its prompt, and both delivery mechanisms are broken
+in Gas City's k8s runtime provider.
+
+### The state of the world
+
+The stack is DEPLOYED and HEALTHY for the first time. `ns gonk`, Flux-managed,
+HelmRelease `Ready=True`, four pods on **multi-arch** images
+`v0.1.0-d0443ac159e7`. GitLab wiring confirmed end to end: an issue on project
+75 produces `POST /order/gonk-dispatch/run` → `POST /sessions` → `POST
+/session/{alias}/submit`, all 2xx, and sweep reads the session and its
+transcript. Project state resolves `valid`. The meter virtual-key blocker that
+haunted earlier sessions did NOT reappear.
+
+What still does not happen: the agent gets a prompt. opencode boots, wires to
+`qwen3-14b` via LiteLLM, and sits at its idle splash forever.
+
+### Why, precisely (both paths, both silent)
+
+1. **Create-time inject.** `template_overrides.initial_message` lands on
+   `runtime.Config.PromptSuffix`, which the PROVIDER must append to the launch
+   command. tmux/acp/herdr/t3bridge do; `internal/runtime/k8s` never references
+   the field. Reported as **gastownhall/gascity#4891**.
+2. **Post-create submit** (the workaround this session shipped).
+   `internal/runtime/k8s/provider.go:535` — `Nudge` discards the carrier's error
+   and returns `nil` unconditionally. Delivery fails, the API answers 202,
+   nobody can tell. `SendKeys` is the same.
+
+So `pkg/gcapi.SubmitSession` + `deliverPrompt` are correct against the
+documented contract and well tested — and cannot work on this backend. **Do not
+revert them**; they become right the moment upstream delivers. They are simply
+not the unblock.
+
+**The remaining path is option (c):** carry the prompt in out-of-band and have
+`gonk-agent-entrypoint` — which is OURS — feed it to opencode directly. Needs
+nothing from Gas City. Read `internal/runtime/k8s/staging.go` first: it already
+stages files into the pod, which is the likeliest channel. `gonk-u1p.7` has the
+reasoning and an explicit warning not to "fix" this with a resubmit loop (it
+cannot distinguish undelivered from still-thinking).
+
+### What landed this session
+
+- **Multi-arch images** (`gonk-owi`, `gonk-owi.1`). orac is 5/7 arm64 and the
+  images were amd64-only, which took gonk-meter down with `exec format error`.
+  `homelab/ci-templates!1` and `!2` added rootless native per-arch legs +
+  a crane manifest merge; gonk builds `TARGETARCH`-aware images. Note
+  `--custom-platform`, opencode's `x64` naming, and dolt's arch-specific tar dir.
+- **Four broker fixes**: `.1` prompt delivery (see above), `.5` nothing ever
+  stamped `SessionEndedAt` so sweep skipped every bead forever, `.2` an in-flight
+  session was judged as failed and escalated, `.3` the batch was read from a
+  400-line peek preview instead of the transcript.
+- **`gonk-u1p.4`**: the session round-trip test that did not exist. `gcapitest`
+  now models a lifecycle (running/stopped/crashed) instead of a static output
+  map, which is what let all of the above hide.
+- **A regression I introduced and fixed** (`fc77fb4`): declining to judge a
+  running session must not mean waiting forever. The reservation is the deadline.
+
+### Traps to know before you touch anything
+
+- **Every commit to gonk `main` re-releases the chart** (its version embeds the
+  git SHA), recreating pods — even for docs-only commits.
+- **…and every intake restart then drops webhooks for up to 10 minutes**
+  (`gonk-fan`): the project reads `unsynced` until the next reconcile, and
+  events are accepted with a 200 and thrown away. Silent from GitLab's side. It
+  bit twice this session. Together these make live iteration painful.
+- **Three wedged agent sessions are parked in `ns gonk`** (`go-844`, `go-d3y`,
+  `go-1pr` — issues 16 and 17). They have no prompt, so they never finish. The
+  reaping fix (`fc77fb4`) is committed but **NOT YET DEPLOYED**; once it is,
+  they get reaped at reservation expiry. Until then they idle.
+- **`steve/gitops` takes DIRECT COMMITS to main** — no MRs. `homelab/ci-templates`
+  does take an MR (its globals merge into every consuming pipeline).
+- **Upstream issues: draft them, do not post them.** The owner reviews, rewrites
+  and posts. See `docs/upstream/CONTRIBUTIONS.md` and the bd memory
+  `upstream-issues-owner-posts-them-not-me`.
+
+### Deploy state at handoff
+
+- Deployed: `v0.1.0-d0443ac159e7`. HEAD is `e9775b8` — so the reaping fix and
+  the latest bead updates are **committed but not deployed**.
+- To roll forward: wait for the pipeline on HEAD to go green, then bump the four
+  tags in `steve/gitops` `clusters/orac/apps/gonk/helmrelease-gonk.yaml` and
+  commit straight to main.
 
 ## ⚠️ 2026-07-28 (session 3): broker slice CODE + CHART COMPLETE; C7 blocked on a homelab infra incident
 
