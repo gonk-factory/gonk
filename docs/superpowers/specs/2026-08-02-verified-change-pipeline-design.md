@@ -68,13 +68,44 @@ commit:
 experiment.** Step 1 proves the test exercises the defect; step 2 proves the
 code fixes it.
 
-**It also closes the CI example from `gonk-066` — completely, and by
-construction.** An agent that deletes or weakens a test to turn a pipeline green
-cannot produce a red→green transition, because removing a test makes step 1
-*green*, and step 1 must be red. The failure mode that could not be judged
-becomes a state the sequence simply cannot reach. That is a much stronger result
-than the protected-path denylist, which only says "not that file"; this says
-"not that *behaviour*, wherever you attempt it".
+### CORRECTION — the "cannot reach" claim was WRONG as first written
+
+This note originally claimed the three steps make test-weakening a state the
+sequence *cannot reach*. **That is false**, and review found three ways to
+satisfy all three steps while weakening the suite:
+
+- **(a) Delete one test, add another.** The test diff removes existing test A
+  and adds new failing test B. Step 0 green, step 1 red *in the new tests*
+  (B fails), step 2 green (B passes; whatever A guarded is now unchecked). The
+  test-diff path gate does not help — the deletion is in a test-pattern file.
+- **(b) The code diff touches test files.** The original note constrained the
+  *test* diff to test patterns and said nothing about the inverse. A code diff
+  that deletes or skips tests sails through step 2.
+- **(c) Skips and deselection.** Adding `t.Skip` / skip markers, or touching
+  `pytest.ini` / `conftest.py` / `Makefile` / build tags, makes tests silently
+  not-run rather than failing. **Green does not mean "passed"; it means "nothing
+  that ran failed."** The protected-path denylist covers CI definitions, not
+  test-runner configuration.
+
+**The fix is one invariant, and step 1 already requires most of its machinery.**
+"Red in the new tests specifically" forces the verifier to collect test IDs at
+steps 0 and 1 and diff them. Extend that into a **monotonicity rule**:
+
+> The set of tests **collected and passed at step 2** must be a superset of
+> those collected and passed at **step 0**, plus the new tests from step 1.
+
+That closes (a), (b) and (c) *semantically* — wherever the deletion or skip is
+attempted, by whichever diff — which is the "not that behaviour, wherever you
+attempt it" property this note claimed but did not deliver. Add as defence in
+depth: the **code diff may not touch test-pattern files** (the symmetric gate),
+and the test patterns and test command must be read from the **base commit**,
+because `.agent/` is the one prefix agents may write, so a run that rewrites its
+own test declarations in the same batch is a self-widening loophole.
+
+With that invariant the claim becomes true, and stated properly it is: an agent
+cannot *reduce the set of passing tests* while satisfying the sequence. That is
+still stronger than the protected-path denylist, which only says "not that
+file" — but it is a property of the monotonicity check, not of red→green alone.
 
 ### Step 0 is not optional
 
@@ -212,12 +243,82 @@ The agent holds no git credentials, consistent with everything else. Two options
 acceptable one: a change too large to express as a bounded patch is a change that
 wants a human anyway.
 
+## Verdict integrity — the verifier's evidence is produced by the code it is judging
+
+Isolation (no creds, no network, caps, fresh sandbox) stops escape and
+exfiltration. It does **not** make the verdict trustworthy: the red/green
+evidence comes from a test framework running in-process with the agent's code
+and the agent's tests. A hostile diff can detect the harness and fabricate
+whatever the verifier parses — exit codes, JUnit XML, a summary line.
+
+For an MR a human reads, this is survivable: the MR is the boundary, and forged
+green only buys a reviewer's attention, not a merge.
+
+**It is NOT survivable for the auto-merge policy proposed above**, which promotes
+forgeable evidence into unattended merge authority. So either restrict
+auto-merge to change classes that could not have tampered with result production
+(hard to characterise), or say plainly that **verifier-green is evidence for a
+human, and auto-merge stays limited to non-code classes** such as `.agent/`-only
+scaffold MRs. The line further down — "buy unattended merges with the verifier"
+— assumes a verdict integrity the isolation section does not provide, and is
+corrected here.
+
+## Change classes with no red-able test
+
+Refactors, documentation, dependency bumps and performance fixes have no test
+that can fail on the base commit, by construction. Step 1 can never go red, so
+every such bead fails the gate — **and gate-failure escalates the ladder**
+(stack design §6.3), so the failure mode is a spend loop climbing toward cloud
+rungs, not merely a stuck bead.
+
+This needs an explicit taxonomy before the pipeline is built:
+
+- **red-green-required** classes (bug fixes, and features with testable
+  behaviour),
+- **green-green** classes (step 0 green, step 2 green, no regression by the
+  monotonicity rule, human review carrying proportionally more weight),
+- an explicit **"no verifier path"** outcome, distinct from gate-failure, so it
+  does not feed escalation.
+
+The same concern applies to the veto-only reviewer: a model's veto is not an
+objective gate, and if it feeds escalation then injection aimed at the reviewer
+buys cloud-rung spend. **Record vetoes as their own outcome class**, as flakes
+already are.
+
+## Mechanics the diff-as-effect route needs
+
+- **Pin the base SHA in the batch.** The verifier must check out exactly the
+  commit the diff was generated against, not the branch tip, or step 0 races the
+  repository.
+- **Specify the patch format** (`git format-patch` style, rename detection on):
+  plain unified diff handles renames and binaries poorly.
+- **Raise the size cap per kind.** The current 64 KiB/file and 256 KiB/batch
+  (`pkg/effects/file.go`) were sized for `.agent/` prose; two diffs plus effects
+  will not fit, and that is a deliberate change to make rather than discover.
+- **Hand the checkout in.** "No credentials" still requires someone to
+  materialise the tree — the controller should provide it, along with a
+  pre-warmed dependency cache, so the verifier truly holds nothing and does not
+  need the network it is not supposed to have. Note "no network" as first
+  written contradicts dependency resolution for most real suites; a vendored
+  tree handed in by the controller is the clean answer, and an allowlisted
+  package proxy is not (registry requests are themselves an exfiltration
+  channel).
+
 ## What this does not solve
 
 - **Scope is still the model's proposal.** Freezing it makes it enforceable, not
-  correct. An intent phase that consistently proposes too-narrow scopes produces
-  a stream of runs failing closed; too-wide, and it authorises nothing it
-  shouldn't but constrains nothing either.
+  correct. Too-narrow produces a stream of runs failing closed; too-wide
+  constrains nothing, and a scope steered wide-but-legal grants the session more
+  room than the task warrants. Freezing makes it enforceable, not honest.
+- **Narrowing must never SELECT TREATMENT.** Intersect-only gives the
+  no-widening property, but if any downstream policy keys off the *declared*
+  scope — "touches only `.agent/`, so auto-merge class" or "so lighter review" —
+  then narrowing into a privileged class is a grant the attacker steers via the
+  issue body. **Every policy decision must consume the OBSERVED diff, never the
+  intent output; the intent output is only ever a rejection predicate.**
+- **Bound flake retries in both directions.** Retrying step 2 until green
+  launders a flake into a pass; retrying step 1 until red launders one into a
+  valid red. Both need bounds.
 - **A test can be green and the change still wrong.** Red→green proves the
   defect is exercised and fixed. It says nothing about whether the fix is any
   good, or whether it broke something no test covers. The MR is still the answer.
@@ -230,9 +331,11 @@ wants a human anyway.
 Nothing here is buildable until there is a code-writing agent, and the pieces
 have a natural order:
 
-1. The **verifier** first, and alone. It is useful on its own — it can gate
-   scaffold MRs and any human MR — and it is the component that needs the most
-   hardening, so it should exist before anything depends on it.
+1. The **verifier** first, and alone — it needs the most hardening, and the
+   test-ID collection the monotonicity rule depends on belongs in its first
+   version rather than bolted on later. Its interim utility is real but modest:
+   scaffold MRs are `.agent/` prose, so the verifier contributes only step 0
+   there.
 2. The **split-diff effect kinds** and their path gates.
 3. The **red-green sequence**, once there is something producing split diffs.
 4. The **intent phase** last: it is the only part with a model in it, and it is
