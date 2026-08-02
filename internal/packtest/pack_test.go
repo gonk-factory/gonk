@@ -330,6 +330,68 @@ var deterministicAgents = map[string]bool{
 	"control-dispatcher": true,
 }
 
+// EVERY MODEL AGENT MUST BE ABLE TO START ON THIS IMAGE.
+//
+// This is the test that was missing, and its absence cost a live debugging
+// session on 2026-08-02: scaffold was ported to the broker, dispatched
+// correctly, reserved budget -- and ran nothing, because its agent.toml
+// carried only a description and min_active_sessions. With no start_command
+// the loader falls through to the catalog's default provider, whose binary
+// this image does not ship, and the controller skipped the pool with
+//
+//	pool "scaffold": agent "scaffold": provider not found in PATH ... (skipping)
+//
+// mention had the identical gap. Nothing failed: the order fired, the meter
+// reserved, and no session was ever created. Every OTHER packtest passed,
+// because they check the pack's CONTENT and this is about whether an agent can
+// RUN.
+//
+// The deterministic agents are exempt by the same rule the chart's
+// bootstrap-city uses when it injects LiteLLM config: they run no model, so
+// they need no harness and must not be given a credential.
+func TestEveryModelAgentCanActuallyStart(t *testing.T) {
+	agentsDir := filepath.Join(packRoot(t), "agents")
+	entries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		t.Fatalf("reading agents/: %v", err)
+	}
+	// HOME and the XDG vars are not decoration. Gas City's session passthrough
+	// copies the CONTROLLER's HOME into every session pod, where that path does
+	// not exist and is not writable; the session dies on mkdir and the
+	// reconciler respawns it in a loop. Overriding HOME alone is NOT enough --
+	// opencode is XDG-aware and follows XDG_CONFIG_HOME straight back to the
+	// same unwritable path. All five, or none of it works.
+	requiredEnv := []string{
+		"HOME",
+		"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
+		// Without this a non-interactive run blocks forever on its first
+		// tool-permission prompt, which reads as a hung agent, not a config bug.
+		"OPENCODE_PERMISSION",
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() || deterministicAgents[e.Name()] {
+			continue
+		}
+		name := e.Name()
+		cfg := decodeTOMLFile(t, filepath.Join(agentsDir, name, "agent.toml"))
+
+		if s, _ := cfg["start_command"].(string); strings.TrimSpace(s) == "" {
+			t.Errorf("agents/%s/agent.toml has no start_command -- the loader will resolve the "+
+				"catalog default provider, whose binary this image does not ship, and the pool "+
+				"is skipped with 'provider not found in PATH'. No session is ever created and "+
+				"NOTHING reports an error.", name)
+		}
+		env, _ := cfg["env"].(map[string]any)
+		for _, key := range requiredEnv {
+			if v, _ := env[key].(string); strings.TrimSpace(v) == "" {
+				t.Errorf("agents/%s/agent.toml [env] is missing %s -- see the comments in "+
+					"agents/triage/agent.toml for why each of these is load-bearing", name, key)
+			}
+		}
+	}
+}
+
 // The DIRECTORY NAME is the agent name. Both files exist for every agent
 // this pack ships, and a stray `name` field inside agent.toml is IGNORED by
 // the loader -- which means someone will one day set it, believe it, and be
