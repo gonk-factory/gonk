@@ -62,7 +62,9 @@ func TestDispatchPoursOnRun(t *testing.T) {
 	}}
 
 	args := baseDispatchArgs()
-	args.Trigger = "scaffold" // a non-ported trigger still pours its formula
+	// mention-reply is the remaining non-ported trigger: it still pours its
+	// formula. (scaffold used to be the example here and is now on the broker.)
+	args.Trigger = "mention-reply"
 	code := runDispatch(context.Background(), dispatchDeps{
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store,
 		Args: args,
@@ -75,8 +77,8 @@ func TestDispatchPoursOnRun(t *testing.T) {
 	if len(gc.Created) != 0 {
 		t.Fatalf("a non-ported trigger must not create a broker session: %+v", gc.Created)
 	}
-	if len(gc.Poured) != 1 || gc.Poured[0].Order != "gonk-scaffold" {
-		t.Fatalf("poured = %+v, want one gonk-scaffold", gc.Poured)
+	if len(gc.Poured) != 1 || gc.Poured[0].Order != "gonk-mention" {
+		t.Fatalf("poured = %+v, want one gonk-mention", gc.Poured)
 	}
 	// And it handed the formula EXACTLY what meter said -- the rung, the model, the
 	// reservation, the key_ref, and atags VERBATIM. Meter mints the metadata; the
@@ -201,7 +203,7 @@ func TestDispatchNeverSendsAReservedFormulaVarName(t *testing.T) {
 	}}
 
 	args := baseDispatchArgs()
-	args.Trigger = "scaffold" // guards the still-live formula pour path
+	args.Trigger = "mention-reply" // guards the still-live formula pour path
 	code := runDispatch(context.Background(), dispatchDeps{
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
 		Args: args,

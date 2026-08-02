@@ -35,6 +35,92 @@ const (
 type brokerApplier interface {
 	CreateIssueNote(ctx context.Context, projectID, issueIID int64, body string) (*glab.Note, error)
 	AddIssueLabel(ctx context.Context, projectID, issueIID int64, label string) error
+	// The scaffold half. The agent proposes .agent/ content and holds no
+	// credentials, so the CONTROLLER commits it and opens the merge request --
+	// the same inversion as triage, where the agent proposes a comment and the
+	// controller posts it.
+	CreateCommit(ctx context.Context, projectID int64, opts glab.CommitOptions) (*glab.Commit, error)
+	CreateMergeRequest(ctx context.Context, projectID int64, opts glab.MROptions) (*glab.MergeRequest, error)
+	ListMergeRequests(ctx context.Context, projectID int64, opts glab.MRListOptions) ([]glab.MergeRequest, error)
+	GetProject(ctx context.Context, projectID int64) (*glab.Project, error)
+}
+
+// scaffoldBranch is the source branch the scaffold MR comes from. Fixed, not
+// per-run: gonk-gate check looks for an MR from exactly this branch, and a
+// re-sling must update the same branch rather than litter the repository with
+// one branch per attempt.
+const scaffoldBranch = "gonk/scaffold"
+
+// applyScaffoldFiles commits a validated batch of file effects onto
+// scaffoldBranch and opens exactly one merge request carrying the bead marker.
+//
+// Idempotent by construction, because a re-sling runs it again: the commit uses
+// StartBranch so GitLab creates the branch on the first run and commits onto it
+// afterwards, and an existing open MR from the branch is reused rather than
+// duplicated. "Exactly one MR" is the gate's requirement, not a preference.
+func applyScaffoldFiles(ctx context.Context, d sweepDeps, rec beadstore.Record, batch effects.Batch, marker string) (string, error) {
+	actions := make([]glab.CommitAction, 0, len(batch.Effects))
+	for _, e := range batch.Effects {
+		if e.Kind != effects.KindFile {
+			continue
+		}
+		// "update" fails when the file is absent and "create" fails when it is
+		// present, and a re-scaffold legitimately hits both. GitLab does not
+		// offer an upsert, so ask what is there: the branch may already carry a
+		// previous attempt's .agent/.
+		action := "create"
+		// A 1-byte read is enough: we only need presence, not content, and the
+		// cap keeps a hostile file from being pulled into memory to answer it.
+		if _, err := d.GL.GetRawFile(ctx, rec.ProjectID, e.Path, scaffoldBranch, 1); err == nil {
+			action = "update"
+		}
+		actions = append(actions, glab.CommitAction{Action: action, FilePath: e.Path, Content: e.Content})
+	}
+	if len(actions) == 0 {
+		return "", nil
+	}
+
+	proj, perr := d.Apply.GetProject(ctx, rec.ProjectID)
+	if perr != nil {
+		return "", perr
+	}
+	base := proj.DefaultBranch
+	if base == "" {
+		base = "main"
+	}
+
+	if _, cerr := d.Apply.CreateCommit(ctx, rec.ProjectID, glab.CommitOptions{
+		Branch:        scaffoldBranch,
+		StartBranch:   base, // creates the branch when absent; ignored when it exists
+		CommitMessage: "gonk: scaffold .agent/\n\n" + marker,
+		Actions:       actions,
+	}); cerr != nil {
+		return "", cerr
+	}
+
+	// One MR, reused across re-slings. The marker must be in the DESCRIPTION on
+	// its own line -- that is what gonk-gate check looks for.
+	existing, lerr := d.Apply.ListMergeRequests(ctx, rec.ProjectID, glab.MRListOptions{
+		SourceBranch: scaffoldBranch, State: "opened",
+	})
+	if lerr != nil {
+		return "", lerr
+	}
+	if len(existing) > 0 {
+		return existing[0].WebURL, nil
+	}
+
+	mr, merr := d.Apply.CreateMergeRequest(ctx, rec.ProjectID, glab.MROptions{
+		SourceBranch: scaffoldBranch,
+		TargetBranch: base,
+		Title:        "gonk: scaffold .agent/",
+		Description: "gonk read this repository and proposed durable context for future " +
+			"triage and mention sessions.\n\nReview it as you would any MR: it is a proposal, not a fact.\n\n" + marker,
+	})
+	if merr != nil {
+		return "", merr
+	}
+	return mr.WebURL, nil
 }
 
 // extractBatch pulls the JSON between the LAST GONK_BATCH_START and the
@@ -127,10 +213,27 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 	if terr := effects.ValidateTargets(batch, map[int64]bool{rec.IssueIID: true}); terr != nil {
 		return false, "target: " + terr.Error(), nil
 	}
+	// The path gate. Separate from Validate (which asks "is this the right shape
+	// of batch for this agent") because this asks "are these writes allowed at
+	// all" -- and unlike a comment, a file effect becomes a commit in someone's
+	// repository. A batch must pass both.
+	if perr := effects.ValidatePaths(batch); perr != nil {
+		return false, "path: " + perr.Error(), nil
+	}
 
 	// Shape-valid. Apply comment(s) first (deterministic order, independent of
 	// the agent's emit order), then labels.
 	marker := fmt.Sprintf("<!-- gonk:bead:%s -->", rec.BeadID)
+
+	// Scaffold's artifact is a merge request, not a comment: the agent proposed
+	// .agent/ content and the controller commits it. Done before comments and
+	// labels because it is this trigger's gate artifact -- if it fails, nothing
+	// else about the run matters.
+	if url, serr := applyScaffoldFiles(ctx, d, rec, batch, marker); serr != nil {
+		return false, "", serr // -> unknown -> retry; nothing durable applied
+	} else if url != "" {
+		d.Log.Info("sweep: scaffold merge request ready", "bead", rec.BeadAnchor, "mr", url)
+	}
 	for _, e := range batch.Effects {
 		if e.Kind != effects.KindComment {
 			continue
