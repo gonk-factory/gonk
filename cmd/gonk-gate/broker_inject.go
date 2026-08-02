@@ -42,6 +42,12 @@ const maxIssueBodyBytes = 8 << 10 // 8 KiB
 // (Phase 6). An entry here takes precedence over orderForTrigger.
 var agentForTrigger = map[string]string{
 	"issue-triage": "triage",
+	// scaffold is ported for the same reason triage was, and it is what unblocks
+	// ONBOARDING: intake gates triage until .agent/ exists (spec 5.3), .agent/ is
+	// created by scaffold, and scaffold on the formula path could never deliver
+	// its prompt (#4891) or even learn which repository it was for (#4668). A
+	// newly onboarded project therefore sat at `pending` forever -- see gonk-bgx.
+	"scaffold": "scaffold",
 }
 
 // brokerSessionAlias is the correlation key stamped on the created session and
@@ -54,8 +60,14 @@ var agentForTrigger = map[string]string{
 // collide with the prior attempt's still-present session. session.ValidateAlias
 // forbids colons (bead anchors use them) and caps length at 64; this form uses
 // only [a-z0-9.] and stays well under the cap.
-func brokerSessionAlias(projectID, issueIID int64, attempt int) string {
-	return fmt.Sprintf("gonk.triage.p%d.i%d.a%d", projectID, issueIID, attempt)
+func brokerSessionAlias(agent string, projectID, issueIID int64, attempt int) string {
+	// Scaffold is PROJECT-scoped: it is dispatched with no issue, so an `.i0`
+	// segment would be a lie about what the session is for. Two agents working
+	// the same project must not collide, hence the agent in the alias.
+	if issueIID == 0 {
+		return fmt.Sprintf("gonk.%s.p%d.a%d", agent, projectID, attempt)
+	}
+	return fmt.Sprintf("gonk.%s.p%d.i%d.a%d", agent, projectID, issueIID, attempt)
 }
 
 // renderTriagePrompt builds the session's initial message.
@@ -109,6 +121,53 @@ GONK_BATCH_END
 
 Emit exactly one comment effect and zero or more label effects. Nothing after
 GONK_BATCH_END.`, issueIID, project, context)
+}
+
+// renderScaffoldPrompt builds the scaffold session's initial message.
+//
+// IT IS A DIFFERENT SHAPE OF JOB from the v1 formula prompt it replaces
+// (pack/agents/scaffold/prompt.template.md), and the difference is the whole
+// point of the port: that prompt told the agent to create a branch and open a
+// merge request ITSELF, which needs forge credentials the broker deliberately
+// denies it. Here the agent only PROPOSES file content; gonk-sweep commits it
+// onto gonk/scaffold and opens exactly one MR under the controller's own PAT.
+//
+// So there is no marker line to copy, no branch to create and no MR to open --
+// every instruction about those was a way for the run to fail at something the
+// controller now does deterministically.
+//
+// The agent has no forge creds but it DOES have the repository checked out in
+// its rig, so unlike triage it is told to read: the whole value of .agent/ is
+// that it was derived from the actual code rather than guessed.
+func renderScaffoldPrompt(project string) string {
+	return fmt.Sprintf(`Write durable project context for the repository `+"`%s`"+`, which is
+checked out in your working directory.
+
+Read enough of it to be accurate: what this project IS, how it is built, how it
+is tested, and any conventions a future automated triage or code session would
+otherwise have to guess at. Prefer a few honest, specific files over one long
+vague one.
+
+An honest gap is a SUCCESS, not a failure. If something cannot be determined
+from the repository, write that down as an open question instead of inventing
+an answer -- a confident wrong claim in this directory will mislead every
+session that reads it afterwards.
+
+Do NOT run git, glab, bd, or any external API, and do NOT try to commit
+anything or open a merge request: you hold no credentials, and gonk commits
+your proposal and opens the merge request for you. Reading the working
+directory is expected and encouraged.
+
+Emit your proposal as a single proposed-effects batch as the LAST thing in your
+output, fenced EXACTLY like this:
+
+GONK_BATCH_START
+{"effects":[{"kind":"file","path":".agent/README.md","content":"<the whole file>"}]}
+GONK_BATCH_END
+
+Every path MUST begin with `+"`.agent/`"+` -- a batch touching anything else is
+rejected in full. Emit one file effect per file, each carrying that file's
+COMPLETE content (there are no partial edits). Nothing after GONK_BATCH_END.`, project)
 }
 
 // sanitizeForKeystrokeDelivery makes a prompt safe to TYPE into opencode's TUI.
@@ -199,18 +258,28 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 		d.Log.Debug("attribution metadata is not deliverable to the pod on the submit path",
 			"bead", a.BeadAnchor, "metadata", string(md))
 	}
-	alias := brokerSessionAlias(a.ProjectID, a.IssueIID, dec.Attempt)
+	alias := brokerSessionAlias(agent, a.ProjectID, a.IssueIID, dec.Attempt)
 
-	// Fetch the issue context controller-side (the pod has no forge creds).
-	// Best-effort: a fetch failure degrades to a reference-only prompt rather
-	// than failing the run -- a re-sling can try again, and the agent still has
-	// the issue reference.
-	issueContext, err := buildIssueContext(ctx, d.Forge, a.ProjectID, a.IssueIID)
-	if err != nil {
-		d.Log.Warn("triage context fetch failed; injecting reference-only prompt",
-			"err", err, "bead", a.BeadAnchor, "issue", a.IssueIID)
+	// The prompt is per-agent. Scaffold is project-scoped and reads the repo
+	// from its own rig, so it needs no issue fetched for it -- and asking the
+	// forge for issue 0 would be a pointless round trip that logs a warning.
+	var prompt string
+	switch agent {
+	case "scaffold":
+		prompt = renderScaffoldPrompt(a.Project)
+	default:
+		// Fetch the issue context controller-side (the pod has no forge creds).
+		// Best-effort: a fetch failure degrades to a reference-only prompt rather
+		// than failing the run -- a re-sling can try again, and the agent still
+		// has the issue reference.
+		issueContext, ferr := buildIssueContext(ctx, d.Forge, a.ProjectID, a.IssueIID)
+		if ferr != nil {
+			d.Log.Warn("triage context fetch failed; injecting reference-only prompt",
+				"err", ferr, "bead", a.BeadAnchor, "issue", a.IssueIID)
+		}
+		prompt = renderTriagePrompt(a.Project, a.IssueIID, issueContext)
 	}
-	prompt := sanitizeForKeystrokeDelivery(renderTriagePrompt(a.Project, a.IssueIID, issueContext))
+	prompt = sanitizeForKeystrokeDelivery(prompt)
 
 	// NOTE the create carries NO Message. It used to, and that is exactly the
 	// bug: `message` becomes template_overrides.initial_message, which Gas City
@@ -274,7 +343,7 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 		d.Log.Error("bead store Put failed", "err", err, "bead", a.BeadAnchor)
 		return 1
 	}
-	d.Log.Info("triage session created", "agent", agent, "alias", alias,
+	d.Log.Info("broker session created", "agent", agent, "alias", alias,
 		"bead", a.BeadAnchor, "rung", dec.Rung, "attempt", dec.Attempt)
 	return 0
 }

@@ -1,3 +1,16 @@
+> **STALE FOR THE BROKER PATH — read this before following anything below.**
+>
+> Scaffold is dispatched through the v2 broker as of 2026-08-02, and the broker
+> renders its prompt in code (`renderScaffoldPrompt`, cmd/gonk-gate). The
+> instructions below are the v1 FORMULA prompt, and they tell the agent to claim
+> a bead, create a branch and open a merge request itself — all of which need
+> forge credentials the broker deliberately denies it. Under the broker the
+> agent only PROPOSES `.agent/` file content; gonk-sweep commits it and opens
+> exactly one MR under the controller's own PAT.
+>
+> Kept because the formula path still exists for mention-reply and this file
+> documents its shape. Do not "fix" the broker by editing this.
+
 # gonk scaffold agent
 
 You are gonk, and this session's job is the `.agent/` scaffold: a second,

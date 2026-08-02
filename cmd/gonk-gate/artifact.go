@@ -17,6 +17,11 @@ type gitlabQuerier interface {
 	ListIssueNotes(ctx context.Context, projectID, issueIID int64) ([]glab.Note, error)
 	GetIssue(ctx context.Context, projectID, issueIID int64) (*glab.Issue, error)
 	ListMergeRequests(ctx context.Context, projectID int64, opts glab.MRListOptions) ([]glab.MergeRequest, error)
+	// GetRawFile lets the scaffold apply ask whether a proposed file already
+	// exists on the branch, because GitLab's commit API has no upsert: "create"
+	// fails when the file is present and "update" fails when it is absent, and a
+	// re-slung scaffold legitimately hits both.
+	GetRawFile(ctx context.Context, projectID int64, path, ref string, maxBytes int64) ([]byte, error)
 }
 
 // artifactKindForTrigger says which artifact a trigger's gate looks for.

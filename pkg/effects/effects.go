@@ -16,12 +16,17 @@ const (
 	KindComment  Kind = "comment"
 	KindLabel    Kind = "label"
 	KindNewIssue Kind = "new_issue" // reserved: contract admits it, apply not built (spec N1)
-	// code/merge_request/commit are reserved for Phase 5 and deliberately NOT
-	// defined here yet -- naming them is a spec-level forward-compat note, and a
-	// constant with no validator/apply would invite half-support.
+	// KindFile is repository content proposed by an agent that holds no forge
+	// credentials: the broker commits it. Its path gate lives in file.go and is
+	// a security boundary -- see the header there before touching either.
+	KindFile Kind = "file"
+	// merge_request/commit are reserved and deliberately NOT defined here:
+	// naming them is a forward-compat note, and a constant with no
+	// validator/apply would invite half-support. Note that scaffold does NOT
+	// need them -- the broker opens the MR, so the agent never proposes one.
 )
 
-var knownKinds = map[Kind]bool{KindComment: true, KindLabel: true, KindNewIssue: true}
+var knownKinds = map[Kind]bool{KindComment: true, KindLabel: true, KindNewIssue: true, KindFile: true}
 
 // Effect is one intended externally-visible change. Fields are a superset;
 // which are meaningful depends on Kind (validated per-kind elsewhere).
@@ -31,6 +36,12 @@ type Effect struct {
 	Add    []string `json:"add,omitempty"`    // label
 	Remove []string `json:"remove,omitempty"` // label
 	Title  string   `json:"title,omitempty"`  // new_issue
+	// Path/Content carry a `file` effect. Content is the WHOLE file: the broker
+	// replaces rather than patches, so a batch is a complete statement of what
+	// .agent/ should contain and there is no diff for a model to get subtly
+	// wrong.
+	Path    string `json:"path,omitempty"`
+	Content string `json:"content,omitempty"`
 	// TargetIID names an existing resource this effect acts on (0 = the session's
 	// primary target, bound from injected context in shape.go).
 	TargetIID int64 `json:"target_iid,omitempty"`

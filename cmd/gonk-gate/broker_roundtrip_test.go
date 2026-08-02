@@ -35,7 +35,7 @@ func TestBrokerRoundTripDispatchToAppliedComment(t *testing.T) {
 	store := beadstore.NewMemory()
 	applier := &recordingApplier{}
 	// The alias is derived, not hardcoded: glabtest assigns the project id.
-	alias := brokerSessionAlias(p.ID, 3, 1)
+	alias := brokerSessionAlias("triage", p.ID, 3, 1)
 
 	// ---- 1. DISPATCH: decide, create the session, deliver the prompt --------
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
@@ -135,7 +135,7 @@ func TestBrokerRoundTripCrashedSessionIsJudgedButAppliesNothing(t *testing.T) {
 	gl.AddIssue(p.ID, 3, "opened")
 
 	gc := gcapitest.New(t)
-	gc.CrashSession(brokerSessionAlias(p.ID, 3, 1))
+	gc.CrashSession(brokerSessionAlias("triage", p.ID, 3, 1))
 	applier := &recordingApplier{}
 
 	store := beadstore.NewMemory()

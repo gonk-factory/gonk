@@ -34,6 +34,12 @@ type recordingApplier struct {
 	notes   []noteCall
 	labels  []labelCall
 	noteErr error
+	// The scaffold half: what the broker committed and which MR it opened.
+	commits   []glab.CommitOptions
+	mrs       []glab.MROptions
+	openMRs   []glab.MergeRequest // pre-existing MRs ListMergeRequests returns
+	commitErr error
+	project   *glab.Project
 }
 
 func (a *recordingApplier) CreateIssueNote(_ context.Context, pid, iid int64, body string) (*glab.Note, error) {
@@ -48,6 +54,33 @@ func (a *recordingApplier) AddIssueLabel(_ context.Context, pid, iid int64, labe
 	defer a.mu.Unlock()
 	a.labels = append(a.labels, labelCall{pid, iid, label})
 	return nil
+}
+
+func (a *recordingApplier) CreateCommit(_ context.Context, pid int64, o glab.CommitOptions) (*glab.Commit, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.commits = append(a.commits, o)
+	return &glab.Commit{ID: "deadbeef"}, a.commitErr
+}
+
+func (a *recordingApplier) CreateMergeRequest(_ context.Context, pid int64, o glab.MROptions) (*glab.MergeRequest, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.mrs = append(a.mrs, o)
+	return &glab.MergeRequest{IID: 7, WebURL: "https://example/mr/7"}, nil
+}
+
+func (a *recordingApplier) ListMergeRequests(_ context.Context, pid int64, o glab.MRListOptions) ([]glab.MergeRequest, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.openMRs, nil
+}
+
+func (a *recordingApplier) GetProject(_ context.Context, pid int64) (*glab.Project, error) {
+	if a.project != nil {
+		return a.project, nil
+	}
+	return &glab.Project{ID: pid, DefaultBranch: "main"}, nil
 }
 
 // brokerRunningRecord is a running triage bead with a SessionID -- the v2 broker

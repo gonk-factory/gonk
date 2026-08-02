@@ -24,6 +24,20 @@ func (c *Client) ListMemberProjects(ctx context.Context) ([]Project, error) {
 	})
 }
 
+// GetProject fetches one project. The broker needs its DefaultBranch: a
+// scaffold commit branches from it, and assuming "main" would silently target
+// the wrong base on any repository that still uses "master" or anything else.
+func (c *Client) GetProject(ctx context.Context, projectID int64) (*Project, error) {
+	var p Project
+	if err := c.getJSON(ctx, request{
+		method: "GET",
+		path:   fmt.Sprintf("/api/v4/projects/%d", projectID),
+	}, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
 // GetRawFile fetches a file's bytes at a ref. maxBytes is enforced by the
 // client: the caller passes the .gonk.yml cap so a hostile 2 GiB file cannot be
 // read into memory. Returns an error satisfying IsNotFound when absent.

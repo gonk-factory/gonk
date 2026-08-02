@@ -86,7 +86,7 @@ func TestDispatchDeliversPromptViaSubmitNotCreate(t *testing.T) {
 // every real agent, because the first "success" here is a lie.
 func TestDispatchRetriesSubmitUntilSessionMaterializes(t *testing.T) {
 	gc := gcapitest.New(t)
-	gc.SubmitUnresolvedUntil = map[string]int{brokerSessionAlias(42, 3, 1): 2}
+	gc.SubmitUnresolvedUntil = map[string]int{brokerSessionAlias("triage", 42, 3, 1): 2}
 
 	if code := runDispatchForSubmit(t, gc); code != 0 {
 		t.Fatalf("exit = %d, want 0 (the resolve_failed outcomes are the async-create window, not a failure)", code)
@@ -105,7 +105,7 @@ func TestDispatchRetriesSubmitUntilSessionMaterializes(t *testing.T) {
 // text. Same window, different half of it.
 func TestDispatchRetriesWhileTheSessionIsNotLiveYet(t *testing.T) {
 	gc := gcapitest.New(t)
-	gc.SubmitInactiveUntil = map[string]int{brokerSessionAlias(42, 3, 1): 1}
+	gc.SubmitInactiveUntil = map[string]int{brokerSessionAlias("triage", 42, 3, 1): 1}
 
 	if code := runDispatchForSubmit(t, gc); code != 0 {
 		t.Fatalf("exit = %d, want 0 (an inactive session is a pod still starting)", code)
@@ -122,7 +122,7 @@ func TestDispatchRetriesWhileTheSessionIsNotLiveYet(t *testing.T) {
 // whole change exists to fix).
 func TestDispatchFailsWhenPromptNeverDelivers(t *testing.T) {
 	gc := gcapitest.New(t)
-	gc.SubmitUnresolvedUntil = map[string]int{brokerSessionAlias(42, 3, 1): 99}
+	gc.SubmitUnresolvedUntil = map[string]int{brokerSessionAlias("triage", 42, 3, 1): 99}
 
 	if code := runDispatchForSubmit(t, gc); code != 1 {
 		t.Fatalf("exit = %d, want 1 (infra) when the prompt could not be delivered", code)
@@ -148,7 +148,7 @@ func zeroBackoff(int) time.Duration { return 0 }
 // immediately still exits 0, because upstream calls parking a success.
 func TestDispatchWaitsForTheRuntimeBeforeSubmitting(t *testing.T) {
 	gc := gcapitest.New(t)
-	alias := brokerSessionAlias(42, 3, 1)
+	alias := brokerSessionAlias("triage", 42, 3, 1)
 	gc.NotRunningUntil = map[string]int{alias: 2}
 
 	if code := runDispatchForSubmit(t, gc); code != 0 {
