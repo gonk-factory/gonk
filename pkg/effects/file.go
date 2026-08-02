@@ -46,6 +46,13 @@ const (
 // questions: Validate says "is this the right SHAPE of batch for this agent",
 // and this says "are these writes allowed at all". A batch must pass both.
 func ValidatePaths(b Batch) error {
+	// The denylist first, and unconditionally. It is redundant against today's
+	// .agent/-only allowlist by design -- see protected.go for why it must not
+	// depend on that allowlist staying narrow.
+	if err := ValidateProtectedPaths(b); err != nil {
+		return err
+	}
+
 	seen := make(map[string]bool)
 	total := 0
 
