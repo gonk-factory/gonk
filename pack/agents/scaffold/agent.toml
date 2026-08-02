@@ -8,3 +8,31 @@ description = "Reads a repository and opens a post-merge MR that scaffolds .agen
 # reasoning applies verbatim to every agent in this pack.
 
 min_active_sessions = 0
+
+# --- The opencode harness -------------------------------------------------
+# IDENTICAL to pack/agents/triage/agent.toml, and it must be. Without
+# start_command the loader falls through to the catalog's DEFAULT provider,
+# whose binary this image does not ship, and the controller logs
+#     pool "scaffold": agent "scaffold": provider not found in PATH ... (skipping)
+# and NO SESSION IS EVER CREATED. Observed live 2026-08-02 on the first real
+# scaffold dispatch: the order fired, the meter reserved, and nothing ran.
+#
+# Every line below is load-bearing and was established the hard way on triage --
+# read that file's comments before changing any of it. In brief: start_command
+# is Gas City's escape hatch (bypasses the provider catalog, so no "opencode"
+# entry is required in [providers]); HOME and all four XDG vars must be
+# overridden because the session passthrough copies the CONTROLLER's HOME into
+# the pod, where it does not exist and is not writable, which crash-loops the
+# session; and OPENCODE_PERMISSION stops a non-interactive run blocking forever
+# on its first tool-permission prompt.
+start_command = "gonk-agent-entrypoint"
+prompt_mode = "flag"
+prompt_flag = "--prompt"
+
+[env]
+HOME = "/tmp/gonk-home"
+XDG_CONFIG_HOME = "/tmp/gonk-home/.config"
+XDG_DATA_HOME = "/tmp/gonk-home/.local/share"
+XDG_CACHE_HOME = "/tmp/gonk-home/.cache"
+XDG_STATE_HOME = "/tmp/gonk-home/.local/state"
+OPENCODE_PERMISSION = '{"*":"allow"}'
