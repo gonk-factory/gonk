@@ -120,7 +120,7 @@ shape gate should not treat them as though they are:
 | rebase onto SHA | low | mechanical; the SHA must be an ancestor of the target branch |
 | assign reviewer | medium | allowlist from project membership; never self-assign |
 | close issue | medium | only with a linked, merged MR — closing without fixing is a failure wearing a success |
-| **approve for merge** | **do not build** | see below |
+| **approve for merge** | **do not build** | see below, incl. the larger-reviewer variant |
 
 **Approve-for-merge should not exist, and this is the one item in the list I would
 argue against.** Every safety property in this design rests on the merge request
@@ -136,6 +136,47 @@ mechanism is a **deterministic auto-merge policy owned by the operator** — e.g
 expressed in `.gonk.yml` and enforced by the controller. That is a rule the
 operator wrote, not a judgement an agent made, and it can be reasoned about
 without trusting a model at all.
+
+### "Could a larger model approve a smaller model's work?"
+
+Raised by the owner, and it defeats one of the objections above: the capability
+gradient means this is *not* the same model reading the same text, so "they
+share a failure mode" does not apply as stated. A larger model genuinely does
+catch competence errors a smaller one makes. That much is real and is the
+premise of a lot of working practice.
+
+It still does not rescue *approval*, for three reasons the gradient does not
+touch:
+
+1. **Capability is not independence.** What a reviewer must provide is
+   uncorrelated failure, not a higher score. Models with overlapping training
+   data and shared lineage fail in correlated *classes*, and the errors that
+   pass both reviewers are exactly the correlated ones. Scaling raises the
+   competence floor; it does not buy independence.
+2. **The reviewer reads attacker-controlled text too** — the issue body, the
+   diff, the comments in it. Injection aimed at a reviewer is a live attack, and
+   "larger" is not monotonically more resistant: a model that follows
+   instructions more faithfully can be more steerable, not less. The gradient
+   does not reliably run the right way on the one axis that matters.
+3. **It inverts the cost model.** If the approver must be the expensive model,
+   every merge pays cloud-rung prices in a system whose ladder exists to ration
+   exactly that. A control that is costly to run attracts downward pressure, and
+   the day someone drops the approver a rung to save money the safety argument
+   evaporates with nothing failing.
+
+**What to build instead: a large model as a reviewer that CANNOT merge.** The
+asymmetry is the same invariant this design has now reached three times —
+intent may narrow but not widen, protected paths may subtract but not add,
+review may **veto but not authorise**. A false veto costs a re-sling; a false
+approval merges bad code. So let the larger model fail the gate deterministically
+and post its reasoning as a comment (both are effects that exist or are cheap),
+and the capability gradient delivers its real benefit without holding the one
+control that does not depend on a validator being complete.
+
+Stated plainly: **if you want unattended merges, buy them with the verifier, not
+with a bigger reviewer.** Step 0/1/2 green is evidence — reproducible,
+inspectable, fails closed. An approval is an opinion about text an attacker
+helped write.
 
 ## The verifier is the most dangerous component in the system
 
