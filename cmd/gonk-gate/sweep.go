@@ -246,14 +246,28 @@ func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
 		return
 	}
 
+	// The verdict is in, so gonk is FINISHED WITH THIS SESSION on every branch
+	// below -- including the re-slings, which open a fresh attempt-suffixed
+	// session rather than reusing this one. Tear it down after the switch.
+	//
+	// Not before: the store writes below are what make the outcome durable, and
+	// a close is a remote call that can hang. Not inside the switch either --
+	// three copies of the same teardown is how one branch ends up missing it.
+	// The `default` (unknown Next) deliberately leaves the session ALIVE: we did
+	// not understand the answer, so we have not established that the work is
+	// over.
+	finished := false
+
 	switch resp.Next {
 	case "done":
+		finished = true
 		rec.State = beadstore.StateDone
 		if err := d.Store.Put(ctx, rec); err != nil {
 			d.Log.Error("sweep: store Put failed", "err", err, "bead", rec.BeadAnchor)
 		}
 		d.Log.Info("sweep: bead done", "bead", rec.BeadAnchor, "outcome", outcome)
 	case "escalate", "retry":
+		finished = true
 		// The re-sling: fire the gonk-dispatch order for the SAME BeadAnchor. It
 		// goes through Gate 2 by construction -- Gas City runs a fresh
 		// `gonk-gate dispatch`, which re-decides and OVERWRITES this record via
@@ -278,6 +292,45 @@ func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
 	default:
 		d.Log.Error("sweep: meter returned an unknown Next; leaving the bead running", "next", resp.Next, "bead", rec.BeadAnchor)
 	}
+
+	if finished {
+		closeSession(ctx, d, rec)
+	}
+}
+
+// closeSession returns the pod. It is the last thing that happens to a bead's
+// session and the only thing that gives the cluster its CPU and memory back.
+//
+// BEST-EFFORT BY CONSTRUCTION, AND LOUD WHEN IT FAILS. The outcome is already
+// reported and the bead has already moved on, so a teardown failure must not
+// fail the sweep, re-judge the bead, or block the next one -- but it must never
+// pass quietly either. A silently swallowed close is the same class of bug as
+// the missing close: something that did nothing and looked like success.
+//
+// A 404 IS SUCCESS. The session is already gone, which is precisely the state
+// being asked for -- and it is the normal case on a second sweep of a bead whose
+// close raced a reconciler. Treating it as an error would make every recovery
+// path noisy for no reason.
+func closeSession(ctx context.Context, d sweepDeps, rec beadstore.Record) {
+	// The v1 formula path never held a session handle: gonk did not create the
+	// session, Gas City's pool did, and there is no alias to close by. Those
+	// beads are not this function's business.
+	if rec.SessionID == "" {
+		return
+	}
+	if err := d.GC.CloseSession(ctx, rec.SessionID); err != nil {
+		if gcapi.IsNotFound(err) {
+			d.Log.Debug("sweep: session already gone at close",
+				"bead", rec.BeadAnchor, "session", rec.SessionID)
+			return
+		}
+		// ERROR, not Warn: this is a leaked pod, and enough of them stop the
+		// cluster scheduling anything at all (gonk-xkm).
+		d.Log.Error("sweep: session close failed -- ITS POD IS LEAKED",
+			"bead", rec.BeadAnchor, "session", rec.SessionID, "err", err)
+		return
+	}
+	d.Log.Info("sweep: session closed", "bead", rec.BeadAnchor, "session", rec.SessionID)
 }
 
 // gatherSpend forces a spend sync (HB-2) and polls session cost until

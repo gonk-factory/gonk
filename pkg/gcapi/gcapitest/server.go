@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -97,6 +98,18 @@ type Server struct {
 	// a 5xx count would measure the CLIENT's retries; a 4xx is terminal there,
 	// which makes SubmitAttemptsSeen isolate the CALLER's own retry loop.
 	SubmitFail int
+	// Closed is append-only, in request order: the id/alias of every ACCEPTED
+	// CloseSession (POST /v0/city/{city}/session/{id}/close). A test asserts
+	// teardown against LiveSessions rather than this -- what matters is that no
+	// session survived, not that a call was made -- but the order is here for a
+	// test that needs to prove close ran exactly once.
+	Closed []string
+	// CloseFail is a count of remaining 401s on the close route, decremented per
+	// request. 401 (not 5xx) for the same reason as SubmitFail: gcapi.Client
+	// retries 5xx internally, so only a 4xx isolates the caller's own handling.
+	// The point of injecting it is that a failed teardown must be LOUD -- a
+	// silently-swallowed close is how the leak got here in the first place.
+	CloseFail int
 
 	srv    *httptest.Server
 	mu     sync.Mutex
@@ -277,9 +290,27 @@ func parseSessionSubmitPath(p string) (city, id string, ok bool) {
 	return city, id, true
 }
 
+// parseSessionClosePath extracts (city, id) from
+// "/v0/city/{city}/session/{id}/close", mirroring the route
+// gcapi.Client.CloseSession builds. Checked alongside the submit path, before
+// the bare session path, for the same reason.
+func parseSessionClosePath(p string) (city, id string, ok bool) {
+	const suffix = "/close"
+	rest, found := strings.CutSuffix(p, suffix)
+	if !found {
+		return "", "", false
+	}
+	city, id, ok = parseSessionGetPath(rest)
+	if !ok || strings.Contains(id, "/") {
+		return "", "", false
+	}
+	return city, id, true
+}
+
 // handle answers the routes gcapi.Client speaks:
 // POST /v0/city/{cityName}/order/{name}/run, POST /v0/city/{cityName}/sessions,
 // POST /v0/city/{cityName}/session/{id}/submit,
+// POST /v0/city/{cityName}/session/{id}/close,
 // and GET /v0/city/{cityName}/session/{id}.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
@@ -305,6 +336,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, id, ok := parseSessionSubmitPath(r.URL.Path); ok {
 		s.handleSubmitSession(w, r, id)
+		return
+	}
+	if _, id, ok := parseSessionClosePath(r.URL.Path); ok {
+		s.handleCloseSession(w, id)
 		return
 	}
 	if _, ok := parseSessionsPath(r.URL.Path); ok {
@@ -408,6 +443,40 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	writeAccepted(w, reqID, cursor)
+}
+
+// handleCloseSession mirrors gascity's close, and the thing worth modelling is
+// that it is NOT like create and submit: upstream's humaHandleSessionClose calls
+// handle.CloseDetailed INLINE and only then answers, so its 200 {"status":"ok"}
+// is a REAL RECEIPT, not a 202 that means "we will get to it". A close is
+// therefore the one session mutation a caller may believe. An unknown id 404s,
+// so a caller still exercises the IsNotFound path -- which matters, because
+// closing a session that is already gone must not read as a failure.
+func (s *Server) handleCloseSession(w http.ResponseWriter, id string) {
+	s.mu.Lock()
+	if s.CloseFail > 0 {
+		s.CloseFail--
+		s.mu.Unlock()
+		http.Error(w, `{"detail":"injected close rejection"}`, http.StatusUnauthorized)
+		return
+	}
+	sess, ok := s.sessions[id]
+	if !ok {
+		s.mu.Unlock()
+		http.Error(w, `{"detail":"session not found"}`, http.StatusNotFound)
+		return
+	}
+	// Close is terminal and idempotent upstream: the runtime is stopped and the
+	// bead closed. Output is preserved -- closing does not erase what the agent
+	// said, and sweep may legitimately have read it moments earlier.
+	sess.State = SessionClosed
+	s.Closed = append(s.Closed, id)
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(struct {
+		Status string `json:"status"`
+	}{Status: "ok"})
 }
 
 // writeAccepted answers the 202 every async session route returns: an
@@ -583,6 +652,12 @@ const (
 	// SessionCrashed is a session that died. Upstream emits session.crashed
 	// alongside session.stopped; it is terminal too, but carries no batch.
 	SessionCrashed SessionState = "crashed"
+	// SessionClosed is a session gonk has torn down: the runtime is stopped and
+	// the pod is gone. This is the ONLY state that returns the cluster's CPU and
+	// memory. A "stopped" session still holds its pod -- that distinction is
+	// exactly what nobody was making, and it cost 13 leaked pods and a wedged
+	// scheduler (gonk-xkm).
+	SessionClosed SessionState = "closed"
 )
 
 type fakeSession struct {
@@ -631,6 +706,27 @@ func (s *Server) CrashSession(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.putSessionLocked(id, SessionCrashed, "")
+}
+
+// LiveSessions is every session this supervisor still holds a pod for, sorted:
+// one that exists and has not been closed. THIS is what a teardown test asserts
+// on -- not the sweep's exit code, not whether a close call was made.
+//
+// The distinction is the whole point of gonk-xkm. A session that stopped, or
+// crashed, or was judged and reported and marked done, is still a running pod
+// holding 500m CPU and 1Gi of memory. Every one of those looked like a success
+// from inside gonk, and eleven of them wedged the cluster's scheduler.
+func (s *Server) LiveSessions() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var live []string
+	for id, sess := range s.sessions {
+		if sess.State != SessionClosed {
+			live = append(live, id)
+		}
+	}
+	sort.Strings(live)
+	return live
 }
 
 // SessionStateOf reports a session's current state ("" when unknown), so a
