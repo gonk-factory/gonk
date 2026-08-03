@@ -106,6 +106,16 @@ func runSweep(ctx context.Context, d sweepDeps) int {
 		}
 		refire(ctx, dd, rec)
 	}
+
+	// LAST, and deliberately after both passes above. The reaper decides what to
+	// destroy by ABSENCE -- a gonk session that no running bead claims -- so it
+	// must run only once this tick has finished making the store's picture of
+	// what is running as accurate as it is going to get.
+	//
+	// It reports nothing and cannot fail the sweep: an orphan left for the next
+	// tick costs one pod for 30 seconds, while a sweep that aborted on the
+	// reaper's behalf would strand real outcomes.
+	runReap(ctx, dd)
 	return 0
 }
 

@@ -104,6 +104,17 @@ type Server struct {
 	// session survived, not that a call was made -- but the order is here for a
 	// test that needs to prove close ran exactly once.
 	Closed []string
+	// ListPageSize, when > 0, makes the session list PAGINATE at that size --
+	// the behaviour of the real route, which is keyset-paginated with a server
+	// cap. A client that reads page one and stops sees an arbitrary prefix, and
+	// for a reaper that is a silent under-reap: success reported having missed
+	// most of what it exists to find.
+	ListPageSize int
+	// ListPartial makes every session-list page report partial=true, modelling
+	// "one or more backends failed and this list is incomplete". A caller that
+	// destroys things based on absence must not read that as "these are all the
+	// sessions that exist".
+	ListPartial bool
 	// CloseFail is a count of remaining 401s on the close route, decremented per
 	// request. 401 (not 5xx) for the same reason as SubmitFail: gcapi.Client
 	// retries 5xx internally, so only a 4xx isolates the caller's own handling.
@@ -322,6 +333,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			s.handleGetTranscript(w, id, r.URL.Query().Get("tail") == "0")
 			return
 		}
+		if _, ok := parseSessionsPath(r.URL.Path); ok {
+			s.handleListSessions(w, r)
+			return
+		}
 		if _, id, ok := parseSessionGetPath(r.URL.Path); ok {
 			n, _ := strconv.Atoi(r.URL.Query().Get("peekLines"))
 			s.handleGetSession(w, id, n)
@@ -443,6 +458,60 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	writeAccepted(w, reqID, cursor)
+}
+
+// handleListSessions mirrors GET /v0/city/{city}/sessions, INCLUDING ITS
+// PAGINATION, which is the part worth modelling: the real route is keyset-
+// paginated with a server cap, so a client that reads one page and stops sees an
+// arbitrary prefix. For the orphan reaper that is a silent under-reap. A fake
+// that returned everything in one page could not show that, so this one pages at
+// ListPageSize whenever a test sets it.
+func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	ids := make([]string, 0, len(s.sessions))
+	for id := range s.sessions {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	items := make([]gcapi.SessionSummary, 0, len(ids))
+	for _, id := range ids {
+		sess := s.sessions[id]
+		// Closed sessions are gone; upstream's list is of live ones and a reaper
+		// must not be handed corpses to re-close.
+		if sess.State == SessionClosed {
+			continue
+		}
+		created := sess.createdAt
+		if created == "" {
+			created = "2020-01-01T00:00:00Z"
+		}
+		items = append(items, gcapi.SessionSummary{
+			ID: id, Alias: id, State: string(sess.State), CreatedAt: created,
+		})
+	}
+	partial := s.ListPartial
+	pageSize := s.ListPageSize
+	s.mu.Unlock()
+
+	start := 0
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		start, _ = strconv.Atoi(c)
+	}
+	if start > len(items) {
+		start = len(items)
+	}
+	end := len(items)
+	next := ""
+	if pageSize > 0 && start+pageSize < len(items) {
+		end = start + pageSize
+		next = strconv.Itoa(end)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(gcapi.SessionList{
+		Items: items[start:end], Total: len(items), NextCursor: next, Partial: partial,
+	})
 }
 
 // handleCloseSession mirrors gascity's close, and the thing worth modelling is
@@ -663,6 +732,22 @@ const (
 type fakeSession struct {
 	State  SessionState
 	output string
+	// createdAt is RFC3339 and drives the reaper's grace window. Empty means
+	// "long ago", so a test that does not care about the window gets the
+	// reapable case by default and must opt IN to the young-session case.
+	createdAt string
+}
+
+// CreateSessionAt declares a session that already exists, created at the given
+// RFC3339 time. It is how a test expresses the one case the orphan reaper must
+// never get wrong: a session created seconds ago by a dispatch that has not yet
+// written its bead record, which must be left alone rather than reaped out from
+// under a live agent.
+func (s *Server) CreateSessionAt(id string, state SessionState, createdAt string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.putSessionLocked(id, state, "")
+	s.sessions[id].createdAt = createdAt
 }
 
 // putSessionLocked upserts a session. Caller holds s.mu.

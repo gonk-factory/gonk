@@ -90,6 +90,80 @@ func (c *Client) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 	return &out, nil
 }
 
+// SessionSummary is the subset of one row of GET /v0/city/{city}/sessions that
+// the orphan reaper needs. Deliberately small: this is a hostile-ish read used
+// to decide what to DESTROY, so it takes only the fields the decision rests on.
+type SessionSummary struct {
+	ID    string `json:"id"`
+	Alias string `json:"alias"`
+	State string `json:"state"`
+	// CreatedAt is RFC3339. It is what the reaper's grace window is measured
+	// against, so an unparseable value must be treated as "too young to touch"
+	// rather than "epoch, therefore ancient".
+	CreatedAt string `json:"created_at"`
+}
+
+// SessionList is one page of the session list, in gascity's standard list
+// envelope (internal/api/huma_types.go, ListBody).
+type SessionList struct {
+	Items      []SessionSummary `json:"items"`
+	Total      int              `json:"total"`
+	NextCursor string           `json:"next_cursor"`
+	// Partial reports that one or more backends failed and the page is
+	// INCOMPLETE. A caller that reaps must not read an incomplete list as
+	// "these are all the sessions that exist".
+	Partial bool `json:"partial"`
+}
+
+// ListSessions reads every session in the city, FOLLOWING PAGINATION TO THE END.
+//
+// The pagination is not incidental. The route is keyset-paginated with a server
+// cap, so a caller that reads one page and stops sees an arbitrary prefix -- and
+// for the orphan reaper that is a silent under-reap: it would report success
+// having missed most of what it was built to find. Exactly the failure shape
+// this codebase keeps producing, so the loop lives HERE rather than being left
+// to each caller to remember.
+//
+// partial reports whether ANY page came back incomplete, so a caller can decide
+// what an incomplete answer means for it. It is returned rather than treated as
+// an error because "some backends failed" is still useful to a reaper (it can
+// only ever act on sessions it positively identified) and useless to hide.
+//
+// It is an unsigned read.
+func (c *Client) ListSessions(ctx context.Context) (sessions []SessionSummary, partial bool, err error) {
+	if c.City == "" {
+		return nil, false, errEmptyCity
+	}
+	path := fmt.Sprintf("/v0/city/%s/sessions", url.PathEscape(c.City))
+	cursor := ""
+	// A hard bound on pages: a server that keeps handing back a cursor must not
+	// spin this loop forever inside a 30s cooldown order.
+	const maxPages = 50
+	for page := 0; page < maxPages; page++ {
+		q := url.Values{}
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		body, rerr := c.doRequest(ctx, http.MethodGet, path, q.Encode(), nil)
+		if rerr != nil {
+			return nil, partial, rerr
+		}
+		var out SessionList
+		if uerr := json.Unmarshal(body, &out); uerr != nil {
+			return nil, partial, fmt.Errorf("gascity: GET %s: decode: %w", path, uerr)
+		}
+		sessions = append(sessions, out.Items...)
+		partial = partial || out.Partial
+		if out.NextCursor == "" {
+			return sessions, partial, nil
+		}
+		cursor = out.NextCursor
+	}
+	// Ran out of pages. Report what we have AND say the list is incomplete --
+	// silently truncating here would be the same bug as not paginating at all.
+	return sessions, true, nil
+}
+
 // CloseSession tears a session down by id or alias: POST
 // /v0/city/{city}/session/{id}/close. It is a mutation and is signed exactly
 // like RunOrder and CreateSession.
