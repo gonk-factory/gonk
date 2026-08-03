@@ -90,6 +90,40 @@ func (c *Client) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 	return &out, nil
 }
 
+// CloseSession tears a session down by id or alias: POST
+// /v0/city/{city}/session/{id}/close. It is a mutation and is signed exactly
+// like RunOrder and CreateSession.
+//
+// THIS IS THE ONLY CALL THAT RETURNS THE POD. A session that stopped, crashed or
+// was judged and marked done still holds its pod, its 500m CPU and its 1Gi of
+// memory, indefinitely. Nothing in gonk called this before 2026-08-03 and
+// thirteen leaked pods took the cluster to the point where no new agent pod
+// could be SCHEDULED at all (gonk-xkm, and the cause of gonk-pev).
+//
+// UNLIKE create and submit, this route is SYNCHRONOUS. Upstream's
+// humaHandleSessionClose (GASCITY_REF internal/api/huma_handlers_sessions_command.go)
+// calls handle.CloseDetailed INLINE and only then answers, so a 200 here is a
+// real receipt rather than the 202 "we will get to it" that this tree has been
+// burned by three times. That is why there is no event correlation on this path
+// and there should not be one.
+//
+// A 404 is returned as an *APIError (IsNotFound == true) and callers should
+// treat it as SUCCESS: a session that is already gone is the desired state, and
+// close is idempotent by intent.
+func (c *Client) CloseSession(ctx context.Context, idOrAlias string) error {
+	if c.City == "" {
+		return errEmptyCity
+	}
+	if idOrAlias == "" {
+		return fmt.Errorf("gascity: CloseSession: id/alias is empty")
+	}
+	path := fmt.Sprintf("/v0/city/%s/session/%s/close", url.PathEscape(c.City), url.PathEscape(idOrAlias))
+	if _, err := c.doRequest(ctx, http.MethodPost, path, "", nil); err != nil {
+		return err
+	}
+	return nil
+}
+
 // GetSessionOutput reads one session by id or alias, asking the supervisor to
 // include the last-output preview. peekLines <= 0 means "use the server
 // default" (the param is omitted). It is an unsigned read; a 404 is an

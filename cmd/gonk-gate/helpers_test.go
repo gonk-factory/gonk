@@ -2,8 +2,16 @@ package main
 
 import (
 	"io"
+	"log/slog"
 	"net/http"
 )
+
+// testLogger writes structured logs into w so a test can assert that something
+// was REPORTED, not merely handled. Used where the correct behaviour is "carry
+// on, but loudly" -- a best-effort step whose failure must not be swallowed.
+func testLogger(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, nil))
+}
 
 // meterClient builds a *meterAPI against baseURL with no bearer token -- every
 // fake meter in this tree answers unauthenticated, so tests only need the URL.

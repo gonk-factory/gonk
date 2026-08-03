@@ -332,6 +332,14 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 		// attempt-suffixed alias.
 		d.Log.Error("prompt delivery failed; session will idle -- re-sling will retry",
 			"agent", agent, "alias", alias, "bead", a.BeadAnchor, "err", err)
+		// ...and TEAR IT DOWN, because "will idle forever" is not a figure of
+		// speech. The bead never reaches StateRunning on this path, so gonk-sweep
+		// will never see it and will never close it -- this is the ONLY place that
+		// can. Worse, the re-sling this comment promises creates a NEW session
+		// under the next attempt's alias, so without this the retry that is
+		// supposed to recover leaks a pod per rung while producing nothing.
+		// Exactly what gonk-pev's scaffold attempt did.
+		abandonSession(ctx, d, agent, alias)
 		return 1
 	}
 
@@ -341,11 +349,40 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 	base.ReservationExpiresAt = dec.ReservationExpiresAt
 	if err := d.Store.Put(ctx, base); err != nil {
 		d.Log.Error("bead store Put failed", "err", err, "bead", a.BeadAnchor)
+		// The record is what makes a session sweepable: no record, no bead in
+		// StateRunning, so gonk-sweep will never look at this alias and never
+		// close it. A live agent with no record is an ORPHAN -- it will run,
+		// spend tokens against a reservation nobody will reconcile, and hold its
+		// pod forever. Tear it down here or nothing ever will.
+		abandonSession(ctx, d, agent, alias)
 		return 1
 	}
 	d.Log.Info("broker session created", "agent", agent, "alias", alias,
 		"bead", a.BeadAnchor, "rung", dec.Rung, "attempt", dec.Attempt)
 	return 0
+}
+
+// abandonSession tears down a session dispatch created but is walking away from.
+//
+// It exists because of an asymmetry that is easy to miss: gonk-sweep can only
+// close sessions belonging to a bead that reached StateRunning. Every failure
+// between "the session exists" and "the record is stored" produces a session
+// NO SWEEP WILL EVER SEE. Those are invisible leaks -- not merely a pod held too
+// long, but a pod nothing in the system is even aware of.
+//
+// Failure to close is logged and swallowed: dispatch is already failing, and the
+// caller's exit code must reflect the dispatch failure that brought us here, not
+// the teardown. Loud, though -- see closeSession.
+func abandonSession(ctx context.Context, d dispatchDeps, agent, alias string) {
+	if err := d.GC.CloseSession(ctx, alias); err != nil {
+		if gcapi.IsNotFound(err) {
+			return
+		}
+		d.Log.Error("could not close the abandoned session -- ITS POD IS LEAKED",
+			"agent", agent, "alias", alias, "err", err)
+		return
+	}
+	d.Log.Info("abandoned session closed", "agent", agent, "alias", alias)
 }
 
 // awaitCreate reads the create's terminal event off the city log. It returns
