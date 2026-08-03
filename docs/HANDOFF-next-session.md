@@ -1,6 +1,111 @@
 # Handoff — next session
 
-_Last updated: 2026-08-01 (session 5). Branch: `main` (we develop on main per owner's call). Everything below is committed and pushed._
+_Last updated: 2026-08-03 (session 6). Branch: `main` (we develop on main per owner's call). Everything below is committed and pushed._
+
+## 2026-08-03 (session 6): the agent completed the loop; onboarding is one step short
+
+_Everything below is committed and pushed. HEAD `31ee5e0`, deployed
+`v0.1.0-a682e5d3e7ce`. Gates green: gofmt, vet, `go test ./...`, chart, pack._
+
+### START HERE: `gonk-4xr` (P1)
+
+The scaffold broker port works up to delivery. The broker created
+`gonk.scaffold.p63.a1` on the real repo, and delivery failed **loudly and
+precisely**:
+
+```
+ERROR prompt delivery failed; session will idle -- re-sling will retry
+  alias=gonk.scaffold.p63.a1 bead=gonk:63:scaffold
+  err=... never accepted its prompt after 40 attempts: session is not running yet
+```
+
+That is session 5's work paying off — before it, this exact situation reported
+SUCCESS and stranded a silent idle session.
+
+**The blocker**: the broker-created session never reaches `running` inside
+deliverPrompt's ~90s budget. The suspicious signal is that the controller is
+ALSO spawning scaffold **pool** sessions — `poolDesired: scaffold = 2` — even
+though `min_active_sessions = 0`. Three scaffold pods contend, with k8s API
+throttling visible while the controller polls for them.
+
+**First thing to check**: did adding `start_command`/`[env]` to
+`pack/agents/scaffold/agent.toml` make the agent look poolable to
+`buildDesiredState` in a way it did not before? Triage has the identical block
+and does NOT do this — that is the comparison to run. **Do not raise the
+delivery budget first**; the budget is not the bug if the pod is never
+scheduled.
+
+**⚠️ ONE RETRY LEFT.** `gonk:63:scaffold` carries one `infra-failed` attempt.
+`max_infra_retries` is 2, so one more failure re-poisons it and it needs another
+manual ledger delete. Diagnose before re-triggering.
+
+### What shipped
+
+- **Prompt delivery actually works** (`gonk-u1p.7`, closed). Session 4's
+  diagnosis was wrong: `SubmitSession` was fine and the bug was ours — dispatch
+  treated the async 202 as a delivery receipt, and that route never 404s. It now
+  correlates the terminal event on the city log. Three further silent failures
+  fell out: the create is async too, a prompt submitted into a start_pending
+  session is parked and never arrives, and the 120s order timeout was killing
+  the delivery it waited for (now 300s).
+- **Prompts were being EXECUTED, not asked.** opencode's composer treats `!` as
+  its shell-mode trigger, and Gas City delivers messages as keystrokes. Every
+  wedged session was the whole prompt running as `/bin/sh`. Mitigated by
+  stripping bangs; `gonk-e9m` is the real fix.
+- **Scaffold ported to the broker** (`gonk-bgx`). First trigger whose artifact
+  is repository CONTENT: the agent proposes `file` effects and the broker
+  commits them and opens the MR. `effects.ValidatePaths` is a security boundary
+  — mutation-tested.
+- **Protected-path denylist** — CI definitions, `.gonk.yml`, CODEOWNERS, `.git/`
+  refused for EVERY agent regardless of shape. Redundant today on purpose.
+- **`TestEveryModelAgentCanActuallyStart`** — scaffold and mention shipped with
+  agent.toml files carrying no `start_command` at all, so no session could ever
+  be created and every other test stayed green.
+
+### Design work (no code)
+
+- [`verified-change-pipeline`](superpowers/specs/2026-08-02-verified-change-pipeline-design.md)
+  — intent → work → deterministic verify, with the split-diff red/green check.
+  **Reviewed by Fable, which falsified the flagship claim**: red→green does NOT
+  make test-weakening unreachable. The fix is a test-set monotonicity invariant.
+  Read the CORRECTION section before building anything on it.
+- [`gitlab-duo-workflows`](reference/gitlab-duo-workflows.md) — recovered from a
+  2026-07-19 conversation via episodic memory. It informed the architecture and
+  was invisible in the repo; most of it got re-derived from scratch. Contains
+  the one piece never built: **classify the work before implementing, and route
+  a non-code diagnosis to an ISSUE rather than a diff** (`gonk-2wq`). That is
+  the sharpest answer to the danger in "fix broken pipeline".
+- The invariant that kept reappearing from three directions, and is worth
+  applying to any new effect kind: **models supply constraints and objections;
+  only deterministic checks and humans grant permission.** Intent may narrow but
+  not widen; protected paths subtract but never add; a reviewer may veto but
+  never authorise.
+
+### Open, ranked
+
+| bead | what |
+|---|---|
+| `gonk-4xr` P1 | scaffold session never reaches running (START HERE) |
+| `gonk-e9m` P1 | prompts delivered as keystrokes — injection boundary |
+| `gonk-066` P1 | shape gate is syntactic; blocks any code-writing agent |
+| `gonk-2wq` P1 | classify-before-implement; blocks `actions.pipelines` |
+| `gonk-ob5` P1 | opencode fails OPEN to a cloud provider if config is unreachable |
+| `gonk-9nx` P2 | no way to reset a bead poisoned by a since-fixed bug |
+| `gonk-m6t` P2 | attribution no longer reaches the pod |
+| `gonk-kp5` P2 | dispatch re-fetches issue data the webhook already delivered |
+
+### Traps (in addition to session 5's)
+
+- **`gonk-fan` bit FOUR times today.** Every intake restart races the meter,
+  both projects read `unsynced`, and nothing recovers for 10 minutes without
+  `POST /admin/reconcile` on the intake private port. After any deploy, kick it.
+- **A dispatch that never creates a session still burns a ladder attempt.** The
+  reservation is made before the session exists, so infra that fails before any
+  model runs is charged against the retry budget. Feeds `gonk-9nx`.
+- **Backgrounded `kubectl port-forward` does not survive between tool calls.**
+  Start it and query it in the same invocation.
+- `graphify-out/` is from 2026-07-30 and does not contain this session's work;
+  `graphify . --update` refreshes it.
 
 ## 2026-08-01 (session 5): THE AGENT WORKS. A gonk-spawned opencode session completed the loop.
 
