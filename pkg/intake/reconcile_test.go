@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,10 +20,21 @@ import (
 // against the same types, so this fake and that server cannot drift apart on the
 // wire shape -- only on behaviour, which is what Plan 06 is for.
 type fakeMeter struct {
-	srv      *httptest.Server
-	puts     []meterapi.ProjectRequest
-	deletes  []string
-	fail     bool // 500 on everything
+	srv     *httptest.Server
+	puts    []meterapi.ProjectRequest
+	deletes []string
+	fail    bool // 500 on everything
+	// failFirst models THE BOOT RACE: meter is not listening yet when intake
+	// comes up, so the first N registration attempts fail outright. Observed
+	// live twice on 2026-07-31 and again on the 2026-08-04 deploy
+	// ("connect: connection refused"). It decrements per non-health request, so
+	// a caller with a retry ladder gets through and a caller without one does not.
+	failFirst int
+	// failNow is `fail`, but flippable from a test goroutine WHILE the server is
+	// serving -- which is what modelling a mid-life meter outage requires. It is
+	// atomic because the handler runs on httptest's goroutine and the plain
+	// bools here are not guarded.
+	failNow  atomic.Bool
 	invalid  bool // 422: the project's yaml will not load
 	state    meterapi.State
 	authSeen string
@@ -36,8 +48,13 @@ func newFakeMeter(t *testing.T) *fakeMeter {
 			w.WriteHeader(200)
 			return
 		}
-		if m.fail {
+		if m.fail || m.failNow.Load() {
 			http.Error(w, `{"error":"nope"}`, 500)
+			return
+		}
+		if m.failFirst > 0 {
+			m.failFirst--
+			http.Error(w, `{"error":"not listening yet"}`, 503)
 			return
 		}
 		if r.Method == http.MethodDelete {

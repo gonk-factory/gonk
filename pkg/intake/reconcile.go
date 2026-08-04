@@ -118,6 +118,23 @@ type Reconciler struct {
 	// `GroupPolicy func(string) gonkcfg.Policy`. Intake does not hold operator
 	// policy and does not resolve. Meter does. (Conflict A.)
 
+	// StartupLadder is how long to wait between reconcile attempts at BOOT,
+	// before settling into the periodic interval. Nil means defaultStartupLadder.
+	// See runStartupLadder for why it exists; tests set tiny values.
+	StartupLadder []time.Duration
+
+	// UnsettledRetryInterval is how soon to reconcile again after a pass that
+	// left a project UNSYNCED, instead of waiting the full interval. Zero means
+	// defaultUnsettledRetry.
+	//
+	// This is the non-boot half of gonk-fan and it is easy to miss: a meter 5xx
+	// or timeout during ANY pass -- not just the first -- downgrades a perfectly
+	// healthy project to unsynced (see reconcileProject: "Classify will make it
+	// `unsynced`, and nothing will be dispatched"). Without this, one transient
+	// blip during a routine pass silently stops dispatching for up to a full
+	// interval, with no restart to correlate it against.
+	UnsettledRetryInterval time.Duration
+
 	// The fields below back Loop/Kick/WaitForNextPass (Task 10, HB-1). They are
 	// zero-value-safe: every existing test that builds a Reconciler by literal
 	// keeps working, and initPass lazily wires them on first use.
@@ -163,7 +180,11 @@ func (r *Reconciler) Loop(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 10 * time.Minute
 	}
-	t := time.NewTicker(interval)
+	// BEFORE the ticker, not after it. This is gonk-fan: without it the first
+	// reconcile happens a full interval after boot, and for those ten minutes
+	// every webhook is answered 200 and dropped as state_unsynced.
+	r.runStartupLadder(ctx)
+	t := time.NewTicker(r.nextInterval(interval))
 	defer t.Stop()
 	for {
 		select {
@@ -174,7 +195,97 @@ func (r *Reconciler) Loop(ctx context.Context, interval time.Duration) {
 		case <-r.kickCh:
 			r.runPass(ctx)
 		}
+		// Re-arm from the state the pass just produced: fast while anything is
+		// unsynced, normal cadence once it settles.
+		t.Reset(r.nextInterval(interval))
 	}
+}
+
+// nextInterval is how long until the next pass should be due: the normal
+// cadence when everything is resolved, the much shorter retry when something is
+// still unsynced. See UnsettledRetryInterval for why the distinction matters.
+func (r *Reconciler) nextInterval(interval time.Duration) time.Duration {
+	if r.startupSettled() {
+		return interval
+	}
+	retry := r.UnsettledRetryInterval
+	if retry <= 0 {
+		retry = defaultUnsettledRetry
+	}
+	// Never SLOWER than the normal cadence: a caller running a 5s interval must
+	// not be pushed out to 30s by this.
+	if retry > interval {
+		return interval
+	}
+	return retry
+}
+
+// defaultStartupLadder is the boot-time retry schedule: reconcile immediately,
+// then at 5s, 15s and 60s if anything is still unresolved, then hand over to the
+// periodic interval.
+//
+// The first rung is what closes gonk-fan's ten-minute window. The REST of the
+// ladder exists because one pass is demonstrably not enough: intake and meter
+// start together and intake usually wins, so the first registration fails with
+// "connect: connection refused" (observed twice on 2026-07-31 and again on the
+// 2026-08-04 deploy). Without the retries, a boot race puts the project right
+// back to unsynced-until-the-next-tick, which is the whole window again.
+//
+// The rungs are spaced to cover a pod start, not to hammer: a meter that is
+// still not answering after 80 seconds has a problem no amount of retrying from
+// here will fix, and the periodic loop takes it from there.
+var defaultStartupLadder = []time.Duration{0, 5 * time.Second, 15 * time.Second, 60 * time.Second}
+
+// defaultUnsettledRetry is how soon to try again after a pass that left
+// something unsynced, once the startup ladder is over. It is far shorter than
+// the 10m cadence and far longer than a hot loop: a meter that is down stays
+// down for a while, and hammering it does not help.
+const defaultUnsettledRetry = 30 * time.Second
+
+// runStartupLadder reconciles at boot until nothing is left unsynced, or the
+// ladder is exhausted, or ctx is done.
+//
+// WHAT "SETTLED" MEANS HERE, and it is deliberately narrow: no project is in
+// StateUnsynced. Unsynced is the ONE state that means "meter has not answered",
+// which is the condition this ladder can actually do something about. Every
+// other non-dispatchable state -- invalid, disabled, key-missing, declined --
+// is a resolved answer, and retrying it would be a boot-time loop over
+// something a human has to change. Zero projects is settled too: an instance
+// with nothing onboarded has nothing to wait for.
+//
+// It does NOT lower the bar for dispatching. Nothing here makes an unsynced
+// project dispatchable; it only shortens how long the project stays unsynced.
+func (r *Reconciler) runStartupLadder(ctx context.Context) {
+	ladder := r.StartupLadder
+	if ladder == nil {
+		ladder = defaultStartupLadder
+	}
+	for _, wait := range ladder {
+		if wait > 0 {
+			t := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		r.runPass(ctx)
+		if r.startupSettled() {
+			return
+		}
+	}
+}
+
+// startupSettled reports whether the ladder has nothing left to wait for.
+func (r *Reconciler) startupSettled() bool {
+	if r.Cache == nil {
+		return true
+	}
+	return r.Cache.CountByState()[StateUnsynced] == 0
 }
 
 // runPass runs one ReconcileOnce and records its ReconcileSummary under
