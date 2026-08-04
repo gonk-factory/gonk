@@ -57,6 +57,13 @@ func newLoopTestReconciler(gl GitLab) *Reconciler {
 		Meter: NewMeterClient("http://127.0.0.1:1", "unused-token", nil),
 		Cache: NewCache(),
 		Obs:   NopObserver{},
+		// NO STARTUP LADDER. Every test in this file is about Kick/
+		// WaitForNextPass sequencing and counts passes by hand, so a boot pass
+		// they did not ask for shifts every number by one and competes for the
+		// same release channel. An EMPTY (non-nil) ladder means "no rungs",
+		// which is distinct from nil ("use the default") -- see runStartupLadder.
+		// The startup behaviour itself is covered in reconcile_startup_test.go.
+		StartupLadder: []time.Duration{},
 	}
 }
 
