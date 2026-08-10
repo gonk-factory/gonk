@@ -33,6 +33,12 @@ import (
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// internal/meter/service has no logger of its own to thread through, and
+	// the one thing it must be able to say -- "I could not provision this
+	// project's virtual key" -- was silent, which cost a whole investigation
+	// (gonk-zp3). Make its slog.Default() calls land in the same JSON stream
+	// as everything else here rather than the text default.
+	slog.SetDefault(log)
 	if err := run(log); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)

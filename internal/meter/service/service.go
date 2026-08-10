@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -424,9 +425,20 @@ func (s *Service) resolveProject(ctx context.Context, project, rig string, raw [
 	}
 	info, keyErr := s.admin.EnsureKey(ctx, spec)
 	if keyErr != nil {
-		// Fail closed, but not loud: onboarding is not at fault, and the
-		// reconcile loop retries. /decide will defer with virtual-key-missing
-		// until the key lands.
+		// Fail closed -- but SAY SO. This was previously silent ("not loud"),
+		// and the silence is what made it undiagnosable: a project stuck in
+		// key-missing has every webhook answered 200 and then dropped as
+		// state_key-missing, so triage simply never runs and NOTHING anywhere
+		// says why. Working that out from the outside took a live LiteLLM
+		// packet-for-packet replay; one WARN would have made it a grep
+		// (gonk-zp3).
+		//
+		// Still a WARN, not an ERROR: onboarding is not at fault and the
+		// reconcile loop retries. /decide defers with virtual-key-missing
+		// until the key lands. The error carries the alias and a 4xx body,
+		// never the secret -- KeyInfo.Token is not part of it.
+		slog.Default().Warn("litellm: could not ensure the project's virtual key; recording key-missing",
+			"project", project, "alias", alias, "err", keyErr)
 		reg := store.Registration{
 			Project: project, Rig: rig, Raw: raw,
 			State: store.StateKeyMissing, Effective: eff, QuietHours: qh,

@@ -189,6 +189,23 @@ func (a *HTTPAdmin) updateByAlias(ctx context.Context, spec KeySpec, reqBody key
 		return KeyInfo{}, err
 	}
 	reqBody.Key = tokenID
+	// The alias MUST NOT be re-sent. LiteLLM's alias-uniqueness check on
+	// /key/update does not exclude the key being updated, so re-asserting a
+	// key's OWN alias is rejected as a duplicate of itself:
+	//
+	//   400 Key with alias 'gonk-agentic-gonk-e2e-1784441480' already exists.
+	//       Unique key aliases across all keys are required.
+	//
+	// Verified against the live LiteLLM (v1.92.0) on 2026-08-10: the identical
+	// /key/update with key_alias omitted returns 200. The field is redundant
+	// here anyway -- tokenID already identifies the record, and its alias is by
+	// construction the one we looked it up by.
+	//
+	// This was not theoretical. It made EnsureKey fail for every project whose
+	// key already existed, so meter recorded key-missing, and intake answered
+	// every webhook 200 and dropped it as state_key-missing. Triage could not
+	// dispatch at all (gonk-zp3).
+	reqBody.KeyAlias = ""
 	body, status, err := a.do(ctx, http.MethodPost, "/key/update", reqBody)
 	if err != nil {
 		return KeyInfo{}, err
