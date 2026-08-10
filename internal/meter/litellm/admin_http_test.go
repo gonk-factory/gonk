@@ -48,6 +48,18 @@ func TestHTTPAdminEnsureKeyUpdatesByAliasViaKeyList(t *testing.T) {
 			if body["key"] != hashedID {
 				t.Fatalf("key/update body key = %v, want the hashed id %q (identifies the record)", body["key"], hashedID)
 			}
+			// REAL v1.92.0 BEHAVIOUR, verified live 2026-08-10: the alias
+			// uniqueness check does NOT exclude the key being updated, so
+			// re-sending a key's own alias is rejected as a duplicate of
+			// itself. This fake used to accept any body, which is why it
+			// agreed with the adapter while production failed -- the same
+			// "a fake built from an unexercised spec always agrees with you"
+			// trap as the 202 contract.
+			if _, present := body["key_alias"]; present {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"message":"Key with alias 'gonk-a' already exists. Unique key aliases across all keys are required.","type":"bad_request_error","param":"key_alias","code":"400"}}`))
+				return
+			}
 			// Real /key/update echoes the hashed id back as "key", never sk-.
 			_, _ = w.Write([]byte(`{"key":"` + hashedID + `","key_alias":"gonk-a","max_budget":7.0}`))
 		default:
