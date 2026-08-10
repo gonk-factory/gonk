@@ -46,7 +46,20 @@ import (
 var version = "dev"
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Records go to stderr AND to a durable sink, because as a Gas City exec
+	// order stderr alone is a dead end: Gas City buffers stdout+stderr together
+	// and drops the buffer when the order SUCCEEDS, which gonk-sweep always
+	// does by design. See logsink.go for the mechanism (gonk-6a6).
+	logOut, closeLogSink, logSinkNote := openLogSink(logSinkPath(os.LookupEnv), os.Stderr)
+	defer closeLogSink()
+	log := slog.New(slog.NewJSONHandler(logOut, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// The package default too: a few call sites (the GONK_BEAD_REPO_DIR
+	// warning below among them) log through slog.Default(), and those were
+	// being discarded for the same reason.
+	slog.SetDefault(log)
+	if logSinkNote != "" {
+		log.Warn("log sink degraded", "detail", logSinkNote)
+	}
 	if len(os.Args) < 2 {
 		log.Error("usage: gonk-gate dispatch|sweep|check")
 		os.Exit(2)
