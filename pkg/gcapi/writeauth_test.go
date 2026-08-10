@@ -574,3 +574,48 @@ func assertTokenVerifies(t *testing.T, pub ed25519.PublicKey, token string) {
 		t.Fatal("token signature does not verify against the derived public key")
 	}
 }
+
+// TestParsePrivateKeyTrimNeverEatsKeyBytes is the exhaustive version of the
+// 4.6% bug. A key file written as TEXT (a Helm/Vault secret, `echo`) arrives
+// with a trailing newline, which is not an exact ed25519 length, so it takes
+// the trim path -- and a trim aimed at that newline must not keep going into
+// the key itself. Every whitespace byte, at both ends, at both key sizes, with
+// both line endings: the parsed key must equal the key exactly.
+//
+// Before the fix this failed for every whitespace value at either end (proved
+// deterministically, not by waiting for the ~1-in-22 random trip).
+func TestParsePrivateKeyTrimNeverEatsKeyBytes(t *testing.T) {
+	whitespace := []byte{'\t', '\n', '\v', '\f', '\r', ' '}
+	for _, size := range []int{ed25519.SeedSize, ed25519.PrivateKeySize} {
+		for _, ws := range whitespace {
+			for _, at := range []string{"first", "last"} {
+				for _, eol := range []string{"\n", "\r\n"} {
+					name := fmt.Sprintf("size=%d/%s=%#x/eol=%q", size, at, ws, eol)
+					t.Run(name, func(t *testing.T) {
+						key := make([]byte, size)
+						for i := range key {
+							key[i] = byte(i + 1)
+						}
+						if at == "first" {
+							key[0] = ws
+						} else {
+							key[size-1] = ws
+						}
+
+						got, err := ParsePrivateKey(append(append([]byte(nil), key...), []byte(eol)...))
+						if err != nil {
+							t.Fatalf("ParsePrivateKey: %v", err)
+						}
+						want := key
+						if size == ed25519.SeedSize {
+							want = ed25519.NewKeyFromSeed(key)
+						}
+						if !bytes.Equal(got, want) {
+							t.Fatalf("key bytes changed: the trim ate into the key")
+						}
+					})
+				}
+			}
+		}
+	}
+}

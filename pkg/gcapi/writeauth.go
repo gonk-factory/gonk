@@ -138,27 +138,40 @@ func ParsePrivateKey(data []byte) (ed25519.PrivateKey, error) {
 		}
 		return key, nil
 	}
-	// TRIM ONLY IF TRIMMING IS NEEDED. bytes.TrimSpace over RAW key material is
-	// a corruption bug: an ed25519 key is 32/64 bytes of uniform random data, so
-	// its first or last byte is an ASCII whitespace value (\t \n \v \f \r space
-	// -- 6 of 256) about 4.6% of the time, and trimming those bytes turns a
-	// perfectly good key into a 63-byte "unrecognized private key" that no
-	// operator could diagnose. Exact-length input is therefore taken verbatim,
-	// and the trim is kept only as a fallback for the common text case (a file
-	// written with a trailing newline). Found by TestParsePrivateKeyRaw64, which
-	// generates a fresh key each run and so trips this roughly 1 run in 22.
-	raw := data
-	if len(raw) != ed25519.SeedSize && len(raw) != ed25519.PrivateKeySize {
-		raw = bytes.TrimSpace(data)
+	// TRIM ONLY IF TRIMMING IS NEEDED, and then only as much as is needed.
+	//
+	// bytes.TrimSpace over RAW key material is a corruption bug: an ed25519 key
+	// is 32/64 bytes of uniform random data, so its first or last byte is an
+	// ASCII whitespace value (\t \n \v \f \r space -- 6 of 256) about 4.6% of
+	// the time, and trimming those bytes turns a perfectly good key into a
+	// 63-byte "unrecognized private key" that no operator could diagnose.
+	//
+	// Taking exact-length input verbatim fixed that for a key file written with
+	// NO trailing newline, but not for the common case this trim exists to
+	// serve. A key delivered as text (`echo`, a Helm/Vault secret) arrives as 64
+	// bytes + "\n" = 65, which is not an exact length, so it fell into
+	// TrimSpace -- and TrimSpace does not stop at the newline it was aimed at.
+	// It keeps going, so a key whose LAST byte is whitespace lost that byte too,
+	// and one whose FIRST byte is whitespace lost that one. Same 4.6%, same
+	// undiagnosable 63-byte error, just one layer down.
+	//
+	// So: try the candidate readings in order, most literal first, and accept
+	// the first whose length is actually a valid ed25519 size. Stripping is only
+	// ever allowed to produce a valid key, never to eat into one.
+	for _, raw := range [][]byte{
+		data,                                   // exact length, no trailing newline
+		bytes.TrimSuffix(data, []byte("\n")),   // unix text file
+		bytes.TrimSuffix(data, []byte("\r\n")), // dos text file
+		bytes.TrimSpace(data),                  // last resort: stray padding
+	} {
+		switch len(raw) {
+		case ed25519.SeedSize: // 32-byte seed
+			return ed25519.NewKeyFromSeed(raw), nil
+		case ed25519.PrivateKeySize: // 64-byte full private key
+			return ed25519.PrivateKey(append([]byte(nil), raw...)), nil
+		}
 	}
-	switch len(raw) {
-	case ed25519.SeedSize: // 32-byte seed
-		return ed25519.NewKeyFromSeed(raw), nil
-	case ed25519.PrivateKeySize: // 64-byte full private key
-		return ed25519.PrivateKey(append([]byte(nil), raw...)), nil
-	default:
-		return nil, fmt.Errorf("unrecognized ed25519 private key: not PEM PKCS#8, and raw length %d is neither a %d-byte seed nor a %d-byte key", len(raw), ed25519.SeedSize, ed25519.PrivateKeySize)
-	}
+	return nil, fmt.Errorf("unrecognized ed25519 private key: not PEM PKCS#8, and raw length %d (%d after trimming) is neither a %d-byte seed nor a %d-byte key", len(data), len(bytes.TrimSpace(data)), ed25519.SeedSize, ed25519.PrivateKeySize)
 }
 
 // grant is the signed payload. Field order is load-bearing only for matching
