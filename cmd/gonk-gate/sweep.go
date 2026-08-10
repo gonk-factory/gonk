@@ -210,6 +210,12 @@ func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
 				d.Log.Warn("sweep: broker batch read/apply error", "bead", rec.BeadAnchor, "err", aerr)
 			case applied:
 				signals.ArtifactPresent = true
+				// Say so. Every OTHER outcome of this switch is logged, so a
+				// silent success is the one case a reader cannot distinguish
+				// from "the sweep never looked at this bead at all" -- which is
+				// exactly the ambiguity gonk-zp3 is stuck in. A log that only
+				// speaks up on failure cannot tell you the happy path ran.
+				d.Log.Info("sweep: triage batch applied", "bead", rec.BeadAnchor, "agent", agent)
 			default:
 				// Present-but-invalid or no batch: nothing applied. The bead
 				// falls to the ladder (spend>0 => escalate/needs-human; else
