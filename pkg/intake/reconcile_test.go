@@ -54,7 +54,7 @@ func newFakeMeter(t *testing.T) *fakeMeter {
 		}
 		if m.failFirst > 0 {
 			m.failFirst--
-			http.Error(w, `{"error":"not listening yet"}`, 503)
+			http.Error(w, `{"error":"not listening yet"}`, http.StatusServiceUnavailable)
 			return
 		}
 		if r.Method == http.MethodDelete {
