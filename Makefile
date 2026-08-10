@@ -82,16 +82,36 @@ meter-testclock-image:
 	  --build-arg BUILD_TAGS=testclock \
 	  -f images/Dockerfile.meter -t $(REGISTRY)/gonk-meter:$(GONK_TAG)-testclock .
 
-# push: EVERY GITLAB RUNNER IS OFFLINE (docs/environment.md). CI has never
-# executed for this repo, so the first images are pushed BY HAND from a box
-# with LAN reach to registry.orac.local -- expected, not a workaround to be
-# embarrassed about. Not run as part of Task 5 (no reach to the cluster LAN
-# from this sandbox); Plan 05/CI formalizes it.
+# push: a HAND build, and a hand build is SINGLE-ARCH -- it is whatever
+# architecture the box running make happens to be ($(TARGETARCH)).
+#
+# This target used to push $(GONK_TAG) itself, from the era when every runner
+# was offline and images HAD to be built by hand. That era is over: CI builds
+# all five images on both architectures and publishes $(GONK_TAG) as an OCI
+# index over them (.gitlab-ci.yml + homelab/ci-templates .manifest-merge).
+#
+# On 2026-08-04 a hand `make push` overwrote four of those indexes with amd64
+# images. orac is mixed-architecture, so every gonk pod that landed on an arm64
+# node crash-looped with `exec format error` -- 1593 controller restarts, 1100
+# meter restarts, six days -- while CI stayed green, because the merge job's
+# verification could not tell a single-arch image from an index (gonk-n50,
+# homelab/ci-templates!4).
+#
+# So a hand push can no longer write a DEPLOYABLE tag at all. It writes only
+# arch-suffixed tags, which is exactly the convention CI's own legs use: these
+# stay usable as index inputs and can never themselves be deployed by accident.
+# If you need a deployable tag, push a commit and let CI build it.
+#
+# internal/buildgate asserts this property so a future edit cannot quietly
+# reintroduce the unsuffixed push.
 push: images
-	@echo "pushing $(GONK_TAG) to $(REGISTRY)"
+	@echo "pushing SINGLE-ARCH $(GONK_TAG)-$(TARGETARCH) to $(REGISTRY)"
+	@echo "NOTE: $(GONK_TAG) itself is published by CI as a multi-arch index and is NOT written here (gonk-9ub)"
 	for i in gonk-agent gonk-controller gonk-intake gonk-meter; do \
-	  $(PODMAN) push $(REGISTRY)/$$i:$(GONK_TAG); done
-	$(PODMAN) push $(REGISTRY)/gonk-meter:$(GONK_TAG)-testclock
+	  $(PODMAN) tag $(REGISTRY)/$$i:$(GONK_TAG) $(REGISTRY)/$$i:$(GONK_TAG)-$(TARGETARCH); \
+	  $(PODMAN) push $(REGISTRY)/$$i:$(GONK_TAG)-$(TARGETARCH); done
+	$(PODMAN) tag $(REGISTRY)/gonk-meter:$(GONK_TAG)-testclock $(REGISTRY)/gonk-meter:$(GONK_TAG)-testclock-$(TARGETARCH)
+	$(PODMAN) push $(REGISTRY)/gonk-meter:$(GONK_TAG)-testclock-$(TARGETARCH)
 
 # scan: Trivy every built image (spec 10.3: "image builds smoke-tested and
 # trivy-scanned"). --ignore-unfixed is deliberate: failing the build on a CVE
