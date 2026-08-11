@@ -59,11 +59,20 @@ type dispatchDeps struct {
 	Meter *meterAPI // gonk-gate's thin wrapper over pkg/meterapi (see meter.go)
 	GC    *gcapi.Client
 	Store beadstore.Store
-	// Forge reads the issue the broker is about to triage, so the controller can
-	// splice its context into the injected prompt (the agent pod has no forge
-	// creds). Optional: nil (or a fetch failure) degrades to a reference-only
-	// prompt. Only the broker path uses it. Satisfied by *glab.Client.
-	Forge issueReader
+	// Forge reads what the broker is about to work on, so the controller can
+	// splice it into the injected prompt: the ISSUE for triage, the REPOSITORY
+	// for scaffold. The agent pod has forge creds for neither, and for scaffold
+	// it has no checkout either -- nothing clones one (gonk-msz).
+	//
+	// Optional, but the two failure modes differ deliberately. A triage fetch
+	// failure degrades to a reference-only prompt, because naming a real issue
+	// is still enough to reason about. A scaffold fetch failure does NOT
+	// degrade: with no repository material the agent has nothing to be accurate
+	// about, so renderScaffoldPrompt makes it refuse rather than invent .agent/
+	// content that gonk would then commit and open an MR for.
+	//
+	// Only the broker path uses it. Satisfied by *glab.Client.
+	Forge brokerForgeReader
 	Log   *slog.Logger
 	Args  dispatchArgs
 	// SubmitAttempts / SubmitBackoff bound the wait for an async-created session
