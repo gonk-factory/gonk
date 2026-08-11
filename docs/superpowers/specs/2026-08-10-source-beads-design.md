@@ -256,12 +256,50 @@ the observed external state, then run the existing gate. The gate's outcome is
 written onto the bead as a `Disposition` rather than being the only thing that
 decides whether a record exists.
 
-`beadstore.Put` already upserts on the anchor, so a replayed webhook converges
-instead of duplicating.
+**CORRECTION (code review, 2026-08-10).** An earlier draft said "`beadstore.Put`
+already upserts on the anchor, so a replayed webhook converges instead of
+duplicating." That is an overstatement that hides the exact race this design
+creates. `Put` is **check-then-act**: `findBeadID` then `bd create`, with no
+uniqueness constraint, and `findBeadID` returns `rows[0]` without checking for
+more than one match. One writer (gonk-gate) makes that safe by luck. This design
+adds intake and the patrol, so two concurrent first-sightings produce two beads
+under one anchor and nondeterministic resolution — i.e. duplicate triage.
 
-**OD-2 RESOLVED (owner, 2026-08-10): intake creates the bead.** Create it as
-soon as we see the work; any other process may amend it afterwards, which
-`beadstore.Put`'s upsert-on-anchor already supports.
+`Put` is non-atomic a second way: `removeGonkStateLabels` then `label add`
+(bd.go:160-167). In between, the bead carries **no** `gonk::<state>` label and is
+invisible to `List`. With three writers and a patrol enumerating continuously,
+that window stops being theoretical.
+
+Whichever write path OD-2 lands on must therefore supply a **real find-or-create**
+(uniqueness constraint or conditional write), or creation must stay
+single-writer. This is the same question graphify raised on 2026-07-30 as
+`gonk-fm7.2` ("can a replayed-but-validly-signed request double-apply?") and
+which was never answered. Answer it as part of OD-2.
+
+**OD-2: intake creates the bead — DECIDED, BUT BLOCKED ON A MISSING MECHANISM.**
+
+The owner decision stands: create it as soon as we see the work, and let other
+processes amend it. What does not stand is my proposed mechanism.
+
+> **BLOCKER (code review, 2026-08-10).** `pkg/gcapi` has orders, sessions and
+> submit routes. It has **no bead route of any kind** (`grep -rn bead
+> pkg/gcapi/*.go` returns nothing). "A `Store` implementation over the city API"
+> assumes an endpoint that does not exist. Until a write path exists, OD-2 is
+> blocked rather than resolved.
+>
+> Candidate paths, none free:
+> 1. **Intake writes Dolt directly (SQL).** Beads are Dolt-backed and Dolt is
+>    already a StatefulSet with a PVC. No bd binary, no city route, no
+>    subprocess. Costs intake a DB credential and netpol egress to 3306, and
+>    couples intake to the bead schema.
+> 2. **Add a bead route to Gas City.** Correct-looking, but gascity is pinned
+>    upstream (`GASCITY_REF`) and we do not own it — that is an upstream change
+>    on someone else's schedule.
+> 3. **A small gonk-owned write service** in the controller, grant-gated like
+>    the order route. Ours to build, but it is a new component.
+>
+> Pick one before slice 2 starts. This also affects C5 below: whichever path is
+> chosen must provide a real find-or-create, because `beadstore.Put` does not.
 
 An earlier draft of this spec objected that writing from intake would widen a
 deliberately narrow credential surface. **That was wrong**, and the deployment
@@ -294,17 +332,38 @@ The rejected alternatives, and why:
 - **Folding into dispatch.** Does not survive the webhook being dropped before
   dispatch, which is the whole point.
 
-### Failure mode: make the source retry
+### Failure mode: RETRACTED — "fail the webhook so the source retries"
 
-Once the source bead is the first thing that happens, a failure to write it
-should **fail the webhook** (non-2xx) rather than today's 200-and-drop. GitLab
-retries deliveries, so the forge becomes the durable queue and we do not build
-one.
+An earlier draft proposed returning non-2xx when the bead write fails, so GitLab
+redelivers and the forge becomes our durable queue. **Code review killed it on
+three independent counts, all verified in-tree.** Recorded here because the idea
+is attractive and will otherwise be reinvented.
 
-Bound it: GitLab disables a hook after sustained failures (the hook's
-`alert_status` field, `executable` when healthy), so this must not flap. But a
-retried delivery is strictly better than a silently discarded one, which is the
-behaviour that lost issue !23.
+1. **The deduper defeats it.** `ghook.Handler` calls `Deduper.Seen(...)` *before*
+   the sink, and `Seen` **records the key and returns false** on first sight
+   (dedupe.go:31-45), with a 1h TTL. A redelivery carrying the same
+   `X-Gitlab-Event-UUID` inside that hour is answered `OutcomeDuplicate` — 200,
+   dropped. The retry path is a no-op as designed. Committing the key only on
+   success turns the deduper into a lock with a crash-leak, which is its own
+   design problem.
+2. **The handler is asynchronous.** `cmd/gonk-intake/main.go:315-323` is a
+   non-blocking `select { case events <- e: ... default: return false }` over a
+   256-slot channel; 200 is written immediately and dispatch runs on another
+   goroutine. Failing the webhook on a store error means moving a database write
+   **into the synchronous HTTP handler**, which puts the bead store inside
+   GitLab's hook timeout and turns store latency into hook auto-disable.
+3. **The premise is unverified.** Nothing in this repo establishes that GitLab
+   redelivers failed hook deliveries. If it does not, non-2xx converts "silently
+   dropped" into "silently dropped **and** the hook is disabled for the whole
+   project" — strictly worse than today for every other event on that project.
+
+**Do not build on redelivery until it is empirically confirmed against this
+GitLab version.** If it does not hold, the options are a local durable spool or
+200-and-log with a metric and an alert.
+
+Related hole this exposes, which the problem statement above missed:
+`OutcomeQueueFull` also answers **200** and drops. That is a silent-loss path
+*inside intake*, independent of any gate, and only a synchronous write closes it.
 
 ## The patrol
 
@@ -362,3 +421,80 @@ The gate for this work, stated before building:
    the backlog — and must report how many items it is about to process.
 5. Close the issue externally. The patrol must close the bead and must not
    dispatch it.
+
+---
+
+## Code review outcome, 2026-08-10: NOT READY TO IMPLEMENT
+
+A superpowers code review checked this spec's factual claims against source.
+Roughly half held; the ones that did not were load-bearing. The principle
+(level-triggered, record-at-receipt) was endorsed. Corrections are inline above;
+what remains open is listed here so no slice starts on a false premise.
+
+**Must be answered before slice 2 starts**
+
+1. **OD-2 has no mechanism** — `pkg/gcapi` has no bead route at all. Pick: Dolt
+   direct, an upstream gascity route, or a gonk-owned write service.
+2. **`deny` must stay terminal.** `beadstore.StateNeedsHuman`'s own comment:
+   *"The sweeper must NEVER pick these up again -- re-sweeping a denied bead is
+   how you spend money on work you already decided not to do."* The problem
+   statement above lists budget `deny` among the holes source beads should
+   cover, and the state table has no `needs-human` row. As written the patrol
+   would re-drive denied work every pass. State explicitly which dispositions
+   are patrol-eligible; `deny` is not one of them.
+3. **Storage shape may not survive backlog scale.** `BdCLI.List` forks one
+   `bd comments` per row, and `Put` appends a JSON comment per write that
+   `getByID` scans backwards through. The patrol enumerates the entire retained
+   backlog every pass by design. Thousands of source beads means thousands of
+   subprocess spawns per pass, against beads whose read cost grows with their
+   event count. `bd compact` addresses neither. Decide the storage shape — it
+   determines whether this design is feasible at all.
+4. **Anchor components must be charset-validated.** `ev.Project.ID` and friends
+   come from an untrusted payload. Unvalidated interpolation lets a payload
+   inject the delimiter and forge an anchor colliding with another project's
+   bead — durable cross-project state confusion. Validate and reject; do not
+   escape silently.
+5. **Anchor identity must be immutable.** The GitHub example keys on
+   `owner/repo`, which renames. Use numeric repo ids, as GitLab already does.
+   `source_id` needs a stated derivation rule, not `com`-by-convention.
+6. **Parse rule is misstated.** "Everything after `source_id` is a source-owned
+   path" swallows `object_type` and `object_id`. The real rule is three fixed
+   fields from the left, two from the right, scope is the remainder — and scope
+   must be non-empty or a 5-field anchor is ambiguous with a legacy 4-field one.
+7. **Migration ordering is a requirement, not a detail.** Add the new label,
+   verify, then remove the old, then the title. The reverse order can leave a
+   bead with neither label — invisible to both lookups, so the next event
+   duplicates it. And the rewrite must not turn a read into a hard failure:
+   log and return the found id if the write is refused.
+8. **Stampede controls are the floor, not the ceiling.** Missing: a freshness
+   bound (enabling a category must not drain a year of history), deterministic
+   oldest-first ordering so the tail cannot starve, per-project fairness, and a
+   dry-run-and-report first pass — a count emitted *while dispatching* is
+   telemetry, not control. Note also that meter spend lags, so a burst can all
+   clear the budget check before any spend is visible.
+9. **`groups:` does not generalize.** `GroupFor` matches by `/`-segment path
+   prefix (opercfg.go:398). Alerts have no path; their scoping is label
+   matching. Give non-repo sources their own construct rather than overloading
+   one key with two matching semantics. Related: `cmd/gonk-intake/main.go:305`
+   records that intake does **not** resolve operator config — meter does
+   ("Conflict A"). Say which process owns resolution, or that invariant erodes.
+10. **Resolution vs a live session needs a rule, not a wish.** A bead in
+    `running` must never be moved to `resolved` by the patrol; the patrol marks
+    it externally-resolved and the existing sweep owns the terminal transition.
+
+**Where graphify would have helped, and where it would not**
+
+`gonk-fm7.2` (2026-07-30) already flagged an AMBIGUOUS edge between the ed25519
+city mutation plane and BeadAnchor-as-idempotency-key, asking whether a
+replayed-but-validly-signed request can double-apply. That is item 1 and the
+`Put` race, raised eleven days early and never answered. The graph is good at
+this class of question — cross-file structure and unresolved invariants — and it
+should be consulted before the remaining structural questions (9, and who owns
+config resolution) are decided.
+
+It would not have caught the falsifiable specifics: the deduper's
+record-before-sink semantics, the async handler, the absent gcapi bead route.
+Those needed reading the code. Use the graph to find *where to look* and what is
+unresolved; keep verifying claims against source. The graph is also now stale
+relative to this session's changes, and `gonk-fm7.8` reports 1427 dangling
+endpoint edges, so treat its edges as leads rather than facts.
