@@ -105,12 +105,56 @@ configured in the operator config, or an alert is mapped to an owning project
 whose `.gonk.yml` then governs it. This does not block the GitLab work, but the
 anchor format and the adapter seam have to be chosen now so it stays additive.
 
-**Migration hazard (OD-1).** The anchor is the dedupe key AND the bead title AND
-a label. Changing its shape orphans every existing bead: in-flight work would be
-re-created under a new anchor and could be triaged twice. Either read-compat
-both forms during a window, or run a one-time rewrite of titles and labels.
-Also confirm bd's label charset/length tolerates the longer form — the current
-anchor already contains colons, so colons are fine, but length is unverified.
+### Migration: rewrite-on-read, not a batch job
+
+**OD-1 RESOLVED (owner, 2026-08-10):** ship a version that reads the old format
+and rewrites it to the new one whenever it sees it. We are the only gonk
+instance, so a one-time rewrite would be acceptable, but lazy migration needs no
+maintenance window and no separate job.
+
+**Where the fallback goes is load-bearing, and the obvious placement is wrong.**
+
+The intuition is "one startup pass migrates the instance during upgrade". That
+is *nearly* true and its gap is the dangerous part:
+
+- `BdCLI.List(state)` (bd.go:219) enumerates by the **state label**
+  `gonk::<state>`, and `runSweep` only ever calls it with `StateRunning` and
+  `StateParked`. A startup pass therefore migrates **in-flight work only**.
+- `done` beads are never enumerated by anything.
+
+And `done` beads are exactly the ones that matter here. `findBeadID` (bd.go:89)
+resolves an anchor by the **label** `gonk-anchor:<anchor>`, so a new-format
+lookup cannot match an old-format label. A new event on an issue whose old bead
+is `done` would miss, create a fresh bead, and **re-run triage** — the exact
+failure this epic exists to prevent.
+
+So the fallback belongs at the **lookup seam**, not (only) in enumeration:
+
+```
+findBeadID(anchor):
+    try new-format label
+    on miss: try old-format label
+    on hit:  rewrite title + anchor label to the new form, then return
+```
+
+With that, every path that touches a bead migrates it:
+
+- startup/patrol enumeration migrates in-flight beads eagerly;
+- a terminal bead migrates the instant it becomes relevant again, which is
+  precisely when correctness depends on it;
+- nothing needs a migration job, and a half-migrated store is always correct.
+
+Properties to preserve: the rewrite is idempotent (label add/remove on one bead
+id, so two processes racing converge); the fallback costs one extra `bd list`
+**only on a miss**, so steady state pays it on genuinely new objects only; and
+it is removable in a later release behind its own bead.
+
+State labels are unaffected — the new states (`observed`, `ineligible`,
+`deferred`, `resolved`) are additive `gonk::<state>` labels, so no state
+migration is needed.
+
+Still to confirm: bd's label length tolerance for the longer anchor. Colons are
+already proven fine (the current anchor contains them); length is not.
 
 ## The source bead
 
@@ -140,6 +184,32 @@ States (extending `beadstore.State`):
 | `parked` | today's meaning, unchanged |
 | `done` | gonk produced its artifact |
 | `resolved` | the external object went away or was fixed elsewhere |
+
+## The link chain
+
+The point is to get from an event to the in-flight work without guessing:
+
+```
+external event  ->  source bead  ->  running workflow
+(issue #24 updated) (gonk:gitlab:orac:75:issue:24) (session gonk.triage.p75.i24.a1)
+```
+
+Half of this exists already. `Record.SessionID` holds the session alias, and the
+alias encodes agent, project, issue and attempt — so **source bead -> workflow
+is done**, and it is what `runSweep` already follows to judge and close a
+session.
+
+What is missing is the **left-hand link**. `pkg/ghook/dedupe.go:84` computes an
+event identity (`issue:{iid}:{action}`) but it is in-memory, per-process, and
+never persisted, so after a restart there is no way to ask "which bead did that
+delivery produce?". The source bead should carry the originating event's
+identity (delivery id where the source provides one, else the computed identity)
+plus `FirstSeenAt`/`LastEventAt`, so the chain is traversable in both directions
+and survives a restart.
+
+Note the asymmetry, deliberately: **many events, one source bead, many workflow
+runs.** A bead accumulates events on its left and attempts on its right; it
+never multiplies.
 
 ## Receipt path
 
