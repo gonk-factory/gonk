@@ -221,18 +221,52 @@ decides whether a record exists.
 `beadstore.Put` already upserts on the anchor, so a replayed webhook converges
 instead of duplicating.
 
-**OD-2: who writes it.** Intake holds no bead store today, and the city is
-grant-gated for mutations. Three options:
+**OD-2 RESOLVED (owner, 2026-08-10): intake creates the bead.** Create it as
+soon as we see the work; any other process may amend it afterwards, which
+`beadstore.Put`'s upsert-on-anchor already supports.
 
-1. **Intake writes directly** (preferred). Anything order-mediated is lost in
-   exactly the outage windows this exists to survive. Cost: intake needs store
-   access, widening its credential surface — deliberately narrow today.
-2. Intake fires a `gonk-observe` exec order; the controller records it. Cheap
-   credential-wise, but depends on the supervisor ticking — and the supervisor
-   demonstrably skips ticks under FS pressure (`supervisor.fs_pressure.skipped_tick`
-   observed 2026-08-10).
-3. Fold into dispatch as a pre-gate step. Simplest, but does not survive the
-   webhook being dropped before dispatch — which is the whole point.
+An earlier draft of this spec objected that writing from intake would widen a
+deliberately narrow credential surface. **That was wrong**, and the deployment
+says so plainly:
+
+```
+GONK_GC_WRITE_KEY_FILE, GONK_GC_WRITE_KEY_ID=gonk
+GONK_SUPERVISOR_URL=http://gonk-controller.gonk.svc:9443
+```
+
+Intake already holds an ed25519 grant-signing key and already signs mutations
+against the city — that is how it fires grant-gated orders today
+(cmd/gonk-intake/main.go:270-275). There is no new credential to grant.
+
+The real constraint is mechanical and much narrower: intake is a **distroless
+image carrying one binary**, so it cannot use `beadstore.BdCLI`, which shells out
+to `bd`. It needs a `beadstore.Store` implementation that writes over the city
+API with the grant it already holds.
+
+That is the better design anyway: intake stays distroless with no subprocess, the
+write travels the same signed path as everything else, and no new secret is
+mounted anywhere.
+
+The rejected alternatives, and why:
+
+- **A `gonk-observe` exec order.** Depends on the supervisor ticking, and it
+  demonstrably skips ticks under FS pressure
+  (`supervisor.fs_pressure.skipped_tick`, observed live 2026-08-10). It would be
+  lost in exactly the windows this exists to survive.
+- **Folding into dispatch.** Does not survive the webhook being dropped before
+  dispatch, which is the whole point.
+
+### Failure mode: make the source retry
+
+Once the source bead is the first thing that happens, a failure to write it
+should **fail the webhook** (non-2xx) rather than today's 200-and-drop. GitLab
+retries deliveries, so the forge becomes the durable queue and we do not build
+one.
+
+Bound it: GitLab disables a hook after sustained failures (the hook's
+`alert_status` field, `executable` when healthy), so this must not flap. But a
+retried delivery is strictly better than a silently discarded one, which is the
+behaviour that lost issue !23.
 
 ## The patrol
 
