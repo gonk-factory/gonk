@@ -37,9 +37,9 @@ const maxIssueBodyBytes = 8 << 10 // 8 KiB
 // batch and posts nothing; gonk-sweep validates the batch's shape and applies
 // it under the controller's own bot PAT. The pod holds no forge creds.
 //
-// Triage is the first (and, for this slice, only) ported trigger. scaffold and
-// mention still pour their formulas in runDispatch until they are ported
-// (Phase 6). An entry here takes precedence over orderForTrigger.
+// Triage was the first ported trigger; scaffold followed (see below). Only
+// mention still pours its formula in runDispatch until it is ported (Phase 6).
+// An entry here takes precedence over orderForTrigger.
 var agentForTrigger = map[string]string{
 	"issue-triage": "triage",
 	// scaffold is ported for the same reason triage was, and it is what unblocks
@@ -136,27 +136,66 @@ GONK_BATCH_END.`, issueIID, project, context)
 // every instruction about those was a way for the run to fail at something the
 // controller now does deterministically.
 //
-// The agent has no forge creds but it DOES have the repository checked out in
-// its rig, so unlike triage it is told to read: the whole value of .agent/ is
-// that it was derived from the actual code rather than guessed.
-func renderScaffoldPrompt(project string) string {
-	return fmt.Sprintf(`Write durable project context for the repository `+"`%s`"+`, which is
-checked out in your working directory.
+// THE REPOSITORY IS NOT IN THE POD, and this prompt used to say it was.
+//
+// It previously opened "which is checked out in your working directory" and
+// closed with "Reading the working directory is expected and encouraged". None
+// of that is true: images/Dockerfile.agent creates /workspace EMPTY, the
+// entrypoint only ASSUMES a clone (RIG_DIR=${GONK_RIG_DIR:-$PWD}) and treats a
+// missing .git as non-fatal, and the controller's Gas City root has no rigs
+// directory at all. Gas City's CreateSessionRequest has no rig field either, and
+// pods are pooled and generic -- at pod start there is no project yet, so an
+// entrypoint clone has nothing to clone (gonk-msz).
+//
+// Telling a model to read a directory that is empty is the worst possible
+// framing, because this prompt also says an honest gap is a SUCCESS: the model
+// finds nothing, invents plausible context, and gonk-sweep commits it and opens
+// an MR. That produces CONFIDENT WRONG .agent/ files -- and .agent/ is durable
+// context every later triage and mention session reads as ground truth.
+//
+// So the controller supplies the material instead, exactly as it already does
+// for triage: runBrokerDispatch fetches with its own PAT and splices the result
+// in (see buildIssueContext / buildRepoContext). Same reason as triage -- the
+// pod holds no forge creds -- and it needs no clone channel at all.
+//
+// repoContext is empty only when every fetch failed. That is NOT survivable
+// here the way a reference-only triage prompt is: with no material there is
+// nothing to be accurate ABOUT, so the prompt instructs an explicit refusal
+// rather than letting the model fill the vacuum.
+func renderScaffoldPrompt(project, repoContext string) string {
+	material := strings.TrimSpace(repoContext)
+	if material == "" {
+		return fmt.Sprintf(`Write durable project context for the repository `+"`%s`"+`.
 
-Read enough of it to be accurate: what this project IS, how it is built, how it
-is tested, and any conventions a future automated triage or code session would
+The repository content could NOT be retrieved for this session, so there is
+nothing to base a description on.
+
+Do NOT guess, and do NOT describe this project from its name or from anything
+you already believe about it. Emit NO batch at all: reply with a single line
+saying the repository content was unavailable, and nothing else.`, project)
+	}
+	return fmt.Sprintf(`Write durable project context for the repository `+"`%s`"+`.
+
+You do NOT have the repository checked out. Everything you know about it is the
+material below, retrieved for you -- do NOT try to read a working directory, and
+do NOT fetch anything yourself:
+
+%s
+
+From that material, write what this project IS, how it is built, how it is
+tested, and any conventions a future automated triage or code session would
 otherwise have to guess at. Prefer a few honest, specific files over one long
 vague one.
 
-An honest gap is a SUCCESS, not a failure. If something cannot be determined
-from the repository, write that down as an open question instead of inventing
-an answer -- a confident wrong claim in this directory will mislead every
-session that reads it afterwards.
+Base EVERY claim on the material above. An honest gap is a SUCCESS, not a
+failure: if something is not determinable from what you were given, write it
+down as an open question instead of inventing an answer. A confident wrong claim
+here will mislead every session that reads this directory afterwards, so
+"unknown" is always the better answer than a plausible guess.
 
-Do NOT run git, glab, bd, or any external API, and do NOT try to commit
-anything or open a merge request: you hold no credentials, and gonk commits
-your proposal and opens the merge request for you. Reading the working
-directory is expected and encouraged.
+Do NOT run git, glab, bd, or any external API, and do NOT try to commit anything
+or open a merge request: you hold no credentials, and gonk commits your proposal
+and opens the merge request for you.
 
 Emit your proposal as a single proposed-effects batch as the LAST thing in your
 output, fenced EXACTLY like this:
@@ -167,7 +206,7 @@ GONK_BATCH_END
 
 Every path MUST begin with `+"`.agent/`"+` -- a batch touching anything else is
 rejected in full. Emit one file effect per file, each carrying that file's
-COMPLETE content (there are no partial edits). Nothing after GONK_BATCH_END.`, project)
+COMPLETE content (there are no partial edits). Nothing after GONK_BATCH_END.`, project, material)
 }
 
 // sanitizeForKeystrokeDelivery makes a prompt safe to TYPE into opencode's TUI.
@@ -218,6 +257,103 @@ func buildIssueContext(ctx context.Context, r issueReader, projectID, issueIID i
 		iss.Title, iss.State, labels, body), nil
 }
 
+// scaffoldProbeFiles are the paths buildRepoContext asks the forge for, in
+// order. They are the files that actually identify a project's language, build
+// and test story -- which is precisely what .agent/ has to get right.
+//
+// A FIXED LIST, not a tree walk, because pkg/glab has no tree-listing call and
+// this needs none: an absent file is itself a fact (no go.mod means it is not a
+// Go project), so the hit/miss pattern carries most of the signal. Adding a path
+// here is cheap; each miss is one 404 the controller absorbs.
+var scaffoldProbeFiles = []string{
+	"README.md", "README.rst", "README",
+	"CONTRIBUTING.md", "CLAUDE.md", "AGENTS.md",
+	"go.mod", "package.json", "pyproject.toml", "requirements.txt",
+	"Cargo.toml", "pom.xml", "build.gradle", "Gemfile", "composer.json",
+	"Makefile", "Justfile", "Taskfile.yml",
+	"Dockerfile", "docker-compose.yml", "compose.yaml",
+	".gitlab-ci.yml", ".github/workflows/ci.yml",
+}
+
+// maxRepoFileBytes caps EACH probed file. Repository content is caller-
+// controlled and unbounded; a vendored lockfile or a generated README must not
+// be able to blow the model's context. Deliberately smaller than
+// maxIssueBodyBytes because scaffold splices MANY files where triage splices
+// one body.
+const maxRepoFileBytes = 4 << 10 // 4 KiB per file
+
+// maxRepoContextBytes caps the WHOLE spliced block. Rung 1 (qwen3-14b) serves a
+// 16384-token total window and opencode's own agent preamble already measures
+// ~6.4K of it, so the material has to leave room for both the rest of the prompt
+// and the model's output. This bound is the reason scaffold cannot simply be
+// handed a repository.
+const maxRepoContextBytes = 24 << 10 // 24 KiB total
+
+// repoReader is the sliver of pkg/glab buildRepoContext needs. The agent pod
+// holds NO forge credentials, so the CONTROLLER reads the repository with its
+// own PAT and splices the result into the prompt -- the same division of labour
+// as issueReader, and for the same reason. Satisfied by *glab.Client.
+type repoReader interface {
+	GetProject(ctx context.Context, projectID int64) (*glab.Project, error)
+	GetRawFile(ctx context.Context, projectID int64, path, ref string, maxBytes int64) ([]byte, error)
+}
+
+// brokerForgeReader is what dispatchDeps.Forge must satisfy: both halves of the
+// controller-side read. Kept as one field because a single *glab.Client backs
+// both, and splitting it would let a caller wire triage's reader without
+// scaffold's and only discover it at dispatch time.
+type brokerForgeReader interface {
+	issueReader
+	repoReader
+}
+
+// buildRepoContext assembles the repository material for a scaffold prompt.
+//
+// Best-effort per file: a probe that 404s is simply absent from the result, and
+// absence is information (see scaffoldProbeFiles). An error is returned ONLY
+// when nothing at all could be read, because that is the case the caller must
+// not paper over -- renderScaffoldPrompt turns it into an explicit refusal
+// rather than letting the model invent a project description (gonk-msz).
+func buildRepoContext(ctx context.Context, r repoReader, projectID int64) (string, error) {
+	if r == nil {
+		return "", fmt.Errorf("no repo reader configured")
+	}
+	proj, err := r.GetProject(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("get project: %w", err)
+	}
+	ref := proj.DefaultBranch
+	if ref == "" {
+		ref = "main"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Repository: %s\nDefault branch: %s\n", proj.PathWithNamespace, ref)
+
+	found := 0
+	for _, path := range scaffoldProbeFiles {
+		if b.Len() >= maxRepoContextBytes {
+			fmt.Fprintf(&b, "\n[further files omitted: context budget reached]\n")
+			break
+		}
+		raw, ferr := r.GetRawFile(ctx, projectID, path, ref, maxRepoFileBytes)
+		if ferr != nil || len(raw) == 0 {
+			continue
+		}
+		found++
+		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", path, capBody(string(raw), maxRepoFileBytes))
+	}
+
+	// Project metadata alone is NOT material. Without at least one real file
+	// there is nothing to describe, and returning the two header lines would
+	// look like success and license a fabricated .agent/.
+	if found == 0 {
+		return "", fmt.Errorf("no readable files among %d probed paths in %s",
+			len(scaffoldProbeFiles), proj.PathWithNamespace)
+	}
+	return b.String(), nil
+}
+
 // capBody truncates an untrusted issue body to at most max bytes, appending a
 // visible marker so the agent (and a human reading the transcript) knows the
 // body was cut. Truncation backs up to a rune boundary so the block stays valid
@@ -266,7 +402,24 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 	var prompt string
 	switch agent {
 	case "scaffold":
-		prompt = renderScaffoldPrompt(a.Project)
+		// Read the repository CONTROLLER-SIDE, for the same reason triage's
+		// issue is read here: the pod holds no forge creds, and (unlike what the
+		// old prompt claimed) it holds no checkout either -- nothing clones one
+		// and Gas City has no rig channel to supply one (gonk-msz).
+		//
+		// Unlike the triage fetch this failure is NOT degraded-but-continue. A
+		// reference-only triage prompt still names a real issue the agent can
+		// reason about; a scaffold prompt with no repository material has
+		// nothing to be accurate about, and the agent's own instructions would
+		// then reward it for writing something plausible. renderScaffoldPrompt
+		// turns the empty case into an explicit refusal, and the WARN below is
+		// what makes that visible rather than silent.
+		repoContext, rerr := buildRepoContext(ctx, d.Forge, a.ProjectID)
+		if rerr != nil {
+			d.Log.Warn("scaffold repository fetch failed; injecting refusal prompt so the agent cannot invent .agent/ content",
+				"err", rerr, "bead", a.BeadAnchor, "project", a.Project)
+		}
+		prompt = renderScaffoldPrompt(a.Project, repoContext)
 	default:
 		// Fetch the issue context controller-side (the pod has no forge creds).
 		// Best-effort: a fetch failure degrades to a reference-only prompt rather
