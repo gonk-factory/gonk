@@ -498,3 +498,51 @@ Those needed reading the code. Use the graph to find *where to look* and what is
 unresolved; keep verifying claims against source. The graph is also now stale
 relative to this session's changes, and `gonk-fm7.8` reports 1427 dangling
 endpoint edges, so treat its edges as leads rather than facts.
+
+---
+
+## OD-2 RESOLVED, and blocker 3 with it (2026-08-10)
+
+**I was wrong twice, in the same way both times: I checked gonk's CLIENT and
+concluded the PLATFORM lacked a capability.**
+
+Gas City exposes a full bead HTTP API (verified in the gascity source at the
+pinned `GASCITY_REF`):
+
+```
+POST /v0/city/{city}/beads              GET  /v0/city/{city}/bead/{id}
+     .../bead/{id}/update  /close  /reopen  /assign  /deps
+     .../beads/ready        .../beads/graph/{id}       ?limit= supported
+```
+
+`pkg/gcapi` having no bead route meant only that **we never wrote that client**.
+The earlier "OD-2 is blocked, there is no bead route" finding is withdrawn.
+
+**Mechanism:** intake writes source beads over the existing signed city API,
+with a new client in `pkg/gcapi`. No Dolt credential, no netpol egress to 3306,
+no upstream gascity change, no new service. Intake already holds the grant and
+already reaches `gonk-controller:9443` — this is one more signed route on a path
+it already uses.
+
+**Blocker 3 (storage shape) largely dissolves with it.** The patrol's
+enumeration problem was `BdCLI`: one `bd comments` fork per row, plus an
+append-only comment log read backwards. An HTTP list with `?limit=` returns the
+set in one call with no subprocess at all. `BdCLI` stays for the controller's
+existing in-flight path; source beads do not inherit its shape.
+
+`gonk-kx3` (List truncating at bd's default 50) still stands on its own — it is
+a live bug in the current sweep, independent of this design.
+
+**ADR-003 decision 4 ("No persistent state") is SUPERSEDED NARROWLY** (owner,
+2026-08-10): for the source bead only. Intake gains exactly one piece of durable
+state — the record that an external event was seen — because a stateless intake
+cannot satisfy requirement 1, and requirement 1 is the whole point. Everything
+else in decision 4 holds: `intake.Cache` stays derived and in-memory, rebuilt
+from GitLab and meter on the first reconcile pass.
+
+Decision 6 is **not** superseded: intake still does not resolve config. Meter
+owns `Config(anchor)`.
+
+Decision 3 is **not** superseded: intake's non-200s stay 401/405/415/413, which
+independently confirms the retracted "fail the webhook so GitLab retries" idea
+was wrong on a third count.
