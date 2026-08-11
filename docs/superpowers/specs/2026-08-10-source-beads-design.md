@@ -99,11 +99,49 @@ Resolve(anchor) -> external state (open | resolved | gone)
   onto Alertmanager's own `resolved` status — arguably the cleanest fit of the
   three, because the source already tells you when the condition ended.
 
-**OD-3: eligibility config for non-repo sources.** `.gonk.yml` lives in a
-repository, which a Prometheus alert does not have. Either non-repo sources are
-configured in the operator config, or an alert is mapped to an owning project
-whose `.gonk.yml` then governs it. This does not block the GitLab work, but the
-anchor format and the adapter seam have to be chosen now so it stays additive.
+**OD-3 RESOLVED (owner, 2026-08-10): config resolution is per source type.**
+There is no universal answer and the design should stop looking for one.
+
+- **Repo-backed sources** (GitLab today, GitHub — which has an equivalent
+  per-project config file) keep `.gonk.yml`, layered under the instance
+  backstop exactly as now.
+- **Sources with no repo** (Alertmanager, Jira) are configured by an
+  **instance-scoped ConfigMap**, the pattern already used for GitLab backstops.
+
+So config resolution joins the adapter seam:
+
+```
+Ingest(event)   -> anchor, external state, observed-at
+Resolve(anchor) -> open | resolved | gone
+Config(anchor)  -> effective eligibility config
+```
+
+The precedent is already in-tree and does not need inventing.
+`gonk-operator-config` is:
+
+```yaml
+groups: {}          # a scoping layer, present and currently unused
+instance:
+  budget: {monthly_cost_usd: 25, monthly_tokens: 500M, per_task_tokens: 2M}
+  enabled: true
+  ladder: [qwen3-14b, qwen3-6-35b, claude-sonnet]
+```
+
+i.e. an **instance -> groups -> project** tightening chain. Non-repo sources
+extend the same idea with a per-source-type section.
+
+**That section must be scoped, not one global block.** Otherwise Alertmanager is
+all-or-nothing across every service, and there is no way to enable it for one and
+not another. `groups: {}` is the existing shape for that scoping.
+
+**Consequence worth naming: the consent model differs.** On GitLab a maintainer
+opts in by committing `.gonk.yml` — consent is expressed in the repo, by someone
+with write access to it, and the instance can only ever set a ceiling the project
+tightens. A non-repo source has no such artifact: the operator turns it on
+centrally and is the *only* authority, with no tightening layer beneath. That is
+a legitimate model for infrastructure alerts, but it means "enabled" in the
+instance ConfigMap is the whole decision to spend, so it should read as a
+deliberate operator action and not a default.
 
 ### Migration: rewrite-on-read, not a batch job
 
