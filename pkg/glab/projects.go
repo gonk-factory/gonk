@@ -47,6 +47,27 @@ func (c *Client) GetRawFile(ctx context.Context, projectID int64, path, ref stri
 	return body, err
 }
 
+// RepoArchive fetches the repository tree at ref as a GZIPPED TAR.
+//
+// This is how an agent pod gets a checkout without holding a forge credential:
+// the CONTROLLER side calls this with its own PAT and serves the bytes on an
+// in-cluster endpoint, and the pod fetches from gonk rather than from the forge
+// (pkg/rig, gonk-msz).
+//
+// maxBytes is enforced by the client and matters more here than anywhere else in
+// this package: a repository is unbounded, caller-controlled, and the response is
+// read into memory. Pass a real cap, never 0.
+func (c *Client) RepoArchive(ctx context.Context, projectID int64, ref string, maxBytes int64) ([]byte, error) {
+	p := fmt.Sprintf("/api/v4/projects/%d/repository/archive.tar.gz", projectID)
+	body, _, err := c.do(ctx, request{
+		method:   "GET",
+		path:     p,
+		query:    map[string]string{"sha": ref},
+		maxBytes: maxBytes,
+	})
+	return body, err
+}
+
 // DirExists reports whether a directory exists at ref (used for .agent/).
 func (c *Client) DirExists(ctx context.Context, projectID int64, path, ref string) (bool, error) {
 	var entries []struct {

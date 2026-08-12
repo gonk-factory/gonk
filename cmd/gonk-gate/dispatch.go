@@ -11,6 +11,7 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
 	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi"
 	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
+	"gitlab.orac.local/agentic/gonk-project/pkg/rig"
 )
 
 // orderForTrigger maps a trigger to the formula-order that runs it. This is the
@@ -73,8 +74,19 @@ type dispatchDeps struct {
 	//
 	// Only the broker path uses it. Satisfied by *glab.Client.
 	Forge brokerForgeReader
-	Log   *slog.Logger
-	Args  dispatchArgs
+
+	// Rig / RigBaseURL register and advertise the per-session CHECKOUT (pkg/rig).
+	// Rig registers the grant controller-side at the decision point; RigBaseURL
+	// is gonk-intake's PRIVATE listener as the agent pod addresses it, which is
+	// what the pod fetches from.
+	//
+	// Both optional: unset simply means no checkout is granted, and the agent
+	// falls back to controller-side repository context and then to an explicit
+	// refusal. Never fatal -- a session without a checkout still runs.
+	Rig        *rig.Client
+	RigBaseURL string
+	Log        *slog.Logger
+	Args       dispatchArgs
 	// SubmitAttempts / SubmitBackoff bound the wait for an async-created session
 	// to exist before its prompt can be submitted (see deliverPrompt). Zero
 	// values mean the production defaults; tests set them to keep the retry

@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"gitlab.orac.local/agentic/gonk-project/pkg/rig"
 )
 
 // DefaultAdminWaitTimeout bounds POST /admin/reconcile?wait=true when
@@ -69,6 +71,15 @@ type ServerConfig struct {
 
 	// AdminWaitTimeout bounds `?wait=true`. Zero -> DefaultAdminWaitTimeout.
 	AdminWaitTimeout time.Duration
+
+	// Rig serves the per-session CHECKOUT on the private listener: gonk-gate
+	// registers a grant at the decision point and the agent pod fetches its tree
+	// (pkg/rig, gonk-msz). It is how a pod gets a repository while holding no
+	// forge credential -- the bytes come from here, not from the forge.
+	//
+	// Nil leaves the routes unmounted (404), which is the correct degraded state:
+	// sessions then run on the no-checkout prompt, which says so.
+	Rig *rig.Handler
 }
 
 // Server builds the two http.Handlers Task 10 specifies. It holds no
@@ -106,6 +117,12 @@ func NewServer(cfg ServerConfig) *Server {
 		s.priv.Handle("/metrics", promhttp.HandlerFor(cfg.Reg, promhttp.HandlerOpts{}))
 	}
 	s.priv.HandleFunc("/admin/reconcile", s.adminReconcile)
+	// PRIVATE LISTENER ONLY, like /admin/reconcile: the NetworkPolicy is what
+	// keeps registration to the controller and delivery to agent pods. Putting
+	// this on the public listener would expose repository bytes to the ingress.
+	if cfg.Rig != nil {
+		cfg.Rig.Register(s.priv)
+	}
 
 	return s
 }

@@ -115,8 +115,12 @@ FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7
 # `tmux new-session -d -s <s> "$CMD"` (internal/runtime/k8s/pod.go @ GASCITY_REF)
 # -- it OVERRIDES this image's ENTRYPOINT and wraps the agent command in tmux, so
 # the binary must be present or the session pod dies before opencode ever starts.
+# curl + tar: entrypoint.sh fetches this session's CHECKOUT from gonk-intake's
+# private listener before opencode starts (pkg/rig, gonk-msz). The bytes come
+# from GONK, not from the forge -- that is what lets a pod have a working copy
+# while holding no forge credential. tar is in the base image; curl is not.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates jq tmux \
+      git ca-certificates jq tmux curl tar \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fetch /fetch/opencode      /usr/local/bin/opencode

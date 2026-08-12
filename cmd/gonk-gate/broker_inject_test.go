@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -212,5 +213,55 @@ func TestBuildRepoContextSplicesFoundFilesOnly(t *testing.T) {
 	}
 	if strings.Contains(got, "package.json") {
 		t.Errorf("repo context names a file that does not exist; absence must stay absent:\n%s", got)
+	}
+}
+
+// THE OWNER'S POINT: the checkout decision belongs at the decision point, and it
+// is per EVENT SHAPE. Most shapes need a working copy; some (an MR approval,
+// which acts on forge state and reads no files) do not, and granting one there
+// would be pure cost.
+func TestCheckoutIsDecidedPerEventShape(t *testing.T) {
+	if !needsCheckout["scaffold"] {
+		t.Error("scaffold MUST get a checkout: describing a repository it cannot read is exactly the failure this exists to stop")
+	}
+	if needsCheckout["triage"] {
+		t.Error("triage is injected its issue and does not yet need a checkout; flipping it changes every triage prompt and is a deliberate follow-up")
+	}
+	if needsCheckout["mr-approval"] {
+		t.Error("an unknown/no-read shape must default to NO checkout")
+	}
+}
+
+// grantCheckout must be silent and harmless for a shape that needs no checkout,
+// and must never fail a dispatch when the rig is simply not configured.
+func TestGrantCheckoutIsANoOpWhenNotNeededOrNotConfigured(t *testing.T) {
+	d := dispatchDeps{Log: testLogger(io.Discard), Args: baseDispatchArgs(), Forge: stubForge{}}
+
+	if url, err := grantCheckout(context.Background(), d, "triage", "alias-a"); url != "" || err != nil {
+		t.Errorf("triage: got (%q, %v), want no checkout and no error", url, err)
+	}
+	// scaffold NEEDS one, but with no rig configured this must still be a clean
+	// no-op that lets the caller fall back rather than failing the run.
+	if url, err := grantCheckout(context.Background(), d, "scaffold", "alias-a"); url != "" || err != nil {
+		t.Errorf("scaffold with no rig configured: got (%q, %v), want a clean no-op", url, err)
+	}
+}
+
+// The checkout prompt must tell the agent the repository IS present -- the exact
+// claim the no-checkout prompt is forbidden from making.
+func TestScaffoldCheckoutPromptSaysTheRepoIsPresent(t *testing.T) {
+	got := renderScaffoldCheckoutPrompt("acme/widget", "http://gonk-intake-internal.gonk.svc:9090/rig/a.tar.gz")
+	for _, want := range []string{
+		"checked out in your working directory",
+		"you hold no credentials",
+		batchStartSentinel,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("checkout prompt missing %q:\n%s", want, got)
+		}
+	}
+	// It must NOT tell the agent to go fetch anything itself.
+	if strings.Contains(got, "git clone") {
+		t.Errorf("the prompt tells the agent to clone; the entrypoint does that before opencode starts:\n%s", got)
 	}
 }

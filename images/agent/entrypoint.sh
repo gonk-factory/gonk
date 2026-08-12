@@ -39,6 +39,50 @@ log() { printf 'gonk-agent-entrypoint: %s\n' "$1" >&2; }
 # clone). A missing .git (no clone yet, or a non-git rig) is not fatal here --
 # scaffold-only sessions and dry runs still need to start.
 RIG_DIR="${GONK_RIG_DIR:-$PWD}"
+
+# ---- Step 0: fetch this session's CHECKOUT, if one was granted --------------
+# THE REPOSITORY IS NOT IN THIS IMAGE. /workspace is created empty and nothing
+# used to put anything in it, while the scaffold prompt claimed a checkout
+# existed -- so the agent read an empty directory and invented project context
+# that gonk then committed (gonk-msz).
+#
+# gonk-gate grants a per-session checkout at the DECISION POINT (where the
+# project, ref and event shape are all known) and gonk-intake serves the tree on
+# its private listener. We fetch it HERE, before opencode starts, so a checkout
+# is a PRECONDITION rather than a task the model can fail at. The pod holds no
+# forge credentials: these bytes come from gonk, not from GitLab.
+#
+# GONK_RIG_URL is per-session and therefore arrives with the assignment, not in
+# static pod env -- so on a pooled session this is empty at startup and the
+# fetch happens when the assignment does. NON-FATAL by design: a session with no
+# checkout still runs, on a prompt that says so.
+gonk_fetch_checkout() {
+	_url="${GONK_RIG_URL:-}"
+	[ -n "${_url}" ] || return 0
+
+	_tmp="${GONK_RUNTIME_DIR:-/tmp/gonk}/rig.tar.gz"
+	mkdir -p "$(dirname "${_tmp}")" "${RIG_DIR}"
+	if ! curl -fsS --max-time 120 -o "${_tmp}" "${_url}"; then
+		log "WARNING: could not fetch the session checkout from ${_url}"
+		log "WARNING: this session runs WITHOUT a working copy"
+		return 0
+	fi
+
+	# GitLab's archive wraps everything in one <project>-<sha>/ directory;
+	# --strip-components=1 lands the tree at RIG_DIR itself. Extraction is the
+	# one place untrusted archive paths could escape, so refuse absolute paths
+	# and ".." rather than trusting the forge's tar.
+	if ! tar -xzf "${_tmp}" -C "${RIG_DIR}" --strip-components=1 \
+		--no-absolute-names --exclude='*/..*/*' 2>/dev/null; then
+		log "WARNING: could not extract the session checkout; running without a working copy"
+		rm -f "${_tmp}"
+		return 0
+	fi
+	rm -f "${_tmp}"
+	log "fetched session checkout into ${RIG_DIR}"
+}
+gonk_fetch_checkout
+
 if [ -d "${RIG_DIR}/.git" ]; then
 	mkdir -p "${RIG_DIR}/.git/hooks"
 	cp /usr/local/share/gonk/prepare-commit-msg "${RIG_DIR}/.git/hooks/prepare-commit-msg"
