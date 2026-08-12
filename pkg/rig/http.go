@@ -82,6 +82,16 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		h.register(w, r, rest)
 	case http.MethodGet:
 		h.deliver(w, r, strings.TrimSuffix(rest, ".tar.gz"))
+	case http.MethodDelete:
+		// Idempotent: revoking an unknown or already-revoked alias is 204, not
+		// 404. Teardown is best-effort and runs after the bead has moved on, so
+		// an error here would be noise about a state that is already correct.
+		if !ValidAlias(rest) {
+			http.Error(w, "invalid alias", http.StatusBadRequest)
+			return
+		}
+		h.Store.Revoke(rest)
+		w.WriteHeader(http.StatusNoContent)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -187,6 +197,32 @@ func (c *Client) Grant(ctx context.Context, alias, project string, projectID int
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("rig: grant %s: unexpected status %s", alias, resp.Status)
+	}
+	return nil
+}
+
+// Revoke ends a session's ability to fetch its tree. Called at teardown, next to
+// the session close, so a pod that outlives its work stops being able to pull.
+//
+// BEST-EFFORT, like the close it sits beside: grants expire on their own TTL, so
+// a failure here costs at most that window and must never fail a sweep.
+func (c *Client) Revoke(ctx context.Context, alias string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		fmt.Sprintf("%s/rig/%s", strings.TrimSuffix(c.BaseURL, "/"), alias), nil)
+	if err != nil {
+		return err
+	}
+	hc := c.HTTP
+	if hc == nil {
+		hc = &http.Client{Timeout: 10 * time.Second}
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("rig: revoke %s: unexpected status %s", alias, resp.Status)
 	}
 	return nil
 }

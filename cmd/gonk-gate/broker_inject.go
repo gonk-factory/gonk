@@ -97,16 +97,26 @@ func brokerSessionAlias(agent string, projectID, issueIID int64, attempt int) st
 // failed -- a degraded, reference-only prompt. The exact emit wording may be
 // tightened after C2's first live run confirms the fenced batch survives the
 // GetSession(peek) read (C5).
-func renderTriagePrompt(project string, issueIID int64, issueContext string) string {
+func renderTriagePrompt(project string, issueIID int64, issueContext, checkout string) string {
 	context := issueContext
 	if strings.TrimSpace(context) == "" {
 		context = "(issue context unavailable -- triage from the issue reference alone)"
+	}
+	// Mentioned ONLY when a checkout was actually granted and fetched. Claiming a
+	// working copy that is not there is the precise failure gonk-msz was: the
+	// model goes looking, finds an empty directory, and fills the gap itself.
+	repo := ""
+	if strings.TrimSpace(checkout) != "" {
+		repo = "\nThe repository is checked out in your working directory. Read `.agent/` " +
+			"first if it exists -- it is the project's own context and it overrides " +
+			"anything you would otherwise assume. Reading files is expected; you still " +
+			"hold no credentials, so do not try to reach GitLab.\n"
 	}
 	return fmt.Sprintf(`Triage GitLab issue #%d in project `+"`%s`"+`. Here is the issue, already
 fetched for you -- do NOT fetch anything yourself:
 
 %s
-
+%s
 Decide the labels (each prefixed `+"`gonk::`"+`) and one short triage comment: a
 brief analysis of what the issue asks for, with anything genuinely ambiguous
 phrased as a direct question to the reporter.
@@ -121,7 +131,7 @@ GONK_BATCH_START
 GONK_BATCH_END
 
 Emit exactly one comment effect and zero or more label effects. Nothing after
-GONK_BATCH_END.`, issueIID, project, context)
+GONK_BATCH_END.`, issueIID, project, context, repo)
 }
 
 // renderScaffoldPrompt builds the scaffold session's initial message.
@@ -391,13 +401,19 @@ type repoReader interface {
 // scaffold: YES. Its entire job is describing the repository, and without a
 // checkout it either invents the description or refuses (gonk-msz).
 //
-// triage: NO, for now. The controller already injects the issue, which is what
-// triage reasons about. Reading .agent/ would make it better and is the obvious
-// next shape to flip, but flipping it changes every triage prompt, so it is a
-// deliberate follow-up rather than a side effect of landing the mechanism.
+// triage: YES. The issue is still injected -- that does not change -- but the
+// project's own .agent/ context is the thing that makes a triage judgement
+// specific to THIS repository rather than generic. That context is exactly what
+// scaffold exists to write, and until now nothing read it: the v1 formula told
+// the agent to "Load .agent/ from the repository first" with no repository
+// present, which is the same empty-directory failure as gonk-msz.
+//
+// A missing checkout stays non-fatal here. renderTriagePrompt only mentions the
+// working copy when one was actually granted, so a fetch failure degrades to
+// exactly the prompt triage used before.
 var needsCheckout = map[string]bool{
 	"scaffold": true,
-	"triage":   false,
+	"triage":   true,
 }
 
 // brokerForgeReader is what dispatchDeps.Forge must satisfy: both halves of the
@@ -543,7 +559,14 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 			d.Log.Warn("triage context fetch failed; injecting reference-only prompt",
 				"err", ferr, "bead", a.BeadAnchor, "issue", a.IssueIID)
 		}
-		prompt = renderTriagePrompt(a.Project, a.IssueIID, issueContext)
+		// A checkout gives triage the project's own .agent/ context. Non-fatal:
+		// on failure the prompt simply does not mention a working copy.
+		checkout, cerr := grantCheckout(ctx, d, agent, alias)
+		if cerr != nil {
+			d.Log.Warn("could not grant a checkout for triage; prompting without a working copy",
+				"err", cerr, "bead", a.BeadAnchor, "project", a.Project)
+		}
+		prompt = renderTriagePrompt(a.Project, a.IssueIID, issueContext, checkout)
 	}
 	prompt = sanitizeForKeystrokeDelivery(prompt)
 

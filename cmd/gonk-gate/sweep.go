@@ -10,6 +10,7 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/pkg/gate"
 	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi"
 	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
+	"gitlab.orac.local/agentic/gonk-project/pkg/rig"
 )
 
 // dispatchOrderName is the exec order that wraps `gonk-gate dispatch` (Gate
@@ -30,6 +31,10 @@ type sweepDeps struct {
 	GL    gitlabQuerier
 	Store beadstore.Store
 	Log   *slog.Logger
+
+	// Rig revokes a session's checkout grant at teardown (pkg/rig, gonk-msz).
+	// Optional: nil simply means grants are left to expire on their own TTL.
+	Rig *rig.Client
 
 	// Apply is the WRITE side of pkg/glab the v2 broker uses to apply a
 	// validated proposed-effects batch under the bot PAT. Only the broker path
@@ -333,6 +338,16 @@ func closeSession(ctx context.Context, d sweepDeps, rec beadstore.Record) {
 	// beads are not this function's business.
 	if rec.SessionID == "" {
 		return
+	}
+	// Revoke the checkout grant next to the close, for the same reason: a pod
+	// that outlives its work must stop being able to pull the tree. Grants carry
+	// their own TTL, so a failure here costs at most that window -- hence Debug,
+	// not Error, unlike the leaked-pod case below (pkg/rig, gonk-msz).
+	if d.Rig != nil {
+		if err := d.Rig.Revoke(ctx, rec.SessionID); err != nil {
+			d.Log.Debug("sweep: checkout revoke failed; the grant will expire on its own",
+				"bead", rec.BeadAnchor, "session", rec.SessionID, "err", err)
+		}
 	}
 	if err := d.GC.CloseSession(ctx, rec.SessionID); err != nil {
 		if gcapi.IsNotFound(err) {
