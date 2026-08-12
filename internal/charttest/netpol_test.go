@@ -277,3 +277,30 @@ func TestControllerPolicyRendersWhenBundled(t *testing.T) {
 		"--set", "gascity.supervisorURL=http://gc.external.svc:8372")...)
 	NoObject(t, byo, "NetworkPolicy", "gonk-controller")
 }
+
+// THE CHECKOUT WIRING, both halves.
+//
+// The per-session checkout works only because the URL is split: a per-INSTALL
+// base that can ride static config, and a per-SESSION alias that Gas City
+// already puts in every agent pod's env (GC_ALIAS). If either half stops being
+// rendered, a pooled pod silently runs with no working copy -- and scaffold
+// quietly falls back instead of failing, so nothing would go red.
+func TestRigBaseURLReachesBothTheControllerAndTheAgent(t *testing.T) {
+	objs := Render(t, withNetpol()...)
+
+	// Half one: gonk-gate runs in the controller and REGISTERS the grant.
+	ctl := MustObject(t, objs, "Deployment", "gonk-controller")
+	if !strings.Contains(ctl.Doc, "GONK_RIG_BASE_URL") {
+		t.Errorf("the controller has no GONK_RIG_BASE_URL, so gonk-gate can never register a checkout:\n%s", ctl.Doc)
+	}
+	if !strings.Contains(ctl.Doc, "gonk-intake-internal") {
+		t.Error("GONK_RIG_BASE_URL does not point at intake's private listener")
+	}
+
+	// Half two: the bootstrap-city initContainer writes the same base into every
+	// agent.toml [env], which is how it reaches the pod at all.
+	if !strings.Contains(ctl.Doc, `printf "GONK_RIG_BASE_URL = `) {
+		t.Errorf("bootstrap-city does not inject GONK_RIG_BASE_URL into agent.toml, so the\n" +
+			"agent pod cannot compose its checkout URL from its own GC_ALIAS")
+	}
+}

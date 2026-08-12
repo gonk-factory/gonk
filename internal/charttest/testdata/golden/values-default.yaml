@@ -1454,14 +1454,25 @@ spec:
                 # has no use for it.
                 case "$agent_dir" in */control-dispatcher/) continue ;; esac
                 grep -q '^\[env\]' "$agent_toml" || printf '\n[env]\n' >> "$agent_toml"
+                # GONK_RIG_BASE_URL is the per-INSTALL half of the checkout URL
+                # (pkg/rig, gonk-msz). It is static, which is exactly why it can
+                # ride this channel: the per-SESSION half is GC_ALIAS, which Gas
+                # City already puts in every agent pod's env. The pod composes
+                # the two itself, so no per-session channel is needed and the
+                # checkout does not wait on gonk-e9m's delivery redesign.
+                #
+                # Not a credential: it is an in-cluster Service address, and the
+                # GRANT is what authorizes a fetch (see pkg/rig).
                 awk -v url='http://litellm.litellm.svc.cluster.local:4000' \
                     -v key="$LITELLM_KEY" \
-                    -v model='qwen3-14b' '
+                    -v model='qwen3-14b' \
+                    -v rigbase='http://gonk-intake-internal.gonk.svc:9090' '
                   /^\[env\]/ && !seen {
                     print
                     printf "GONK_LITELLM_URL = \"%s\"\n", url
                     printf "GONK_LITELLM_KEY = \"%s\"\n", key
                     if (model != "") printf "GONK_MODEL = \"%s\"\n", model
+                    if (rigbase != "") printf "GONK_RIG_BASE_URL = \"%s\"\n", rigbase
                     seen = 1
                     next
                   }
@@ -1612,6 +1623,13 @@ spec:
             # The KEY MATERIAL still ends up in an order var (litellm_key/bot_token)
             # on the way to the session pod: a DELIBERATE v1 compromise the v2 broker
             # removes by keeping all creds out of the pod entirely.
+            # Where gonk-gate REGISTERS a per-session checkout, and the same base
+            # the agent pod fetches it from (pkg/rig, gonk-msz). Marker-free by
+            # the rule above -- it is a Service address, not a credential, and
+            # the GRANT is what authorizes a fetch. Empty when intake is
+            # disabled, which simply means no checkout is ever granted.
+            - name: GONK_RIG_BASE_URL
+              value: "http://gonk-intake-internal.gonk.svc:9090"
             - name: GONK_LITELLM_URL
               value: "http://litellm.litellm.svc.cluster.local:4000"
             - name: GONK_LITELLM_KEY_FILE

@@ -52,12 +52,30 @@ RIG_DIR="${GONK_RIG_DIR:-$PWD}"
 # is a PRECONDITION rather than a task the model can fail at. The pod holds no
 # forge credentials: these bytes come from gonk, not from GitLab.
 #
-# GONK_RIG_URL is per-session and therefore arrives with the assignment, not in
-# static pod env -- so on a pooled session this is empty at startup and the
-# fetch happens when the assignment does. NON-FATAL by design: a session with no
-# checkout still runs, on a prompt that says so.
+# THE POD COMPOSES ITS OWN URL, and that is the whole trick. A pooled session
+# pod cannot be handed per-session env -- SessionCreateBody has no env field and
+# resolved.Env is static agent/city config -- so a URL built controller-side
+# could never reach it. But the two halves are separately available:
+#
+#   GONK_RIG_BASE_URL  per-INSTALL, injected into agent.toml's [env] by the
+#                      chart's bootstrap-city initContainer, the same channel
+#                      that already carries GONK_LITELLM_URL/GONK_MODEL.
+#   GC_ALIAS           per-SESSION, put in every agent pod's env by Gas City
+#                      itself (verified live with printenv; GC_SESSION_ID is
+#                      there too).
+#
+# So the pod appends its own alias to a static base and fetches exactly the tree
+# its own session was granted -- no per-session channel, and no dependency on
+# the prompt-delivery redesign. GONK_RIG_URL still wins if set explicitly, which
+# is what the e2e harness uses.
+#
+# NON-FATAL by design: a session with no checkout still runs, on a prompt that
+# says so.
 gonk_fetch_checkout() {
 	_url="${GONK_RIG_URL:-}"
+	if [ -z "${_url}" ] && [ -n "${GONK_RIG_BASE_URL:-}" ] && [ -n "${GC_ALIAS:-}" ]; then
+		_url="${GONK_RIG_BASE_URL%/}/rig/${GC_ALIAS}.tar.gz"
+	fi
 	[ -n "${_url}" ] || return 0
 
 	_tmp="${GONK_RUNTIME_DIR:-/tmp/gonk}/rig.tar.gz"
