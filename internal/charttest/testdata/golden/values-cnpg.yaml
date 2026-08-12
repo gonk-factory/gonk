@@ -100,11 +100,43 @@ spec:
       ports:
         - protocol: TCP
           port: 4000
-    # GitLab: the agent clones the rig and posts comments as the bot.
+    # gonk-intake (PRIVATE listener): the per-session checkout. gonk-gate
+    # shallow-clones the project CONTROLLER-SIDE at the decision point and
+    # registers it under the session alias; the pod fetches that tree here
+    # before opencode starts. This is the only reason an agent needs a
+    # repository, and it deliberately does NOT go to the forge -- the bytes come
+    # from gonk, so the pod still holds no forge credentials (gonk-msz).
     - to:
-        - namespaceSelector:
+        - podSelector:
             matchLabels:
-              kubernetes.io/metadata.name: gitlab
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: intake
+      ports:
+        - protocol: TCP
+          port: 9090
+    # GitLab: DELIBERATELY NO EGRESS (gonk-7oz).
+    #
+    # This used to allow the agent the WHOLE gitlab namespace on EVERY port,
+    # under the v1 assumption in the old comment here ("the agent clones the rig
+    # and posts comments as the bot"). Neither is true under the broker design:
+    # the controller does all forge I/O -- it reads the issue, and gonk-sweep
+    # applies the agent's proposed-effects batch under its own PAT -- and the
+    # checkout now comes from gonk-intake above.
+    #
+    # It mattered because "the agent never talks to GitLab" (images/agent/
+    # entrypoint.sh) was enforced by ONE thing: the absence of a credential.
+    # With this rule in place, anything that put a usable token in the pod got
+    # full forge reach with no second line of defence -- and pack/formulas/
+    # gonk-triage.toml still ships a bot_token into the pod as a v1 compromise.
+    # The agent also runs attacker-influenceable text by construction (issue
+    # titles and bodies), which gonk-e9m already showed reaching a shell.
+    #
+    # KNOWN CONSEQUENCE: `mention` is not yet ported to the broker (Phase 6). If
+    # its v1 formula path expects the pod to reach GitLab, it breaks here rather
+    # than failing quietly on credentials -- which is the better failure. Set
+    # networkPolicy.gitlabEgress.enabled=true to restore the old behaviour while
+    # that is sorted; doing so re-opens exactly the hole described above.
     # gonk-meter: the agent reads its own session cost for the commit trailers
     # (GET /v1/cost/session/{key}).
     - to:

@@ -72,8 +72,19 @@ func TestDefaultDenyExists(t *testing.T) {
 // lands. Do not mistake this green for that one.
 func TestAgentEgressIsLimitedToGitLabLiteLLMAndDNS(t *testing.T) {
 	np := MustObject(t, Render(t, withNetpol()...), "NetworkPolicy", "gonk-agent")
-	if !strings.Contains(np.Doc, "gitlab") {
-		t.Error("agents cannot reach GitLab")
+	// GitLab egress is OFF by default (gonk-7oz). This test used to assert the
+	// opposite -- that agents CAN reach GitLab -- which encoded the v1 assumption
+	// that the agent clones the rig and posts comments itself. Under the broker
+	// design the controller does all forge I/O and the checkout is served by
+	// gonk-intake, so an agent that can reach the forge is a hole, not a feature.
+	//
+	// Asserted on the SPEC (the rendered egress rules), not the whole document:
+	// the explanatory comment in the template legitimately contains the word
+	// "gitlab", so a substring check over np.Doc would pass for the wrong reason.
+	if egressMentions(np, "gitlab") {
+		t.Errorf("the agent policy still grants egress to GitLab. The pod holds no forge\n"+
+			"credentials by design, so this rule's only effect is to remove the second\n"+
+			"line of defence if a credential ever reaches it (gonk-7oz):\n%s", np.Doc)
 	}
 	if !strings.Contains(np.Doc, "litellm") {
 		t.Error("agents cannot reach LiteLLM -- which is the ONLY door to a model")
@@ -106,11 +117,89 @@ func TestIntakeIngressIsLimited(t *testing.T) {
 
 // The external-GitLab path must still render, lint and validate -- it is the only
 // thing an operator whose GitLab is NOT in-cluster can use.
+//
+// It now requires networkPolicy.gitlabEgress.enabled, because agent->forge
+// egress is off by default (gonk-7oz). The path must keep WORKING for an
+// operator who deliberately re-enables it; it must simply not be the default.
 func TestExternalGitLabEgressStillRenders(t *testing.T) {
-	np := MustObject(t, Render(t, withExternalGitLab()...), "NetworkPolicy", "gonk-agent")
+	args := append(withExternalGitLab(), "--set", "networkPolicy.gitlabEgress.enabled=true")
+	np := MustObject(t, Render(t, args...), "NetworkPolicy", "gonk-agent")
 	if !strings.Contains(np.Doc, "10.0.5.7/32") {
-		t.Error("the external-GitLab (ipBlock) path does not render")
+		t.Error("the external-GitLab (ipBlock) path does not render when explicitly enabled")
 	}
+}
+
+// The escape hatch must be exactly that: OFF unless asked for, and PORT-SCOPED
+// when asked for. The in-cluster branch previously emitted no `ports:` at all,
+// which is what allowed the whole gitlab namespace on EVERY port (gonk-7oz).
+func TestGitLabEgressIsOffByDefaultAndPortScopedWhenEnabled(t *testing.T) {
+	off := MustObject(t, Render(t, withNetpol()...), "NetworkPolicy", "gonk-agent")
+	if egressMentions(off, "gitlab") {
+		t.Error("gitlabEgress must be off by default")
+	}
+
+	args := append(withNetpol(), "--set", "networkPolicy.gitlabEgress.enabled=true")
+	on := MustObject(t, Render(t, args...), "NetworkPolicy", "gonk-agent")
+	if !egressMentions(on, "gitlab") {
+		t.Fatalf("the escape hatch does not restore GitLab egress when enabled:\n%s", on.Doc)
+	}
+	for _, rule := range egressRules(on) {
+		if !strings.Contains(rule, "gitlab") {
+			continue
+		}
+		if !strings.Contains(rule, "port:") {
+			t.Errorf("the GitLab egress rule opens EVERY port; it must be scoped to\n"+
+				"networkPolicy.gitlab.ports even when deliberately enabled:\n%s", rule)
+		}
+	}
+}
+
+// The agent fetches its per-session checkout from gonk-intake's PRIVATE
+// listener. That is the replacement for forge egress: the bytes come from gonk,
+// so the pod still holds no forge credentials (gonk-msz).
+func TestAgentMayReachIntakePrivateListenerForTheCheckout(t *testing.T) {
+	np := MustObject(t, Render(t, withNetpol()...), "NetworkPolicy", "gonk-agent")
+	var found bool
+	for _, rule := range egressRules(np) {
+		if strings.Contains(rule, "component: intake") && strings.Contains(rule, "port: 9090") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("agents cannot reach gonk-intake:9090, so the per-session checkout\n"+
+			"can never be fetched and scaffold is back to describing a repo it never saw:\n%s", np.Doc)
+	}
+}
+
+// egressRules splits a rendered NetworkPolicy's egress list into one string per
+// rule, so a test can assert about the rule that matched rather than about the
+// whole document (whose COMMENTS mention hosts the policy deliberately denies).
+func egressRules(np Object) []string {
+	_, after, ok := strings.Cut(np.Doc, "egress:")
+	if !ok {
+		return nil
+	}
+	var rules []string
+	for _, part := range strings.Split(after, "\n    - to:") {
+		if strings.TrimSpace(part) != "" {
+			rules = append(rules, part)
+		}
+	}
+	return rules
+}
+
+// egressMentions reports whether any egress RULE (not comment) names target.
+func egressMentions(np Object, target string) bool {
+	for _, rule := range egressRules(np) {
+		// Strip comment lines: the template explains at length why certain
+		// destinations are denied, and those explanations name them.
+		for _, line := range strings.Split(rule, "\n") {
+			if t := strings.TrimSpace(line); !strings.HasPrefix(t, "#") && strings.Contains(t, target) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Meter is reachable from intake and from the pack. With the controller BUNDLED

@@ -542,6 +542,23 @@ networkPolicy:
   # namespaceSelector below. Do NOT use gitlab.cidrs for an in-cluster Service:
   # a CIDR there is a POD IP, and pod IPs move on every reschedule -- the policy
   # would work until the first restart and then silently stop allowing GitLab.
+  # AGENT -> GITLAB EGRESS, OFF BY DEFAULT (gonk-7oz).
+  #
+  # Under the broker design the agent pod has no business reaching the forge at
+  # all: the controller reads the issue, gonk-sweep applies the agent's proposed
+  # effects under its own PAT, and the per-session checkout is served by
+  # gonk-intake. Until this was turned off, the agent netpol allowed the WHOLE
+  # gitlab namespace on EVERY port, which meant the "agent never talks to
+  # GitLab" property rested entirely on there being no credential in the pod --
+  # no second line of defence, for a workload that processes attacker-written
+  # issue text by construction.
+  #
+  # Turning this back on restores that hole. Do it only as a temporary measure
+  # (e.g. if the unported `mention` formula path turns out to need it), and note
+  # that even when enabled the rule is now port-scoped via gitlab.ports rather
+  # than allowing every port.
+  gitlabEgress:
+    enabled: false
   gitlabInCluster:
     enabled: true
     namespaceSelector: {kubernetes.io/metadata.name: gitlab}
