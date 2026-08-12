@@ -35,6 +35,7 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
 	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi"
 	"gitlab.orac.local/agentic/gonk-project/pkg/glab"
+	"gitlab.orac.local/agentic/gonk-project/pkg/rig"
 )
 
 // version is stamped at build time (`-ldflags -X main.version=...`) by both
@@ -111,6 +112,13 @@ func main() {
 	case "dispatch":
 		code = runDispatch(ctx, dispatchDeps{
 			Meter: cfg.meter(), GC: cfg.gc(), Store: cfg.store(), Forge: cfg.gl(), Log: log,
+			// The per-session CHECKOUT (pkg/rig, gonk-msz). Both halves come from
+			// GONK_RIG_BASE_URL: gonk-gate POSTs the grant here, and the agent pod
+			// GETs from the same base with its own GC_ALIAS appended. Unset simply
+			// means no checkout is granted -- scaffold then falls back to
+			// controller-side repository context, never to inventing one.
+			Rig:        cfg.rig(),
+			RigBaseURL: os.Getenv("GONK_RIG_BASE_URL"),
 			Args: dispatchArgs{
 				Project:       envArg("project"),
 				ProjectID:     envArgInt64("project_id"),
@@ -269,6 +277,21 @@ func (c gateConfig) gc() *gcapi.Client {
 func (c gateConfig) gl() *glab.Client {
 	tok, _ := readSecretFile(c.GitLabTokenFile)
 	return glab.New(c.GitLabURL, tok)
+}
+
+// rig builds the client that registers a per-session checkout with gonk-intake.
+//
+// Returns nil when GONK_RIG_BASE_URL is unset, which is a legitimate
+// configuration and not a warning: the caller treats a nil rig as "grant no
+// checkout" and falls back to controller-side repository context. Nothing here
+// is fatal -- a session without a working copy still runs, on a prompt that
+// says so (gonk-msz).
+func (c gateConfig) rig() *rig.Client {
+	base := os.Getenv("GONK_RIG_BASE_URL")
+	if base == "" {
+		return nil
+	}
+	return &rig.Client{BaseURL: base}
 }
 
 func (c gateConfig) store() beadstore.Store {

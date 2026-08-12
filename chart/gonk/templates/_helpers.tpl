@@ -243,3 +243,20 @@ gonk-dolt.{{ .Release.Namespace }}.svc
 {{- if eq .name $want }}{{ .model }}{{ end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+gonk.rigBaseURL -- where an agent pod fetches its per-session CHECKOUT.
+
+gonk-intake's PRIVATE listener, by Service DNS. This is the per-INSTALL half of
+the URL; the pod appends its own GC_ALIAS (which Gas City already puts in every
+agent pod's env) to get the per-session half. That split is what lets a pooled,
+generic pod fetch exactly its own tree without any per-session channel.
+
+Empty when intake is disabled -- the entrypoint then simply grants no checkout
+and the agent falls back to controller-side repository context (gonk-msz).
+*/}}
+{{- define "gonk.rigBaseURL" -}}
+{{- if .Values.intake.enabled -}}
+http://gonk-intake-internal.{{ .Release.Namespace }}.svc:{{ .Values.intake.ports.private }}
+{{- end -}}
+{{- end -}}

@@ -28,6 +28,7 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/pkg/ghook"
 	"gitlab.orac.local/agentic/gonk-project/pkg/glab"
 	"gitlab.orac.local/agentic/gonk-project/pkg/intake"
+	"gitlab.orac.local/agentic/gonk-project/pkg/rig"
 )
 
 // Config comes from the environment. SECRETS ARE READ FROM FILES, never from an
@@ -330,11 +331,20 @@ func newService(ctx context.Context, cfg Config, log *slog.Logger) (*service, er
 		GL: gl, Meter: meter, Metrics: metrics, Cache: cache,
 		Dispatch: dp, Reconciler: rec, BotUserID: me.ID, Events: events,
 	}
+	// The per-session CHECKOUT (pkg/rig, gonk-msz). intake serves it because it
+	// already holds the bot PAT and already runs an internal-only listener; the
+	// agent pod holds neither, which is the point -- the pod gets a working copy
+	// without a forge credential. Mounted on the PRIVATE listener only.
 	svc.Server = intake.NewServer(intake.ServerConfig{
 		Hook:      hook,
 		Reg:       reg,
 		Reconcile: rec,
 		Ready:     &readiness{meter: meter, done: &svc.firstReconcileDone},
+		Rig: &rig.Handler{
+			Store: rig.NewStore(nil),
+			Fetch: gl,
+			Log:   log,
+		},
 	})
 	return svc, nil
 }
