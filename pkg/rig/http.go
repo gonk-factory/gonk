@@ -194,7 +194,7 @@ func (c *Client) Grant(ctx context.Context, alias, project string, projectID int
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("rig: grant %s: unexpected status %s", alias, resp.Status)
 	}
@@ -220,7 +220,7 @@ func (c *Client) Revoke(ctx context.Context, alias string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("rig: revoke %s: unexpected status %s", alias, resp.Status)
 	}

@@ -187,7 +187,7 @@ func TestClientAndHandlerAgreeOnTheURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetch %s: %v", FetchURL(srv.URL, "alias-a"), err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("FetchURL round trip = %d, want 200", resp.StatusCode)
 	}
