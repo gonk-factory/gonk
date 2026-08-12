@@ -224,8 +224,8 @@ func TestCheckoutIsDecidedPerEventShape(t *testing.T) {
 	if !needsCheckout["scaffold"] {
 		t.Error("scaffold MUST get a checkout: describing a repository it cannot read is exactly the failure this exists to stop")
 	}
-	if needsCheckout["triage"] {
-		t.Error("triage is injected its issue and does not yet need a checkout; flipping it changes every triage prompt and is a deliberate follow-up")
+	if !needsCheckout["triage"] {
+		t.Error("triage needs a checkout too: .agent/ is what makes a judgement specific to THIS repo, and it is exactly what scaffold writes")
 	}
 	if needsCheckout["mr-approval"] {
 		t.Error("an unknown/no-read shape must default to NO checkout")
@@ -263,5 +263,25 @@ func TestScaffoldCheckoutPromptSaysTheRepoIsPresent(t *testing.T) {
 	// It must NOT tell the agent to go fetch anything itself.
 	if strings.Contains(got, "git clone") {
 		t.Errorf("the prompt tells the agent to clone; the entrypoint does that before opencode starts:\n%s", got)
+	}
+}
+
+// The triage prompt may mention a working copy ONLY when one was granted.
+// Claiming a checkout that is not there is the precise gonk-msz failure: the
+// model goes looking, finds an empty directory, and fills the gap itself.
+func TestTriagePromptMentionsTheRepoOnlyWhenGranted(t *testing.T) {
+	without := renderTriagePrompt("acme/widget", 3, "Title: x", "")
+	if strings.Contains(without, "checked out in your working directory") {
+		t.Errorf("triage claims a checkout with none granted:\n%s", without)
+	}
+	if !strings.Contains(without, "fetched for you") {
+		t.Error("the no-checkout prompt must still carry the injected issue")
+	}
+
+	with := renderTriagePrompt("acme/widget", 3, "Title: x", "http://intake:9090/rig/a.tar.gz")
+	for _, want := range []string{"checked out in your working directory", ".agent/", "hold no credentials"} {
+		if !strings.Contains(with, want) {
+			t.Errorf("granted-checkout triage prompt missing %q:\n%s", want, with)
+		}
 	}
 }
