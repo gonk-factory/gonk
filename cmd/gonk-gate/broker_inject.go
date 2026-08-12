@@ -12,6 +12,7 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi"
 	"gitlab.orac.local/agentic/gonk-project/pkg/glab"
 	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
+	"gitlab.orac.local/agentic/gonk-project/pkg/rig"
 )
 
 // issueReader is the sliver of pkg/glab the broker's inject needs: read the
@@ -257,6 +258,85 @@ func buildIssueContext(ctx context.Context, r issueReader, projectID, issueIID i
 		iss.Title, iss.State, labels, body), nil
 }
 
+// grantCheckout registers a per-session checkout and returns the URL the pod
+// fetches it from, or "" when this event shape does not need one.
+//
+// Called at the DECISION POINT: the project and ref are known, the controller
+// holds the PAT, and the pod holds neither. The grant binds this one session
+// alias to that one project at that one ref -- see pkg/rig for why registration
+// is the authorization.
+//
+// Every failure here is NON-FATAL by design. A session without a checkout still
+// runs, on a prompt that says so; failing the dispatch instead would turn a
+// degraded run into no run at all.
+func grantCheckout(ctx context.Context, d dispatchDeps, agent, alias string) (string, error) {
+	if !needsCheckout[agent] {
+		return "", nil
+	}
+	if d.Rig == nil || d.RigBaseURL == "" {
+		return "", nil // not configured; the fallback tiers cover it
+	}
+	if d.Forge == nil {
+		return "", fmt.Errorf("no forge reader to resolve the ref")
+	}
+	proj, err := d.Forge.GetProject(ctx, d.Args.ProjectID)
+	if err != nil {
+		return "", fmt.Errorf("resolve default branch: %w", err)
+	}
+	ref := proj.DefaultBranch
+	if ref == "" {
+		ref = "main"
+	}
+	// PIN THE REF at grant time. If the pod resolved "the default branch" for
+	// itself, a push landing mid-session would change what it read, and the
+	// batch it proposes would describe a tree nobody can reconstruct.
+	if err := d.Rig.Grant(ctx, alias, d.Args.Project, d.Args.ProjectID, ref); err != nil {
+		return "", fmt.Errorf("register grant: %w", err)
+	}
+	d.Log.Info("checkout granted for this session",
+		"bead", d.Args.BeadAnchor, "alias", alias, "project", d.Args.Project, "ref", ref)
+	return rig.FetchURL(d.RigBaseURL, alias), nil
+}
+
+// renderScaffoldCheckoutPrompt is the scaffold prompt when the agent HAS a real
+// working copy. It is the good case: unlike renderScaffoldPrompt's probe-list
+// material, the agent can read whatever it needs.
+//
+// The fetch itself is the entrypoint's job, done BEFORE opencode starts, so the
+// checkout is a precondition rather than a task the model can fail. The URL is
+// named here anyway so the transcript records where the tree came from.
+func renderScaffoldCheckoutPrompt(project, url string) string {
+	return fmt.Sprintf(`Write durable project context for the repository `+"`%s`"+`, which IS
+checked out in your working directory (fetched for you from %s -- you do not need
+to fetch anything, and you hold no credentials to fetch anything else).
+
+Read enough of it to be accurate: what this project IS, how it is built, how it
+is tested, and any conventions a future automated triage or code session would
+otherwise have to guess at. Prefer a few honest, specific files over one long
+vague one.
+
+An honest gap is a SUCCESS, not a failure. If something cannot be determined
+from the repository, write that down as an open question instead of inventing an
+answer -- a confident wrong claim here will mislead every session that reads
+this directory afterwards.
+
+Do NOT run git, glab, bd, or any external API, and do NOT try to commit anything
+or open a merge request: you hold no credentials, and gonk commits your proposal
+and opens the merge request for you. Reading the working directory is expected
+and encouraged.
+
+Emit your proposal as a single proposed-effects batch as the LAST thing in your
+output, fenced EXACTLY like this:
+
+GONK_BATCH_START
+{"effects":[{"kind":"file","path":".agent/README.md","content":"<the whole file>"}]}
+GONK_BATCH_END
+
+Every path MUST begin with `+"`.agent/`"+` -- a batch touching anything else is
+rejected in full. Emit one file effect per file, each carrying that file's
+COMPLETE content (there are no partial edits). Nothing after GONK_BATCH_END.`, project, url)
+}
+
 // scaffoldProbeFiles are the paths buildRepoContext asks the forge for, in
 // order. They are the files that actually identify a project's language, build
 // and test story -- which is precisely what .agent/ has to get right.
@@ -296,6 +376,28 @@ const maxRepoContextBytes = 24 << 10 // 24 KiB total
 type repoReader interface {
 	GetProject(ctx context.Context, projectID int64) (*glab.Project, error)
 	GetRawFile(ctx context.Context, projectID int64, path, ref string, maxBytes int64) ([]byte, error)
+}
+
+// needsCheckout says whether an agent's EVENT SHAPE requires a working copy of
+// the repository.
+//
+// This is the owner's point, and it belongs exactly here: the decision point is
+// already where gonk has read the project's config, parsed it and compared it
+// against the event, so "does this shape need a checkout?" is one more property
+// of the same decision rather than a separate lookup later. Most shapes do need
+// one; some genuinely do not -- an MR approval acts on forge state and reads no
+// files, and granting it a checkout would be pure cost.
+//
+// scaffold: YES. Its entire job is describing the repository, and without a
+// checkout it either invents the description or refuses (gonk-msz).
+//
+// triage: NO, for now. The controller already injects the issue, which is what
+// triage reasons about. Reading .agent/ would make it better and is the obvious
+// next shape to flip, but flipping it changes every triage prompt, so it is a
+// deliberate follow-up rather than a side effect of landing the mechanism.
+var needsCheckout = map[string]bool{
+	"scaffold": true,
+	"triage":   false,
 }
 
 // brokerForgeReader is what dispatchDeps.Forge must satisfy: both halves of the
@@ -414,6 +516,17 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 		// then reward it for writing something plausible. renderScaffoldPrompt
 		// turns the empty case into an explicit refusal, and the WARN below is
 		// what makes that visible rather than silent.
+		// THREE TIERS, best first, each strictly safer than inventing content:
+		//   1. a real CHECKOUT the pod fetches from gonk-intake (grantCheckout)
+		//   2. the controller-side probe of identifying files (buildRepoContext)
+		//   3. an explicit refusal (renderScaffoldPrompt with no material)
+		if url, gerr := grantCheckout(ctx, d, agent, alias); gerr != nil {
+			d.Log.Warn("could not grant a checkout; falling back to controller-side repository context",
+				"err", gerr, "bead", a.BeadAnchor, "project", a.Project)
+		} else if url != "" {
+			prompt = renderScaffoldCheckoutPrompt(a.Project, url)
+			break
+		}
 		repoContext, rerr := buildRepoContext(ctx, d.Forge, a.ProjectID)
 		if rerr != nil {
 			d.Log.Warn("scaffold repository fetch failed; injecting refusal prompt so the agent cannot invent .agent/ content",
