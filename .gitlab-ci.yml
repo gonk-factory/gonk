@@ -138,11 +138,43 @@ no-latest:
   image:
     name: gcr.io/kaniko-project/executor:v1.24.0-debug
     entrypoint: [""]
-  # Build images on branch pipelines (and main). Heavy, but these are the
-  # deliverable's proof that the build runs in CI; dial to `when: manual` later
-  # if per-commit image churn becomes a concern.
-  rules:
+  # Build images ONLY when something that can change an image changed.
+  #
+  # WHY (gonk-1t4, measured 2026-08-13): this used to be a bare
+  # `- if: '$CI_COMMIT_BRANCH'`, so every commit ran ten kaniko builds and five
+  # index jobs. 61 of the 87 commits between 2026-07-30 and 2026-08-13 -- 70% --
+  # touched no file below: bead updates, chart edits, docs, gitops notes. They
+  # each published five new image tags plus a pile of kaniko cache layers, which
+  # is how agentic/gonk-project reached 183 GB of a 294 GB registry and filled
+  # the volume (gonk-mzm).
+  #
+  # DELIBERATELY COARSE -- one shared list for all five images, not per-image
+  # rules. The Go binaries all share pkg/ + internal/ + vendor/, so per-image
+  # granularity would buy maybe another tenth while adding a way to ship a STALE
+  # image. That is this project's signature failure mode (a step that silently
+  # did nothing and looked exactly like success), and it is not worth a tenth.
+  # Rebuild all five, or none.
+  #
+  # KNOW THIS BEFORE YOU DEPLOY: a commit touching none of these paths now
+  # produces NO image, so v0.1.0-<sha12> for that commit does not exist in the
+  # registry. Deploy the tag of the most recent commit that did build. `git log`
+  # against this list tells you which one that is.
+  rules: &gonk_image_rules
     - if: '$CI_COMMIT_BRANCH'
+      changes:
+        - go.mod
+        - go.sum
+        - vendor/**/*
+        - cmd/**/*
+        - internal/**/*
+        - pkg/**/*
+        - images/**/*      # Dockerfiles, versions.env, entrypoint.sh
+        - pack/**/*        # COPY pack/ /opt/gonk/pack/ in Dockerfile.controller
+        - .gitlab-ci.yml   # the build definition itself
+    # Escape hatch: build any commit on demand without editing this file.
+    - if: '$CI_COMMIT_BRANCH'
+      when: manual
+      allow_failure: true
   # Serialize the image builds: the template pins every job to node johnny, and
   # five parallel kaniko pods there would contend for memory. One at a time gives
   # each build johnny's full headroom (and warms the shared layer cache in order).
@@ -210,6 +242,24 @@ controller-image-amd64:
       --insecure-registry=$INTERNAL_REGISTRY_HOST
       --skip-tls-verify
 
+# NO LAYER CACHE, deliberately -- and the same for both meter jobs below.
+#
+# Kaniko caches RUN layers, keyed on the layer's command PLUS the contents of
+# everything COPYed before it. Dockerfile.intake and Dockerfile.meter have
+# exactly one RUN in the build stage (`go build`), and it sits after
+# `COPY cmd/ internal/ pkg/`. The source changes on every commit that builds at
+# all, so that key is different every time: the cache could never hit. It was
+# still PUSHED every build, and gonk-meter pushed twice per arch (plain +
+# testclock). That is a pure write of layers nothing would ever read.
+#
+# Measured 2026-08-13 (gonk-1t4): agentic/gonk-project/cache held 139 GB across
+# 1296 tags -- on its own, nearly half the 294 GB registry, and the direct cause
+# of the volume filling (gonk-mzm).
+#
+# gonk-agent and gonk-controller KEEP their cache: those genuinely do have
+# stable, expensive RUN layers ahead of any source COPY -- the pinned gascity
+# clone, the apt installs, and the checksum-verified opencode/glab/bd/dolt
+# fetches, all keyed on images/versions.env rather than on the working tree.
 intake-image-amd64:
   extends: .gonk-kaniko
   script:
@@ -223,9 +273,6 @@ intake-image-amd64:
       --build-arg GONK_TAG=$GONK_TAG
       --build-arg GO_VERSION=$GO_VERSION
       --build-arg DISTROLESS_BASE=$DISTROLESS_BASE
-      --cache=true
-      --cache-repo="$INTERNAL_REGISTRY_REPO/cache"
-      --compressed-caching=false
       --registry-mirror=$ZOT_MIRROR
       --insecure-registry=$ZOT_MIRROR
       --insecure-registry=$INTERNAL_REGISTRY_HOST
@@ -244,9 +291,6 @@ meter-image-amd64:
       --build-arg GONK_TAG=$GONK_TAG
       --build-arg GO_VERSION=$GO_VERSION
       --build-arg DISTROLESS_BASE=$DISTROLESS_BASE
-      --cache=true
-      --cache-repo="$INTERNAL_REGISTRY_REPO/cache"
-      --compressed-caching=false
       --registry-mirror=$ZOT_MIRROR
       --insecure-registry=$ZOT_MIRROR
       --insecure-registry=$INTERNAL_REGISTRY_HOST
@@ -269,9 +313,6 @@ meter-testclock-image-amd64:
       --build-arg GO_VERSION=$GO_VERSION
       --build-arg DISTROLESS_BASE=$DISTROLESS_BASE
       --build-arg BUILD_TAGS=testclock
-      --cache=true
-      --cache-repo="$INTERNAL_REGISTRY_REPO/cache"
-      --compressed-caching=false
       --registry-mirror=$ZOT_MIRROR
       --insecure-registry=$ZOT_MIRROR
       --insecure-registry=$INTERNAL_REGISTRY_HOST
@@ -322,8 +363,12 @@ meter-testclock-image-arm64:
 .gonk-index:
   extends: .manifest-merge
   stage: images
-  rules:
-    - if: '$CI_COMMIT_BRANCH'
+  # THE SAME LIST as .gonk-kaniko, by anchor rather than by copy. An index job
+  # that ran when its two arch legs did not would look for tags that were never
+  # pushed; one that skipped when they did would leave a commit with per-arch
+  # tags and no index, which is exactly the shape that took gonk down for six
+  # days (gonk-n50). These two must not be able to drift.
+  rules: *gonk_image_rules
   before_script:
     - set -a; . images/versions.env; set +a
     - export GONK_TAG="${GONK_VERSION}-$(printf %s "$CI_COMMIT_SHA" | cut -c1-12)"
