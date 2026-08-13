@@ -114,11 +114,21 @@ def plan_for_repo(rid, rpath, deployed, keep_groups):
             order.append(b)
 
     keepset = set(order[:keep_groups]) | {deployed}
-    keep = [n for _, n in dated if base_tag(n) in keepset]
-    delete = [n for _, n in dated if base_tag(n) not in keepset]
+
+    def protected(name):
+        # Keep the recent build groups, and keep EVERY tag carrying the deployed
+        # sha -- not just its build group. gonk-meter also publishes
+        # <tag>-testclock (and its two arch children), which base_tag does not
+        # fold into the deployed group because -testclock is not an arch suffix.
+        # Nothing in gitops pins it, so deleting it would probably be harmless,
+        # and "probably harmless" is not worth three tags of disk.
+        return base_tag(name) in keepset or name.startswith(deployed)
+
+    keep = [n for _, n in dated if protected(n)]
+    delete = [n for _, n in dated if not protected(n)]
 
     # Hard stop. Removing what Flux has pinned is how you unschedule production.
-    if any(base_tag(n) == deployed for n in delete):
+    if any(n.startswith(deployed) for n in delete):
         raise SystemExit(
             f"REFUSING: {rpath} delete set contains the deployed tag {deployed}")
     return keep, delete
