@@ -13,3 +13,6 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# Python bytecode from hack/ ops scripts.
+__pycache__/
