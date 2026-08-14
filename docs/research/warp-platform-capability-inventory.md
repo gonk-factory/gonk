@@ -144,8 +144,11 @@ Their canonical definition: *"an automation loop around the SDLC — **triage �
 | **Cost attribution** | Per-user and per-team. **No per-project attribution** ([#12075](https://github.com/warpdotdev/warp/issues/12075) open) | Enterprise | **AHEAD by design** — atags; currently broken (`gonk-m6t`) |
 | Credits | Combined **inference + compute** in one number. Per-conversation footer: credits, context consumed, tools invoked, model cost indicator | All | **PARTIAL** — Grafana only (roadmap 5.3) |
 | Analytics API | `summary` / `users` / `events`. Deterministic acceptance schema: file changes and LOC **suggested vs accepted**, `was_edited_by_user`. Aggregates only, never conversation text | Enterprise | **NONE** — copy the schema |
-| Run states | `INPROGRESS` / `SUCCEEDED` / `FAILED` / `BLOCKED` / `ERROR` / `CANCELLED` | — | **NONE** (roadmap 5.1) |
-| Error taxonomy | `environment_setup_failed`, `agent_process_failed` (incl. OOM, non-retryable), **`infrastructure_timeout`** (a stale-task reaper — their *entire* runaway-loop backstop), `content_policy_violation`, `budget_exceeded`, `insufficient_credits` | — | **NONE** (roadmap 5.1) |
+| Run states | `QUEUED` / `PENDING` / `CLAIMED` / `INPROGRESS` / `SUCCEEDED` / `FAILED` / `BLOCKED` / `ERROR` / `CANCELLED` | — | **NONE** (roadmap 5.1) |
+| Error taxonomy | **18 codes, split by fault: `FAILED` = caller's fault, `ERROR` = platform's fault**, with `retryable` carried on the wire. Includes `environment_setup_failed`, `agent_process_failed` (incl. OOM, non-retryable), **`infrastructure_timeout`** (a stale-task reaper — their *entire* runaway-loop backstop), `content_policy_violation`, `budget_exceeded`, `insufficient_credits`, `conflict`/`resource_unavailable`/`internal_error` (all retryable). RFC 7807 error bodies with `trace_id` | — | **NONE** — the fault split is the part to copy (roadmap 5.1) |
+| Credits are **three buckets** | **AI** (inference), **compute** (sandbox; cloud runs only), **platform** (run lifecycle/orchestration/observability — charged on *every* cloud run regardless of harness or inference source). One run can draw from all three | — | **PARTIAL** — gonk meters USD only; GPU-seconds is the real local axis |
+| Outbound webhooks | **None.** Warp never pushes events to you; you poll `GET /agent/runs/{id}` or watch the message bus | — | **AHEAD** — gonk is event-driven end to end |
+| Documented rate limits | **None anywhere**, including the OpenAPI spec | — | n/a |
 | Worker metrics | OTel catalog: connected gauge, active/max-concurrent, claimed/rejected(`reason`)/completed(`result`) counters, duration histogram, reconnects(`reason`). **All series pre-seeded at startup** | Enterprise | **PARTIAL** — service metrics, no agent-run metrics (roadmap 5.2) |
 | Session sharing / steering | Join a live session; web viewer is the Warp app compiled to WASM | Paid | **WON'T** |
 | Stuck-agent detection | **No semantic detector.** Only: `BLOCKED` state, `unschedulable_timeout` (30s), `activeDeadlineSeconds`, `--idle-on-complete` (45m), app-layer expiry | — | **PARTIAL** — reservation TTL |
@@ -206,6 +209,35 @@ Included for completeness; almost none of it is gonk-relevant.
 
 ---
 
+## 9b. Mechanisms a self-hosted competitor wouldn't think to build
+
+From a full sweep of all 363 doc pages plus the OpenAPI spec (21 paths, 28 operations, 85 schemas). Ranked by relevance to gonk; these are the non-obvious design choices, not the feature list.
+
+1. **Harness as a run-config *field*, not a deployment.** `harness: oz | claude | codex`, with per-harness auth secrets and a dedicated endpoint to fetch the *native* third-party transcript separately from the normalized one. gonk already runs opencode pods; making the harness a field rather than a fork is the cheap generalization of the rung seam (roadmap 5.6).
+2. **A durable inter-agent mailbox as a first-class primitive.** `oz run message list|read|watch --since-sequence N|send --to|mark-delivered`, addressed by agent ID, harness-agnostic, cross-location. Two non-obvious properties: **a child in a terminal state is still addressable and wakes on a new message**, and **messages and lifecycle events share a global sequence number** so a parent can never observe `SUCCEEDED` before the message that produced it.
+3. **Per-run federated identity.** `oz federate issue-token`, callable **only from inside a running agent**, mints a short-lived OIDC JWT with a composable `--subject-template` over `principal, scoped_principal, email, teams, environment, agent_name, skill_spec, run_id, host`. You can write an IAM policy scoped to "this exact skill, as this team, in this environment." No static cloud credentials anywhere. Conceptually adjacent to gonk's ed25519 grant model, and a good pattern if gonk ever needs cloud resources.
+4. **Declarative end-of-run workspace snapshots.** A pluggable script emits JSONL `{kind: repo|file, path}`; **repos are diffed, not copied**; per-run output path so concurrent runs can't clobber; malformed lines skipped rather than fatal; best-effort so a snapshot failure never fails the run.
+5. **Denylist ≥ allowlist ≥ autonomy, as a documented invariant, with a two-tier trust boundary.** "Run until completion" bypasses the *user's* denylist by default (with a named opt-out setting), but **admin denylist rules are structurally non-bypassable under any setting**. Most homegrown guardrails have one tier and ambiguous precedence. Their shipped defaults are instructive: allow `cat`/`echo`/`find`/`grep`/`ls`/`which`; deny `bash`/`sh`/`zsh`/`curl`/`wget`/`eval`/`exec`/`source`/`ssh`/`scp`/`rsync`/`rm`/`dig`. Note the footgun they document: **setting a denylist replaces rather than merges the defaults.**
+6. **Three-layer secret scoping with an explicit empty-list opt-out.** Owner scope → environment-attached *names* (so rotation is free) → per-run list, where an empty list means zero injection. And the rule gonk's broker should adopt: **personal secrets are never injected into user-less triggers** (schedules, automated integrations) — only team-scoped ones.
+7. **Approval gating on MCP *config file edits*, separate from tool-call approval.** The dangerous moment is a cloned repo silently registering a command-executing server, not calling an existing one.
+8. **`--idle-on-complete` (default 45m).** The worker keeps the agent process alive after the conversation ends so a human can attach and send a follow-up. Fire-and-forget pod designs make this impossible — worth knowing before gonk hard-codes pod teardown.
+9. **Fleet and environment health as queryable metadata**: `GET /agent/connected-self-hosted-workers` (live heartbeat roster), plus `setup_failed` and `last_task_created` on environments — so you find broken environments proactively rather than at run time.
+10. **Runner separated from environment.** "What the agent works on" and "what hardware it runs on" are distinct objects, overridable per run and per orchestration child.
+11. **Cancelling a parent deliberately does *not* cancel children**, and they say why; self-hosted/local/Action runs return 422 on cancel because Warp doesn't own their lifecycle. An honest boundary, explicitly documented.
+12. **`RunSourceType` as a queryable enum** (`LINEAR, API, SLACK, LOCAL, SCHEDULED_AGENT, WEB_APP, GITHUB_ACTION, CLOUD_MODE, CLI`), with **separate `creator` and `executor`** fields — modeling "a human delegated this to an agent running as a different principal."
+13. **Analytics `credit_charged` is an apportioned per-message share** of a multi-message LLM request — real chargeback accounting rather than request-level cost. Directly relevant to gonk's per-bead attribution (`gonk-m6t`).
+14. **PR artifact attachment is a tri-state** (Disabled / Link only / Embed) precisely because Embed makes agent screenshots downloadable by anyone who can read the PR.
+15. **Computer-use recordings are post-processed before leaving the sandbox** — idle time cut, actions burned in as overlays, **typed text masked as "typing…"** so secrets don't end up on camera.
+16. **Dynamic environment variables store the *retrieval command*, never the value** (`vault kv get …` is the stored object).
+17. **`osc52_clipboard_access` defaults to `deny`** — the escape sequence letting a sandboxed process write your clipboard is treated as a three-level security boundary.
+18. **OSC 9 / OSC 777 as a zero-dependency notification channel** — two `printf`s from any job produce a native desktop notification. A free "agent needs you" signal for any harness.
+19. **Orchestration notifications fire only on the parent**; children appear in a pill bar. Deliberate anti-fatigue design for fan-out.
+20. **Git worktrees as the documented parallel-agent isolation strategy**, with per-worktree index and review panel — a real alternative to container-per-job, and cheaper.
+
+**A rules-file constraint worth internalizing:** their docs state bluntly that the *entire* rules file is prepended to every prompt, so keep it under ~500 lines. With gonk at 16K context, the equivalent budget is far tighter — which is the argument for skills' progressive disclosure (name+description at start, body on trigger, references on demand) rather than one large always-on instruction file.
+
+---
+
 ## 10. Where gonk is ahead
 
 Worth stating plainly, because it's easy to lose in a parity exercise:
@@ -226,6 +258,7 @@ Worth stating plainly, because it's easy to lose in a parity exercise:
 | Date | Change |
 |---|---|
 | 2026-08-13 | Initial snapshot. Twelve parallel research passes over warp.dev/blog (133 posts), docs.warp.dev, the GitHub org, and the public demo repos. Key state: client AGPL open-source since Apr 2026, server/harness/Oz proprietary; all inference proxied through Warp; local harness announced May 2026 and walked back Jul 2026. |
+| 2026-08-13 | Added §9b from a complete docs sweep — all **363** doc URLs plus `openapi.json` (21 paths / 28 operations / 85 schemas). Nothing was unfetchable; the only gap is *inside* the docs, which never state prices, seat limits, or credit allowances (they defer to the pricing page). Corrections folded in: run states are nine not six; the error taxonomy is **18 codes split by fault** (`FAILED` = caller, `ERROR` = platform) with `retryable` on the wire; credits are **three independent buckets** (AI / compute / platform); there are **no outbound webhooks and no documented rate limits**. |
 
 ### Re-survey checklist
 
