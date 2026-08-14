@@ -304,24 +304,51 @@ And the discipline that costs nothing: *"Every time we use an interactive agent 
 
 ---
 
+## 11b. Revisions from the second-opinion review (2026-08-13)
+
+An independent analysis (`2026-08-13-fable-gonk-vs-warp-analysis.md`) reviewed this roadmap and caught two ordering errors. Both are accepted; the phase table above is superseded where they conflict.
+
+**Revision 1 — the runtime items in Phase 4 are preconditions for Phase 1, not follow-on work.** §0.1 of this document argues that context isolation is *"a precondition for gonk, not an optimization"* at 16K context, and then schedules the enabling work (4.1 search subagent, 4.3 hunk-only edit returns, 4.4 context-dependent tools and the pager fix, plus windowed search tools from 4.2) three phases later. That is an internal contradiction. **Move 4.1–4.4 into Phase 1**, ahead of the implementation agent: an implementation agent that echoes whole files or swallows a repo tree will not fit in the window at all, so building it first guarantees rework. Phase 4 keeps the *loop* (4.8–4.12) and the packaging items (4.5–4.7).
+
+**Revision 2 — verification should precede the spec agent.** Phase 2 currently bundles two things of very different value: the cheap routing inputs (`roadmap.md`/`vision.md`, the four-state rubric) and the expensive spec-authoring machinery. The routing half stays in Phase 2. The **spec agent moves after Phase 3**. The argument: Warp's spec gate exists to reduce review burden across *a team of engineers with varying prompt skill* — the variance it removes doesn't exist in a one-operator shop, where the operator already *is* the spec gate. What actually consumes the single operator's time is wrong diffs, and the thing that makes wrong diffs cheap to detect is verification, not a pre-written spec. Build the detector first; add spec authoring when verification proves the model produces work worth specifying in advance.
+
+**Revision 3 — within Phase 0, `gonk-ob5` outranks `gonk-e9m`.** Fail-open to a cloud provider defeats *both* core invariants simultaneously (local-only inference and hard budget enforcement) and does so silently. The keystroke-injection bug is bounded by a sanitizer; the fail-open is not bounded by anything.
+
+**Two items to STOP, also accepted:**
+
+- **Cut the self-improvement loop (4.8–4.12) from the plan.** Warp, with a team producing hundreds of runs per week, never validated theirs — no accuracy metric, no eval, and a published concession that it finds local maxima. A single operator's correction corpus is statistically empty; a loop that learns from a handful of relabels will overfit faster than it improves. **Keep only 4.8 (the versioned marker)** — it is cheap, and it is the join key that makes a future loop possible without retrofitting. Revisit when there is a corpus worth mining.
+- **Delete the formula / `[steps.check]` machinery.** Carrying two orchestration idioms (broker path and formula pour) is what produced the silently-dead mention trigger (`gonk-ecn`) and three zombie carry-forwards in PLAN.md. Port mention onto the broker and remove the formula path rather than maintaining both.
+
+**Also added from the review, not previously filed:** `gonk-8g9` (credential Ollama — one auth proxy makes local budgets hard without waiting on the Cilium migration; the highest value-per-effort item not on any list), `gonk-ecn` (the dead mention trigger), `gonk-sxg` (no `PAGER` in the agent image — Warp's documented pager-hang will hit gonk as-is).
+
+---
+
 ## 12. Sequencing summary
 
+Revised per §11b:
+
 ```
-Phase 0  Unblock          registry, prompt-by-reference, fail-open, scaffold, rig, egress
+Phase 0  Unblock          fail-open (ob5) FIRST, then registry, prompt-by-reference,
+   │                      scaffold, rig, egress; + credential Ollama (8g9), PAGER (sxg)
    │                      → all existing beads; nothing works until these do
-Phase 1  Throughput       implementation agent, code effects, anti-lying validator,
-   │                      MR↔bead marker, fix attribution
-   │                      → THE gap; Warp's own factory stalled exactly here
-Phase 2  Route + spec     roadmap/vision, 4-state rubric, PRODUCT/TECH specs,
-   │                      human spec gate, skills-as-files
-   │                      → moves review upstream; biggest reduction in operator burden
+Phase 1  Throughput       [moved up] search subagent w/ own window, windowed grep tools,
+   │                      hunk-only edit returns + edit ladder, context-dependent tools;
+   │                      THEN implementation agent, code effects, anti-lying validator,
+   │                      MR↔bead marker (+ versioned skill marker), fix attribution
+   │                      → THE gap; Warp's own factory stalled exactly here.
+   │                        Runtime items lead because 16K context makes them preconditions
+Phase 2  Route            roadmap.md/vision.md, 4-state rubric, skills-as-files
+   │                      → cheap, high-leverage; the spec agent is NOT here any more
 Phase 3  Review + verify  annotated-diff coordinates, validator, read-only reviewer,
    │                      reproduce/verify modes, artifact-backed status, attempt cap
-Phase 4  Learn            search subagent, edit ladder, environments, sidecar, cache;
-   │                      versioned markers, deterministic feedback, bounded write
-   │                      surface, evals
-Phase 5  Harden           state machine, metrics, cost footer + alerts, routing,
-   │                      local failover, multi-harness, egress; THEN widen intake
+   │                      → the detector for wrong diffs, which is what costs the operator
+Phase 3b Spec agent       PRODUCT/TECH specs + human spec gate
+   │                      → only once verification proves the work is worth pre-specifying
+Phase 4  Package          environments as one object, sidecar-merged harness, warm cache
+   │                      → self-improvement loop CUT; only the versioned marker survives
+Phase 5  Harden           state machine + fault-split errors, metrics, cost footer +
+   │                      alerts, complexity routing, local failover, multi-harness,
+   │                      egress; delete the formula path; THEN widen intake
 Phase 6  Compound         dependency/CVE, docs sync, sweeps, CI diagnosis, monitor
 ```
 
