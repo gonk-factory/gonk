@@ -368,6 +368,26 @@ Accepted, with an added constraint that sharpens it: **a toy repo produces toy i
 4. **Diagnosable size** — small enough that an early failure can be read in one sitting.
 5. **Not gonk**, until `gonk-066` closes.
 
+**Decided 2026-08-13 (owner): `agentic/nagus`, `agentic/rom`, `agentic/quark`.** Tracked as `gonk-4v8`.
+
+| | nagus | rom | quark |
+|---|---|---|---|
+| Commits, last 90d | **73** | 3 | 3 |
+| Size / tests | 134 files, 33 test files | 61 / 4 | 61 / 4 |
+| Deployed | **yes** — gitops, own image + shared CNPG | no | no |
+| `.agent/` present | yes, richest (`tasks`, `grafana`, `sops`, `system`) | yes | yes |
+| Provenance | first-party service | `homelab/go-service-template` | same template |
+
+Three observations that matter to the plan:
+
+- **The orientation tier already exists.** All three carry an initialized `.agent/`. ADR-007 §4.2's "review against durable project documents" is buildable now, not after a Navigator build-out.
+- **The criteria split cleanly, which is why three beats one.** nagus supplies the genuine inflow but is deployed *and* handles untrusted listing content, so it carries real blast radius. rom and quark are undeployed and cheap to get wrong, but at 3 commits a quarter they generate little on their own. Neither profile satisfies criteria 1 and 3 together; the set does.
+- **rom and quark are near-identical siblings** from one template. That is a free A/B: run the same change against both, or hold one as a control while tuning prompts against the other.
+
+**Order within the set:** prove the plumbing on rom or quark, hold the sibling as control, bring nagus in third once the loop is trusted.
+
+**A hazard found while checking this, now `gonk-jn5`.** `pkg/glab/projects.go:19-25` enumerates watched projects via `GET /api/v4/projects?membership=true`, and GitLab's `membership=true` **inherits group membership**. All three targets live in `agentic/` — and so does `gonk-project`. Granting the bot membership at *group* level would therefore make gonk watch itself, handing a code-writing agent a path to its own broker and `effect-shape.toml`, as a side effect of onboarding rather than as a decision. Onboard **per-project only**, and consider a hard project-ID denylist in intake so self-watching fails closed regardless of how membership is later granted in GitLab's UI — which is outside gonk's control. `gonk-066` now blocks `gonk-4v8` for the same reason.
+
 **Priority shifts that follow:**
 
 - **`gonk-bgx` is promoted from bug to hard blocker.** "A newly-onboarded project can never reach triage: scaffold gates it and scaffold is on the broken formula path" is no longer one broken path among several — it is the thing standing between the plan and its own test bed. Onboarding a second project is now on the critical path. Same for `gonk-msz` (scaffold told the repo is checked out; nothing clones it).
