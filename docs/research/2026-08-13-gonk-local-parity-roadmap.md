@@ -12,7 +12,9 @@
 
 Warp's mechanisms assume things gonk does not have. Every port below is filtered through these:
 
-1. **Local models, small context.** `qwen3-14b` is capped at `num_ctx` 16384 (`gonk-m4k`). Warp's harness assumes frontier models and large windows. Their context-isolation patterns (subagent with its own window, cheaper model for narrow tasks) are **preconditions for gonk, not optimizations**.
+1. **Local models — and the window is 128K, not 16K.** ⚠️ **CORRECTED 2026-08-13.** An earlier version of this document asserted a 16K ceiling and built Phase ordering on it. That was wrong. `num_ctx 16384` is a property of **one Ollama alias**, `qwen3-14b` (`gonk-m4k`) — which happens to be the alias gonk's rung catalog names (`gonk-gyj`). LiteLLM actually serves seven local models, of which **five are 128K**, including a vLLM deployment on bailey hosting `RedHatAI/Qwen3.6-35B-A3B-NVFP4` (`--max-model-len=131072`, `--gpu-memory-utilization=0.35` ≈45GB, MoE with 3B active, fp8 KV cache, prefix caching, MTP speculative decoding) exposed as `qwen3.6-35b-vllm`. Note the trap: vLLM's `--max-num-batched-tokens=16384` is a *prefill batch budget*, not a context window, and reads exactly like one.
+   **Consequence:** Warp's context-isolation patterns are **useful optimizations, not preconditions.** The binding constraint on Phase 1 is not "will the context fit" but "will the model emit a valid edit" — which moves the deterministic validator and the annotated-diff coordinate scheme up, and moves the search subagent down. See §11c.
+   **What is newly available and matters:** the vLLM deployment runs `--enable-auto-tool-choice` with `--tool-call-parser=qwen3_xml` and `--reasoning-parser=qwen3`. Native tool-call parsing is a direct input to implementation-agent reliability, and it makes Warp's "tool names and schemas are model-specific" finding immediately testable rather than theoretical.
 2. **No LLM judges in the ladder.** Warp's determinism is *contract-shaped* — the LLM still emits `verdict: APPROVE|REJECT`, only the vocabulary and coordinates are machine-checked. gonk's is *judgment-shaped*: `pkg/gate.Classify` is pure and total, protected by a regression test. Where Warp uses model judgment for classification, gonk needs a deterministic substitute or an explicit human gate.
 3. **One operator.** Warp's "highest-leverage checkpoint" (human spec approval) and "agents comment, humans merge" both consume the scarcest resource here. Anything that adds review burden without removing more must be rejected.
 
@@ -310,6 +312,8 @@ An independent analysis (`2026-08-13-fable-gonk-vs-warp-analysis.md`) reviewed t
 
 **Revision 1 — the runtime items in Phase 4 are preconditions for Phase 1, not follow-on work.** §0.1 of this document argues that context isolation is *"a precondition for gonk, not an optimization"* at 16K context, and then schedules the enabling work (4.1 search subagent, 4.3 hunk-only edit returns, 4.4 context-dependent tools and the pager fix, plus windowed search tools from 4.2) three phases later. That is an internal contradiction. **Move 4.1–4.4 into Phase 1**, ahead of the implementation agent: an implementation agent that echoes whole files or swallows a repo tree will not fit in the window at all, so building it first guarantees rework. Phase 4 keeps the *loop* (4.8–4.12) and the packaging items (4.5–4.7).
 
+> **⚠️ Revision 1 is PARTLY WITHDRAWN — see §11c.** Its premise was the 16K figure, which was wrong. At 128K the "won't fit at all" argument fails. The pager fix (`gonk-sxg`) and the edit-tool investigation stay in Phase 1 because they are cheap and load-bearing for a different reason; the **search subagent moves back out to Phase 4/5** as the cost optimization it actually is.
+
 **Revision 2 — verification should precede the spec agent.** Phase 2 currently bundles two things of very different value: the cheap routing inputs (`roadmap.md`/`vision.md`, the four-state rubric) and the expensive spec-authoring machinery. The routing half stays in Phase 2. The **spec agent moves after Phase 3**. The argument: Warp's spec gate exists to reduce review burden across *a team of engineers with varying prompt skill* — the variance it removes doesn't exist in a one-operator shop, where the operator already *is* the spec gate. What actually consumes the single operator's time is wrong diffs, and the thing that makes wrong diffs cheap to detect is verification, not a pre-written spec. Build the detector first; add spec authoring when verification proves the model produces work worth specifying in advance.
 
 **Revision 3 — within Phase 0, `gonk-ob5` outranks `gonk-e9m`.** Fail-open to a cloud provider defeats *both* core invariants simultaneously (local-only inference and hard budget enforcement) and does so silently. The keystroke-injection bug is bounded by a sanitizer; the fail-open is not bounded by anything.
@@ -323,20 +327,116 @@ An independent analysis (`2026-08-13-fable-gonk-vs-warp-analysis.md`) reviewed t
 
 ---
 
+## 11c. Corrections of 2026-08-13 (model routing, and the test repo)
+
+Two facts arrived after the first draft. Both change priorities.
+
+### 11c.1 The context ceiling was an artifact of pointing at the wrong model
+
+Established against the live cluster, not from documentation:
+
+| Alias in LiteLLM | Backend | Context |
+|---|---|---|
+| `qwen3-14b` | Ollama `qwen3:14b` | **16,384** ← what gonk's rung catalog names |
+| `qwen3-8b-bailey` | Ollama `qwen3:8b` | 40,960 |
+| `qwen3.6:35b`, `qwen3.6:35b-nothink` | Ollama | 131,072 |
+| `nemotron3:33b` | Ollama | 131,072 |
+| **`qwen3.6-35b-vllm`, `qwen3.6-35b-vllm-nothink`** | **vLLM → NVFP4 35B MoE** | **131,072** |
+
+`docs/environment.md` still claims the instance has two models (`gonk-4ck`), and documents no vLLM deployment at all. The routing fix is `gonk-gyj`.
+
+**What this changes:**
+
+- **Search subagent / context isolation: Phase 1 → Phase 4–5.** It is a cost optimization now. Warp's own measurement (−26% tokens) is a cost result, not a capability result, and it was measured against a tool-definition blob gonk does not yet have.
+- **What moves *up* instead.** The binding Phase-1 risk is no longer "will it fit" but "will the model emit a valid, appliable edit." That promotes: the **annotated-diff coordinate scheme + validator** (hallucinated line numbers are a model behaviour, unaffected by window size), the **anti-lying validator**, and the **opencode edit-tool investigation** — what its pinned edit tool does on a fuzzy miss, and how much of a file it echoes back. That last one is the first real test of whether opencode stays the right harness for a code-writing rung.
+- **Tool-call parsing is now a lever.** The vLLM deployment has `--enable-auto-tool-choice` with a `qwen3_xml` parser. Warp's finding that tool names and schemas are model-specific (renaming `grep`→`ripgrep` measurably improved selection; preamble prompts caused stalls) is now directly testable rather than theoretical.
+- **Reviewer/implementer model diversity is free.** Several distinct 128K models are already served, so ADR-007 §4.3's separate-reviewer idea costs nothing to arrange.
+- **Predictions re-baselined.** Any forecast keyed to "qwen3-14b at 16K" was scored against the wrong model. In particular, the predicted dominant failure mode — *context exhaustion on repos over ~30 files* — is now unlikely; expect malformed or non-appliable edits instead. The pessimistic merge-rate forecast should be re-run against `qwen3.6-35b-vllm` before it is treated as a baseline.
+- **Open question, not resolved here:** deployed `--max-model-len` is 131072 while the stated design target was ~250k. Decide whether that is a deliberate step-down (KV-cache headroom at 0.35 utilization, alongside a resident Ollama on the same box) or drift.
+
+### 11c.2 The first implementation target must be a real repo that is not gonk
+
+Accepted, with an added constraint that sharpens it: **a toy repo produces toy issues.** The failure modes worth discovering — ambiguous requests, cross-file changes, stale assumptions, work that should have been an issue reply instead of a diff — only appear against genuine activity. A scratch repo would validate the plumbing and teach nothing about the product.
+
+**Why not gonk itself:** an agent whose effect batches can reach the repository containing its own broker, gate, and `effect-shape.toml` is precisely the scenario `gonk-066` (workflow-scope gating) exists to prevent — and `gonk-066` is open. The 70-bead backlog makes gonk the tempting first target; that temptation is the argument for the rule, not against it.
+
+**Selection criteria:**
+
+1. **Genuine issue flow** — you file issues against it in the ordinary course of work, without manufacturing them.
+2. **Deterministic validation** — a real build and test command that runs in a container, so Phase 1's `.gonk.yml` validation contract has something true to name.
+3. **Bounded blast radius** — a merged bad MR is embarrassing, not operational. This rules out the gitops repo outright: an MR there deploys.
+4. **Diagnosable size** — small enough that an early failure can be read in one sitting.
+5. **Not gonk**, until `gonk-066` closes.
+
+**Priority shifts that follow:**
+
+- **`gonk-bgx` is promoted from bug to hard blocker.** "A newly-onboarded project can never reach triage: scaffold gates it and scaffold is on the broken formula path" is no longer one broken path among several — it is the thing standing between the plan and its own test bed. Onboarding a second project is now on the critical path. Same for `gonk-msz` (scaffold told the repo is checked out; nothing clones it).
+- **`.gonk.yml` validation commands move earlier**, from Phase 1.4 into the onboarding of the test repo. The agent must not guess how to test a codebase it did not write.
+- **`gonk-m6t` gains real value.** A second project makes per-project attribution and per-project ceilings observable rather than theoretical — two projects is where the budget story is actually exercised, and it is the differentiator Warp's analytics lacks.
+- **`gonk-8s0` stays deferred.** One deliberate extra project needs no instance-wide discovery model.
+- **The metrics get a denominator.** §11's two numbers only mean something against a repo with genuine inflow; measured against gonk's own backlog they would be self-referential.
+
+### 11c.3 The serving layer is a *development-environment* variable — not a gonk feature
+
+Correcting a framing error, and then correcting the correction.
+
+The earlier draft treated "local models" as exogenous: a fixed capability the roadmap must work around. That was wrong. But the fix is **not** that gonk drives the serving layer — that would be a worse error, because it would encode a deployment reality into the product.
+
+**The accurate statement:** *our development of gonk on orac* drives what bailey serves and how. Because gonk is the primary workload on this cluster, the operator can tune the model/server mix to suit it. That is a fact about **this deployment**, and it belongs to `docs/environment.md`, the gitops repo, and the operator — the same place the site-local model names already live.
+
+**What gonk the software may assume: nothing beyond an OpenAI-compatible endpoint.** Spec §2 goal 8 requires the product repos carry no deployment-specific material, and `docs/environment.md` already states the rule for exactly this class of fact — site-local model names *"must never appear as defaults in gonk's product code or chart."* The same rule governs serving assumptions. gonk must run against whatever LiteLLM fronts, on any site, including one with a single modest model behind Ollama and no vLLM at all.
+
+So the two columns must stay separate:
+
+| Development-environment activity (orac, operator, `environment.md`) | Product requirement (gonk repos, chart, pack) |
+|---|---|
+| Which models run on bailey, on which server, with which flags | A rung catalog that is **operator-supplied and site-local**, with the chart failing to render without one |
+| Consolidating agent load onto vLLM; raising `--max-model-len` toward the ~250k target; resolving the vLLM/Ollama resident-memory contention | No assumption about batching, prefix caching, or resident-model behaviour |
+| Evaluating SGLang or TensorRT-LLM as a better fit for sustained agent load than Ollama's low-commitment load/unload model | No assumption that any specific server is present |
+| Enabling guided decoding on the backend | **Optional** use of it where advertised; never a load-bearing guarantee (see below) |
+
+**Why this matters beyond tidiness.** Stage workloads genuinely differ — implementation resends the same repository prefix every turn and benefits enormously from prefix caching, while triage is short and one-shot — and it is right for *this deployment's operator* to act on that. It would be wrong for gonk to encode it, because a site with different hardware will make different choices and gonk must still work there.
+
+**Grammar-constrained decoding — an optional optimization, never a guarantee.**
+
+gonk's architecture depends on the agent emitting a well-formed effects batch, and Phase 3 adds a second schema-shaped artifact for review findings. Warp defends this with a *tolerant parser* — scanning for the last JSON object carrying the required keys, because models wrap output in prose despite instructions, a defence they implement in three separate places.
+
+Where a site's backend supports guided decoding (vLLM's xgrammar/outlines, SGLang's structured output), constraining the sampler to the effect-batch schema removes an entire failure class at the most deterministic point available. That is worth taking **when it is offered**.
+
+But it must be plumbed as an **optimization that reduces retries, never as the thing that makes output trustworthy.** The reasons are the same two that govern everything else here:
+
+- **Portability.** A site with a backend that can't do it must still work. If the guarantee lived in the sampler, gonk would silently become vLLM-only.
+- **Fail-closed.** The **shape gate remains the sole authority**. The broker validates the batch regardless of how it was produced — that is already the design, and it is what makes the agent's output untrusted-by-construction. Constrained decoding narrows what the model tends to emit; only the gate decides what is allowed to happen.
+
+Practically: advertise it per-rung in the operator's catalog, use it where present, and keep the parser and gate unchanged either way. The main unknown is whether LiteLLM forwards guided-decoding parameters to the backend, or whether that capability is only reachable by addressing vLLM directly — which would itself be a portability cost worth weighing.
+
+Worth noting as context rather than as a gonk claim: a cloud-proxied product like Warp cannot do this at all, since it sits in front of vendor APIs and can only constrain by prompting and retrying. Owning the inference layer is what makes the option *available* to this deployment — it does not make it part of the product.
+
+**Consequence for the plan, split by column:**
+
+*Development-environment work (not gonk product work):* `gonk-tqf` — pick the model/server mix that suits how we develop gonk here, resolve the vLLM/Ollama resident contention, and decide the `--max-model-len` target. Record the outcome in `environment.md` (`gonk-4ck`), not in the chart or the pack.
+
+*Product work:* `gonk-gyj` — point the site-local rung catalog at a model that fits the workload, which is a config change in *this* deployment's operator values, not a default. `gonk-vpm` — support guided decoding as an advertised, optional per-rung capability, with the shape gate unchanged as the authority. And instrument requested-policy vs resolved-model vs cost per call (Warp's routing observability schema), which *is* product work and is what lets any operator steer their own catalog by measured demand rather than guesswork.
+
+---
+
 ## 12. Sequencing summary
 
-Revised per §11b:
+Revised per §11b **and §11c**:
 
 ```
 Phase 0  Unblock          fail-open (ob5) FIRST, then registry, prompt-by-reference,
-   │                      scaffold, rig, egress; + credential Ollama (8g9), PAGER (sxg)
-   │                      → all existing beads; nothing works until these do
-Phase 1  Throughput       [moved up] search subagent w/ own window, windowed grep tools,
-   │                      hunk-only edit returns + edit ladder, context-dependent tools;
-   │                      THEN implementation agent, code effects, anti-lying validator,
-   │                      MR↔bead marker (+ versioned skill marker), fix attribution
+   │                      rig, egress; + credential Ollama (8g9), PAGER (sxg),
+   │                      route rungs to the vLLM 35B (gyj);
+   │                      SCAFFOLD/ONBOARDING (bgx, msz) is now a hard blocker —
+   │                      it gates the test repo, which gates everything
+   │                      + pick and onboard the real non-gonk test repo (§11c.2)
+Phase 1  Throughput       edit-tool investigation + hunk-only returns, PAGER, tool-name
+   │                      tuning for qwen3_xml; THEN implementation agent, code effects,
+   │                      anti-lying validator, annotated-diff coordinates + validator,
+   │                      MR↔bead marker, .gonk.yml validation contract, fix attribution
    │                      → THE gap; Warp's own factory stalled exactly here.
-   │                        Runtime items lead because 16K context makes them preconditions
+   │                        Search subagent is NOT here — 128K makes it an optimization
 Phase 2  Route            roadmap.md/vision.md, 4-state rubric, skills-as-files
    │                      → cheap, high-leverage; the spec agent is NOT here any more
 Phase 3  Review + verify  annotated-diff coordinates, validator, read-only reviewer,
