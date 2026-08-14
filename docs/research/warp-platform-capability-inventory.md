@@ -243,6 +243,7 @@ From a full sweep of all 363 doc pages plus the OpenAPI spec (21 paths, 28 opera
 Worth stating plainly, because it's easy to lose in a parity exercise:
 
 1. **Hard per-project budget ceilings** enforced at the model door via LiteLLM virtual keys + synthetic pricing. Warp caps per team (per user only at Enterprise), inside their billing system.
+   ⚠️ **Architecturally true; operationally true today only for cloud rungs.** Verified 2026-08-13: LiteLLM's `model_cost_map` contains two entries, both `qwen3-14b`, both priced at **zero**, while the HelmRelease declares synthetic prices gonk-side that were never copied across. So the USD ceiling does not close on any *local* rung — a second, independent gap from the Ollama network bypass, since even correctly-routed traffic is unpriced. gonk-meter's own token ceilings still bind. Filed as `gonk-1zm`; the claim above is restored once that closes.
 2. **Per-project cost attribution** — an open feature request at Warp.
 3. **Zero forge credentials in the agent pod.** Warp injects a short-lived scoped token; gonk's broker means there is nothing to exfiltrate.
 4. **Deterministic classification** — `pkg/gate.Classify` is pure and total with a regression test. Warp's `verdict` is model-produced; only the vocabulary is checked.
