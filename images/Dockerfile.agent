@@ -144,6 +144,30 @@ RUN chmod +x /usr/local/bin/gonk-agent-entrypoint /usr/local/share/gonk/prepare-
 # fail to write .gitconfig/.config as a non-root uid with no home directory.
 RUN mkdir -p /workspace /etc/gonk/overlay && chown -R 65532:65532 /workspace /etc/gonk
 ENV HOME=/workspace
+
+# No pager, and no credential prompt: both are SILENT HANGS in this pod, and a
+# silent hang is indistinguishable from a slow model.
+#
+# git only pages when stdout is a TTY -- which is exactly the agent's case, not
+# the CI case. opencode gives the session a PTY, so an agent that runs `git log`
+# or `git diff` lands in `less` and waits for a keypress that never comes, until
+# the reservation TTL reaps it. `podman run` without -t will NOT reproduce this,
+# which is why it has never been seen in the image tests. Warp published the
+# same failure from production as a common, silent one; gonk's agent has shell
+# access and would have hit it on the first `git log`.
+#
+# GIT_PAGER beats core.pager, so this needs no .gitconfig and survives a rig
+# checkout that ships its own. PAGER covers everything else that shells out to a
+# pager (man, systemctl, gh).
+#
+# GIT_TERMINAL_PROMPT=0 is the same class of bug one layer down: the agent pod
+# holds NO forge credential by design (the broker applies effects, pkg/rig
+# delivers the tree), so any git operation that reaches for a remote must FAIL,
+# not sit on a TTY prompting for a username. Failing closed here turns a hang
+# into an error the gate can classify.
+ENV PAGER=cat \
+    GIT_PAGER=cat \
+    GIT_TERMINAL_PROMPT=0
 WORKDIR /workspace
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/gonk-agent-entrypoint"]

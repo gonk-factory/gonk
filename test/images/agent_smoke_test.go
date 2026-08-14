@@ -172,6 +172,41 @@ func TestAgentImageRunsAsNonRoot(t *testing.T) {
 	}
 }
 
+// The agent pod must never be able to hang on something waiting for a keypress.
+// Two env vars carry that, and both are load-bearing for a reason the test
+// harness itself cannot reproduce:
+//
+//   - PAGER/GIT_PAGER: git pages only when stdout is a TTY. `podman run` here
+//     has no TTY, so `git log` would pass this suite whether or not a pager is
+//     configured. The AGENT runs under opencode's PTY, where git WILL page and
+//     then block forever on a keypress until the reservation TTL reaps it --
+//     a silent stall indistinguishable from a slow model.
+//   - GIT_TERMINAL_PROMPT: the pod holds no forge credential by design, so a
+//     git operation reaching for a remote must fail rather than sit on a
+//     username prompt. Failing closed turns a hang into a classifiable error.
+//
+// Asserting the environment (rather than trying to provoke a pager) is
+// deliberate: it is the property that actually has to hold, and it holds
+// regardless of whether this suite can allocate a TTY.
+func TestAgentImageCannotHangOnAPagerOrCredentialPrompt(t *testing.T) {
+	image, _ := agentImage(t)
+	want := map[string]string{
+		"PAGER":               "cat",
+		"GIT_PAGER":           "cat",
+		"GIT_TERMINAL_PROMPT": "0",
+	}
+	for _, k := range []string{"PAGER", "GIT_PAGER", "GIT_TERMINAL_PROMPT"} {
+		out, code := runIn(t, image, "/bin/sh", "-c", "printf %s \"$"+k+"\"")
+		if code != 0 {
+			t.Fatalf("reading $%s exited %d:\n%s", k, code, out)
+		}
+		if got := strings.TrimSpace(out); got != want[k] {
+			t.Errorf("$%s = %q, want %q -- without it the agent can hang "+
+				"silently under opencode's PTY until its reservation expires", k, got, want[k])
+		}
+	}
+}
+
 // gonk-gate ships in the agent image for `check`/`trailers` (AD-3). What this
 // asserts: the binary is present, executable, and honours its documented
 // exit-code contract (main.go's own doc comment: 2 = misconfiguration, never
