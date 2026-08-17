@@ -1,8 +1,215 @@
 # Handoff — next session
 
-_Last updated: 2026-08-03 (session 6). Branch: `main` (we develop on main per owner's call). Everything below is committed and pushed._
+_Last updated: 2026-08-17. Branch: `main` (we develop on main per owner's call).
+Everything below is committed and pushed._
 
-## 2026-08-03 (session 6): the agent completed the loop; onboarding is one step short
+**Read the top section and stop.** Sections below it are dated history, kept
+because their measurements and dead ends are still worth not repeating. Any
+"START HERE" in a dated section is superseded by the one in the current section.
+
+---
+
+## 2026-08-17: state of the world, and the two weeks the doc had lost
+
+This doc had gone stale by two weeks — it ended at session 6 (2026-08-03) and
+still told you to start on `gonk-4xr`, naming a deployed sha two deploys old.
+Sessions 7–10 (2026-08-04 → 08-13) existed only in beads, commit messages and
+`docs/research/`. That is the gap this section closes.
+
+### Position
+
+| | |
+|---|---|
+| `main` | `bed8792`, clean, in sync with origin. Last commit **2026-08-13** |
+| deployed images | `v0.1.0-4b3c7e185b55` (2026-08-10) — **behind HEAD** |
+| ns `gonk` | four service pods Running, controller 3 restarts |
+| beads | 137 total / 80 open / **0 in progress** / 16 blocked / 57 closed |
+
+### START HERE
+
+**`gonk-ob5` (P1) — opencode fails OPEN to a built-in cloud provider.** The
+local-parity roadmap's revision 3 promotes it above everything else in Phase 0,
+and the argument is right: it defeats *both* core invariants at once (local-only
+inference and hard budget enforcement) and does so silently, where the keystroke
+bug is at least bounded by a sanitizer. It was found incidentally by the
+prompt-by-reference T0 spike, and **the full three-layer fix is already written
+on the bead** — an `enabled_providers: ["gonk"]` allowlist (in opencode's schema
+but not its `--help`), plus an entrypoint assertion that opencode actually
+resolved a gonk-only provider list, because config cannot guard its own absence.
+
+Worth knowing before you start: the exposure is wider than "config missing". The
+built-in providers were present **even with the overlay loaded**, and an
+unguarded pod answers an explicit `-m opencode/big-pickle` override happily,
+from inside the cluster, with no gonk credential and outside LiteLLM entirely.
+
+Then: **`gonk-e9m`** (the plan is written, T1–T6, see below), and **a deploy**
+(see "Deploy drift").
+
+### What happened in sessions 7–10
+
+**`gonk-zp3` was root-caused, and it was two faults wearing one signature**
+(2026-08-10, and it needed `gonk-6a6`'s log sink to be fixed first — before that,
+every structured line `gonk-gate` emitted was discarded, which is why four
+investigations bounced off this).
+
+- *Fault 1, fixed in `49d0d7d`*: the meter could not provision a project's
+  LiteLLM virtual key, because `updateByAlias` re-sent `key_alias` on
+  `/key/update` and LiteLLM rejects that as a duplicate of itself. Consequence:
+  intake answered **every** webhook `200` and dropped it as state_key-missing, so
+  dispatch never fired at all.
+- *Fault 2, the original bug*: with dispatch working, the sweep said in one line
+  what four investigations could not — `no GONK_BATCH_START/END fence in session
+  transcript`. Fetching the live transcript repeatedly until the session ended
+  returned the same single turn every time: opencode's TUI splash and nothing
+  else. **The agent never receives its prompt.** So `zp3` is `gonk-e9m`, and
+  extraction, validation, the shape gate and the peek window are all exonerated.
+
+**The out-of-band channel exists, but one of its two shapes is broken.**
+`gonk-2do`: `opencode run --attach <url>` emits a single `step_start`, exits 0,
+and produces no text, no tool call and no error on any stream — proven side by
+side against a working standalone `run` in one pod, seconds apart. Not a display
+loss; `opencode export <sessionID>` against the server afterwards also returns
+nothing, and neither LiteLLM nor ollama ever saw a chat completion, so the turn
+is abandoned before any provider request. **The distinction that matters is
+argument vs keystroke, not serve vs TUI** — and `e9m`'s design field proposed
+`opencode serve`, which is now refuted. The correction is on the bead.
+
+**The rig checkout slice landed** (`gonk-j9z`, `gonk-msz`, part of `gonk-7oz`):
+per-session checkout granted at the decision point, agent→GitLab egress dropped
+from the NetworkPolicy, triage given a checkout too, grant revoked at teardown.
+The nice result is item 4 — a pooled generic pod **can** learn its own
+per-session URL without any new channel, because the URL splits into a
+per-install base (`GONK_RIG_BASE_URL`, chart-injected) and a per-session
+`GC_ALIAS` that Gas City puts in every agent pod itself. So the checkout never
+needed `e9m` after all.
+
+**The registry filled to 100% and was fixed** (`gonk-mzm`, `gonk-1t4`). 295G of
+unreferenced blobs against 684M of manifests — the signature of a registry that
+has never been garbage collected. Fixed by a tag prune (921 tags) plus a
+registry-side GC, and the CI cause was fixed too (`10dda82` stopped rebuilding
+every image on every commit).
+
+**2026-08-13 was a research day, and it reordered the plan.** A Warp.dev
+comparison, a 363-URL capability inventory, a 54KB local-parity roadmap, a Fable
+second-opinion that caught two ordering errors in it, and ADR-007. Outputs:
+epic `gonk-6sp` (phases 0–6) and `gonk-4v8` (first real targets decided:
+`nagus`, `rom`, `quark`). Read
+[`the roadmap`](research/2026-08-13-gonk-local-parity-roadmap.md)
+§11b and §11c before planning anything — they supersede the phase table above
+them, and §11c.1 in particular invalidates a whole class of earlier reasoning.
+
+### The correction that matters most: the context ceiling was the wrong model
+
+`qwen3-14b` at **16,384** is what gonk's rung catalog names, and
+`enforce_ladder_order=true` makes it where every bead starts. Meanwhile the
+cluster already serves several **131,072**-context models, including a vLLM
+NVFP4 35B MoE. The routing fix is `gonk-gyj`.
+
+Two separate conclusions had been drawn from that one bad number and both were
+wrong: `gonk-2do`'s first hypothesis (rung 1's context limit explains the empty
+turn — killed by measuring a real triage prompt at 6,676 input tokens), and the
+roadmap's revision 1 (context isolation is a *precondition*, so move the search
+subagent into Phase 1 — withdrawn; at 128K it is a cost optimization and moves
+back to Phase 4/5). What moves **up** instead is the annotated-diff coordinate
+scheme and validator, the anti-lying validator, and the opencode edit-tool
+investigation: the binding Phase-1 risk is no longer "will it fit" but "will the
+model emit a valid, appliable edit."
+
+### Deploy drift — the rig checkout is committed and NOT running
+
+Images are pinned at `v0.1.0-4b3c7e185b55` (2026-08-10). Seven code commits sit
+after it:
+
+```
+82f9f9b  fix(agent-image)  PAGER/GIT_PAGER/GIT_TERMINAL_PROMPT (gonk-sxg)
+d09b10a  fix(rig)          check resp.Body.Close
+26dfc3b  feat(rig)         triage gets a checkout too; revoke at teardown
+100c70a  feat(rig)         wire the checkout end to end
+d7de8fc  feat(rig)         per-session checkout, granted at the decision point
+2a70711  fix(netpol)       drop agent->GitLab egress, add checkout path to intake
+2739633  fix(scaffold)     stop telling the agent it has a checkout it does not have
+```
+
+The pods are only ~4 days old, which is misleading: the 2026-08-13 docs commits
+re-released the chart (its version embeds the git sha) but the image tags never
+moved. Everything above is unit- and chart-tested and **none of it has ever run
+in a cluster** — that is the whole of what remains on `gonk-j9z`.
+
+To roll forward: confirm CI published a complete four-image set at HEAD, then
+bump the four tags in `steve/gitops`
+`clusters/orac/apps/gonk/helmrelease-gonk.yaml` and commit **straight to main**
+(that repo takes no MRs).
+
+### Tracker corrections made 2026-08-17
+
+The tracker was actively misleading, so this session fixed it rather than
+working around it. Closed: `gonk-mzm` (P0 — the registry had been at 35% for
+days while this blocked the critical path as a P0), `gonk-1t4` (reclaim
+confirmed), `gonk-zp3` (diagnosed; `e9m` carries the fix), `gonk-2do`
+(diagnosed; upstream draft split to the new `gonk-ckb`). Moved out of
+`in_progress`, where nothing was actually being worked: `gonk-712` (claimed for
+a month) and `gonk-pev`. `in_progress` is now empty and honest.
+
+Two structural fixes worth naming:
+
+- **`gonk-712`, the project's milestone bead, had no dependency edges at all.**
+  `zp3`'s description asserted "Blocks gonk-712" in prose and no edge was ever
+  created. Now correctly blocked by `gonk-e9m`, which is the honest chain:
+  everything upstream of prompt delivery works, and the only reason the milestone
+  has never been reached is that the agent never gets its prompt.
+- **`gonk-j9z` items 5 and 6 had already landed** in `26dfc3b`, whose message
+  says so explicitly — but no `bd` update followed, so the bead still listed them
+  as open. Only item 7 (never proven live) remains, which makes `j9z` gated
+  purely on the deploy.
+
+### The critical path
+
+Everything funnels into `gonk-3so` (Phase 1: implementation agent), now blocked
+by six: `gonk-4v8`, `gonk-8g9`, `gonk-bgx`, `gonk-e9m`, `gonk-gyj`, `gonk-j9z`.
+`gonk-4v8` (onboard the real target repos) is itself blocked by `gonk-066`,
+`gonk-bgx` and `gonk-msz` — so **scaffold/onboarding is a hard blocker now**: it
+gates the test repo, which gates everything.
+
+Note what the roadmap says to *stop*: delete the formula / `[steps.check]`
+machinery rather than maintain two orchestration idioms, and cut the
+self-improvement loop (keep only the versioned marker as a join key). Carrying
+both idioms is what produced the silently-dead mention trigger (`gonk-ecn`) and
+the stale-work-bead pool demand (`gonk-p2e`) that caused the 2026-08-03 capacity
+wedge.
+
+### Traps, current
+
+- **The failure shape of this project is the silent success.** A 202 read as a
+  receipt; a create that succeeds asynchronously and fails later; a turn that
+  exits 0 having produced nothing; `ENOSPC` surfacing as "check push
+  permissions"; a checkout that degrades quietly rather than going red. When
+  something does not work and nothing is red, assume a discarded error before
+  assuming a wrong value.
+- **`gonk:63:scaffold` has ONE infra retry left** of `max_infra_retries=2`. A
+  second failure re-poisons it and needs another manual ledger delete
+  (`gonk-9nx`, still open). Prefer a fresh bead over re-triggering that one.
+- **Every commit to gonk `main` re-releases the chart** and recreates pods, even
+  for docs-only commits, because the chart version embeds the git sha.
+- **`make push` can silently clobber a CI-published multi-arch index**
+  (`gonk-9ub`) — `GONK_TAG` comes from git HEAD at invocation, so a commit
+  between build and push drifts the tag. Mitigated in `1e89c38`; know it exists.
+- **Traefik 504s on the ~500MB agent/controller layers.** Push those through
+  `kubectl port-forward svc/gitlab-registry 5000` to `localhost:5000`.
+- **Upstream issues: draft them, do not post them.** Owner reviews, rewrites and
+  posts. `gonk-ckb` now tracks the three pending drafts.
+- All five worktrees under `.worktrees/` are clean and all five branches are
+  already merged into main — safe to remove. `design-gonk-agent-harness` is the
+  only genuinely unmerged branch (2 commits, 2026-07-19).
+- `graphify-out/` is from 2026-07-30 and predates everything above.
+
+---
+
+## (historical) 2026-08-03 (session 6): the agent completed the loop; onboarding is one step short
+
+> ⚠️ **Its "START HERE: `gonk-4xr`" is superseded.** That line of work became
+> `gonk-pev`, which was root-caused on 2026-08-03 and is no longer where to
+> start — the pool-session contention was a capacity leak (`gonk-xkm`, now
+> closed), not an `agent.toml` problem. See the current section above.
 
 _Everything below is committed and pushed. HEAD `31ee5e0`, deployed
 `v0.1.0-a682e5d3e7ce`. Gates green: gofmt, vet, `go test ./...`, chart, pack._
