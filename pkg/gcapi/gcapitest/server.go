@@ -122,6 +122,17 @@ type Server struct {
 	// silently-swallowed close is how the leak got here in the first place.
 	CloseFail int
 
+	// AmbiguousAliases makes a session read answer 409 session-conflict, the way
+	// upstream does when an alias resolves to MORE THAN ONE session (gonk-u6p:
+	// "gonk.triage.p75.i24.a1" matched both go-s4ug and go-93gk).
+	//
+	// The property that matters, and why this is a set rather than a countdown
+	// like SubmitFail/CloseFail: THIS ERROR NEVER CLEARS. Both sessions go on
+	// existing, so every retry gets the same 409 forever. A fake that decremented
+	// would model a transient blip and quietly hide the only thing worth testing
+	// here -- that gonk stops waiting on a read that can never succeed.
+	AmbiguousAliases map[string]bool
+
 	srv    *httptest.Server
 	mu     sync.Mutex
 	next   int
@@ -678,6 +689,20 @@ func (s *Server) handleEventList(w http.ResponseWriter, r *http.Request) {
 // caller exercises GetSessionOutput's IsNotFound path).
 func (s *Server) handleGetSession(w http.ResponseWriter, id string, peekLines int) {
 	s.mu.Lock()
+	ambiguous := s.AmbiguousAliases[id]
+	s.mu.Unlock()
+	if ambiguous {
+		// Upstream's shape, kept verbatim from the live 409 on gonk-u6p so the
+		// error string a caller logs in a test is the one it logs in production.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"type":"urn:gascity:error:session-conflict",` +
+			`"title":"Session State Conflict","status":409,` +
+			`"detail":"ambiguous: ambiguous session identifier: \"` + id + `\" matches 2 sessions"}`))
+		return
+	}
+
+	s.mu.Lock()
 	sess, ok := s.sessions[id]
 	var state, out string
 	var running bool
@@ -783,6 +808,20 @@ func (s *Server) FinishSession(id, output string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.putSessionLocked(id, SessionStopped, output)
+}
+
+// AmbiguousAlias makes every read of alias answer 409 session-conflict, and keep
+// answering it. Models the state gonk-u6p wedged on: two sessions minted under
+// one alias, so the name no longer identifies anything and never will again.
+// Deliberately has no "un-ambiguous" counterpart -- nothing in production clears
+// it either.
+func (s *Server) AmbiguousAlias(alias string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.AmbiguousAliases == nil {
+		s.AmbiguousAliases = map[string]bool{}
+	}
+	s.AmbiguousAliases[alias] = true
 }
 
 // CrashSession transitions a session to CRASHED: terminal, so it is judgeable,

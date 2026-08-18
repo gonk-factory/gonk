@@ -149,13 +149,27 @@ func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
 	var view *gcapi.SessionView
 	if broker {
 		v, err := brokerSessionView(ctx, d, rec)
-		if err != nil {
+		switch {
+		case err != nil && !expired:
 			// Could not read the session: unknown. Try again next tick rather
-			// than classify on no information.
+			// than classify on no information. Still the right call INSIDE the
+			// reservation -- a transient 5xx or a restarting supervisor must buy
+			// a retry, not a verdict on a session that is probably still working.
 			d.Log.Warn("sweep: could not read broker session", "bead", rec.BeadAnchor, "err", err)
 			return
-		}
-		switch {
+		case err != nil:
+			// Unreadable AND past its deadline. The reservation is the deadline
+			// for THIS too (gonk-u6p): an alias that resolves to two sessions
+			// 409s on every read and never stops, so "try again next tick" is a
+			// promise that can never be kept -- the bead sat in StateRunning for
+			// eight days being re-read every 60s. Fall through with view nil:
+			// no batch is read, and ReservationExpired classifies it infra-failed,
+			// which does not escalate the rung and IS bounded by
+			// max_infra_retries. A bead that cannot be judged must still be able
+			// to STOP.
+			d.Log.Warn("sweep: broker session unreadable past its reservation; classifying rather than retrying forever",
+				"bead", rec.BeadAnchor, "session", rec.SessionID,
+				"reservation_expired_at", rec.ReservationExpiresAt, "err", err)
 		case v == nil && !expired:
 			// Still working, still inside its reservation. Nothing to judge and
 			// nothing to report -- exactly like the v1 guard above. Reporting an
