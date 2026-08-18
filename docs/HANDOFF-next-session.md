@@ -170,6 +170,14 @@ by six: `gonk-4v8`, `gonk-8g9`, `gonk-bgx`, `gonk-e9m`, `gonk-gyj`, `gonk-j9z`.
 `gonk-bgx` and `gonk-msz` — so **scaffold/onboarding is a hard blocker now**: it
 gates the test repo, which gates everything.
 
+**Designed but deliberately NOT started: the buildkit migration** (`gonk-03f`,
+[design](superpowers/specs/2026-08-18-buildkit-migration-design.md)). It is a CI
+wall-clock and cache-bloat fix, not a correctness fix — none of the recent build
+failures were kaniko's — and it is off the critical path. Do not pick it up
+ahead of Phase 0. If someone does start it, `gonk-sl1` (evaluate the Chainguard
+kaniko fork) comes first and may cancel the whole epic for the cost of an image
+swap.
+
 Note what the roadmap says to *stop*: delete the formula / `[steps.check]`
 machinery rather than maintain two orchestration idioms, and cut the
 self-improvement loop (keep only the versioned marker as a join key). Carrying
