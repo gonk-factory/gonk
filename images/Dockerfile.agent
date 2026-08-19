@@ -31,7 +31,7 @@ COPY pkg/ pkg/
 RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags="-s -w -X main.version=${GONK_TAG}" \
     -o /out/gonk-gate ./cmd/gonk-gate
 
-# ---- fetch opencode, glab, bd (pinned; checksum-verified) -------------------
+# ---- fetch opencode (pinned; checksum-verified) ------------------------------
 # A separate stage so `curl`/`tar` never ship in the runtime image, and so a
 # checksum mismatch fails the BUILD, not a running pod.
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS fetch
@@ -73,33 +73,25 @@ RUN set -eu; \
     tar xzf opencode.tar.gz; \
     chmod +x opencode
 
-ARG GLAB_VERSION
-RUN test -n "${GLAB_VERSION}" || (echo "GLAB_VERSION is unset" && exit 1)
-RUN set -eu; \
-    case "${TARGETARCH}" in \
-      amd64) GLAB_SHA=cb3eb9d6b05eedef24a028b52354f12fb9a07ecfa0b5581eb161176585bc8213 ;; \
-      arm64) GLAB_SHA=681031c6477dc7eb53b07a4641e2defc6795cf7ffb18ddc6cf8bdbc1211ed782 ;; \
-      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL -o glab.tar.gz \
-      "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/packages/generic/glab/${GLAB_VERSION}/glab_${GLAB_VERSION}_linux_${TARGETARCH}.tar.gz"; \
-    echo "${GLAB_SHA}  glab.tar.gz" | sha256sum -c -; \
-    tar xzf glab.tar.gz bin/glab; \
-    chmod +x bin/glab
-
-ARG BD_VERSION
-RUN test -n "${BD_VERSION}" || (echo "BD_VERSION is unset" && exit 1)
-RUN set -eu; \
-    case "${TARGETARCH}" in \
-      amd64) BD_SHA=b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34 ;; \
-      arm64) BD_SHA=e64eb6f5f998c9eae3ef9ec786f5f1c907ab3ed04fe220ebf265ca9952e21b2f ;; \
-      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL -o bd.tar.gz \
-      "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_${TARGETARCH}.tar.gz"; \
-    echo "${BD_SHA}  bd.tar.gz" | sha256sum -c -; \
-    tar xzf bd.tar.gz bd; \
-    chmod +x bd
+# NO glab AND NO bd IN THIS IMAGE (gonk-0de). They were 19.5 MB and 52.8 MB of
+# every agent build -- 72.3 MB per arch, a third of the image -- and NOTHING
+# invoked either one: zero references in images/agent/, pack/ or entrypoint.sh.
+#
+# They were dead by DESIGN, not by accident, and each for its own reason:
+#   glab  the broker model strips the pod of forge credentials, so a forge CLI
+#         here has nothing to authenticate with. The repository arrives as a
+#         tarball from gonk-intake (see the checkout fetch in entrypoint.sh),
+#         never from the forge. Shipping it also put a forge client inside a pod
+#         whose entire security story is "holds no forge access" (cf gonk-7oz),
+#         so removing it is a small hardening win as well as a size one.
+#   bd    spike S0 established that the agent pod has NO working beads store
+#         ("no beads database found" -- split store topology). The return
+#         channel is the effects batch, not the pod writing a bead. Do not add
+#         it back to "let the agent record something"; that path is closed by
+#         design.
+#
+# If a future agent genuinely needs repository write access, it arrives as an
+# effect the BROKER applies, not as a credentialed CLI in the pod.
 
 # ---- runtime -----------------------------------------------------------------
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
@@ -124,8 +116,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fetch /fetch/opencode      /usr/local/bin/opencode
-COPY --from=fetch /fetch/bin/glab      /usr/local/bin/glab
-COPY --from=fetch /fetch/bd            /usr/local/bin/bd
 COPY --from=gate  /out/gonk-gate       /usr/local/bin/gonk-gate
 COPY images/agent/entrypoint.sh        /usr/local/bin/gonk-agent-entrypoint
 COPY images/agent/prepare-commit-msg   /usr/local/share/gonk/prepare-commit-msg

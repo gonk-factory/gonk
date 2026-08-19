@@ -31,8 +31,6 @@ agent-image:
 	  --build-arg GO_VERSION=$(GO_VERSION) \
 	  --build-arg DEBIAN_BASE=$(DEBIAN_BASE) \
 	  --build-arg OPENCODE_VERSION=$(OPENCODE_VERSION) \
-	  --build-arg GLAB_VERSION=$(GLAB_VERSION) \
-	  --build-arg BD_VERSION=$(BD_VERSION) \
 	  -f images/Dockerfile.agent -t $(REGISTRY)/gonk-agent:$(GONK_TAG) .
 
 # controller-image: gc (MIT gascity, pinned GASCITY_REF) + gonk-gate + bd +

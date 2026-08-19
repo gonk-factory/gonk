@@ -134,8 +134,6 @@ func TestAgentImagePinsMatchVersionsEnv(t *testing.T) {
 		want       string // substring the output must contain
 	}{
 		{"opencode", "/usr/local/bin/opencode", []string{"--version"}, pins["OPENCODE_VERSION"]},
-		{"glab", "/usr/local/bin/glab", []string{"--version"}, pins["GLAB_VERSION"]},
-		{"bd", "/usr/local/bin/bd", []string{"--version"}, pins["BD_VERSION"]},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -148,6 +146,35 @@ func TestAgentImagePinsMatchVersionsEnv(t *testing.T) {
 			}
 			if !strings.Contains(out, c.want) {
 				t.Fatalf("%s --version = %q, want it to contain pinned version %q (a floating agent is not an agent)", c.name, out, c.want)
+			}
+		})
+	}
+}
+
+// gonk-0de. glab and bd are NOT in this image, and their absence is a property
+// worth pinning rather than a detail that happens to be true today.
+//
+// They cost 19.5 MB and 52.8 MB of every build -- 72.3 MB per arch, a third of
+// the image -- while nothing invoked either. But size is the lesser reason. The
+// broker model strips this pod of forge credentials on purpose, so a forge CLI
+// in it is a standing invitation to re-credential the pod "just for this one
+// case" and quietly undo the whole zero-creds design (cf gonk-7oz). And spike S0
+// established the pod has no working beads store at all, so a bd here can only
+// mislead whoever finds it.
+//
+// If this test starts failing because someone added them back, the question to
+// answer first is not "how do we shrink the image" but "why does the agent need
+// a credentialed CLI" -- the answer is meant to be that it does not: writes
+// happen as effects the BROKER applies.
+func TestAgentImageShipsNoForgeOrBeadsCLI(t *testing.T) {
+	image, _ := agentImage(t)
+	for _, bin := range []string{"glab", "bd"} {
+		t.Run(bin, func(t *testing.T) {
+			out, code := runIn(t, image, "/bin/sh", "-c", "command -v "+bin+" || echo ABSENT")
+			if !strings.Contains(out, "ABSENT") {
+				t.Fatalf("%s is present in the agent image at %q -- the pod holds no forge "+
+					"credentials and no beads store, so this binary can only mislead or tempt "+
+					"(gonk-0de). exit=%d", bin, strings.TrimSpace(out), code)
 			}
 		})
 	}
