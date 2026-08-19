@@ -512,6 +512,40 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 		d.Log.Debug("attribution metadata is not deliverable to the pod on the submit path",
 			"bead", a.BeadAnchor, "metadata", string(md))
 	}
+	// IDEMPOTENCY, AND IT IS NOT OPTIONAL (gonk-6n8). `base` is built fresh from
+	// the webhook args in runDispatch, so it carries an empty SessionID even when
+	// a session for this exact bead+attempt already exists. Nothing else looked,
+	// so a second dispatch for one attempt created a SECOND session under the
+	// SAME alias.
+	//
+	// That is not merely untidy. Gas City's create-time alias uniqueness only
+	// considers ACTIVE sessions, while its alias RESOLUTION considers all of
+	// them -- so once the first session ended, the duplicate create succeeded and
+	// the alias permanently resolved to two sessions. Every read after that 409s
+	// and never stops (gonk-u6p: gonk:75:issue:24 wedged for eight days). Session
+	// TEARDOWN resolves by alias too, so an ambiguous alias also cannot be
+	// reliably closed -- which is the gonk-xkm leak wearing a different hat.
+	//
+	// Measured shape of the failure: go-93gk at 23:11:07Z and go-s4ug at
+	// 23:15:36Z, 4m29s apart, both `gonk.triage.p75.i24.a1`. Not a race -- a
+	// re-dispatch, at an interval no lock would have covered. The meter is
+	// idempotent here BY DESIGN (an open, unsettled reservation returns the same
+	// attempt), so the duplicate has to be refused on this side.
+	if prior, ok, perr := d.Store.Get(ctx, a.BeadAnchor); perr != nil {
+		// Do NOT fail closed. An unreadable store used to mean a guaranteed
+		// duplicate; since gonk-u6p a duplicate is recoverable (the sweep
+		// classifies it infra-failed at the reservation deadline instead of
+		// retrying forever), while refusing here would drop a legitimate
+		// dispatch. Proceed, loudly.
+		d.Log.Error("could not read the bead store before creating a session; "+
+			"proceeding, but a duplicate session for this attempt cannot be ruled out",
+			"err", perr, "bead", a.BeadAnchor)
+	} else if ok && prior.SessionID != "" && prior.Attempt == dec.Attempt {
+		d.Log.Warn("a session already exists for this bead and attempt; not creating a second",
+			"bead", a.BeadAnchor, "attempt", dec.Attempt, "session", prior.SessionID)
+		return 0
+	}
+
 	alias := brokerSessionAlias(agent, a.ProjectID, a.IssueIID, dec.Attempt)
 
 	// The prompt is per-agent. Scaffold is project-scoped and reads the repo
