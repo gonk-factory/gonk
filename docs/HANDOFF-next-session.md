@@ -22,11 +22,11 @@ value.
 
 | | |
 |---|---|
-| `main` | `030a6c5` |
-| deployed images | `v0.1.0-6f8d09f46e0f` (pipeline 2194); `030a6c5` building |
+| `main` | `94b24ee` |
+| deployed images | `v0.1.0-030a6c58ee2e` (pipeline 2195) |
 | ns `gonk` | four service pods Running |
-| closed this session | `gonk-u6p`, `gonk-j9z`, `gonk-mzm`, `gonk-1t4`, `gonk-zp3`, `gonk-2do` |
-| filed this session | `gonk-6n8`, `gonk-0de`, `gonk-ak0`, `gonk-ckb`, `gonk-03f` (+5 children) |
+| closed this session | `gonk-u6p`, `gonk-j9z`, `gonk-6n8`, `gonk-mzm`, `gonk-1t4`, `gonk-zp3`, `gonk-2do` |
+| filed this session | `gonk-au1` (P1), `gonk-0de`, `gonk-ak0`, `gonk-ckb`, `gonk-6n8`, `gonk-03f` (+5 children) |
 
 ### START HERE
 
@@ -108,19 +108,34 @@ being pinned and byte-identical. Each build writes ~182 MB of new blobs to
 deliver a 3.6 MB change — which reconciles exactly with `gonk-1t4`'s 26 GB across
 203 tags. Pruning treats the symptom.
 
-Shipped: `glab` and `bd` removed from the agent image (72.3 MB/arch, a third of
-it, provably uninvoked). That is a hardening change as much as a size one — a
+Shipped and measured: `glab` and `bd` removed from the agent image —
+**210.6 MB → 138.3 MB** compressed, 10 layers → 8, the predicted 72.3 MB exactly.
+Confirmed in a live pod: `glab ABSENT`, `bd ABSENT`, opencode still present, and
+the checkout still lands. That is a hardening change as much as a size one — a
 forge CLI in a deliberately credential-free pod is an invitation to
-re-credential it. The real fix, a toolchain base image rebuilt only on
-`versions.env`, is still open on the bead.
+re-credential it.
+
+**The bead stays OPEN because the headline finding is not fixed.** Layers still
+do not dedupe: each build now writes ~110 MB of fresh blobs (was ~182 MB) for a
+3.6 MB change. Removing two binaries shrank what is needlessly re-uploaded; it
+did not stop the re-uploading. The remaining fix is a toolchain base image
+(debian + apt + opencode) rebuilt only when `versions.env` changes, with
+`Dockerfile.agent` reduced to `FROM` that base plus one `COPY`. It is a
+build-topology change — new image, new CI job, build-ordering dependency, and a
+chicken-and-egg on first introduction — so it wants its own session against a
+clean baseline. Getting it wrong breaks every agent build at once.
 
 ### Traps learned the hard way this session
 
-- **Do not test immediately after a deploy.** `gonk-fan` is alive: intake
-  restarts, the project reads `unsynced`, and webhooks are accepted with 200 and
-  dropped. A verification issue filed 34s after rollout vanished without trace.
-  `POST /admin/reconcile` on intake's private port fixes it instantly — the
-  response is `{"kicked":true}`, 202.
+- **Do not test immediately after a deploy, and the reconcile kick is not a
+  shortcut past it.** `gonk-fan` is alive: intake restarts, the project reads
+  `unsynced`, and webhooks are accepted with 200 and dropped. This cost two
+  verification rounds. The second is the instructive one — kicking
+  `POST /admin/reconcile` right after rollout ALSO fails, because the reconcile
+  itself has to reach `gonk-meter`, which is still starting. **Wait until
+  `meter registration failed` stops appearing in the intake log, THEN kick, then
+  test.** Kicking once the meter is up works immediately (`{"kicked":true}`,
+  202).
 - **`test/images/` has never run in CI** (`//go:build images` vs a bare
   `go test ./...`). The one suite that tests the real container is excluded, and
   that is how the tar flag shipped. Filed as `gonk-ak0`. Any assertion that can
