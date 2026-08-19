@@ -1,11 +1,168 @@
 # Handoff — next session
 
-_Last updated: 2026-08-17. Branch: `main` (we develop on main per owner's call).
+_Last updated: 2026-08-19. Branch: `main` (we develop on main per owner's call).
 Everything below is committed and pushed._
 
 **Read the top section and stop.** Sections below it are dated history, kept
 because their measurements and dead ends are still worth not repeating. Any
 "START HERE" in a dated section is superseded by the one in the current section.
+
+---
+
+## 2026-08-19: three bugs that all looked like success
+
+Four things shipped and were verified live. The thread joining them is worth
+stating once, because it is now the thing to expect from this codebase: **every
+one of these reported success while doing nothing.** A grant that logged twice
+and delivered nothing; a green pipeline that built no images; a sweep that
+retried forever rather than concluding. Assume a discarded error before a wrong
+value.
+
+### Position
+
+| | |
+|---|---|
+| `main` | `030a6c5` |
+| deployed images | `v0.1.0-6f8d09f46e0f` (pipeline 2194); `030a6c5` building |
+| ns `gonk` | four service pods Running |
+| closed this session | `gonk-u6p`, `gonk-j9z`, `gonk-mzm`, `gonk-1t4`, `gonk-zp3`, `gonk-2do` |
+| filed this session | `gonk-6n8`, `gonk-0de`, `gonk-ak0`, `gonk-ckb`, `gonk-03f` (+5 children) |
+
+### START HERE
+
+**Still `gonk-ob5` (P1) — opencode fails OPEN to a built-in cloud provider.**
+Unchanged from the section below, and now the last untouched Phase 0 blocker of
+real severity: it defeats both core invariants at once (local-only inference and
+hard budget enforcement) and does so silently. The full three-layer fix is
+already written on the bead — an `enabled_providers: ["gonk"]` allowlist (in
+opencode's schema but not its `--help`), plus an entrypoint assertion that
+opencode actually resolved a gonk-only provider list, because config cannot
+guard its own absence.
+
+**Then `gonk-712`** — see "Where prompt delivery actually stands" below. Prompts
+now demonstrably arrive; no triage comment has ever been produced. That gap is
+the milestone and it is no longer blocked on delivery.
+
+Phase 0 of the local-parity roadmap now stands at: `mzm` ✓, `j9z` ✓, `e9m`
+functionally resolved (security half open), `ob5` / `bgx` / `msz` / `7oz` open.
+
+### `gonk-j9z` — the rig checkout had NEVER worked. Fixed and verified.
+
+`tar --no-absolute-names` **is not a GNU tar flag.** GNU tar spells the opt-out
+`-P/--absolute-names` and strips leading `/` by default, so the protection it was
+reaching for was already on and the invented flag simply made tar exit 64 — every
+session, since the rig slice landed a week earlier.
+
+Invisible three ways at once, which is why it survived: the fetch is non-fatal by
+design so it logged a WARNING and continued; the entrypoint runs under
+`tmux new-session -d`, so its stdout never reaches the container log; and **both
+grant sites logged success throughout**. `rig: checkout granted` was true and
+meant nothing.
+
+Verified on issue !27 (session `s-go-wuvq`): `/workspace` now carries `.agent/`,
+`.gonk.yml`, `README.md`, `RIG_PROOF.md`. The two assumptions the bead had
+flagged as only-checkable-live — the archive's directory prefix and `GC_ALIAS`'s
+runtime value — were both fine.
+
+Guard: `test/entrypoint/`, deliberately **no build tag**. It parses the real tar
+invocation out of `entrypoint.sh` and runs those flags against a real
+GitLab-shaped archive.
+
+### `gonk-u6p` — beads can reach a terminal state again. Fixed and verified.
+
+`sweepRunning` computed the reservation deadline and then returned on any
+session-read error *before* the switch that consumes it, so `gate.Classify` was
+unreachable for a session that could not be read. An alias resolving to two
+sessions 409s forever, so `gonk:75:issue:24` sat in `StateRunning` for **eight
+days**. The adjacent branch, for the same class of "cannot judge yet", already
+guarded on `!expired` — which is what makes it an oversight rather than a design
+choice. Live proof: the bead classified `infra-failed`, hit
+`infra-retries-exhausted`, and stopped.
+
+**It was never the `xkm` shape.** No pod leak, both sessions already ended, and
+reservations self-release via `ExpireReservations`. The cost was one
+permanently-unfinishable bead plus log noise.
+
+### `gonk-6n8` — one bead+attempt can no longer mint two sessions.
+
+`runDispatch` builds its record **fresh from the webhook args**, so `SessionID`
+is always empty and nothing ever checked whether a session already existed. Two
+dispatches 4m29s apart both created `gonk.triage.p75.i24.a1`. Gas City's
+create-time alias uniqueness considers only ACTIVE sessions while resolution
+considers all of them, so once the first ended the duplicate succeeded — and the
+alias was ambiguous forever. Teardown resolves by alias too, so an ambiguous
+alias cannot be reliably closed either.
+
+The guard keys on the **attempt**, not "a session exists": a re-sling is a new
+attempt and must still get its own session. Not done, and deliberately:
+unique-by-construction aliases. They would not have prevented this (both creates
+shared a reservation) and `reap.go` matches gonk's sessions with an anchored
+regex — changing the alias shape without it stops the reaper recognising gonk
+sessions and turns a 409 into a leak.
+
+### `gonk-0de` — the registry bloat was never image size
+
+Comparing two consecutive agent builds layer by layer: **1 of 10 layers shared**.
+The apt layer, opencode, glab and bd all take a fresh digest every build despite
+being pinned and byte-identical. Each build writes ~182 MB of new blobs to
+deliver a 3.6 MB change — which reconciles exactly with `gonk-1t4`'s 26 GB across
+203 tags. Pruning treats the symptom.
+
+Shipped: `glab` and `bd` removed from the agent image (72.3 MB/arch, a third of
+it, provably uninvoked). That is a hardening change as much as a size one — a
+forge CLI in a deliberately credential-free pod is an invitation to
+re-credential it. The real fix, a toolchain base image rebuilt only on
+`versions.env`, is still open on the bead.
+
+### Traps learned the hard way this session
+
+- **Do not test immediately after a deploy.** `gonk-fan` is alive: intake
+  restarts, the project reads `unsynced`, and webhooks are accepted with 200 and
+  dropped. A verification issue filed 34s after rollout vanished without trace.
+  `POST /admin/reconcile` on intake's private port fixes it instantly — the
+  response is `{"kicked":true}`, 202.
+- **`test/images/` has never run in CI** (`//go:build images` vs a bare
+  `go test ./...`). The one suite that tests the real container is excluded, and
+  that is how the tar flag shipped. Filed as `gonk-ak0`. Any assertion that can
+  be made without podman belongs in an untagged test instead.
+- **A green gonk pipeline does not imply images exist.** When the `changes:`
+  rules do not match, image jobs fall through to `when: manual` and are skipped;
+  pipeline 2187 went green having built nothing.
+- **The entrypoint's stdout is invisible.** It runs under `tmux new-session -d`,
+  so `kubectl logs` on a session pod shows nothing. Use
+  `tmux capture-pane -p -S -3000 -t main` inside the pod.
+
+### Where prompt delivery actually stands
+
+The tmux pane of a live session shows **the full triage prompt rendered in
+opencode's composer**, fence instructions and all. So the bang-stripping
+mitigation works and prompts ARE arriving — `gonk-e9m`'s remaining scope is the
+SECURITY half (the keystroke channel is an injection boundary), not the
+functional half. Note this contradicts the older sections below; trust this one.
+
+What still has not happened is `gonk-712`'s milestone: a real triage COMMENT —
+and as of this session **we know exactly why**. See `gonk-au1`.
+
+### `gonk-au1` — the milestone is blocked by a five-minute timer
+
+The deployed HelmRelease sets `reservation_ttl: 5m`, overriding the chart's 60m.
+A qwen3-14b triage turn takes longer than that, so the sweep reaps every session
+at the deadline before it can emit its fence. Measured on issue !27: created
+`01:15:27`, four consecutive "still running; nothing to judge yet" ticks, reaped
+at `01:19:53` with `reservation_expired_at=01:19:10`. The agent was still
+working and was killed for it.
+
+It hid this long because **every layer reports correctly**: the "still running"
+lines are INFO, the reap is the `gonk-u1p.6` machinery working as designed, and
+`infra-failed` correctly does not escalate. The bead then re-slings, is reaped
+again, and exhausts `max_infra_retries: 2`.
+
+The value is suspicious on its face — it sits directly beneath
+`max_clock_skew: 5m` and `max_spend_staleness: 5m` with no comment, which reads
+like it was matched to its neighbours rather than to a model turn. **Raise it,
+but measure first**: one unreaped run gives the real distribution, and the trade
+is that a longer TTL means a wedged session holds its budget reservation longer.
+It is a deployment value in gitops, not a chart default.
 
 ---
 
