@@ -88,10 +88,18 @@ gonk_fetch_checkout() {
 
 	# GitLab's archive wraps everything in one <project>-<sha>/ directory;
 	# --strip-components=1 lands the tree at RIG_DIR itself. Extraction is the
-	# one place untrusted archive paths could escape, so refuse absolute paths
-	# and ".." rather than trusting the forge's tar.
+	# one place untrusted archive paths could escape, so refuse ".." rather than
+	# trusting the forge's tar.
+	#
+	# There is deliberately NO --no-absolute-names here: THAT FLAG DOES NOT
+	# EXIST (gonk-j9z). GNU tar spells the opt-OUT `-P/--absolute-names` and
+	# strips leading "/" BY DEFAULT, so the guard it was meant to add is already
+	# on and the invented flag made tar exit 64 every time. Because the fetch is
+	# non-fatal by design, that surfaced only as a WARNING into a tmux pane
+	# opencode immediately redrew -- so every session since the rig slice landed
+	# ran with a SILENTLY empty working copy. Test: test/entrypoint.
 	if ! tar -xzf "${_tmp}" -C "${RIG_DIR}" --strip-components=1 \
-		--no-absolute-names --exclude='*/..*/*' 2>/dev/null; then
+		--exclude='*/..*/*' 2>/dev/null; then
 		log "WARNING: could not extract the session checkout; running without a working copy"
 		rm -f "${_tmp}"
 		return 0
