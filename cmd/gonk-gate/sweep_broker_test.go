@@ -154,6 +154,83 @@ func TestSweepBrokerAppliesValidBatch(t *testing.T) {
 // NOTHING and fall to the ladder. This is the shape-gate's mutation guard:
 // delete the effects.Validate call in applyBrokerBatch and the broker would
 // post two comments -> applier.notes != 0 -> this test fails.
+// gonk-5k5: a session that is STILL RUNNING but has already closed its fence
+// must be judged, not waited on.
+//
+// This is the bug that kept gonk from ever posting a triage comment. opencode's
+// TUI does not exit after answering, so the provider reports the session Running
+// forever; the agent emitted a complete batch in a 32.6s model turn and the
+// sweep answered "nothing to judge yet" every 60s until the reservation expired
+// and the bead was classified infra-failed. The verdict was gated on a process
+// lifecycle detail instead of on the work.
+//
+// Running the harness non-interactively is the primary fix. This is the
+// backstop, and it is the half that survives a model/harness pair that pauses
+// or prompts instead of exiting -- so it is worth a test of its own.
+func TestSweepBrokerJudgesRunningSessionOnceFenceIsClosed(t *testing.T) {
+	gl := glabtest.New(t)
+	gl.Me = glab.User{ID: 1, Username: "gonk"}
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	gl.AddIssue(p.ID, 3, "opened")
+
+	gc := gcapitest.New(t)
+	// RunSession, not FinishSession: the provider still says running.
+	gc.RunSession("gonk.triage.p42.i3.a1", "thinking...\n"+
+		"GONK_BATCH_START\n"+
+		`{"effects":[{"kind":"comment","body":"Looks like a Safari-only CSS bug."}]}`+
+		"\nGONK_BATCH_END\n")
+	applier := &recordingApplier{}
+
+	store := beadstore.NewMemory()
+	rec := brokerRunningRecord(p.ID)
+	_ = store.Put(context.Background(), rec)
+	fm := &fakeOutcomeMeter{outcomeNext: "done"}
+
+	code := runSweep(context.Background(), sweepDeps{
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), GL: gl.Client(), Apply: applier,
+		Store: store, BotUsername: "gonk", PackDir: repoPackDir,
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if len(applier.notes) != 1 {
+		t.Fatalf("notes = %+v, want exactly one comment -- a closed fence on a "+
+			"still-running session must be judged, not waited on (gonk-5k5)", applier.notes)
+	}
+}
+
+// The other half of the same rule, and the reason the check is "closed fence"
+// rather than "any output": a session that is running and has NOT closed its
+// fence is still working, and judging it would re-sling a live agent.
+func TestSweepBrokerWaitsWhileRunningWithNoClosedFence(t *testing.T) {
+	gl := glabtest.New(t)
+	gl.Me = glab.User{ID: 1, Username: "gonk"}
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	gl.AddIssue(p.ID, 3, "opened")
+
+	gc := gcapitest.New(t)
+	// Mid-emission: the fence is open but not closed.
+	gc.RunSession("gonk.triage.p42.i3.a1", "thinking...\nGONK_BATCH_START\n{\"effects\":[")
+	applier := &recordingApplier{}
+
+	store := beadstore.NewMemory()
+	rec := brokerRunningRecord(p.ID)
+	_ = store.Put(context.Background(), rec)
+	fm := &fakeOutcomeMeter{outcomeNext: "done"}
+
+	code := runSweep(context.Background(), sweepDeps{
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), GL: gl.Client(), Apply: applier,
+		Store: store, BotUsername: "gonk", PackDir: repoPackDir,
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if len(applier.notes) != 0 {
+		t.Fatalf("notes = %+v, want none -- an unclosed fence means the agent is "+
+			"still working and must not be judged", applier.notes)
+	}
+}
+
 func TestSweepBrokerRejectsOutOfShapeBatch(t *testing.T) {
 	gl := glabtest.New(t)
 	gl.Me = glab.User{ID: 1, Username: "gonk"}
