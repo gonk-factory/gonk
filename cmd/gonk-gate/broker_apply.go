@@ -290,6 +290,31 @@ func brokerSessionView(ctx context.Context, d sweepDeps, rec beadstore.Record) (
 		return nil, err // transport error -> unknown -> retry next tick
 	}
 	if view.Running || view.State == sessionStateRunning {
+		// A CLOSED FENCE IS A COMPLETION SIGNAL IN ITS OWN RIGHT.
+		//
+		// Waiting for the provider to say "not running" was the single reason
+		// gonk never posted a triage comment (gonk-5k5). opencode's TUI does
+		// not exit after answering, so the session stays Running forever: the
+		// agent emitted a complete batch in a 32.6s model turn and the sweep
+		// still reported "nothing to judge yet" until the reservation expired
+		// and the bead was classified infra-failed. The verdict was gated on a
+		// process lifecycle detail rather than on the work.
+		//
+		// The prompt's contract is "Nothing after GONK_BATCH_END", so a closed
+		// fence means the agent is done by definition -- whatever the harness
+		// process does afterwards. Running non-interactively (so the process
+		// exits) is the primary fix; this is the backstop, and it is the one
+		// that holds when a model/harness pair pauses, prompts, or otherwise
+		// hesitates instead of exiting.
+		//
+		// Detection only. LastOutput is a bounded peek, and judging a batch
+		// from a peek was itself a past bug -- so this decides that the
+		// session is JUDGEABLE and lets the normal path re-read the full
+		// transcript before extracting anything. The fence is emitted last,
+		// which is exactly what a tail-peek sees.
+		if _, ok := extractBatch(view.LastOutput); ok {
+			return view, nil
+		}
 		return nil, nil
 	}
 	return view, nil
