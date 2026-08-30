@@ -260,6 +260,16 @@ jq -n \
 	--arg metadata "${GC_WEBHOOK_ARG_METADATA_JSON}" \
 	'{
 		"$schema": "https://opencode.ai/config.json",
+		# LAYER 1 of the fail-open fix (gonk-ob5). An ALLOWLIST, not a
+		# denylist: opencode ships built-in providers that are present even
+		# when this overlay loads correctly, so the exposure was never limited
+		# to the config-missing case. Proven on opencode 1.18.3 in pod
+		# s-go-8oj: without this, `opencode models` lists 7 built-ins
+		# alongside gonk/; with it, exactly gonk/. It blocks USE, not merely
+		# listing -- an explicit `-m opencode/big-pickle` is refused, which is
+		# the real threat (a prompt-injected agent switching models, not just
+		# a silent fallback).
+		"enabled_providers": ["gonk"],
 		"model": ("gonk/" + $model),
 		"provider": {
 			"gonk": {
@@ -286,6 +296,48 @@ jq -n \
 log "rendered ${OVERLAY_PATH} (model=${GC_WEBHOOK_ARG_MODEL})"
 
 export OPENCODE_CONFIG="${OVERLAY_PATH}"
+
+# Keep `opencode models` (and opencode itself) from fetching a remote model
+# list: it is egress this pod should not make, and it is a way for providers to
+# appear after an upgrade nobody reviewed. It also makes the assertion below
+# answer from CONFIG ALONE, so a LiteLLM blip cannot turn this guard into a
+# crash-loop.
+export OPENCODE_DISABLE_MODELS_FETCH=1
+
+# ---- LAYER 2 of the fail-open fix (gonk-ob5) --------------------------------
+# The layer that closes the hole that actually fired. Layer 1 lives INSIDE the
+# config; if OPENCODE_CONFIG does not resolve, layer 1 does not exist either --
+# which is exactly how this was found (a tmux server did not inherit the export,
+# opencode silently used a built-in cloud provider, answered correctly, exited
+# 0, and gonk had no way to know a model call had happened off-meter).
+#
+# So do not TRUST that the export took. ASK opencode what it resolved and refuse
+# to start if the answer is anything but gonk. This turns opencode's fail-open
+# into gonk's fail-closed, matching what the entrypoint already does for a
+# missing model and a missing LiteLLM key.
+#
+# Written deliberately verbosely rather than as a one-line grep: the obvious
+# `opencode models | grep -qv "^gonk/"` passes when the command ERRORS and
+# prints nothing, and this codebase's recurring bug is a discarded error
+# reporting success (see the 2026-08-19 handoff). Every branch here fails
+# closed, so exit status and emptiness are both checked explicitly.
+_models=$(opencode models 2>/dev/null); _rc=$?
+if [ "${_rc}" -ne 0 ]; then
+	log "opencode models exited ${_rc} -- cannot confirm the provider is gonk; refusing to start unmetered"
+	exit 1
+fi
+if [ -z "${_models}" ]; then
+	log "opencode models returned nothing -- cannot confirm the provider is gonk; refusing to start unmetered"
+	exit 1
+fi
+_foreign=$(printf '%s\n' "${_models}" | sed '/^[[:space:]]*$/d' | grep -v '^gonk/' || true)
+if [ -n "${_foreign}" ]; then
+	log "opencode resolved non-gonk provider(s) -- refusing to start unmetered:"
+	printf '%s\n' "${_foreign}" | while IFS= read -r _line; do log "  ${_line}"; done
+	exit 1
+fi
+log "provider check ok: opencode resolved only gonk/ models"
+unset _models _rc _foreign
 
 # ---- Step 3: exec opencode ---------------------------------------------------
 # Strip the gonk marker lines from the prompt before the model ever sees them:

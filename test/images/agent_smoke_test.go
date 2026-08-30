@@ -11,6 +11,7 @@ package images
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -231,6 +232,67 @@ func TestAgentImageCannotHangOnAPagerOrCredentialPrompt(t *testing.T) {
 			t.Errorf("$%s = %q, want %q -- without it the agent can hang "+
 				"silently under opencode's PTY until its reservation expires", k, got, want[k])
 		}
+	}
+}
+
+// gonk-ob5: opencode fails OPEN. Given no resolvable config it does not error
+// -- it silently falls back to a built-in cloud provider, answers correctly and
+// exits 0, so a model call happens off-meter and gonk cannot know. Worse, the
+// built-ins are present even when our overlay DOES load: the overlay adds a
+// provider, it never removed theirs.
+//
+// This is the A/B that proves the allowlist is what closes it, run against the
+// real pinned opencode rather than asserted from its docs. The control half
+// matters: without it, a future opencode that ignored `enabled_providers`
+// entirely would still pass the guarded half and this test would be decoration.
+func TestAgentImageOpencodeResolvesOnlyTheGonkProvider(t *testing.T) {
+	image, _ := agentImage(t)
+
+	const overlay = `{
+  "$schema": "https://opencode.ai/config.json",
+  %s
+  "model": "gonk/qwen3-14b",
+  "provider": {"gonk": {"npm": "@ai-sdk/openai-compatible", "name": "gonk (LiteLLM)",
+    "options": {"baseURL": "http://127.0.0.1:1/v1", "apiKey": "unused"},
+    "models": {"qwen3-14b": {"name": "qwen3-14b"}}}}
+}`
+	script := func(cfg string) string {
+		return "set -e\n" +
+			"printf '%s' '" + cfg + "' > /workspace/oc.json\n" +
+			"export OPENCODE_CONFIG=/workspace/oc.json\n" +
+			"export OPENCODE_DISABLE_MODELS_FETCH=1\n" +
+			"opencode models 2>/dev/null || true\n"
+	}
+
+	// Control: no allowlist -> opencode's built-in providers are reachable.
+	ctrl, _ := runIn(t, image, "/bin/sh", "-c", script(fmt.Sprintf(overlay, "")))
+	var ctrlForeign []string
+	for _, ln := range strings.Split(strings.TrimSpace(ctrl), "\n") {
+		if ln = strings.TrimSpace(ln); ln != "" && !strings.HasPrefix(ln, "gonk/") {
+			ctrlForeign = append(ctrlForeign, ln)
+		}
+	}
+	if len(ctrlForeign) == 0 {
+		t.Skipf("control listed no non-gonk providers, so this opencode build "+
+			"exposes none and the allowlist assertion below would be vacuous; "+
+			"re-check gonk-ob5 against opencode %s. control output:\n%s",
+			"(pinned)", ctrl)
+	}
+
+	// Guarded: with the allowlist, nothing but gonk/ may appear.
+	got, _ := runIn(t, image, "/bin/sh", "-c",
+		script(fmt.Sprintf(overlay, `"enabled_providers": ["gonk"],`)))
+	var foreign []string
+	for _, ln := range strings.Split(strings.TrimSpace(got), "\n") {
+		if ln = strings.TrimSpace(ln); ln != "" && !strings.HasPrefix(ln, "gonk/") {
+			foreign = append(foreign, ln)
+		}
+	}
+	if len(foreign) > 0 {
+		t.Errorf("enabled_providers did not confine opencode to gonk/.\n"+
+			"leaked: %v\nfull output:\n%s\n"+
+			"(control saw %d non-gonk provider(s), so the allowlist is the "+
+			"thing that failed, not the fixture)", foreign, got, len(ctrlForeign))
 	}
 }
 
