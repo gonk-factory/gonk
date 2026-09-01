@@ -234,8 +234,24 @@ vet:
 test:
 	$(GO) test ./... -race -count=1
 
+# lint runs the SAME golangci-lint the CI job runs, pinned to the same tag.
+#
+# It used to hard-code /root/go/bin/golangci-lint, which is not installed on
+# every dev box -- so `make gate` was not actually runnable here, and lint
+# findings were discovered in CI instead. That happened (gonk-mzd: nine findings,
+# one pipeline). The container fallback means there is no excuse and no version
+# skew: if the binary is present it is used, otherwise the pinned image is.
+LINT_IMAGE ?= golangci/golangci-lint:v2.12.2
 lint:
-	/root/go/bin/golangci-lint run ./...
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+	  golangci-lint run ./...; \
+	elif [ -x /root/go/bin/golangci-lint ]; then \
+	  /root/go/bin/golangci-lint run ./...; \
+	else \
+	  echo "golangci-lint not installed; running $(LINT_IMAGE) in a container"; \
+	  $(PODMAN) run --rm --network=host -v "$$PWD":/w -w /w \
+	    -e GOFLAGS=-mod=vendor -e GOPROXY=off $(LINT_IMAGE) golangci-lint run ./...; \
+	fi
 
 # e2e-doctor is the preflight that refuses to waste your 25 minutes: it fails
 # fast, with a remedy, when a layer's prereqs are absent. Expected to FAIL on the
