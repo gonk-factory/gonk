@@ -478,7 +478,7 @@ func TestOnlyThePromptGetIsUnauthenticated(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.method+" "+c.path, func(t *testing.T) {
 			resp, _ := h.do(c.method, c.path, "", nil) // no bearer
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			got401 := resp.StatusCode == http.StatusUnauthorized
 			if c.exempt && got401 {
 				t.Fatalf("%s %s = 401 without a bearer, want the exemption to apply",
@@ -505,7 +505,7 @@ func TestNonceFreeAliasIsRefusedUnauthenticated(t *testing.T) {
 		"nodotsatall",
 	} {
 		resp, _ := h.do("GET", "/v1/prompt/"+alias, "", nil)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("GET with alias %q = %d, want 401 -- a nonce-free alias is "+
 				"guessable and must not read as a capability", alias, resp.StatusCode)
@@ -520,20 +520,20 @@ func TestPromptIsOneShotAndDistinguishes404From410(t *testing.T) {
 	h := newHTTPFixture(t)
 
 	resp, _ := h.do("GET", "/v1/prompt/"+testNonceAlias, "", nil)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("GET before any PUT = %d, want 404", resp.StatusCode)
 	}
 
 	resp, _ = h.do("PUT", "/v1/prompt/"+testNonceAlias, h.token,
 		meterapi.PromptRequest{Prompt: "triage this", Model: "qwen3-14b", Metadata: `{"a":"b"}`})
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("PUT with bearer = %d, want 204", resp.StatusCode)
 	}
 
 	resp, body := h.do("GET", "/v1/prompt/"+testNonceAlias, "", nil)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("first GET = %d, want 200", resp.StatusCode)
 	}
@@ -547,7 +547,7 @@ func TestPromptIsOneShotAndDistinguishes404From410(t *testing.T) {
 	}
 
 	resp, _ = h.do("GET", "/v1/prompt/"+testNonceAlias, "", nil)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusGone {
 		t.Fatalf("second GET = %d, want 410 -- a replayable unauthenticated read "+
 			"is the whole risk of exempting this route", resp.StatusCode)
@@ -561,10 +561,10 @@ func TestPromptStatusReportsTheFetch(t *testing.T) {
 	h := newHTTPFixture(t)
 	resp, _ := h.do("PUT", "/v1/prompt/"+testNonceAlias, h.token,
 		meterapi.PromptRequest{Prompt: "p", Model: "m"})
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	resp, body := h.do("GET", "/v1/prompt/"+testNonceAlias+"/status", h.token, nil)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	var st meterapi.PromptStatusResponse
 	_ = json.Unmarshal(body, &st)
 	if st.Fetched {
@@ -572,10 +572,10 @@ func TestPromptStatusReportsTheFetch(t *testing.T) {
 	}
 
 	resp, _ = h.do("GET", "/v1/prompt/"+testNonceAlias, "", nil)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	resp, body = h.do("GET", "/v1/prompt/"+testNonceAlias+"/status", h.token, nil)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	_ = json.Unmarshal(body, &st)
 	if !st.Fetched || st.FetchedAt.IsZero() {
 		t.Fatalf("status after fetch = %+v, want fetched with a timestamp", st)

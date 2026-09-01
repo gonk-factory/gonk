@@ -719,6 +719,10 @@ func (s *Service) InstanceCost(ctx context.Context) (meterapi.InstanceCostRespon
 
 // --- prompt-by-reference (gonk-mzd) -----------------------------------------
 
+// base32Alphabet is RFC 4648, upper-case, no padding -- what
+// base32.StdEncoding produces for the alias nonce.
+const base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
 // aliasHasNonce is the shape gate on the one unauthenticated route.
 //
 // The handler cannot measure entropy, only form. Requiring the final
@@ -738,9 +742,9 @@ func aliasHasNonce(alias string) bool {
 	if len(nonce) != 26 {
 		return false
 	}
+	// RFC 4648 base32 alphabet, upper-case, no padding.
 	for _, c := range nonce {
-		// RFC 4648 base32 alphabet, upper-case, no padding.
-		if !(c >= 'A' && c <= 'Z') && !(c >= '2' && c <= '7') {
+		if !strings.ContainsRune(base32Alphabet, c) {
 			return false
 		}
 	}

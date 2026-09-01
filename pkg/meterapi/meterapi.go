@@ -100,8 +100,6 @@ type PromptStatusResponse struct {
 	FetchedAt time.Time `json:"fetched_at,omitzero"`
 }
 
-const ()
-
 // ---------------------------------------------------------------- budget
 
 // Budget is an EffectiveBudget, wire-shaped. NULL MEANS UNLIMITED.

@@ -43,7 +43,7 @@ func TestRoundTripLeavesNoLiveSessionBehind(t *testing.T) {
 	gc := gcapitest.New(t)
 	store := beadstore.NewMemory()
 	applier := &recordingApplier{}
-	alias := brokerRunningRecord(p.ID).SessionID
+	var alias string
 
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
 		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
