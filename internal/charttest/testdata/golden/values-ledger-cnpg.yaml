@@ -1465,13 +1465,15 @@ spec:
                 awk -v url='http://litellm.litellm.svc:4000' \
                     -v key="$LITELLM_KEY" \
                     -v model='stub-local' \
-                    -v rigbase='http://gonk-intake-internal.gonk.svc:9090' '
+                    -v rigbase='http://gonk-intake-internal.gonk.svc:9090' \
+                    -v prompturl='http://gonk-meter.gonk.svc:8080' '
                   /^\[env\]/ && !seen {
                     print
                     printf "GONK_LITELLM_URL = \"%s\"\n", url
                     printf "GONK_LITELLM_KEY = \"%s\"\n", key
                     if (model != "") printf "GONK_MODEL = \"%s\"\n", model
                     if (rigbase != "") printf "GONK_RIG_BASE_URL = \"%s\"\n", rigbase
+                    if (prompturl != "") printf "GONK_PROMPT_URL = \"%s\"\n", prompturl
                     seen = 1
                     next
                   }
