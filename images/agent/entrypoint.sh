@@ -340,28 +340,50 @@ log "provider check ok: opencode resolved only gonk/ models"
 unset _models _rc _foreign
 
 # ---- Step 3: exec opencode ---------------------------------------------------
-# Strip the gonk marker lines from the prompt before the model ever sees them:
-# they are plumbing, and a model that reads "<!-- gonk:meta:{...} -->" may well
-# echo it into the comment it posts. Everything else is passed through verbatim,
-# argument boundaries intact.
+# RUN NON-INTERACTIVELY (gonk-5k5). `opencode <flags>` starts the TUI, which does
+# not exit when the turn is done -- so Gas City reported the session Running
+# forever, the sweep never read the completed batch, and the bead waited out its
+# reservation and was classified infra-failed. That is the entire reason gonk had
+# never posted a triage comment. `opencode run` takes the message positionally
+# and has -i/--interactive defaulting to false, so it answers and exits, which is
+# what lets a session reach a terminal state at all.
+#
+# THIS IS NOT SUFFICIENT ON ITS OWN, and that is measured, not assumed: `opencode
+# run` against an unreachable endpoint did NOT exit either -- it hung until it
+# was killed. These model/harness pairs pause, prompt and hesitate. The
+# authoritative completion signal is therefore a CLOSED GONK_BATCH fence, which
+# the sweep now honours even while the provider still reports the session running
+# (cmd/gonk-gate/broker_apply.go). Non-interactive mode is the happy path; the
+# fence is the one that holds when the harness misbehaves.
+#
+# The gonk marker lines are stripped before the model ever sees the prompt: they
+# are plumbing, and a model that reads "<!-- gonk:meta:{...} -->" may well echo
+# it into the comment it posts.
 if [ -n "${GONK_PROMPT}" ]; then
-	# Rebuild argv positionally, swapping ONLY the value that follows --prompt.
-	# Any other flag opencode was given survives untouched, in order.
 	_clean=$(printf '%s\n' "${GONK_PROMPT}" | sed '/^<!-- gonk:\(model\|meta\):.* -->[[:space:]]*$/d')
-	_orig_argc=$#
-	_take_next=0
+
+	# Gas City passes the prompt as `--prompt <text>` (pack agent.toml
+	# prompt_mode="flag"). `run` takes it positionally instead, so that pair is
+	# consumed here rather than forwarded. Anything ELSE on argv cannot be
+	# forwarded blind -- TUI flags are not `run` flags -- so it is LOGGED rather
+	# than dropped in silence. A silently discarded argument is this codebase's
+	# signature failure, and a loud line in the pane is what makes the next
+	# harness change visible instead of mysterious.
+	_dropped=""
+	_skip=0
 	for _arg in "$@"; do
-		if [ "${_take_next}" = "1" ]; then
-			set -- "$@" "${_clean}"
-			_take_next=0
-		else
-			set -- "$@" "${_arg}"
-			[ "${_arg}" = "--prompt" ] && _take_next=1
-		fi
+		if [ "${_skip}" = "1" ]; then _skip=0; continue; fi
+		if [ "${_arg}" = "--prompt" ]; then _skip=1; continue; fi
+		_dropped="${_dropped} ${_arg}"
 	done
-	# Drop the original argv, keeping only the rebuilt copy appended above.
-	shift "${_orig_argc}"
-	unset _clean _orig_argc _take_next _arg
+	[ -n "${_dropped}" ] && log "not forwarding to \`opencode run\`:${_dropped} (TUI flags are not run flags; see gonk-5k5)"
+	unset _skip _arg _dropped
+
+	# `--` so a prompt beginning with a dash is never parsed as a flag.
+	log "starting opencode run (non-interactive)"
+	exec opencode run -- "${_clean}"
 fi
 
+# No prompt: nothing to run non-interactively. Fall back to whatever we were
+# given, unchanged -- the entrypoint refuses to start without a model anyway.
 exec opencode "$@"
