@@ -325,14 +325,38 @@ spec:
           # liveness signal is the 9443 city-API socket. IMAGE-GATED (gonk-fsl):
           # 9443 does not bind until the image can finish init -- the probe SHAPE is
           # settled, the boot is not.
+          #
+          # STARTUP IS GUARDED SEPARATELY FROM LIVENESS (gonk-4za). The liveness
+          # probe alone gave `gc` roughly 75s to bind 9443 (15s delay + 3 x 20s)
+          # before the kubelet SIGKILLed it -- and a kill during startup does not
+          # make the next start any faster, so a slow boot became a crash loop.
+          # Observed 2026-09-01: four restarts in nine minutes with exit 137
+          # during a three-pod roll, while the SAME image started cleanly with
+          # zero restarts once the cluster was quiet. gc is byte-identical
+          # between those two runs, so this was never a code regression -- it was
+          # a probe that could not tell "slow" from "dead".
+          #
+          # A startupProbe is the primitive for exactly that: it suspends
+          # liveness until the socket first answers, then normal liveness takes
+          # over. 30 x 10s = 5 minutes of boot budget, which covers a cold image
+          # plus `gc init` plus a Dolt connection under contention, without
+          # loosening the steady-state check at all.
+          startupProbe:
+            tcpSocket: {port: supervisor}
+            periodSeconds: 10
+            failureThreshold: 30
           livenessProbe:
             tcpSocket: {port: supervisor}
             initialDelaySeconds: 15
             periodSeconds: 20
+            # timeoutSeconds defaults to 1, which is thin for a TCP accept on a
+            # loaded node; a probe that times out under load reads as "dead".
+            timeoutSeconds: 3
           readinessProbe:
             tcpSocket: {port: supervisor}
             initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 3
           resources:
             {{- toYaml .Values.gascity.resources | nindent 12 }}
           securityContext:
