@@ -151,11 +151,25 @@ spec:
           # retries. That is fail-closed (no unmetered dispatch), but GitLab
           # auto-disables hooks that fail repeatedly: Plan 06 must test the
           # recovery path.
+          #
+          # failureThreshold IS SIZED FOR A PEER RESTART, NOT JUST A PEER OUTAGE
+          # (gonk-4za). The coupling above is deliberate and stays -- intake must
+          # not dispatch unmetered. But 3 x 10s = 30s cannot ride out a ROLLING
+          # RESTART of the meter, which is a routine deploy rather than a fault,
+          # and the consequence was not merely a blip: on 2026-09-01 a Helm
+          # upgrade rolled meter and intake together, both the old AND the new
+          # intake answered /readyz 503 while the meter was down, the Deployment
+          # went to zero available replicas, and Flux failed the upgrade AND the
+          # rollback -- three times. The stack had to be recovered by hand.
+          #
+          # 12 x 10s = 120s covers a meter roll with headroom while still taking
+          # intake out of the Service inside two minutes for a genuine outage,
+          # which is what the fail-closed argument actually requires.
           readinessProbe:
             httpGet: {path: /readyz, port: http-private}
             initialDelaySeconds: 5
             periodSeconds: 10
-            failureThreshold: 3
+            failureThreshold: 12
           resources:
             {{- toYaml .Values.intake.resources | nindent 12 }}
           securityContext:
