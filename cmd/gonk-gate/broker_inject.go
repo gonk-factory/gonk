@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base32"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -55,20 +57,41 @@ var agentForTrigger = map[string]string{
 // recorded on the bead (Record.SessionID). gonk-sweep reads the session back by
 // this alias via GetSessionOutput.
 //
-// It is deterministic and re-sling-stable EXCEPT for the attempt suffix, which
-// is deliberate: gascity rejects a create whose alias is already taken, so a
-// re-sling (same project+issue, next attempt) must get a fresh alias rather than
-// collide with the prior attempt's still-present session. session.ValidateAlias
-// forbids colons (bead anchors use them) and caps length at 64; this form uses
-// only [a-z0-9.] and stays well under the cap.
+// It carries 128 bits of crypto/rand as a base32 suffix, and THAT ENTROPY IS
+// LOAD-BEARING (gonk-mzd): the alias is the capability the agent pod presents to
+// fetch its own prompt, on the meter's one unauthenticated route. A deterministic
+// alias -- which this used to be -- is reconstructible from a project and issue
+// number by anyone who can reach the meter, which would make that route a public
+// read of issue text. The meter refuses a nonce-free alias by shape for the same
+// reason.
+//
+// The attempt segment stays: gascity rejects a create whose alias is taken, so a
+// re-sling must not collide with the prior attempt's still-present session. The
+// nonce makes that automatic, but keeping the segment keeps the alias legible in
+// logs. session.ValidateAlias forbids colons (bead anchors use them) and caps
+// length at 64; this form uses only [a-z0-9.A-Z2-7] and stays under the cap at
+// ~49 characters.
+//
+// NOTHING IN PRODUCTION RECONSTRUCTS AN ALIAS. Sweep reads Record.SessionID;
+// this is the one call site. Tests that used to recompute it must capture
+// gc.Created[0].Alias instead -- a better assertion anyway, since it checks what
+// was actually sent rather than re-running the generator and agreeing with
+// itself.
 func brokerSessionAlias(agent string, projectID, issueIID int64, attempt int) string {
+	var b [16]byte // 128 bits
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failing is not survivable here: a predictable alias is a
+		// public read of the prompt, so refuse rather than degrade.
+		panic("gonk-gate: crypto/rand unavailable, refusing to mint a guessable session alias: " + err.Error())
+	}
+	nonce := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b[:])
 	// Scaffold is PROJECT-scoped: it is dispatched with no issue, so an `.i0`
 	// segment would be a lie about what the session is for. Two agents working
 	// the same project must not collide, hence the agent in the alias.
 	if issueIID == 0 {
-		return fmt.Sprintf("gonk.%s.p%d.a%d", agent, projectID, attempt)
+		return fmt.Sprintf("gonk.%s.p%d.a%d.%s", agent, projectID, attempt, nonce)
 	}
-	return fmt.Sprintf("gonk.%s.p%d.i%d.a%d", agent, projectID, issueIID, attempt)
+	return fmt.Sprintf("gonk.%s.p%d.i%d.a%d.%s", agent, projectID, issueIID, attempt, nonce)
 }
 
 // renderTriagePrompt builds the session's initial message.
@@ -218,32 +241,6 @@ GONK_BATCH_END
 Every path MUST begin with `+"`.agent/`"+` -- a batch touching anything else is
 rejected in full. Emit one file effect per file, each carrying that file's
 COMPLETE content (there are no partial edits). Nothing after GONK_BATCH_END.`, project, material)
-}
-
-// sanitizeForKeystrokeDelivery makes a prompt safe to TYPE into opencode's TUI.
-//
-// The prompt is delivered by the supervisor as tmux `send-keys -l`, i.e. as
-// KEYSTROKES into a running terminal UI -- and opencode's composer treats "!"
-// as its shell-mode trigger. PROVEN LIVE 2026-08-01: sending
-//
-//	Hello there, see issue !42 and reply with exactly the word GOLF
-//
-// rendered as "$ Hello there, see issue 42 ..." (bang eaten, shell prompt shown)
-// and produced "/bin/sh: 1: Hello: not found". The model never saw the message
-// AT ALL. Every wedged triage session was this: the whole prompt executed as a
-// shell command instead of being asked.
-//
-// THIS IS ALSO AN INJECTION BOUNDARY, which is why it is a hard strip rather
-// than a tidy-up of gonk's own wording. The prompt embeds an UNTRUSTED GitLab
-// issue title and body; a body containing a "!" followed by shell syntax would
-// otherwise run in the agent pod. Sanitizing only the parts gonk writes would
-// leave the half an attacker controls.
-//
-// Stripping is lossy -- exclamation marks and GitLab "!123" MR references do
-// not survive -- and that is the right trade against executing issue text.
-// The durable fix is to stop delivering prompts as keystrokes at all.
-func sanitizeForKeystrokeDelivery(prompt string) string {
-	return strings.ReplaceAll(prompt, "!", "")
 }
 
 // buildIssueContext fetches the issue and renders its title/labels/body into the
@@ -500,18 +497,18 @@ func capBody(s string, max int) string {
 // Exit codes match runDispatch's contract: 0 acted, 1 infra, 2 misconfig.
 func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec meterapi.DecideResponse, base beadstore.Record) int {
 	a := d.Args
-	// The meter's attribution metadata is deliberately NOT put in the prompt any
-	// more (see renderTriagePrompt): it rode a marker line the pod cannot read on
-	// this delivery path. It is still marshalled and logged so the value that
-	// SHOULD be reaching the pod is visible at the point it is lost, rather than
-	// quietly disappearing from the code.
-	if md, err := json.Marshal(dec.Metadata); err != nil {
+	// The meter's attribution metadata NOW REACHES THE POD (gonk-m6t). It used
+	// to be marshalled only to be logged, because the marker line it rode was
+	// unreadable on the submit path -- so spend attributed per install instead
+	// of per bead. It travels with the prompt row instead, and the entrypoint
+	// stamps it into the opencode overlay's spend-logs header before the model
+	// is ever called.
+	md, err := json.Marshal(dec.Metadata)
+	if err != nil {
 		d.Log.Error("could not marshal meter metadata", "err", err, "bead", a.BeadAnchor)
 		return 1
-	} else {
-		d.Log.Debug("attribution metadata is not deliverable to the pod on the submit path",
-			"bead", a.BeadAnchor, "metadata", string(md))
 	}
+	metadataJSON := string(md)
 	// IDEMPOTENCY, AND IT IS NOT OPTIONAL (gonk-6n8). `base` is built fresh from
 	// the webhook args in runDispatch, so it carries an empty SessionID even when
 	// a session for this exact bead+attempt already exists. Nothing else looked,
@@ -602,7 +599,24 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 		}
 		prompt = renderTriagePrompt(a.Project, a.IssueIID, issueContext, checkout)
 	}
-	prompt = sanitizeForKeystrokeDelivery(prompt)
+	// STORE THE PROMPT BEFORE CREATING THE SESSION (gonk-mzd). The pod can be
+	// up and asking before CreateSession returns, so a prompt written after the
+	// create is a race the pod loses -- it would 404 through its whole window
+	// and exit.
+	//
+	// There is no sanitizeForKeystrokeDelivery call here any more, and its
+	// deletion is the point rather than a side effect: the prompt is no longer
+	// TYPED anywhere, so a `!` in an issue body is just text. Stripping bangs
+	// was lossy protection for a channel that no longer exists.
+	if err := d.Meter.PutPrompt(ctx, alias, meterapi.PromptRequest{
+		Prompt:   prompt,
+		Model:    dec.Model,
+		Metadata: metadataJSON,
+	}); err != nil {
+		d.Log.Error("could not store the session prompt; refusing to create a session that would idle",
+			"agent", agent, "alias", alias, "bead", a.BeadAnchor, "err", err)
+		return 1
+	}
 
 	// NOTE the create carries NO Message. It used to, and that is exactly the
 	// bug: `message` becomes template_overrides.initial_message, which Gas City
@@ -648,12 +662,12 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 		d.Log.Debug("session is commandable; delivering prompt", "alias", alias)
 	}
 
-	if err := deliverPrompt(ctx, d, alias, prompt); err != nil {
+	if err := awaitPromptFetched(ctx, d, alias); err != nil {
 		// An undelivered prompt is a real failure, not a warning: the session
 		// exists but will idle forever and never be swept. Fail as infra so the
 		// existing re-sling decides again and retries with a fresh
 		// attempt-suffixed alias.
-		d.Log.Error("prompt delivery failed; session will idle -- re-sling will retry",
+		d.Log.Error("prompt was never fetched; session will idle -- re-sling will retry",
 			"agent", agent, "alias", alias, "bead", a.BeadAnchor, "err", err)
 		// ...and TEAR IT DOWN, because "will idle forever" is not a figure of
 		// speech. The bead never reaches StateRunning on this path, so gonk-sweep
@@ -723,7 +737,7 @@ func abandonSession(ctx context.Context, d dispatchDeps, agent, alias string) {
 //
 // So a timeout here is NOT a failure and must not be treated as one -- it means
 // the pod is still starting, which is the normal case. Delivery simply falls
-// through to deliverPrompt's retry loop, which is built for exactly that window.
+// through to awaitPromptFetched's retry loop, built for exactly that window.
 // Blocking on the success event instead would either exceed the order timeout or
 // turn every slow-but-healthy pod start into a failed dispatch.
 //
@@ -769,31 +783,20 @@ func sessionIsRunning(ctx context.Context, d dispatchDeps, alias string) (bool, 
 	return view.Running, nil
 }
 
-// deliverPrompt submits the rendered prompt to the freshly-created session and
-// then CONFIRMS, from the city event log, that it was actually delivered.
+// awaitPromptFetched waits for the agent pod to TAKE its prompt (gonk-mzd).
 //
-// THE 202 IS NOT A RECEIPT. POST .../session/{id}/submit resolves the session
-// and delivers the message in a goroutine AFTER answering, so a submit against
-// a session that does not exist yet is answered 202 exactly like one that
-// lands, and the real outcome exists only as a terminal event keyed by the
-// request id (gcapi.AwaitRequestOutcome). An earlier version of this function
-// retried on 404 -- a status this route never returns -- so the first submit
-// always "succeeded", dispatch recorded StateRunning, and the prompt was
-// dropped whenever the async create had not materialized the session yet. Every
-// agent then sat at opencode's idle splash forever. That was gonk-u1p.7; do not
-// reintroduce a success path that does not read the outcome.
+// This replaced submit-and-correlate-an-event as the evidence that the agent got
+// its work. The difference is what is being believed: the old path believed its
+// own submit, and reported success even when the prompt landed on a splash
+// screen that was not listening -- the pod carried GC_STARTUP_PROMPT_DELIVERED=1
+// in exactly the runs where the composer stayed empty. fetched_at is the pod's
+// own acknowledgement, recorded by the store when it consumed the row.
 //
-// The retry is not defensive padding: agent-kind create is ALWAYS-async
-// upstream (202 with no session id), so the session genuinely does not exist
-// for the first attempts -- a live run took ~31s from create to session start.
-// Only a RETRYABLE outcome is retried (the session is not there / not live
-// yet); a hard rejection is terminal, because retrying it just burns the
-// order's timeout budget.
-//
-// The bound must stay comfortably inside gonk-dispatch's own 120s order timeout
-// (pack/orders/gonk-dispatch.toml) -- overshooting it turns a recoverable
-// delivery failure into a killed order with no bead update.
-func deliverPrompt(ctx context.Context, d dispatchDeps, alias, prompt string) error {
+// It is NOT terminal success. It proves the entrypoint fetched, not that
+// opencode accepted the prompt or that a model was reached, so dispatch keeps
+// its session-health checks around it rather than treating this as proof of
+// work in progress.
+func awaitPromptFetched(ctx context.Context, d dispatchDeps, alias string) error {
 	attempts, backoff := d.SubmitAttempts, d.SubmitBackoff
 	if attempts <= 0 {
 		attempts = defaultSubmitAttempts
@@ -801,24 +804,7 @@ func deliverPrompt(ctx context.Context, d dispatchDeps, alias, prompt string) er
 	if backoff == nil {
 		backoff = defaultSubmitBackoff
 	}
-	awaitTimeout := d.SubmitAwaitTimeout
-	if awaitTimeout <= 0 {
-		awaitTimeout = defaultSubmitAwaitTimeout
-	}
-	budget := d.SubmitDeadline
-	if budget <= 0 {
-		budget = defaultSubmitDeadline
-	}
-	// The budget bounds the CONTEXT, not just the loop arithmetic, so it caps the
-	// in-flight HTTP calls too. Without this a single slow round-trip started
-	// just inside the deadline could run the whole delivery well past it -- a
-	// live run overshot to 3m14s against a 90s budget exactly that way, which
-	// would be a killed order rather than a legible failure.
-	ctx, cancel := context.WithTimeout(ctx, budget)
-	defer cancel()
-	deadline := time.Now().Add(budget)
-
-	var last error
+	var lastErr error
 	for i := 0; i < attempts; i++ {
 		if i > 0 {
 			select {
@@ -827,83 +813,19 @@ func deliverPrompt(ctx context.Context, d dispatchDeps, alias, prompt string) er
 			case <-time.After(backoff(i)):
 			}
 		}
-		// The hard cap on the whole loop. Checked before spending an attempt so
-		// the budget bounds real work, not just the sleeps between it.
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			break
-		}
-
-		// DO NOT SUBMIT INTO A SESSION THAT IS NOT RUNNING YET.
-		//
-		// Manager.submit parks a default-intent message on the nudge queue --
-		// outcome.Queued -- when the session is still start_pending/creating
-		// (GASCITY_REF internal/session/submit.go). Delivery then depends on a
-		// separate poller process, and PROVEN LIVE 2026-08-01 it never arrived:
-		// session go-57b took a queued prompt, its pod came up healthy, and
-		// opencode still sat at the idle splash minutes later. A queued prompt is
-		// a dropped prompt on this backend.
-		//
-		// Waiting for running=true avoids the queue entirely rather than trying
-		// to recover from it, which also sidesteps the one thing a retry cannot
-		// undo: a parked copy landing later and prompting the agent twice.
-		running, err := sessionIsRunning(ctx, d, alias)
+		fetched, err := d.Meter.PromptFetched(ctx, alias)
 		if err != nil {
-			// A state check that could not be answered is not a verdict. The
-			// supervisor is single-threaded behind a session mutation lock and a
-			// live run saw this GET exceed its client timeout while another
-			// session was mid-turn -- failing the dispatch on that would throw
-			// away a perfectly good session over a slow read. Retry within the
-			// budget instead; if it never answers, the loop exhausts and fails.
-			last = err
-			d.Log.Debug("could not read session state; will retry", "alias", alias, "attempt", i+1, "err", err)
+			// The meter being briefly unreachable is not evidence the pod
+			// failed; keep waiting within the window rather than tearing down a
+			// session that may be about to fetch.
+			lastErr = err
 			continue
 		}
-		if !running {
-			last = fmt.Errorf("session is not running yet")
-			d.Log.Debug("session not running yet; holding the prompt back", "alias", alias, "attempt", i+1)
-			continue
+		if fetched {
+			d.Log.Info("prompt fetched by the agent pod", "alias", alias)
+			return nil
 		}
-
-		ack, err := d.GC.SubmitSession(ctx, alias, prompt, gcapi.SubmitIntentDefault)
-		if err != nil {
-			// A transport-level rejection really is synchronous (no grant,
-			// wrong city, unrouted path) and never reaches the event log.
-			return err
-		}
-		if ack == nil || ack.RequestID == "" {
-			// No correlation handle means no way to confirm delivery, and an
-			// unconfirmable prompt is exactly the failure being fixed here.
-			return fmt.Errorf("submit for session %q returned no request id: delivery cannot be confirmed", alias)
-		}
-
-		// NOTE the await is NOT retried on timeout, and the prompt is NOT
-		// resubmitted: a timeout means the outcome is unobserved, not that it
-		// failed, and resubmitting would risk delivering the prompt twice while
-		// still not knowing. An unknown outcome fails the dispatch, loudly.
-		outcome, err := d.GC.AwaitRequestOutcome(ctx, ack.RequestID, ack.EventCursor, gcapi.EventSessionSubmitResult, min(awaitTimeout, remaining))
-		if err != nil {
-			return fmt.Errorf("confirming prompt delivery to session %q: %w", alias, err)
-		}
-		if outcome.OK && !outcome.Queued {
-			return nil // typed into the live runtime, and observed to be
-		}
-		if outcome.OK {
-			// Accepted but PARKED, not delivered -- see the running-check above
-			// for why that is a dropped prompt here. The running gate should
-			// make this unreachable, so reaching it is worth a warning, not a
-			// silent retry.
-			last = fmt.Errorf("prompt was queued rather than delivered live")
-			d.Log.Warn("prompt accepted but QUEUED, not delivered live -- retrying",
-				"alias", alias, "session", outcome.SessionID)
-			continue
-		}
-		last = fmt.Errorf("%s", outcome.String())
-		if !outcome.Retryable() {
-			return fmt.Errorf("prompt delivery to session %q rejected: %w", alias, last)
-		}
-		d.Log.Debug("prompt not delivered yet; session still materializing",
-			"alias", alias, "attempt", i+1, "outcome", outcome.String())
+		lastErr = fmt.Errorf("prompt not yet fetched")
 	}
-	return fmt.Errorf("session %q never accepted its prompt after %d attempts: %w", alias, attempts, last)
+	return fmt.Errorf("prompt was never fetched by the agent after %d checks: %w", attempts, lastErr)
 }

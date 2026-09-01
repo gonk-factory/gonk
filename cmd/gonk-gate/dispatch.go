@@ -88,7 +88,7 @@ type dispatchDeps struct {
 	Log        *slog.Logger
 	Args       dispatchArgs
 	// SubmitAttempts / SubmitBackoff bound the wait for an async-created session
-	// to exist before its prompt can be submitted (see deliverPrompt). Zero
+	// to exist before its prompt is fetched (see awaitPromptFetched). Zero
 	// values mean the production defaults; tests set them to keep the retry
 	// path fast and deterministic.
 	SubmitAttempts int

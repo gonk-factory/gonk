@@ -34,8 +34,10 @@ func TestBrokerRoundTripDispatchToAppliedComment(t *testing.T) {
 	gc := gcapitest.New(t)
 	store := beadstore.NewMemory()
 	applier := &recordingApplier{}
-	// The alias is derived, not hardcoded: glabtest assigns the project id.
-	alias := brokerSessionAlias("triage", p.ID, 3, 1)
+	// The alias is CAPTURED from what dispatch actually sent, not recomputed.
+	// It now carries a crypto nonce (gonk-mzd), so recomputing it would only
+	// agree with itself; capturing checks the real value.
+	var alias string
 
 	// ---- 1. DISPATCH: decide, create the session, deliver the prompt --------
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
@@ -55,14 +57,18 @@ func TestBrokerRoundTripDispatchToAppliedComment(t *testing.T) {
 		t.Fatalf("dispatch exit = %d, want 0", code)
 	}
 
-	if len(gc.Created) != 1 || gc.Created[0].Alias != alias {
-		t.Fatalf("created = %+v, want one session aliased %q", gc.Created, alias)
+	if len(gc.Created) != 1 {
+		t.Fatalf("created = %+v, want exactly one session", gc.Created)
 	}
-	if len(gc.Submitted) != 1 || gc.Submitted[0].ID != alias {
-		t.Fatalf("submitted = %+v, want the prompt delivered to %q", gc.Submitted, alias)
+	alias = gc.Created[0].Alias
+
+	// The prompt is stored for the pod to fetch, keyed by that same alias.
+	stored := fm.putPrompts()
+	if _, ok := stored[alias]; !ok {
+		t.Fatalf("no prompt stored for %q; stored = %+v", alias, stored)
 	}
-	if !strings.Contains(gc.Submitted[0].Message, "GONK_BATCH_START") {
-		t.Fatalf("the delivered prompt does not state the batch contract:\n%s", gc.Submitted[0].Message)
+	if !strings.Contains(stored[alias].Prompt, "GONK_BATCH_START") {
+		t.Fatalf("the stored prompt does not state the batch contract:\n%s", stored[alias].Prompt)
 	}
 	// Create leaves it RUNNING -- the agent has work to do.
 	if got := gc.SessionStateOf(alias); got != gcapitest.SessionRunning {
@@ -135,7 +141,7 @@ func TestBrokerRoundTripCrashedSessionIsJudgedButAppliesNothing(t *testing.T) {
 	gl.AddIssue(p.ID, 3, "opened")
 
 	gc := gcapitest.New(t)
-	gc.CrashSession(brokerSessionAlias("triage", p.ID, 3, 1))
+	gc.CrashSession(brokerRunningRecord(p.ID).SessionID)
 	applier := &recordingApplier{}
 
 	store := beadstore.NewMemory()
