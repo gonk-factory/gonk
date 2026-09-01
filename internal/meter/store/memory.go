@@ -30,6 +30,7 @@ type Memory struct {
 	cursor       time.Time
 	syncedAt     time.Time
 	window       spend.Window
+	prompts      map[string]Prompt
 }
 
 func NewMemory() *Memory {
@@ -38,6 +39,7 @@ func NewMemory() *Memory {
 		attempts:     map[string][]attemptRecord{},
 		reservations: map[string]Reservation{},
 		seen:         map[string]struct{}{},
+		prompts:      map[string]Prompt{},
 	}
 }
 
@@ -288,3 +290,58 @@ func (m *Memory) SetWindow(_ context.Context, w spend.Window) error {
 }
 
 var _ Store = (*Memory)(nil)
+
+// --- prompt-by-reference (gonk-mzd) -----------------------------------------
+
+func (m *Memory) PutPrompt(ctx context.Context, p Prompt) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.prompts[p.Alias] = p
+	return nil
+}
+
+// TakePrompt is read-and-mark under the SAME write lock, so two concurrent
+// callers cannot both observe an unconsumed row. In the memory store that is
+// what the postgres implementation buys with a single UPDATE ... RETURNING.
+func (m *Memory) TakePrompt(ctx context.Context, alias string, now time.Time) (Prompt, bool, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.prompts[alias]
+	if !ok {
+		return Prompt{}, false, false, nil
+	}
+	if !p.ExpiresAt.IsZero() && now.After(p.ExpiresAt) {
+		// Expired reads as never-stored: the caller must retry or fail, not
+		// consume something the janitor is about to drop.
+		return Prompt{}, false, false, nil
+	}
+	if !p.FetchedAt.IsZero() {
+		return p, true, true, nil
+	}
+	p.FetchedAt = now
+	m.prompts[alias] = p
+	return p, true, false, nil
+}
+
+func (m *Memory) PromptStatus(ctx context.Context, alias string) (Prompt, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	p, ok := m.prompts[alias]
+	if !ok {
+		return Prompt{}, false, nil
+	}
+	return p, true, nil
+}
+
+func (m *Memory) ExpirePrompts(ctx context.Context, now time.Time) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for k, p := range m.prompts {
+		if !p.ExpiresAt.IsZero() && now.After(p.ExpiresAt) {
+			delete(m.prompts, k)
+			n++
+		}
+	}
+	return n, nil
+}

@@ -63,7 +63,44 @@ const (
 	HealthzPath        = "/healthz"
 	ReadyzPath         = "/readyz"
 	MetricsPath        = "/metrics"
+
+	// PromptPathPrefix is prompt-by-reference (gonk-mzd). The agent pod fetches
+	// its own prompt at PromptPathPrefix+<alias> instead of having it typed
+	// into a TUI.
+	//
+	// GET on this path is the ONE unauthenticated route on this service: the
+	// alias carries 128 bits of entropy and IS the capability, so there is no
+	// token to distribute to a pod that deliberately holds no credentials.
+	// PUT and DELETE on the same path still require the admin bearer.
+	PromptPathPrefix = "/v1/prompt/"
 )
+
+// PromptRequest is what the controller PUTs before creating the session.
+// Model and Metadata travel with the prompt so the pod can render its own
+// opencode overlay per session -- that is what restores per-bead attribution
+// (gonk-m6t) rather than attributing spend per install.
+type PromptRequest struct {
+	Prompt   string `json:"prompt"`
+	Model    string `json:"model"`
+	Metadata string `json:"metadata,omitempty"`
+}
+
+// PromptResponse is what the agent pod GETs, once.
+type PromptResponse struct {
+	Prompt   string `json:"prompt"`
+	Model    string `json:"model"`
+	Metadata string `json:"metadata,omitempty"`
+}
+
+// PromptStatusResponse lets dispatch confirm the entrypoint actually fetched,
+// which is strictly better evidence than "we submitted it" -- the claim the old
+// keystroke path made even when the composer was empty.
+type PromptStatusResponse struct {
+	Fetched   bool      `json:"fetched"`
+	FetchedAt time.Time `json:"fetched_at,omitzero"`
+}
+
+const ()
 
 // ---------------------------------------------------------------- budget
 

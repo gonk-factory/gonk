@@ -242,4 +242,55 @@ type Store interface {
 	// spend.Advance's monotonicity survives a restart.
 	Window(ctx context.Context) (spend.Window, error)
 	SetWindow(ctx context.Context, w spend.Window) error
+
+	// --- prompt-by-reference (gonk-mzd) ------------------------------------
+	//
+	// The agent pod PULLS its prompt instead of having it typed into a TUI.
+	// Delivery by keystroke was unreliable -- across five live runs one
+	// composer received text, and the pod carried
+	// GC_STARTUP_PROMPT_DELIVERED=1 every time, including when the composer was
+	// visibly empty. A fetch either returns the prompt or fails loudly, which
+	// is the property that channel never had.
+
+	// PutPrompt stores the prompt the session named by alias will fetch. The
+	// caller writes it BEFORE creating the session: the pod can be up before
+	// CreateSession returns.
+	PutPrompt(ctx context.Context, p Prompt) error
+
+	// TakePrompt returns the prompt and marks it consumed, ATOMICALLY. One-shot
+	// is the only thing separating "unauthenticated read" from "replayable
+	// unauthenticated read", so read-and-mark must be a single statement, the
+	// same discipline ReserveIfFits follows -- two pods racing must not both
+	// win.
+	//
+	// found=false means never stored (or expired). consumed=true means it was
+	// stored and already taken: the caller answers 410, not 404. The two are
+	// opposite diagnoses -- "never delivered" versus "respawn or theft" -- and
+	// collapsing them would hide exactly the case worth seeing.
+	TakePrompt(ctx context.Context, alias string, now time.Time) (p Prompt, found bool, consumed bool, err error)
+
+	// PromptStatus reports without consuming, so dispatch can confirm the
+	// entrypoint fetched. FetchedAt is zero until it does.
+	PromptStatus(ctx context.Context, alias string) (p Prompt, found bool, err error)
+
+	// ExpirePrompts drops rows past ExpiresAt. Prompts hold issue text and want
+	// their own retention, so this runs alongside the existing janitor rather
+	// than sharing a ledger table's lifetime.
+	ExpirePrompts(ctx context.Context, now time.Time) (int, error)
+}
+
+// Prompt is one session's rendered prompt, held until that session fetches it.
+//
+// Model and Metadata travel WITH the prompt so the entrypoint can render its
+// opencode overlay per session. That is what restores the attribution seam
+// (gonk-m6t): today the overlay is built from pod env that the submit path does
+// not set, so spend rows attribute per-install instead of per-bead.
+type Prompt struct {
+	Alias     string
+	Prompt    string
+	Model     string
+	Metadata  string // the atags JSON, verbatim, for the spend-logs header
+	CreatedAt time.Time
+	FetchedAt time.Time // zero until taken
+	ExpiresAt time.Time
 }

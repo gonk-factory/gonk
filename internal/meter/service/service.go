@@ -1276,3 +1276,27 @@ func (s *Service) Reresolve(ctx context.Context) error {
 	}
 	return lastErr
 }
+
+// --- prompt-by-reference (gonk-mzd) -----------------------------------------
+
+// promptTTL bounds how long an unfetched prompt stays readable. It is generous
+// against session startup (image pull, city bootstrap) and short against the
+// value of the capability: the alias travels in pod env, so an abandoned prompt
+// should stop being readable long before anyone goes looking for it.
+const promptTTL = 30 * time.Minute
+
+func (s *Service) PutPrompt(ctx context.Context, alias string, req meterapi.PromptRequest) error {
+	now := s.now()
+	return s.store.PutPrompt(ctx, store.Prompt{
+		Alias: alias, Prompt: req.Prompt, Model: req.Model, Metadata: req.Metadata,
+		CreatedAt: now, ExpiresAt: now.Add(promptTTL),
+	})
+}
+
+func (s *Service) TakePrompt(ctx context.Context, alias string) (store.Prompt, bool, bool, error) {
+	return s.store.TakePrompt(ctx, alias, s.now())
+}
+
+func (s *Service) PromptStatus(ctx context.Context, alias string) (store.Prompt, bool, error) {
+	return s.store.PromptStatus(ctx, alias)
+}
