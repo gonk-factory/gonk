@@ -767,22 +767,6 @@ func awaitCreate(ctx context.Context, d dispatchDeps, alias string, ack *gcapi.C
 	return true, nil
 }
 
-// sessionIsRunning reports whether the session's runtime is live yet. A 404 is
-// "not there yet" -- agent create is async, so the alias legitimately does not
-// resolve for the first seconds -- not an error.
-func sessionIsRunning(ctx context.Context, d dispatchDeps, alias string) (bool, error) {
-	// peekLines=1: this is a state check, not a read of the agent's output, and
-	// the whole transcript would be pulled otherwise.
-	view, err := d.GC.GetSessionOutput(ctx, alias, 1)
-	if err != nil {
-		if gcapi.IsNotFound(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return view.Running, nil
-}
-
 // awaitPromptFetched waits for the agent pod to TAKE its prompt (gonk-mzd).
 //
 // This replaced submit-and-correlate-an-event as the evidence that the agent got

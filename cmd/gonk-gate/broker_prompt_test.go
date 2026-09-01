@@ -158,6 +158,8 @@ func promptTestForge() stubForge {
 	}}
 }
 
+const base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
 func aliasLooksNonced(alias string) bool {
 	i := strings.LastIndex(alias, ".")
 	if i < 0 {
@@ -168,7 +170,7 @@ func aliasLooksNonced(alias string) bool {
 		return false
 	}
 	for _, c := range n {
-		if !(c >= 'A' && c <= 'Z') && !(c >= '2' && c <= '7') {
+		if !strings.ContainsRune(base32Alphabet, c) {
 			return false
 		}
 	}

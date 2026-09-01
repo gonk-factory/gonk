@@ -115,19 +115,6 @@ const (
 	// of patience covers that with margin.
 	defaultSubmitAttempts = 40
 	submitBackoffInterval = 3 * time.Second
-	// defaultSubmitAwaitTimeout is sized from MEASURED latency, not guessed
-	// (live, ns gonk, 2026-08-01): the two outcomes are wildly asymmetric.
-	//   - resolve_failed  ~262ms  -- nothing is delivered, so nothing is slow;
-	//                               this is the case the retry loop spins on.
-	//   - success        ~10.8s   -- the message is exec'd into the pod's tmux
-	//                               and only then does the event land.
-	// So the retry loop stays fast while a genuine delivery gets room. The
-	// success latency is also LOAD-DEPENDENT -- the supervisor serializes
-	// delivery behind a session mutation lock, and the same submit confirmed in
-	// 10.8s idle and 51.2s while another session was mid-turn. A timeout here
-	// means the outcome is UNKNOWN, which fails the dispatch, so it must clear
-	// the loaded case comfortably rather than the idle one.
-	defaultSubmitAwaitTimeout = 90 * time.Second
 	// defaultSubmitDeadline keeps the whole loop inside gonk-dispatch's order
 	// timeout (pack/orders/gonk-dispatch.toml, 300s) with room for the meter
 	// call, the issue fetch and the create that precede it. Overshooting it
