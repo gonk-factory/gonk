@@ -260,3 +260,24 @@ and the agent falls back to controller-side repository context (gonk-msz).
 http://gonk-intake-internal.{{ .Release.Namespace }}.svc:{{ .Values.intake.ports.private }}
 {{- end -}}
 {{- end -}}
+
+{{/*
+gonk.promptBaseURL -- where an agent pod fetches its own PROMPT (gonk-mzd).
+
+The pod pulls instead of having its prompt typed into a TUI. Delivery by
+keystroke was unreliable and, worse, silent: the pod carried
+GC_STARTUP_PROMPT_DELIVERED=1 even when the composer was empty.
+
+Not a credential, and deliberately so -- there is no token to distribute here.
+The capability is the 128-bit nonce in GC_ALIAS, which Gas City already places
+in every agent pod's environment, so the pod composes the URL itself.
+
+Injected explicitly rather than relying on GONK_METER_SERVICE_HOST/_PORT: the
+kubelet only injects service env vars when the Service predates the pod, which
+is a startup-ordering dependency nobody should have to reason about.
+*/}}
+{{- define "gonk.promptBaseURL" -}}
+{{- if .Values.meter.enabled -}}
+http://gonk-meter.{{ .Release.Namespace }}.svc:{{ .Values.meter.port }}
+{{- end -}}
+{{- end -}}

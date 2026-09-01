@@ -151,6 +151,74 @@ for _arg in "$@"; do
 	_prev_arg="${_arg}"
 done
 
+# ---- Step 1.5: fetch this session's prompt (gonk-mzd) ------------------------
+# The pod PULLS its prompt instead of having it typed into the opencode TUI.
+#
+# WHY: keystroke delivery is a race against composer readiness, and it fails
+# silently. Across five live runs one composer received text; the pod carried
+# GC_STARTUP_PROMPT_DELIVERED=1 every time, including when the composer was
+# visibly empty. A fetch either returns the prompt or fails loudly, which is the
+# property that channel never had.
+#
+# NO CREDENTIAL. GC_ALIAS carries 128 bits of entropy and IS the capability, so
+# there is nothing to mount here and the LiteLLM-key dance does not apply.
+#
+# TREAT THE ALIAS AS SECRET IN LOGS. This script logs freely and its pane is
+# captured and read by sweep, so the URL is never echoed -- printing it would
+# publish the capability into the transcript.
+if [ -z "${GONK_PROMPT}" ] && [ -n "${GONK_PROMPT_URL:-}" ] && [ -n "${GC_ALIAS:-}" ]; then
+	_purl="${GONK_PROMPT_URL%/}/v1/prompt/${GC_ALIAS}"
+	_pfile="${GONK_RUNTIME_DIR:-/tmp/gonk}/prompt.json"
+	mkdir -p "$(dirname "${_pfile}")"
+
+	# Retry only 404: the pod can legitimately beat the controller's PUT. Any
+	# other status is terminal -- retrying a 410 would just re-confirm that
+	# someone already took it.
+	_deadline=$(( $(date +%s) + ${GONK_PROMPT_WAIT_SECS:-120} ))
+	_code=""
+	while :; do
+		_code=$(curl -sS -o "${_pfile}" -w '%{http_code}' --max-time 20 "${_purl}" 2>/dev/null || echo 000)
+		case "${_code}" in
+			200) break ;;
+			404) : ;;   # not stored yet -- keep waiting
+			*)   break ;;
+		esac
+		[ "$(date +%s)" -ge "${_deadline}" ] && break
+		sleep 2
+	done
+
+	case "${_code}" in
+		200)
+			GONK_PROMPT=$(jq -r '.prompt // empty' <"${_pfile}")
+			_pmodel=$(jq -r '.model // empty' <"${_pfile}")
+			_pmeta=$(jq -r '.metadata // empty' <"${_pfile}")
+			# The model and metadata travel WITH the prompt so the overlay is
+			# rendered per session. That is what restores per-bead attribution
+			# (gonk-m6t) rather than attributing spend per install.
+			[ -n "${_pmodel}" ] && GC_WEBHOOK_ARG_MODEL="${_pmodel}"
+			[ -n "${_pmeta}" ] && GC_WEBHOOK_ARG_METADATA_JSON="${_pmeta}"
+			rm -f "${_pfile}"
+			log "prompt fetched (${#GONK_PROMPT} bytes)"
+			;;
+		410)
+			# ALREADY CONSUMED -- the opposite diagnosis from a timeout. Either
+			# this pod was respawned past the fetch (Gas City relaunches a dead
+			# agent into the warm pod and re-runs the start command), or someone
+			# else took it. Exit distinctly so the logs say which, rather than
+			# looking like a delivery bug.
+			log "FATAL: prompt already consumed (410) -- respawn past the fetch, or theft"
+			exit 3
+			;;
+		*)
+			# An agent that idles while looking healthy is the failure mode this
+			# whole change exists to end. Exit non-zero and loudly.
+			log "FATAL: no prompt after ${GONK_PROMPT_WAIT_SECS:-120}s (last status ${_code})"
+			exit 4
+			;;
+	esac
+	unset _purl _pfile _deadline _code _pmodel _pmeta
+fi
+
 marker_value() {
 	# $1 = marker name. Prints the value, or nothing. `head -1` because only the
 	# first occurrence is ours; a hostile issue body cannot forge an earlier one
