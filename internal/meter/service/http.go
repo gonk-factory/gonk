@@ -54,6 +54,11 @@ func NewMux(svc *Service, token, prevToken string, metricsHandler http.Handler) 
 	mux.HandleFunc("GET /v1/cost/session/{session_key}", h.costSession)
 	mux.HandleFunc("GET /v1/cost/project/{project}", h.costProject)
 	mux.HandleFunc("GET /v1/cost/instance", h.costInstance)
+	// prompt-by-reference (gonk-mzd). GET is exempt from the bearer in
+	// bearerAuth; PUT and status are not.
+	mux.HandleFunc("PUT "+meterapi.PromptPathPrefix+"{alias}", h.putPrompt)
+	mux.HandleFunc("GET "+meterapi.PromptPathPrefix+"{alias}", h.takePrompt)
+	mux.HandleFunc("GET "+meterapi.PromptPathPrefix+"{alias}/status", h.promptStatus)
 	// POST /admin/spend/sync IS bearer-authenticated (unlike /healthz,
 	// /readyz, /metrics): it is on the same listener as everything else --
 	// meter has one port, unlike intake's public/private split -- and
@@ -82,6 +87,37 @@ func bearerAuth(tokens [][]byte, next http.Handler) http.Handler {
 		case meterapi.HealthzPath, meterapi.ReadyzPath, meterapi.MetricsPath:
 			next.ServeHTTP(w, r)
 			return
+		}
+		// THE ONE UNAUTHENTICATED ROUTE (gonk-mzd). The agent pod holds no
+		// credentials by design, so it cannot present a bearer; the 128-bit
+		// alias in its GC_ALIAS is the capability instead.
+		//
+		// METHOD-AWARE ON PURPOSE. The switch above matches on path alone,
+		// which is correct for /healthz and friends but would hand WRITE access
+		// away here -- an unauthenticated PUT to this path would let anyone
+		// replace the prompt a session is about to run. Only GET is exempt;
+		// PUT and DELETE fall through to the bearer check below.
+		//
+		// SHAPE IS CHECKED BEFORE THE STORE IS TOUCHED. The handler cannot
+		// measure entropy, only form, so a nonce-free alias is refused here.
+		// That also stops this route becoming a free database probe on the same
+		// listener that serves budget decisions.
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, meterapi.PromptPathPrefix) {
+			rest := strings.TrimPrefix(r.URL.Path, meterapi.PromptPathPrefix)
+			// EXACT PATH ONLY. A sub-path under this prefix -- /status today,
+			// anything added later -- must NOT inherit the exemption just by
+			// living under it. Caught by the route table test: without this the
+			// status route was swallowed here and 401'd even WITH a bearer,
+			// which is the benign direction of a mistake whose other direction
+			// hands operator data away.
+			if !strings.Contains(rest, "/") {
+				if aliasHasNonce(rest) {
+					next.ServeHTTP(w, r)
+					return
+				}
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
 		}
 		presented := []byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 		matched := 0
@@ -679,4 +715,108 @@ func (s *Service) InstanceCost(ctx context.Context) (meterapi.InstanceCostRespon
 		CostUSD: costUSD, SyntheticCostUSD: syntheticUSD, TotalTokens: tokens,
 		ByProject: byProject, AsOf: asOf, Complete: complete,
 	}, nil
+}
+
+// --- prompt-by-reference (gonk-mzd) -----------------------------------------
+
+// aliasHasNonce is the shape gate on the one unauthenticated route.
+//
+// The handler cannot measure entropy, only form. Requiring the final
+// dot-separated label to be exactly 26 base32 characters is what distinguishes
+// a capability-bearing alias (gonk.triage.p75.i35.a1.<26 chars of crypto/rand>)
+// from the old deterministic one (gonk.triage.p75.i35.a1), which anyone could
+// reconstruct from an issue number. Without this, an unauthenticated GET would
+// be guessable, and the alias would not be a capability at all.
+//
+// 26 base32 chars is 130 bits, which is how 128 bits of randomness encodes.
+func aliasHasNonce(alias string) bool {
+	i := strings.LastIndex(alias, ".")
+	if i < 0 {
+		return false
+	}
+	nonce := alias[i+1:]
+	if len(nonce) != 26 {
+		return false
+	}
+	for _, c := range nonce {
+		// RFC 4648 base32 alphabet, upper-case, no padding.
+		if !(c >= 'A' && c <= 'Z') && !(c >= '2' && c <= '7') {
+			return false
+		}
+	}
+	return true
+}
+
+func (h *handler) putPrompt(w http.ResponseWriter, r *http.Request) {
+	alias := r.PathValue("alias")
+	if !aliasHasNonce(alias) {
+		writeError(w, http.StatusBadRequest, "alias must carry a 26-character base32 nonce")
+		return
+	}
+	var req meterapi.PromptRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed prompt body")
+		return
+	}
+	if req.Prompt == "" {
+		writeError(w, http.StatusBadRequest, "prompt is empty")
+		return
+	}
+	if err := h.svc.PutPrompt(r.Context(), alias, req); err != nil {
+		writeError(w, http.StatusInternalServerError, "store prompt")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// takePrompt is the unauthenticated one. It CONSUMES: a second GET is 410, not
+// a replay, because the alias travels in pod env and process listings and a
+// replayable unauthenticated read is the whole risk of exempting this route.
+func (h *handler) takePrompt(w http.ResponseWriter, r *http.Request) {
+	alias := r.PathValue("alias")
+	if !aliasHasNonce(alias) {
+		// Unauthorized rather than 400: this route is reached without a bearer,
+		// so a malformed alias should look exactly like a wrong one.
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	p, found, consumed, err := h.svc.TakePrompt(r.Context(), alias)
+	switch {
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "take prompt")
+	case !found:
+		// Never stored, or expired. The pod can legitimately beat the
+		// controller here, so its entrypoint retries this.
+		writeError(w, http.StatusNotFound, "no prompt for alias")
+	case consumed:
+		// Already taken. Opposite diagnosis from 404: a respawn into the same
+		// pod, or a theft. The entrypoint exits with a distinct code so the
+		// logs say which.
+		writeError(w, http.StatusGone, "prompt already consumed")
+	default:
+		writeJSON(w, http.StatusOK, meterapi.PromptResponse{
+			Prompt: p.Prompt, Model: p.Model, Metadata: p.Metadata,
+		})
+	}
+}
+
+func (h *handler) promptStatus(w http.ResponseWriter, r *http.Request) {
+	alias := r.PathValue("alias")
+	if !aliasHasNonce(alias) {
+		writeError(w, http.StatusBadRequest, "alias must carry a 26-character base32 nonce")
+		return
+	}
+	p, found, err := h.svc.PromptStatus(r.Context(), alias)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "prompt status")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no prompt for alias")
+		return
+	}
+	writeJSON(w, http.StatusOK, meterapi.PromptStatusResponse{
+		Fetched:   !p.FetchedAt.IsZero(),
+		FetchedAt: p.FetchedAt,
+	})
 }

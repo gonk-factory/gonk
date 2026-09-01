@@ -434,3 +434,150 @@ func assertNoLeakedToken(t *testing.T, body []byte) {
 		t.Fatalf("response body leaks a token (contains \"sk-\"): %s", body)
 	}
 }
+
+// --- prompt-by-reference (gonk-mzd) -----------------------------------------
+
+const testNonceAlias = "gonk.triage.p42.i3.a1.ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+// THE TEST THAT MATTERS MOST IN THIS CHANGE.
+//
+// Adding an unauthenticated route to a service that otherwise guards project
+// registration and budget decisions is exactly the kind of change that goes
+// wrong quietly. This is an exhaustive table over every route and method: the
+// prompt GET is the ONLY entry allowed to answer without a bearer, and every
+// other combination must 401. A future route added without thought fails here
+// by default, which is the point.
+func TestOnlyThePromptGetIsUnauthenticated(t *testing.T) {
+	h := newHTTPFixture(t)
+
+	cases := []struct {
+		method, path string
+		exempt       bool
+	}{
+		{"PUT", "/v1/projects/group%2Frepo", false},
+		{"GET", "/v1/projects/group%2Frepo", false},
+		{"DELETE", "/v1/projects/group%2Frepo", false},
+		{"POST", "/v1/policy/decide", false},
+		{"POST", "/v1/policy/outcome", false},
+		{"GET", "/v1/cost/bead/b1", false},
+		{"GET", "/v1/cost/session/s1", false},
+		{"GET", "/v1/cost/project/group%2Frepo", false},
+		{"GET", "/v1/cost/instance", false},
+		{"POST", "/admin/spend/sync", false},
+
+		// The one exemption -- and only for GET.
+		{"GET", "/v1/prompt/" + testNonceAlias, true},
+		// Write access must NOT come with it: an unauthenticated PUT here would
+		// let anyone replace the prompt a session is about to run.
+		{"PUT", "/v1/prompt/" + testNonceAlias, false},
+		{"DELETE", "/v1/prompt/" + testNonceAlias, false},
+		// Status reveals whether a prompt was fetched; that is operator data.
+		{"GET", "/v1/prompt/" + testNonceAlias + "/status", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.method+" "+c.path, func(t *testing.T) {
+			resp, _ := h.do(c.method, c.path, "", nil) // no bearer
+			defer resp.Body.Close()
+			got401 := resp.StatusCode == http.StatusUnauthorized
+			if c.exempt && got401 {
+				t.Fatalf("%s %s = 401 without a bearer, want the exemption to apply",
+					c.method, c.path)
+			}
+			if !c.exempt && !got401 {
+				t.Fatalf("%s %s = %d without a bearer, want 401 -- only GET on the "+
+					"prompt path may answer unauthenticated", c.method, c.path, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// The alias IS the capability, so an alias without a nonce is not one. Shape is
+// checked before the store is touched, which also stops this route becoming a
+// free database probe on the listener that serves budget decisions.
+func TestNonceFreeAliasIsRefusedUnauthenticated(t *testing.T) {
+	h := newHTTPFixture(t)
+	for _, alias := range []string{
+		"gonk.triage.p42.i3.a1",                            // the old deterministic form: guessable
+		"gonk.triage.p42.i3.a1.TOOSHORT",                   // wrong length
+		"gonk.triage.p42.i3.a1.abcdefghijklmnopqrstuvwxyz", // lower case is not base32
+		"gonk.triage.p42.i3.a1.ABCDEFGHIJKLMNOPQRSTUVWXY1", // 1 is not in the alphabet
+		"nodotsatall",
+	} {
+		resp, _ := h.do("GET", "/v1/prompt/"+alias, "", nil)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("GET with alias %q = %d, want 401 -- a nonce-free alias is "+
+				"guessable and must not read as a capability", alias, resp.StatusCode)
+		}
+	}
+}
+
+// One-shot is the only thing standing between "unauthenticated read" and
+// "replayable unauthenticated read". 404 and 410 are deliberately different
+// answers: never-delivered versus already-consumed are opposite diagnoses.
+func TestPromptIsOneShotAndDistinguishes404From410(t *testing.T) {
+	h := newHTTPFixture(t)
+
+	resp, _ := h.do("GET", "/v1/prompt/"+testNonceAlias, "", nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET before any PUT = %d, want 404", resp.StatusCode)
+	}
+
+	resp, _ = h.do("PUT", "/v1/prompt/"+testNonceAlias, h.token,
+		meterapi.PromptRequest{Prompt: "triage this", Model: "qwen3-14b", Metadata: `{"a":"b"}`})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PUT with bearer = %d, want 204", resp.StatusCode)
+	}
+
+	resp, body := h.do("GET", "/v1/prompt/"+testNonceAlias, "", nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first GET = %d, want 200", resp.StatusCode)
+	}
+	var got meterapi.PromptResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Prompt != "triage this" || got.Model != "qwen3-14b" || got.Metadata != `{"a":"b"}` {
+		t.Fatalf("payload = %+v -- model and metadata must travel with the prompt "+
+			"so the pod can render its overlay per session (gonk-m6t)", got)
+	}
+
+	resp, _ = h.do("GET", "/v1/prompt/"+testNonceAlias, "", nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("second GET = %d, want 410 -- a replayable unauthenticated read "+
+			"is the whole risk of exempting this route", resp.StatusCode)
+	}
+}
+
+// Dispatch confirms delivery by asking whether the pod fetched, rather than by
+// trusting its own submit -- which is the claim the keystroke path made even
+// when the composer was empty.
+func TestPromptStatusReportsTheFetch(t *testing.T) {
+	h := newHTTPFixture(t)
+	resp, _ := h.do("PUT", "/v1/prompt/"+testNonceAlias, h.token,
+		meterapi.PromptRequest{Prompt: "p", Model: "m"})
+	resp.Body.Close()
+
+	resp, body := h.do("GET", "/v1/prompt/"+testNonceAlias+"/status", h.token, nil)
+	resp.Body.Close()
+	var st meterapi.PromptStatusResponse
+	_ = json.Unmarshal(body, &st)
+	if st.Fetched {
+		t.Fatal("status reported fetched before any GET")
+	}
+
+	resp, _ = h.do("GET", "/v1/prompt/"+testNonceAlias, "", nil)
+	resp.Body.Close()
+
+	resp, body = h.do("GET", "/v1/prompt/"+testNonceAlias+"/status", h.token, nil)
+	resp.Body.Close()
+	_ = json.Unmarshal(body, &st)
+	if !st.Fetched || st.FetchedAt.IsZero() {
+		t.Fatalf("status after fetch = %+v, want fetched with a timestamp", st)
+	}
+}

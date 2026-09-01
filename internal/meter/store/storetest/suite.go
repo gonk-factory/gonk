@@ -9,6 +9,7 @@ package storetest
 import (
 	"context"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -81,6 +82,127 @@ func Run(t *testing.T, newStore func() store.Store) {
 	t.Run("NonFiniteSpendRowIsRejectedNotPersisted", testNonFiniteSpendRowIsRejectedNotPersisted(newStore))
 	t.Run("NonFiniteReservationIsRejected", testNonFiniteReservationIsRejected(newStore))
 	t.Run("ListRegistrationsReturnsEveryProject", testListRegistrationsReturnsEveryProject(newStore))
+	t.Run("PromptRoundTripAndOneShot", testPromptRoundTripAndOneShot(newStore))
+	t.Run("TakePromptHasExactlyOneWinnerUnderConcurrency", testTakePromptHasExactlyOneWinnerUnderConcurrency(newStore))
+	t.Run("ExpiredPromptReadsAsAbsentNotConsumed", testExpiredPromptReadsAsAbsentNotConsumed(newStore))
+}
+
+// The prompt row is what the agent pod fetches instead of having its prompt
+// typed into a TUI (gonk-mzd). Three properties matter, and each is a distinct
+// failure if it is wrong.
+func testPromptRoundTripAndOneShot(newStore func() store.Store) func(t *testing.T) {
+	return func(t *testing.T) {
+		ctx, s := context.Background(), newStore()
+		now := time.Now().UTC().Truncate(time.Millisecond)
+
+		if _, found, err := s.PromptStatus(ctx, "nope"); err != nil || found {
+			t.Fatalf("empty store: found=%v err=%v", found, err)
+		}
+		// An absent alias must read as NOT-found rather than as consumed: the
+		// two answers become 404 and 410, which mean opposite things to the
+		// entrypoint ("never delivered" vs "respawn or theft").
+		if _, found, consumed, err := s.TakePrompt(ctx, "nope", now); err != nil || found || consumed {
+			t.Fatalf("take of absent alias: found=%v consumed=%v err=%v", found, consumed, err)
+		}
+
+		want := store.Prompt{
+			Alias:  "gonk.triage.p42.i3.a1.ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+			Prompt: "triage this issue", Model: "qwen3-14b",
+			Metadata:  `{"gonk_project":"g/r"}`,
+			CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		}
+		if err := s.PutPrompt(ctx, want); err != nil {
+			t.Fatalf("PutPrompt: %v", err)
+		}
+
+		// Status must NOT consume -- dispatch polls it to confirm the fetch.
+		st, found, err := s.PromptStatus(ctx, want.Alias)
+		if err != nil || !found {
+			t.Fatalf("status after put: found=%v err=%v", found, err)
+		}
+		if !st.FetchedAt.IsZero() {
+			t.Fatalf("PromptStatus consumed the prompt: fetched_at=%v", st.FetchedAt)
+		}
+
+		got, found, consumed, err := s.TakePrompt(ctx, want.Alias, now)
+		if err != nil || !found || consumed {
+			t.Fatalf("first take: found=%v consumed=%v err=%v", found, consumed, err)
+		}
+		if got.Prompt != want.Prompt || got.Model != want.Model || got.Metadata != want.Metadata {
+			t.Fatalf("round trip lost fields: %+v", got)
+		}
+		if got.FetchedAt.IsZero() {
+			t.Fatal("take did not stamp fetched_at -- dispatch has no way to confirm delivery")
+		}
+
+		// Second take is the one-shot guarantee: the alias is an unauthenticated
+		// capability, so a replayable read is the whole risk.
+		if _, found, consumed, err = s.TakePrompt(ctx, want.Alias, now); err != nil || !found || !consumed {
+			t.Fatalf("second take: found=%v consumed=%v err=%v (want found+consumed => 410)", found, consumed, err)
+		}
+	}
+}
+
+// Two pods racing must not both receive the prompt. In postgres this is one
+// UPDATE ... WHERE fetched_at IS NULL ... RETURNING; in memory it is one
+// critical section. If either degrades to read-then-write, this fails.
+func testTakePromptHasExactlyOneWinnerUnderConcurrency(newStore func() store.Store) func(t *testing.T) {
+	return func(t *testing.T) {
+		ctx, s := context.Background(), newStore()
+		now := time.Now().UTC()
+		alias := "gonk.triage.p42.i9.a1.RACERACERACERACERACERACERA"
+		if err := s.PutPrompt(ctx, store.Prompt{Alias: alias, Prompt: "p", Model: "m", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+			t.Fatalf("PutPrompt: %v", err)
+		}
+
+		const n = 16
+		var wg sync.WaitGroup
+		wins := make([]bool, n)
+		start := make(chan struct{})
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				_, found, consumed, err := s.TakePrompt(ctx, alias, time.Now().UTC())
+				wins[i] = err == nil && found && !consumed
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		won := 0
+		for _, w := range wins {
+			if w {
+				won++
+			}
+		}
+		if won != 1 {
+			t.Fatalf("%d/%d callers got the prompt, want exactly 1 -- the one-shot "+
+				"guarantee is the only thing between an unauthenticated read and a "+
+				"replayable one", won, n)
+		}
+	}
+}
+
+// Expired must read as ABSENT, not as consumed: the janitor is about to drop it
+// and the caller should retry or fail, not be told someone else took it.
+func testExpiredPromptReadsAsAbsentNotConsumed(newStore func() store.Store) func(t *testing.T) {
+	return func(t *testing.T) {
+		ctx, s := context.Background(), newStore()
+		now := time.Now().UTC()
+		alias := "gonk.triage.p42.i4.a1.EXPIREDEXPIREDEXPIREDEXPIR"
+		if err := s.PutPrompt(ctx, store.Prompt{Alias: alias, Prompt: "p", Model: "m", CreatedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour)}); err != nil {
+			t.Fatalf("PutPrompt: %v", err)
+		}
+		if _, found, consumed, err := s.TakePrompt(ctx, alias, now); err != nil || found || consumed {
+			t.Fatalf("expired take: found=%v consumed=%v err=%v, want absent", found, consumed, err)
+		}
+		n, err := s.ExpirePrompts(ctx, now)
+		if err != nil || n != 1 {
+			t.Fatalf("ExpirePrompts = %d, %v, want 1", n, err)
+		}
+	}
 }
 
 func testRegistrationRoundTrip(newStore func() store.Store) func(t *testing.T) {

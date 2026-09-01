@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -165,6 +166,19 @@ CREATE TABLE IF NOT EXISTS meter_meta (
 	CONSTRAINT meter_meta_singleton CHECK (id)
 );
 INSERT INTO meter_meta (id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING;
+
+-- prompt-by-reference (gonk-mzd). Its OWN table, not a ledger table: it holds
+-- issue text and wants its own retention.
+CREATE TABLE IF NOT EXISTS prompts (
+	alias      TEXT PRIMARY KEY,
+	prompt     TEXT NOT NULL,
+	model      TEXT NOT NULL,
+	metadata   TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL,
+	fetched_at TIMESTAMPTZ,
+	expires_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS prompts_expires_at_idx ON prompts (expires_at);
 `
 
 func (p *Postgres) migrate(ctx context.Context) error {
@@ -703,6 +717,102 @@ func (p *Postgres) SetWindow(ctx context.Context, w spend.Window) error {
 		return fmt.Errorf("store: set window: %w", err)
 	}
 	return nil
+}
+
+// --- prompt-by-reference (gonk-mzd) -----------------------------------------
+
+func (p *Postgres) PutPrompt(ctx context.Context, pr Prompt) error {
+	_, err := p.pool.Exec(ctx, `
+		INSERT INTO prompts (alias, prompt, model, metadata, created_at, fetched_at, expires_at)
+		VALUES ($1,$2,$3,$4,$5,NULL,$6)
+		ON CONFLICT (alias) DO UPDATE SET
+			prompt = EXCLUDED.prompt, model = EXCLUDED.model,
+			metadata = EXCLUDED.metadata, created_at = EXCLUDED.created_at,
+			expires_at = EXCLUDED.expires_at`,
+		pr.Alias, pr.Prompt, pr.Model, pr.Metadata, pr.CreatedAt, nullTime(pr.ExpiresAt))
+	if err != nil {
+		return fmt.Errorf("store: put prompt: %w", err)
+	}
+	return nil
+}
+
+// TakePrompt is ONE statement. The UPDATE ... WHERE fetched_at IS NULL ...
+// RETURNING is what makes the one-shot guarantee real: two pods racing both run
+// it, exactly one matches the WHERE, and the loser gets no rows. Doing this as
+// SELECT-then-UPDATE would make the guarantee decorative -- the same reasoning
+// ReserveIfFits already documents for the overspend race.
+func (p *Postgres) TakePrompt(ctx context.Context, alias string, now time.Time) (Prompt, bool, bool, error) {
+	var pr Prompt
+	var fetched, expires *time.Time
+	err := p.pool.QueryRow(ctx, `
+		UPDATE prompts SET fetched_at = $2
+		WHERE alias = $1 AND fetched_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > $2)
+		RETURNING alias, prompt, model, metadata, created_at, fetched_at, expires_at`,
+		alias, now).Scan(&pr.Alias, &pr.Prompt, &pr.Model, &pr.Metadata, &pr.CreatedAt, &fetched, &expires)
+	if err == nil {
+		if fetched != nil {
+			pr.FetchedAt = *fetched
+		}
+		if expires != nil {
+			pr.ExpiresAt = *expires
+		}
+		return pr, true, false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Prompt{}, false, false, fmt.Errorf("store: take prompt: %w", err)
+	}
+	// No row updated: either it does not exist / has expired (404) or it was
+	// already consumed (410). Distinguish them -- they are opposite diagnoses.
+	got, found, serr := p.PromptStatus(ctx, alias)
+	if serr != nil {
+		return Prompt{}, false, false, serr
+	}
+	if !found {
+		return Prompt{}, false, false, nil
+	}
+	if !got.ExpiresAt.IsZero() && now.After(got.ExpiresAt) {
+		return Prompt{}, false, false, nil
+	}
+	return got, true, true, nil
+}
+
+func (p *Postgres) PromptStatus(ctx context.Context, alias string) (Prompt, bool, error) {
+	var pr Prompt
+	var fetched, expires *time.Time
+	err := p.pool.QueryRow(ctx, `
+		SELECT alias, prompt, model, metadata, created_at, fetched_at, expires_at
+		FROM prompts WHERE alias = $1`, alias).
+		Scan(&pr.Alias, &pr.Prompt, &pr.Model, &pr.Metadata, &pr.CreatedAt, &fetched, &expires)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Prompt{}, false, nil
+	}
+	if err != nil {
+		return Prompt{}, false, fmt.Errorf("store: prompt status: %w", err)
+	}
+	if fetched != nil {
+		pr.FetchedAt = *fetched
+	}
+	if expires != nil {
+		pr.ExpiresAt = *expires
+	}
+	return pr, true, nil
+}
+
+func (p *Postgres) ExpirePrompts(ctx context.Context, now time.Time) (int, error) {
+	tag, err := p.pool.Exec(ctx, `DELETE FROM prompts WHERE expires_at IS NOT NULL AND expires_at <= $1`, now)
+	if err != nil {
+		return 0, fmt.Errorf("store: expire prompts: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// nullTime keeps a zero time out of the column as NULL rather than year 1.
+func nullTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t
 }
 
 var _ Store = (*Postgres)(nil)
