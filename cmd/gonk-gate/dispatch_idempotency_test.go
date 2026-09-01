@@ -108,7 +108,10 @@ func TestARealReSlingOnTheNextAttemptStillGetsItsOwnSession(t *testing.T) {
 		t.Fatalf("both attempts reused alias %q; a re-sling must not collide with the "+
 			"prior attempt's session", a)
 	}
-	if !strings.HasSuffix(a, ".a1") || !strings.HasSuffix(b, ".a2") {
+	// The attempt segment is no longer the SUFFIX -- the nonce is (gonk-mzd) --
+	// but it must still be present and correct, because it is what keeps a
+	// re-sling legible in logs next to the prior attempt.
+	if !strings.Contains(a, ".a1.") || !strings.Contains(b, ".a2.") {
 		t.Fatalf("aliases do not carry their attempt: %q, %q", a, b)
 	}
 }

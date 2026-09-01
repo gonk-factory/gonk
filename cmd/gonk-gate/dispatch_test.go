@@ -23,11 +23,64 @@ type fakeMeter struct {
 	mu       sync.Mutex
 	lastBody []byte
 	calls    int
+
+	// prompt-by-reference (gonk-mzd). The store the dispatcher PUTs to and then
+	// polls. neverFetched models the pod that never came up: dispatch must fail
+	// rather than leave a session idling.
+	prompts      map[string]meterapi.PromptRequest
+	promptOrder  []string // aliases in PUT order
+	neverFetched bool
+	// createdAtPut, if set, is called when a prompt is PUT and its result
+	// recorded. A test sets it to len(gc.Created) so the ordering claim
+	// "the prompt is stored BEFORE the session exists" is PROVEN rather
+	// than assumed from reading the code.
+	createdAtPut  func() int
+	createdCounts []int
+}
+
+func (f *fakeMeter) putPrompts() map[string]meterapi.PromptRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]meterapi.PromptRequest{}
+	for k, v := range f.prompts {
+		out[k] = v
+	}
+	return out
 }
 
 func (f *fakeMeter) server(t *testing.T) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Prompt routes first: they are the only ones with a variable path.
+		if strings.HasPrefix(r.URL.Path, meterapi.PromptPathPrefix) {
+			alias := strings.TrimPrefix(r.URL.Path, meterapi.PromptPathPrefix)
+			switch {
+			case r.Method == http.MethodPut:
+				var req meterapi.PromptRequest
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				f.mu.Lock()
+				if f.prompts == nil {
+					f.prompts = map[string]meterapi.PromptRequest{}
+				}
+				f.prompts[alias] = req
+				f.promptOrder = append(f.promptOrder, alias)
+				if f.createdAtPut != nil {
+					f.createdCounts = append(f.createdCounts, f.createdAtPut())
+				}
+				f.mu.Unlock()
+				w.WriteHeader(http.StatusNoContent)
+			case r.Method == http.MethodGet && strings.HasSuffix(alias, "/status"):
+				f.mu.Lock()
+				_, stored := f.prompts[strings.TrimSuffix(alias, "/status")]
+				fetched := stored && !f.neverFetched
+				f.mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(meterapi.PromptStatusResponse{Fetched: fetched})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+			return
+		}
 		body, _ := jsonReadAll(r)
 		f.mu.Lock()
 		f.calls++
@@ -145,19 +198,20 @@ func TestDispatchCreatesTriageSessionOnRun(t *testing.T) {
 	if cs.Kind != "agent" || cs.Name != "triage" || !cs.Async {
 		t.Fatalf("created session = %+v, want kind=agent name=triage async=true", cs)
 	}
-	// The alias is the correlation marker: deterministic, colon-free (bead
-	// anchors have colons; aliases forbid them), attempt-suffixed so a re-sling
-	// never collides with the prior attempt's session.
-	const wantAlias = "gonk.triage.p42.i3.a1"
-	if cs.Alias != wantAlias {
-		t.Fatalf("alias = %q, want %q", cs.Alias, wantAlias)
+	// The alias is the correlation marker: colon-free (bead anchors have colons;
+	// aliases forbid them), attempt-suffixed so a re-sling never collides with
+	// the prior attempt's session, and NONCED -- it is the capability the pod
+	// presents on the meter's unauthenticated prompt route (gonk-mzd), so it
+	// must not be reconstructible from a project and issue number.
+	if !strings.HasPrefix(cs.Alias, "gonk.triage.p42.i3.a1.") {
+		t.Fatalf("alias = %q, want the gonk.triage.p42.i3.a1.<nonce> form", cs.Alias)
 	}
-	// The prompt is delivered by the submit (the create-time inject is dropped
-	// by the k8s provider -- gonk-u1p.1).
-	if len(gc.Submitted) != 1 {
-		t.Fatalf("submitted = %+v, want one", gc.Submitted)
+	// The prompt is STORED for the pod to fetch, not submitted into a TUI.
+	if _, ok := fm.putPrompts()[cs.Alias]; !ok {
+		t.Fatalf("no prompt stored for %q; stored = %+v", cs.Alias, fm.putPrompts())
 	}
-	cs.Message = gc.Submitted[0].Message
+	// The prompt body now comes from the row the pod fetches, not a submit.
+	cs.Message = fm.putPrompts()[cs.Alias].Prompt
 	// IT MUST CARRY NO "!". opencode's composer treats a bang as its shell-mode
 	// trigger, and a prompt typed in as keystrokes then runs as a shell command
 	// instead of reaching the model -- which is what wedged every live triage
@@ -181,7 +235,7 @@ func TestDispatchCreatesTriageSessionOnRun(t *testing.T) {
 
 	// The alias is recorded on the bead so sweep can read the session back.
 	rec, _, _ := store.Get(context.Background(), "gonk:42:issue:3")
-	if rec.State != beadstore.StateRunning || rec.SessionID != wantAlias || rec.Rung != "cheap" || rec.Attempt != 1 {
+	if rec.State != beadstore.StateRunning || rec.SessionID != cs.Alias || rec.Rung != "cheap" || rec.Attempt != 1 {
 		t.Fatalf("record = %+v", rec)
 	}
 }
@@ -314,10 +368,11 @@ func TestDispatchAlwaysDecidesEvenWhenVarsCarryARung(t *testing.T) {
 	if len(gc.Created) != 1 {
 		t.Fatalf("created = %+v, want one", gc.Created)
 	}
-	if len(gc.Submitted) != 1 {
-		t.Fatalf("submitted = %+v, want one", gc.Submitted)
+	if _, ok := fm.putPrompts()[gc.Created[0].Alias]; !ok {
+		t.Fatalf("no prompt stored for the created session; stored = %+v", fm.putPrompts())
 	}
-	if gc.Created[0].Alias != "gonk.triage.p42.i3.a2" { // meter's Attempt=2, not a caller value
+	// The attempt in the alias comes from METER's answer, not a caller value.
+	if !strings.HasPrefix(gc.Created[0].Alias, "gonk.triage.p42.i3.a2.") {
 		t.Fatalf("alias = %q, want attempt 2 from meter", gc.Created[0].Alias)
 	}
 	rec, _, _ := store.Get(context.Background(), "gonk:42:issue:3")

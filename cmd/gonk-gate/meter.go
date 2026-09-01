@@ -154,3 +154,38 @@ func (m *meterAPI) do(ctx context.Context, method, path string, body, out any) (
 	}
 	return resp.StatusCode, nil
 }
+
+// --- prompt-by-reference (gonk-mzd) -----------------------------------------
+
+// PutPrompt stores the prompt the session will fetch. It is written BEFORE the
+// create, because the pod can be up and asking before CreateSession returns.
+func (m *meterAPI) PutPrompt(ctx context.Context, alias string, req meterapi.PromptRequest) error {
+	path := meterapi.PromptPathPrefix + alias
+	code, err := m.do(ctx, http.MethodPut, path, req, nil)
+	if err != nil {
+		return err
+	}
+	if code != http.StatusNoContent {
+		return fmt.Errorf("meter: PUT %s: %d", path, code)
+	}
+	return nil
+}
+
+// PromptFetched reports whether the pod has taken its prompt.
+//
+// This is what replaced "we submitted it" as the evidence of delivery. It is
+// strictly better -- the old keystroke path claimed success even when the
+// composer was empty -- but it is NOT terminal success: it proves the entrypoint
+// fetched, not that opencode accepted. Dispatch keeps its session-health checks.
+func (m *meterAPI) PromptFetched(ctx context.Context, alias string) (bool, error) {
+	var out meterapi.PromptStatusResponse
+	path := meterapi.PromptPathPrefix + alias + "/status"
+	code, err := m.do(ctx, http.MethodGet, path, nil, &out)
+	if err != nil {
+		return false, err
+	}
+	if code != http.StatusOK {
+		return false, fmt.Errorf("meter: GET %s: %d", path, code)
+	}
+	return out.Fetched, nil
+}

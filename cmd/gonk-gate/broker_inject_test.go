@@ -72,12 +72,15 @@ func TestDispatchInjectsIssueContext(t *testing.T) {
 	if len(gc.Created) != 1 {
 		t.Fatalf("created = %+v, want one", gc.Created)
 	}
-	// The prompt rides the SUBMIT, not the create: k8s-backed sessions never
-	// receive template_overrides.initial_message (gonk-u1p.1 / gonk-drf).
-	if len(gc.Submitted) != 1 {
-		t.Fatalf("submitted = %+v, want one", gc.Submitted)
+	// The prompt is STORED for the pod to fetch, not typed at it (gonk-mzd).
+	// It rides neither the create nor a submit: k8s-backed sessions never
+	// receive template_overrides.initial_message, and typing it into the TUI
+	// was the unreliable channel this replaced.
+	stored := fm.putPrompts()
+	if len(stored) != 1 {
+		t.Fatalf("stored prompts = %+v, want exactly one", stored)
 	}
-	msg := gc.Submitted[0].Message
+	msg := stored[gc.Created[0].Alias].Prompt
 	for _, want := range []string{
 		"fetched for you",
 		"Login button does nothing on Safari", // title
@@ -110,11 +113,12 @@ func TestDispatchProceedsWhenContextFetchFails(t *testing.T) {
 	if len(gc.Created) != 1 {
 		t.Fatalf("created = %+v, want one even on a context miss", gc.Created)
 	}
-	if len(gc.Submitted) != 1 {
-		t.Fatalf("submitted = %+v, want one even on a context miss", gc.Submitted)
+	stored := fm.putPrompts()
+	if len(stored) != 1 {
+		t.Fatalf("stored prompts = %+v, want one even on a context miss", stored)
 	}
-	if !strings.Contains(gc.Submitted[0].Message, "issue context unavailable") {
-		t.Fatalf("prompt should carry the degraded marker:\n%s", gc.Submitted[0].Message)
+	if got := stored[gc.Created[0].Alias].Prompt; !strings.Contains(got, "issue context unavailable") {
+		t.Fatalf("prompt should carry the degraded marker:\n%s", got)
 	}
 }
 

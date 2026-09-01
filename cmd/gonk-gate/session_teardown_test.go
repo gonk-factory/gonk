@@ -43,7 +43,7 @@ func TestRoundTripLeavesNoLiveSessionBehind(t *testing.T) {
 	gc := gcapitest.New(t)
 	store := beadstore.NewMemory()
 	applier := &recordingApplier{}
-	alias := brokerSessionAlias("triage", p.ID, 3, 1)
+	alias := brokerRunningRecord(p.ID).SessionID
 
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
 		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
@@ -73,6 +73,7 @@ func TestRoundTripLeavesNoLiveSessionBehind(t *testing.T) {
 	if code := sweep(); code != 0 {
 		t.Fatalf("sweep(running) exit = %d", code)
 	}
+	alias = gc.Created[0].Alias // captured, not recomputed: the alias is nonced
 	if live := gc.LiveSessions(); len(live) != 1 || live[0] != alias {
 		t.Fatalf("live sessions while the agent is still working = %v, want exactly [%s]: "+
 			"tearing a session down mid-turn destroys the batch it has not written yet", live, alias)
@@ -151,14 +152,16 @@ func TestSweepLeavesNoLiveSessionOnEveryTerminalOutcome(t *testing.T) {
 // retried -- so this leaks once per attempt while producing nothing at all.
 func TestDispatchClosesTheSessionWhenPromptDeliveryFails(t *testing.T) {
 	gc := gcapitest.New(t)
-	// Every submit reports resolve_failed, so delivery exhausts its attempts.
-	gc.SubmitUnresolvedUntil = map[string]int{
-		brokerSessionAlias("triage", 42, 7, 1): 99,
-	}
 	store := beadstore.NewMemory()
-	fm := &fakeMeter{resp: meterapi.DecideResponse{
-		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
-	}}
+	// The pod never fetches its prompt, so delivery exhausts its attempts. This
+	// used to be modelled as every submit reporting resolve_failed; the submit
+	// channel is gone (gonk-mzd) and never-fetched is its successor.
+	fm := &fakeMeter{
+		resp: meterapi.DecideResponse{
+			Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
+		},
+		neverFetched: true,
+	}
 	args := baseDispatchArgs()
 	args.ProjectID = 42
 	args.IssueIID = 7
