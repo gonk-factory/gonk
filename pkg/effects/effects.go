@@ -47,9 +47,55 @@ type Effect struct {
 	TargetIID int64 `json:"target_iid,omitempty"`
 }
 
+// Verdict is what the agent concluded about the WORK ITEM as a whole, as
+// opposed to Effect, which is one change to make. Triage without it has exactly
+// one outcome -- comment and labels -- so an agent that decides "this is a real
+// bug with an obvious fix" and one that decides "this is a duplicate, close it"
+// produce the identical result and the broker cannot tell them apart.
+//
+// A verdict is MODEL-AUTHORED, so it is a PROPOSAL and never ground truth
+// (ADR-007). It is validated against the closed set below before anything acts
+// on it, exactly as effect kinds are. What a verdict MEANS -- whether an issue
+// gets closed, whether an MR is opened -- is decided by the broker
+// deterministically; the model states a conclusion, it does not perform one.
+type Verdict string
+
+const (
+	// VerdictReplyOnly: no code change is needed, but the reporter needs an
+	// answer -- a question, a clarification, "works as designed and here is why".
+	VerdictReplyOnly Verdict = "reply-only"
+	// VerdictCodeChange: a genuine defect with an identifiable fix. What happens
+	// next depends on the project's actions.features policy, not on the model.
+	VerdictCodeChange Verdict = "code-change"
+	// VerdictClose: terminal -- duplicate, obsolete, already fixed, not
+	// reproducible. The only verdict that ends a conversation, and so the one to
+	// be most conservative about; the prompt tells the agent to prefer
+	// reply-only when unsure.
+	VerdictClose Verdict = "close"
+)
+
+var knownVerdicts = map[Verdict]bool{
+	VerdictReplyOnly: true, VerdictCodeChange: true, VerdictClose: true,
+}
+
 // Batch is the ordered list a run returns.
 type Batch struct {
 	Effects []Effect `json:"effects"`
+	// Verdict is OPTIONAL: a batch without one is treated as reply-only, so
+	// existing agents and existing tests keep their current behaviour and this
+	// stays additive. An UNKNOWN verdict is not tolerated -- that is a gate
+	// failure, like an unknown kind, because it means the agent believes it
+	// asked for something we are not going to do.
+	Verdict Verdict `json:"verdict,omitempty"`
+}
+
+// EffectiveVerdict is Verdict with the empty-means-reply-only rule applied, so
+// callers never re-implement the default.
+func (b Batch) EffectiveVerdict() Verdict {
+	if b.Verdict == "" {
+		return VerdictReplyOnly
+	}
+	return b.Verdict
 }
 
 // ParseBatch decodes and structurally validates a batch. It rejects invalid
@@ -127,6 +173,9 @@ func ParseBatch(raw []byte) (Batch, error) {
 		if !knownKinds[e.Kind] {
 			return Batch{}, fmt.Errorf("effects: effect %d has unknown kind %q", i, e.Kind)
 		}
+	}
+	if b.Verdict != "" && !knownVerdicts[b.Verdict] {
+		return Batch{}, fmt.Errorf("effects: unknown verdict %q", b.Verdict)
 	}
 	return b, nil
 }

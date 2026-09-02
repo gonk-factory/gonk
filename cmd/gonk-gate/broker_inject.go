@@ -130,19 +130,50 @@ func renderTriagePrompt(project string, issueIID int64, issueContext, checkout s
 	// model goes looking, finds an empty directory, and fills the gap itself.
 	repo := ""
 	if strings.TrimSpace(checkout) != "" {
+		// INVESTIGATE BEFORE ASKING (gonk-kta). On gonk's first successful triage
+		// the agent read two files and then asked the reporter how sorting and
+		// paging were implemented -- something it could have grepped for. The
+		// reporter's answer was the correct critique: "it's hosted in this
+		// project, you should be able to search the codebase yourself". Saying
+		// "reading files is expected" was not enough, because the emit
+		// instructions ask for questions and nothing pushed the other way.
 		repo = "\nThe repository is checked out in your working directory. Read `.agent/` " +
 			"first if it exists -- it is the project's own context and it overrides " +
-			"anything you would otherwise assume. Reading files is expected; you still " +
-			"hold no credentials, so do not try to reach GitLab.\n"
+			"anything you would otherwise assume. You still hold no credentials, so do " +
+			"not try to reach GitLab.\n\n" +
+			"INVESTIGATE THE CODE BEFORE YOU ASK ANYTHING. Search for the behaviour the " +
+			"issue describes and read the code that implements it. Ask the reporter only " +
+			"for what the code CANNOT tell you -- their intent, their environment, exact " +
+			"reproduction steps, which behaviour they expected. Anything answerable by " +
+			"reading this repository you are expected to answer yourself, citing the " +
+			"files you relied on. If you searched and genuinely found nothing relevant, " +
+			"say that explicitly rather than asking a question you could have answered.\n"
 	}
 	return fmt.Sprintf(`Triage GitLab issue #%d in project `+"`%s`"+`. Here is the issue, already
 fetched for you -- do NOT fetch anything yourself:
 
 %s
 %s
-Decide the labels (each prefixed `+"`gonk::`"+`) and one short triage comment: a
-brief analysis of what the issue asks for, with anything genuinely ambiguous
-phrased as a direct question to the reporter.
+Decide the labels (each prefixed `+"`gonk::`"+`), one short triage comment, and a
+VERDICT saying what kind of answer this is.
+
+The comment is a brief analysis of what the issue asks for, grounded in the code
+where you could find it. Ask the reporter only what the code cannot tell you.
+
+The verdict must be EXACTLY ONE of:
+
+  "reply-only"   No code change is needed, but the reporter needs an answer --
+                 a question, a clarification, or "this works as designed, and
+                 here is why".
+  "code-change"  A genuine defect with an identifiable fix. Say in the comment
+                 WHICH code is wrong and WHAT should change. Do not write the
+                 fix here; that is a separate step.
+  "close"        Terminal. No further discussion is useful -- a duplicate, an
+                 obsolete report, something already fixed, or something you
+                 established is not reproducible. The comment MUST say why.
+
+Choose "close" only when you are confident, because it ENDS THE CONVERSATION.
+When you are unsure between close and reply-only, choose reply-only and ask.
 
 Do NOT post anything yourself. Do NOT run glab, git, bd, or any external API --
 you hold no credentials and any such call will fail. Instead, emit your decision
@@ -150,7 +181,7 @@ as a single proposed-effects batch as the LAST thing in your output, fenced
 EXACTLY like this:
 
 GONK_BATCH_START
-{"effects":[{"kind":"comment","body":"<your comment>"},{"kind":"label","add":["gonk::<label>"]}]}
+{"verdict":"<one of: reply-only, code-change, close>","effects":[{"kind":"comment","body":"<your comment>"},{"kind":"label","add":["gonk::<label>"]}]}
 GONK_BATCH_END
 
 Emit exactly one comment effect and zero or more label effects. Nothing after
