@@ -40,6 +40,20 @@ type recordingApplier struct {
 	openMRs   []glab.MergeRequest // pre-existing MRs ListMergeRequests returns
 	commitErr error
 	project   *glab.Project
+	// Verdict actions (gonk-aib): which issues the broker closed, and whether
+	// closing was made to fail.
+	closed   []int64
+	closeErr error
+}
+
+func (r *recordingApplier) CloseIssue(_ context.Context, _, issueIID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closeErr != nil {
+		return r.closeErr
+	}
+	r.closed = append(r.closed, issueIID)
+	return nil
 }
 
 func (a *recordingApplier) CreateIssueNote(_ context.Context, pid, iid int64, body string) (*glab.Note, error) {

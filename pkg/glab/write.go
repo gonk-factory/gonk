@@ -115,3 +115,40 @@ func (c *Client) CreateIssueNote(ctx context.Context, projectID, issueIID int64,
 	}
 	return &n, nil
 }
+
+// CloseIssue sets an issue's state to closed. It is the write behind the
+// `close` triage verdict (gonk-aib), and it is deliberately the ONLY
+// state-changing issue write the broker has: a model states the verdict, the
+// broker decides what that verdict means and performs it, so no model-authored
+// artifact ever closes anything by itself (ADR-007).
+//
+// state_event=close is idempotent in GitLab: closing an already-closed issue
+// succeeds and changes nothing, so a re-sling cannot fail here.
+func (c *Client) CloseIssue(ctx context.Context, projectID, issueIID int64) error {
+	return c.getJSON(ctx, request{
+		method: "PUT",
+		path:   fmt.Sprintf("/api/v4/projects/%d/issues/%d", projectID, issueIID),
+		query:  map[string]string{"state_event": "close"},
+	}, nil)
+}
+
+// UpdateIssueNote rewrites the body of a note the bot already posted. It exists
+// for the canned-status comment (gonk-yrs): a deferred notice must be EDITED IN
+// PLACE as the situation changes, and replaced by the real answer when one
+// arrives, so a thread ends with the answer rather than a pile of stale
+// apologies.
+//
+// Only ever called with a note id the bot itself created and recognised by its
+// own marker -- GitLab will reject an edit of somebody else's note, but the
+// caller should not rely on that as the guard.
+func (c *Client) UpdateIssueNote(ctx context.Context, projectID, issueIID, noteID int64, body string) (*Note, error) {
+	var n Note
+	if err := c.getJSON(ctx, request{
+		method: "PUT",
+		path:   fmt.Sprintf("/api/v4/projects/%d/issues/%d/notes/%d", projectID, issueIID, noteID),
+		query:  map[string]string{"body": body},
+	}, &n); err != nil {
+		return nil, err
+	}
+	return &n, nil
+}

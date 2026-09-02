@@ -35,6 +35,9 @@ const (
 type brokerApplier interface {
 	CreateIssueNote(ctx context.Context, projectID, issueIID int64, body string) (*glab.Note, error)
 	AddIssueLabel(ctx context.Context, projectID, issueIID int64, label string) error
+	// CloseIssue is the `close` verdict's action (gonk-aib). The broker performs
+	// it; the model only proposes the conclusion.
+	CloseIssue(ctx context.Context, projectID, issueIID int64) error
 	// The scaffold half. The agent proposes .agent/ content and holds no
 	// credentials, so the CONTROLLER commits it and opens the merge request --
 	// the same inversion as triage, where the agent proposes a comment and the
@@ -278,6 +281,9 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 			}
 		}
 	}
+	// The verdict acts LAST, so the reporter has the explanation in hand before
+	// the issue changes state underneath them (gonk-aib).
+	applyVerdict(ctx, d, rec, batch)
 	return true, "", nil
 }
 
