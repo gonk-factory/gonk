@@ -154,7 +154,12 @@ GONK_BATCH_START
 GONK_BATCH_END
 
 Emit exactly one comment effect and zero or more label effects. Nothing after
-GONK_BATCH_END.`, issueIID, project, context, repo)
+GONK_BATCH_END.
+
+The batch must be valid JSON on a SINGLE line. Keep the comment to one
+paragraph, and if you must include a line break write it as \n inside the
+string -- a real line break inside a JSON string is invalid and costs you the
+whole batch.`, issueIID, project, context, repo)
 }
 
 // renderScaffoldPrompt builds the scaffold session's initial message.
