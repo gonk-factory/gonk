@@ -114,8 +114,14 @@ func TestBrokerRoundTripDispatchToAppliedComment(t *testing.T) {
 	if !strings.Contains(applier.notes[0].Body, "<!-- gonk:bead:gk-1a2b -->") {
 		t.Fatalf("comment missing the bead marker:\n%s", applier.notes[0].Body)
 	}
-	if len(applier.labels) != 1 || applier.labels[0].Label != "gonk::bug" {
-		t.Fatalf("labels = %+v, want gonk::bug", applier.labels)
+	// The agent's label, plus the BROKER'S OWN audit label recording which
+	// verdict it acted on (gonk-kxg). The second is written by gonk, not
+	// proposed by the model, which is what makes it trustworthy as an audit
+	// trail -- so it is asserted here rather than tolerated.
+	if len(applier.labels) != 2 ||
+		applier.labels[0].Label != "gonk::bug" ||
+		applier.labels[1].Label != "gonk::verdict-reply-only" {
+		t.Fatalf("labels = %+v, want gonk::bug then gonk::verdict-reply-only", applier.labels)
 	}
 	if reqs := om.requests(); len(reqs) != 1 || reqs[0].Outcome != meterapi.OutcomeSuccess {
 		t.Fatalf("outcome = %+v, want exactly one success", reqs)

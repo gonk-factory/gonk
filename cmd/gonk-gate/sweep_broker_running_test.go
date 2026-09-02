@@ -103,8 +103,11 @@ func TestSweepBrokerJudgesABeadThatWasNeverStampedEnded(t *testing.T) {
 	if len(applier.notes) != 1 {
 		t.Fatalf("notes = %+v, want the triage comment -- an unstamped bead must still be swept", applier.notes)
 	}
-	if len(applier.labels) != 1 || applier.labels[0].Label != "gonk::bug" {
-		t.Fatalf("labels = %+v, want gonk::bug", applier.labels)
+	// The agent's label plus the broker's verdict audit label (gonk-kxg).
+	if len(applier.labels) != 2 ||
+		applier.labels[0].Label != "gonk::bug" ||
+		applier.labels[1].Label != "gonk::verdict-reply-only" {
+		t.Fatalf("labels = %+v, want gonk::bug then gonk::verdict-reply-only", applier.labels)
 	}
 }
 
