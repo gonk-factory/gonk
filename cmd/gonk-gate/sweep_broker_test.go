@@ -160,9 +160,13 @@ func TestSweepBrokerAppliesValidBatch(t *testing.T) {
 	if !strings.Contains(n.Body, "Safari-only CSS bug") || !strings.Contains(n.Body, "<!-- gonk:bead:gk-1a2b -->") {
 		t.Fatalf("comment body missing text or marker:\n%s", n.Body)
 	}
-	// Both labels, on the issue.
-	if len(applier.labels) != 2 || applier.labels[0].Label != "gonk::bug" || applier.labels[1].Label != "gonk::frontend" {
-		t.Fatalf("labels = %+v, want gonk::bug, gonk::frontend", applier.labels)
+	// Both of the agent's labels, then the broker's verdict audit label
+	// (gonk-kxg): the batch carries no verdict, so it is reply-only.
+	if len(applier.labels) != 3 ||
+		applier.labels[0].Label != "gonk::bug" ||
+		applier.labels[1].Label != "gonk::frontend" ||
+		applier.labels[2].Label != "gonk::verdict-reply-only" {
+		t.Fatalf("labels = %+v, want gonk::bug, gonk::frontend, gonk::verdict-reply-only", applier.labels)
 	}
 	// The apply is the artifact => success => done, no re-sling.
 	reqs := fm.requests()
