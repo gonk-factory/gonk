@@ -448,8 +448,40 @@ if [ -n "${GONK_PROMPT}" ]; then
 	unset _skip _arg _dropped
 
 	# `--` so a prompt beginning with a dash is never parsed as a flag.
+	#
+	# NOT `exec`, AND WE HOLD AFTERWARDS. THIS IS LOAD-BEARING (gonk-2tb).
+	#
+	# Gas City serves the session transcript by asking TMUX for it, and tmux is
+	# only alive while the command it was given is still running: the k8s
+	# provider launches us as `tmux new-session -d -s main "gonk-agent-entrypoint"`,
+	# so the moment this script returns, the session ends and the tmux SERVER
+	# exits. The pod itself survives on the provider's trailing `sleep infinity`,
+	# which is what makes the failure so confusing -- the session is still
+	# "there", it just has no tmux to read from.
+	#
+	# MEASURED, 2026-09-02, issue !42 attempt 1 on qwen3-14b: the agent emitted a
+	# complete and fully valid batch (ParseBatch, shape, targets and paths all
+	# pass -- replayed against the real broker path), the pod was still alive and
+	# the session was not closed until a second AFTER judgement, and yet the
+	# sweep recorded `violation: no GONK_BATCH_START/END fence in session
+	# transcript`. `tmux list-sessions` inside a post-turn pod returns "no server
+	# running on /tmp/tmux-65532/default". The work was done and then thrown away
+	# for want of a reader.
+	#
+	# This was introduced by the move to non-interactive `run`: the TUI never
+	# exited, so tmux never died and the pane was always readable. Holding here
+	# restores that property without giving up non-interactive execution. It is
+	# safe to hold precisely because the sweep now treats a CLOSED FENCE as the
+	# completion signal rather than process exit (gonk-au1) -- the batch, not the
+	# exit, is what ends the turn -- and the sweep closes the session itself once
+	# it has judged, which is what finally reaps us.
 	log "starting opencode run (non-interactive)"
-	exec opencode run -- "${_clean}"
+	opencode run -- "${_clean}"
+	_rc=$?
+	log "opencode run exited rc=${_rc}; holding so tmux stays alive for the transcript read (gonk-2tb)"
+	# `wait` would return immediately (no background jobs); sleep in a loop is
+	# the portable hold. The sweep closes the session when it has judged.
+	while :; do sleep 3600; done
 fi
 
 # No prompt: nothing to run non-interactively. Fall back to whatever we were

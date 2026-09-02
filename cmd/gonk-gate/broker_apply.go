@@ -129,6 +129,14 @@ func applyScaffoldFiles(ctx context.Context, d sweepDeps, rec beadstore.Record, 
 // the sentinels appearing earlier (echoed in the injected prompt, or in the
 // model's own reasoning). ok=false if the fence is absent, out of order, or
 // empty.
+// isUnreadableTranscript reports whether a transcript carries no content at all,
+// which means WE failed to read it rather than that the agent stayed silent. A
+// real session always carries at least the harness banner, so this cannot hide a
+// genuinely silent agent.
+func isUnreadableTranscript(text string) bool {
+	return strings.TrimSpace(text) == ""
+}
+
 func extractBatch(output string) ([]byte, bool) {
 	start := strings.LastIndex(output, batchStartSentinel)
 	if start < 0 {
@@ -192,6 +200,21 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 		// derived from a partial transcript is the same silent loss in a new
 		// costume. Unknown -> retry, never escalate.
 		return false, "", fmt.Errorf("transcript for %q is paginated; refusing to judge a partial read", rec.SessionID)
+	}
+	// AN EMPTY TRANSCRIPT IS A FAILED READ, NOT A SILENT AGENT (gonk-2tb).
+	// Judging it as "no fence" charges the agent for OUR inability to read it,
+	// and the cost is not abstract: it burns the attempt, re-slings onto a
+	// pricier rung, and eventually denies the bead as ladder-exhausted with the
+	// agent's completed work sitting unread. Measured on issue !42 -- a valid
+	// batch existed in the pod while the sweep recorded "no fence", because the
+	// transcript is served through tmux and tmux had exited.
+	//
+	// This is the same rule the pagination check above already applies, for the
+	// same reason: an incomplete read must resolve to UNKNOWN -> retry, never to
+	// a verdict. A genuinely silent agent still produces a non-empty transcript
+	// (the harness banner alone guarantees that), so this cannot mask one.
+	if isUnreadableTranscript(tr.Text()) {
+		return false, "", fmt.Errorf("transcript for %q is empty; refusing to judge an unreadable session", rec.SessionID)
 	}
 	raw, ok := extractBatch(tr.Text())
 	if !ok {
