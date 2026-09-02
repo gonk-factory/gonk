@@ -475,6 +475,27 @@ if [ -n "${GONK_PROMPT}" ]; then
 	# completion signal rather than process exit (gonk-au1) -- the batch, not the
 	# exit, is what ends the turn -- and the sweep closes the session itself once
 	# it has judged, which is what finally reaps us.
+	# WIDEN THE PANE BEFORE ANY OUTPUT IS PRODUCED (gonk-d6h).
+	#
+	# Gas City serves the transcript by CAPTURING THIS TMUX PANE, and it does not
+	# join wrapped lines. A detached tmux session with no client attached sits at
+	# the default 80x24, so a single-line JSON batch comes back with real
+	# newlines inserted at every 80th column -- mid-word. Measured on issue !45,
+	# the first successful end-to-end triage: the payload opens with 38
+	# characters of JSON preamble followed by 42 characters of body, and the
+	# break lands at exactly 80.
+	#
+	# Widening here is the fix for the CAUSE. The alternative -- joining newlines
+	# when we parse -- cannot distinguish a wrap from a newline the model meant,
+	# so it would silently corrupt any legitimately multi-line body.
+	#
+	# Best-effort: every one of these is non-fatal. A tmux that does not support
+	# `window-size` or a launcher that does not use tmux at all must not stop the
+	# agent from working -- a wrapped comment is bad, no comment is worse.
+	tmux set-option -g window-size manual 2>/dev/null || true
+	tmux resize-window -t main -x 4000 -y 200 2>/dev/null || true
+	log "pane width now: $(tmux display -p '#{pane_width}' 2>/dev/null || echo unknown)"
+
 	log "starting opencode run (non-interactive)"
 	opencode run -- "${_clean}"
 	_rc=$?
