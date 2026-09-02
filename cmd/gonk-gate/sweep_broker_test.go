@@ -44,6 +44,20 @@ type recordingApplier struct {
 	// closing was made to fail.
 	closed   []int64
 	closeErr error
+	updated  []noteUpdate
+}
+
+func (r *recordingApplier) UpdateIssueNote(_ context.Context, _, issueIID, noteID int64, body string) (*glab.Note, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.updated = append(r.updated, noteUpdate{IssueIID: issueIID, NoteID: noteID, Body: body})
+	return &glab.Note{ID: noteID, Body: body}, nil
+}
+
+type noteUpdate struct {
+	IssueIID int64
+	NoteID   int64
+	Body     string
 }
 
 func (r *recordingApplier) CloseIssue(_ context.Context, _, issueIID int64) error {
