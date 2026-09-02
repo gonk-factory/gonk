@@ -16,6 +16,20 @@ const (
 	labelFixQueued       = "gonk::fix-queued"
 )
 
+// verdictLabel is the audit trail for what gonk concluded. The closed set is
+// mirrored here deliberately rather than interpolated, so a new verdict cannot
+// silently produce a new label nobody is filtering on.
+func verdictLabel(v effects.Verdict) string {
+	switch v {
+	case effects.VerdictCodeChange:
+		return "gonk::verdict-code-change"
+	case effects.VerdictClose:
+		return "gonk::verdict-close"
+	default:
+		return "gonk::verdict-reply-only"
+	}
+}
+
 // applyVerdict performs the deterministic action a validated verdict names.
 //
 // THE SPLIT MATTERS: the model states a CONCLUSION and this function decides
@@ -33,6 +47,13 @@ const (
 // which is the part the human reads, stands.
 func applyVerdict(ctx context.Context, d sweepDeps, rec beadstore.Record, batch effects.Batch) {
 	v := batch.EffectiveVerdict()
+	// RECORD THE ROUTING DECISION WHERE HUMANS LOOK (gonk-kxg: "the
+	// classification must be recorded ... so the routing decision is auditable
+	// after the fact"). A label is the cheapest durable record that survives log
+	// rotation and is filterable in the GitLab UI, and it is written by the
+	// BROKER, so it states what gonk actually did rather than what a model
+	// suggested.
+	label(ctx, d, rec, verdictLabel(v))
 	switch v {
 	case effects.VerdictReplyOnly:
 		// The comment IS the action. Nothing further, and nothing to log beyond

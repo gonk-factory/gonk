@@ -64,8 +64,12 @@ func TestReplyOnlyClosesNothing(t *testing.T) {
 		if len(ap.closed) != 0 {
 			t.Fatalf("verdict %q closed issues %v; it must change no state", b.EffectiveVerdict(), ap.closed)
 		}
-		if len(ap.labels) != 0 {
-			t.Fatalf("verdict %q wrote labels %v; the comment is the whole action", b.EffectiveVerdict(), ap.labels)
+		// The audit label is expected; what must NOT appear is a routing label.
+		if !hasLabel(ap, "gonk::verdict-reply-only") {
+			t.Fatalf("verdict %q must be recorded for audit; labels = %v", b.EffectiveVerdict(), ap.labels)
+		}
+		if hasLabel(ap, labelNeedsMaintainer) || hasLabel(ap, labelFixQueued) {
+			t.Fatalf("verdict %q routed work somewhere; the comment is the whole action", b.EffectiveVerdict())
 		}
 	}
 }
