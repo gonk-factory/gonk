@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -31,6 +32,7 @@ type Memory struct {
 	syncedAt     time.Time
 	window       spend.Window
 	prompts      map[string]Prompt
+	traces       map[string]Trace
 }
 
 func NewMemory() *Memory {
@@ -39,7 +41,7 @@ func NewMemory() *Memory {
 		attempts:     map[string][]attemptRecord{},
 		reservations: map[string]Reservation{},
 		seen:         map[string]struct{}{},
-		prompts:      map[string]Prompt{},
+		prompts:      map[string]Prompt{}, traces: make(map[string]Trace),
 	}
 }
 
@@ -292,6 +294,46 @@ func (m *Memory) SetWindow(_ context.Context, w spend.Window) error {
 var _ Store = (*Memory)(nil)
 
 // --- prompt-by-reference (gonk-mzd) -----------------------------------------
+
+// traceKey is the (session, attempt) identity. Attempt is part of the key
+// because a re-slung attempt is a DIFFERENT run of the same work and must not
+// inherit the previous attempt's evidence.
+func traceKey(sessionKey string, attempt int) string {
+	return fmt.Sprintf("%s#%d", sessionKey, attempt)
+}
+
+// AppendTrace adds to what was already observed rather than replacing it, and
+// degrades completeness monotonically: once a collector reports a gap, no later
+// report may claim the trace is complete again.
+func (m *Memory) AppendTrace(ctx context.Context, t Trace) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := traceKey(t.SessionKey, t.Attempt)
+	cur, ok := m.traces[k]
+	if !ok {
+		m.traces[k] = t
+		return nil
+	}
+	cur.Calls = append(cur.Calls, t.Calls...)
+	cur.Turns += t.Turns
+	cur.UpdatedAt = t.UpdatedAt
+	cur.Completeness = degrade(cur.Completeness, t.Completeness)
+	if cur.BeadID == "" {
+		cur.BeadID = t.BeadID
+	}
+	if cur.Project == "" {
+		cur.Project = t.Project
+	}
+	m.traces[k] = cur
+	return nil
+}
+
+func (m *Memory) GetTrace(ctx context.Context, sessionKey string, attempt int) (Trace, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	t, ok := m.traces[traceKey(sessionKey, attempt)]
+	return t, ok, nil
+}
 
 func (m *Memory) PutPrompt(ctx context.Context, p Prompt) error {
 	m.mu.Lock()
