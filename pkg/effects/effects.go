@@ -55,9 +55,66 @@ type Batch struct {
 // ParseBatch decodes and structurally validates a batch. It rejects invalid
 // JSON and unknown effect kinds -- a run that cannot produce a valid batch
 // fails; it never half-applies.
+// escapeRawControlsInStrings rewrites literal newline, carriage-return and tab
+// bytes that appear INSIDE a JSON string literal into their escaped forms.
+//
+// JSON forbids raw control characters in strings, and models break that rule
+// constantly: asked for a multi-line comment body, a model writes the newline
+// literally instead of as \n. Observed on issue !43, where an otherwise correct
+// triage batch was rejected with "invalid character '\n' in string literal" --
+// the agent's analysis was fine and we threw it away over a byte.
+//
+// This is a NORMALISATION, not a repair, and deliberately the narrowest one that
+// helps: it cannot change the meaning of any VALID batch, because valid JSON
+// cannot contain these bytes inside a string in the first place, so for
+// well-formed input it is a byte-for-byte identity. It does not balance braces,
+// close quotes, strip prose or guess at intent -- anything still malformed after
+// this stays malformed and is still rejected. The shape gate remains the sole
+// authority on what a batch is allowed to DO; this only decides whether we can
+// read it at all.
+//
+// Byte-wise is safe for UTF-8: only ASCII control bytes are special-cased, and
+// multi-byte sequences are >= 0x80, so they pass through untouched.
+func escapeRawControlsInStrings(raw []byte) []byte {
+	var out bytes.Buffer
+	out.Grow(len(raw))
+	inString, escaped := false, false
+	for _, b := range raw {
+		if !inString {
+			if b == '"' {
+				inString = true
+			}
+			out.WriteByte(b)
+			continue
+		}
+		if escaped {
+			out.WriteByte(b)
+			escaped = false
+			continue
+		}
+		switch b {
+		case '\\':
+			out.WriteByte(b)
+			escaped = true
+		case '"':
+			inString = false
+			out.WriteByte(b)
+		case '\n':
+			out.WriteString(`\n`)
+		case '\r':
+			out.WriteString(`\r`)
+		case '\t':
+			out.WriteString(`\t`)
+		default:
+			out.WriteByte(b)
+		}
+	}
+	return out.Bytes()
+}
+
 func ParseBatch(raw []byte) (Batch, error) {
 	var b Batch
-	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec := json.NewDecoder(bytes.NewReader(escapeRawControlsInStrings(raw)))
 	// DisallowUnknownFields is CORRECT and intentional: Effect is a superset
 	// struct, so {"kind":"comment","body":"x"} decodes cleanly and fields like
 	// `add`/`title` are known struct fields (never wrongly rejected); a genuinely
