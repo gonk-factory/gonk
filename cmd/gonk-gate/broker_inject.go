@@ -847,5 +847,37 @@ func awaitPromptFetched(ctx context.Context, d dispatchDeps, alias string) error
 		}
 		lastErr = fmt.Errorf("prompt not yet fetched")
 	}
-	return fmt.Errorf("prompt was never fetched by the agent after %d checks: %w", attempts, lastErr)
+	// SAY WHICH FAILURE THIS WAS (gonk-alw). "Prompt was never fetched" reads as
+	// an AGENT fault, but the same message covers a case where no agent ever
+	// existed: on issue !44 a controller that had been up 42 seconds accepted
+	// POST /sessions with 202, created no pod, logged nothing, and the only
+	// symptom was this timeout two minutes later. Those have completely
+	// different causes and only one of them is the agent's fault, so ask Gas
+	// City what it thinks the session is before blaming the pod.
+	return fmt.Errorf("prompt was never fetched by the agent after %d checks (%s): %w",
+		attempts, describeSessionRuntime(ctx, d, alias), lastErr)
+}
+
+// describeSessionRuntime reports what Gas City believes about a session, for
+// the diagnosis above. Best effort by construction: it runs on a path that has
+// ALREADY failed, so it must never mask the original error with one of its own.
+func describeSessionRuntime(ctx context.Context, d dispatchDeps, alias string) string {
+	if d.GC == nil {
+		return "session runtime unknown"
+	}
+	view, err := d.GC.GetSessionOutput(ctx, alias, 1)
+	if err != nil {
+		return "session runtime unknown: " + err.Error()
+	}
+	if view == nil {
+		return "session runtime unknown: no view"
+	}
+	if !view.Running && strings.TrimSpace(view.LastOutput) == "" {
+		// Accepted, never ran, produced nothing: the controller-side failure,
+		// not the agent's.
+		return fmt.Sprintf("NO AGENT EVER RAN -- session state %q, not running, no output; "+
+			"the session was accepted but nothing started it", view.State)
+	}
+	return fmt.Sprintf("session state %q running=%v -- a runtime existed, so the pod started and did not fetch",
+		view.State, view.Running)
 }
