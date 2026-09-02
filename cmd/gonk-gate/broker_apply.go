@@ -38,6 +38,11 @@ type brokerApplier interface {
 	// CloseIssue is the `close` verdict's action (gonk-aib). The broker performs
 	// it; the model only proposes the conclusion.
 	CloseIssue(ctx context.Context, projectID, issueIID int64) error
+	// UpdateIssueNote rewrites a note gonk already posted. It is what lets the
+	// canned status comment be edited in place and then REPLACED by the real
+	// answer, so a thread ends with the answer rather than a stale apology
+	// (gonk-yrs).
+	UpdateIssueNote(ctx context.Context, projectID, issueIID, noteID int64, body string) (*glab.Note, error)
 	// The scaffold half. The agent proposes .agent/ content and holds no
 	// credentials, so the CONTROLLER commits it and opens the merge request --
 	// the same inversion as triage, where the agent proposes a comment and the
@@ -260,12 +265,34 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 	} else if url != "" {
 		d.Log.Info("sweep: scaffold merge request ready", "bead", rec.BeadAnchor, "mr", url)
 	}
+	// THE ANSWER REPLACES THE PLACEHOLDER (gonk-yrs). If gonk previously said
+	// "I cannot answer yet", that note is edited into the real answer rather
+	// than left above it, so the thread ends with the answer and not the
+	// apology. Only the FIRST comment claims the placeholder; anything further
+	// is posted normally.
+	replaced := false
 	for _, e := range batch.Effects {
 		if e.Kind != effects.KindComment {
 			continue
 		}
-		body := e.Body + "\n\n" + marker
-		if _, aerr := d.Apply.CreateIssueNote(ctx, rec.ProjectID, targetIID(e, rec), body); aerr != nil {
+		iid := targetIID(e, rec)
+		body := e.Body
+		if f := mentionFooter(d.BotUsername); f != "" {
+			body += "\n\n" + f
+		}
+		body += "\n\n" + marker
+		if !replaced {
+			if st := findStatusNote(ctx, d, rec.ProjectID, iid, rec.BeadID); st != nil {
+				if _, uerr := d.Apply.UpdateIssueNote(ctx, rec.ProjectID, iid, st.ID, body); uerr == nil {
+					replaced = true
+					continue
+				}
+				// Fall through and post normally: a failed edit must not cost the
+				// reporter the answer.
+			}
+			replaced = true
+		}
+		if _, aerr := d.Apply.CreateIssueNote(ctx, rec.ProjectID, iid, body); aerr != nil {
 			// The gate artifact failed to post; nothing durable applied yet.
 			return false, "", aerr // -> unknown -> retry
 		}

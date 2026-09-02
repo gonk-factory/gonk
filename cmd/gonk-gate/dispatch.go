@@ -75,6 +75,15 @@ type dispatchDeps struct {
 	// Only the broker path uses it. Satisfied by *glab.Client.
 	Forge brokerForgeReader
 
+	// Apply/GL/BotUsername exist ONLY for the canned status comment (gonk-yrs).
+	// When a bead is parked -- unmetered, over budget, quiet hours -- the
+	// reporter otherwise sees nothing at all, which is indistinguishable from
+	// being ignored. All three are optional; nil simply means no status comment
+	// is posted, and dispatch's real work is unaffected.
+	Apply       brokerApplier
+	GL          gitlabQuerier
+	BotUsername string
+
 	// Rig / RigBaseURL register and advertise the per-session CHECKOUT (pkg/rig).
 	// Rig registers the grant controller-side at the decision point; RigBaseURL
 	// is gonk-intake's PRIVATE listener as the agent pod addresses it, which is
@@ -204,6 +213,10 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 		}
 		d.Log.Info("bead parked", "bead", a.BeadAnchor, "reason", dec.Reason,
 			"detail", dec.Detail, "retry_after", dec.RetryAfter)
+		// Say so in the thread, at no token cost, and EDIT the same note on every
+		// subsequent park so the issue carries one current status rather than a
+		// growing pile of apologies (gonk-yrs).
+		d.postDeferredNotice(ctx, a, dec.Reason, dec.Detail, dec.RetryAfter)
 		return 0
 
 	case meterapi.DecisionDeny:
@@ -311,4 +324,19 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 	}
 	d.Log.Info("poured", "order", order, "bead", a.BeadAnchor, "rung", dec.Rung, "attempt", dec.Attempt)
 	return 0
+}
+
+// postDeferredNotice publishes gonk's "I cannot answer yet" status comment.
+//
+// Deliberately BEST EFFORT and never fatal: this is courtesy, not correctness.
+// A bead that is parked is parked whether or not the reporter was told, and
+// failing the dispatch because a comment did not post would turn a polite
+// gesture into an outage.
+func (d dispatchDeps) postDeferredNotice(ctx context.Context, a dispatchArgs, reason, detail string, retryAfter time.Time) {
+	if d.Apply == nil || a.ProjectID == 0 || a.IssueIID == 0 {
+		return
+	}
+	sd := sweepDeps{Apply: d.Apply, GL: d.GL, BotUsername: d.BotUsername, Log: d.Log}
+	upsertStatusNote(ctx, sd, a.ProjectID, a.IssueIID, a.BeadID,
+		deferredBody(reason, detail, retryAfter, d.BotUsername))
 }
