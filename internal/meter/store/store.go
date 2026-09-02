@@ -269,6 +269,21 @@ type Store interface {
 	// collapsing them would hide exactly the case worth seeing.
 	TakePrompt(ctx context.Context, alias string, now time.Time) (p Prompt, found bool, consumed bool, err error)
 
+	// AppendTrace records observed tool-call evidence for one (session, attempt)
+	// -- trajectory slice 1 (gonk-p8j). APPEND, not put: the collector reports
+	// incrementally as a session runs, so a later report ADDS calls and turns
+	// rather than replacing what was already seen.
+	//
+	// Completeness is monotonically DOWNWARD: once a collector reports that it
+	// missed something, no later report may upgrade the trace back to complete.
+	// A gap does not stop being a gap because the next turn was seen.
+	AppendTrace(ctx context.Context, t Trace) error
+
+	// GetTrace returns what was observed for one (session, attempt). found=false
+	// means NOTHING WAS EVER RECORDED, which the caller must treat as Absent --
+	// never as "the agent called no tools".
+	GetTrace(ctx context.Context, sessionKey string, attempt int) (t Trace, found bool, err error)
+
 	// PromptStatus reports without consuming, so dispatch can confirm the
 	// entrypoint fetched. FetchedAt is zero until it does.
 	PromptStatus(ctx context.Context, alias string) (p Prompt, found bool, err error)
@@ -293,4 +308,51 @@ type Prompt struct {
 	CreatedAt time.Time
 	FetchedAt time.Time // zero until taken
 	ExpiresAt time.Time
+}
+
+// Trace is stored trajectory evidence for one (session, attempt): what a
+// session was OBSERVED to do (gonk-p8j).
+//
+// It holds tool NAMES and normalised argument SHAPE only. No prompt or response
+// bodies: they carry untrusted issue text and, on cloud rungs, left our
+// premises to begin with, and the ledger holds no bodies today -- a property
+// this must not break.
+type Trace struct {
+	SessionKey string
+	Attempt    int
+	BeadID     string
+	Project    string
+	// Completeness is the field every consumer must read first. "absent" and
+	// "the agent did nothing" are different facts and must stay different.
+	Completeness string
+	// Calls is the observed sequence, encoded as JSON by the store layer.
+	Calls []TraceCall
+	Turns int
+	// UpdatedAt is when the collector last reported.
+	UpdatedAt time.Time
+}
+
+// TraceCall is one observed tool invocation. Target is a NORMALISED shape --
+// a cleaned relative path or an issue reference -- never a raw argument blob.
+type TraceCall struct {
+	Tool   string `json:"tool"`
+	Target string `json:"target,omitempty"`
+}
+
+// degrade folds two completeness values, keeping the WORSE of the two.
+//
+// Completeness only ever moves downward. A collector that reports a gap has
+// observed a fact about the session that a later, cleaner report does not
+// undo: the gap still happened, and a predicate built on top must keep seeing
+// it. Anything unrecognised degrades to "absent" rather than being trusted.
+func degrade(a, b string) string {
+	rank := map[string]int{"complete": 3, "partial": 2, "absent": 1}
+	ra, rb := rank[a], rank[b]
+	if ra == 0 || rb == 0 {
+		return "absent"
+	}
+	if rb < ra {
+		return b
+	}
+	return a
 }

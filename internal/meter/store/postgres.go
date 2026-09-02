@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -179,6 +180,25 @@ CREATE TABLE IF NOT EXISTS prompts (
 	expires_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS prompts_expires_at_idx ON prompts (expires_at);
+
+-- Trajectory evidence, one row per (session, attempt) -- gonk-p8j.
+-- ATTEMPT IS PART OF THE KEY: a re-slung attempt is a different run of the same
+-- work and must not inherit the previous attempt's evidence.
+-- calls is a JSON array of {tool,target}. NO PROMPT OR RESPONSE BODIES: tool
+-- names and normalised argument shape only, so this never becomes a transcript
+-- store (the ledger holds no bodies today and that is worth keeping).
+CREATE TABLE IF NOT EXISTS traces (
+	session_key  TEXT NOT NULL,
+	attempt      INTEGER NOT NULL,
+	bead_id      TEXT NOT NULL DEFAULT '',
+	project      TEXT NOT NULL DEFAULT '',
+	completeness TEXT NOT NULL,
+	calls        TEXT NOT NULL DEFAULT '[]',
+	turns        INTEGER NOT NULL DEFAULT 0,
+	updated_at   TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (session_key, attempt)
+);
+CREATE INDEX IF NOT EXISTS traces_bead_idx ON traces (bead_id);
 `
 
 func (p *Postgres) migrate(ctx context.Context) error {
@@ -816,3 +836,74 @@ func nullTime(t time.Time) any {
 }
 
 var _ Store = (*Postgres)(nil)
+
+// AppendTrace adds observed calls to a (session, attempt) row, creating it on
+// first report. It is an UPSERT that CONCATENATES rather than replaces, because
+// a collector reports incrementally as a session runs.
+//
+// The completeness fold happens in SQL rather than read-modify-write so that two
+// concurrent reports cannot lose a gap: LEAST over the rank keeps the worse of
+// the two, and an unrecognised value collapses to 'absent' rather than being
+// trusted. Completeness only ever moves DOWNWARD.
+func (p *Postgres) AppendTrace(ctx context.Context, t Trace) error {
+	callsJSON, err := json.Marshal(t.Calls)
+	if err != nil {
+		return fmt.Errorf("store: encode trace calls: %w", err)
+	}
+	if t.Calls == nil {
+		callsJSON = []byte("[]")
+	}
+	const q = `
+INSERT INTO traces (session_key, attempt, bead_id, project, completeness, calls, turns, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (session_key, attempt) DO UPDATE SET
+	bead_id      = CASE WHEN traces.bead_id = '' THEN EXCLUDED.bead_id ELSE traces.bead_id END,
+	project      = CASE WHEN traces.project = '' THEN EXCLUDED.project ELSE traces.project END,
+	completeness = CASE
+		WHEN traces.completeness NOT IN ('complete','partial','absent') THEN 'absent'
+		WHEN EXCLUDED.completeness NOT IN ('complete','partial','absent') THEN 'absent'
+		WHEN traces.completeness = 'absent' OR EXCLUDED.completeness = 'absent' THEN 'absent'
+		WHEN traces.completeness = 'partial' OR EXCLUDED.completeness = 'partial' THEN 'partial'
+		ELSE 'complete'
+	END,
+	-- jsonb's || on two arrays concatenates them in order. Deliberately the
+	-- boring construct: this runs on a database the unit suite cannot reach
+	-- without a container, so it must be obviously correct on reading rather
+	-- than clever.
+	calls      = ((traces.calls::jsonb) || (EXCLUDED.calls::jsonb))::text,
+	turns      = traces.turns + EXCLUDED.turns,
+	updated_at = EXCLUDED.updated_at
+`
+	_, err = p.pool.Exec(ctx, q,
+		t.SessionKey, t.Attempt, t.BeadID, t.Project, t.Completeness, string(callsJSON), t.Turns, t.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("store: append trace: %w", err)
+	}
+	return nil
+}
+
+// GetTrace returns what was observed. found=false means NOTHING WAS EVER
+// RECORDED, which the caller must read as Absent -- never as "no tools called".
+func (p *Postgres) GetTrace(ctx context.Context, sessionKey string, attempt int) (Trace, bool, error) {
+	const q = `
+SELECT session_key, attempt, bead_id, project, completeness, calls, turns, updated_at
+FROM traces WHERE session_key = $1 AND attempt = $2`
+	var t Trace
+	var callsJSON string
+	err := p.pool.QueryRow(ctx, q, sessionKey, attempt).Scan(
+		&t.SessionKey, &t.Attempt, &t.BeadID, &t.Project, &t.Completeness, &callsJSON, &t.Turns, &t.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Trace{}, false, nil
+	}
+	if err != nil {
+		return Trace{}, false, fmt.Errorf("store: get trace: %w", err)
+	}
+	if uerr := json.Unmarshal([]byte(callsJSON), &t.Calls); uerr != nil {
+		// A row we cannot decode is evidence we do not have. Report it as
+		// absent rather than as an empty call list, which would read as "the
+		// agent did nothing".
+		t.Calls = nil
+		t.Completeness = "absent"
+	}
+	return t, true, nil
+}

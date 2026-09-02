@@ -85,6 +85,10 @@ func Run(t *testing.T, newStore func() store.Store) {
 	t.Run("PromptRoundTripAndOneShot", testPromptRoundTripAndOneShot(newStore))
 	t.Run("TakePromptHasExactlyOneWinnerUnderConcurrency", testTakePromptHasExactlyOneWinnerUnderConcurrency(newStore))
 	t.Run("ExpiredPromptReadsAsAbsentNotConsumed", testExpiredPromptReadsAsAbsentNotConsumed(newStore))
+	t.Run("TraceAppendsRatherThanReplaces", testTraceAppendsRatherThanReplaces(newStore))
+	t.Run("TraceCompletenessOnlyEverDegrades", testTraceCompletenessOnlyEverDegrades(newStore))
+	t.Run("MissingTraceIsNotAnEmptyTrace", testMissingTraceIsNotAnEmptyTrace(newStore))
+	t.Run("TraceIsKeyedByAttempt", testTraceIsKeyedByAttempt(newStore))
 }
 
 // The prompt row is what the agent pod fetches instead of having its prompt
@@ -723,6 +727,144 @@ func testListRegistrationsReturnsEveryProject(newStore func() store.Store) func(
 		must(t, s.DeleteRegistration(ctx, "group/a"))
 		if got, err := s.ListRegistrations(ctx); err != nil || len(got) != 1 || got[0].Project != "group/b" {
 			t.Fatalf("ListRegistrations after delete = %+v %v, want only group/b", got, err)
+		}
+	}
+}
+
+// A collector reports incrementally as a session runs, so a second report must
+// ADD to what was seen rather than replace it. Replacing would silently discard
+// every tool call made before the last report.
+func testTraceAppendsRatherThanReplaces(newStore func() store.Store) func(*testing.T) {
+	return func(t *testing.T) {
+		t.Helper()
+		st := newStore()
+		ctx := context.Background()
+		now := time.Now().UTC().Truncate(time.Second)
+
+		must(t, st.AppendTrace(ctx, store.Trace{
+			SessionKey: "s-append", Attempt: 1, BeadID: "gonk:1:issue:2", Project: "g/p",
+			Completeness: "complete", Turns: 1, UpdatedAt: now,
+			Calls: []store.TraceCall{{Tool: "read", Target: "README.md"}},
+		}))
+		must(t, st.AppendTrace(ctx, store.Trace{
+			SessionKey: "s-append", Attempt: 1,
+			Completeness: "complete", Turns: 2, UpdatedAt: now.Add(time.Second),
+			Calls: []store.TraceCall{{Tool: "grep"}, {Tool: "read", Target: "a.go"}},
+		}))
+
+		got, found, err := st.GetTrace(ctx, "s-append", 1)
+		must(t, err)
+		if !found {
+			t.Fatal("trace not found after two appends")
+		}
+		if len(got.Calls) != 3 {
+			t.Fatalf("calls = %+v, want all three preserved in order", got.Calls)
+		}
+		if got.Calls[0].Tool != "read" || got.Calls[1].Tool != "grep" || got.Calls[2].Target != "a.go" {
+			t.Fatalf("calls lost their order: %+v", got.Calls)
+		}
+		if got.Turns != 3 {
+			t.Fatalf("turns = %d, want 3 (1+2 accumulated)", got.Turns)
+		}
+		// Identity fields set on the first report must survive a later one that
+		// omits them.
+		if got.BeadID != "gonk:1:issue:2" || got.Project != "g/p" {
+			t.Fatalf("identity lost on append: bead=%q project=%q", got.BeadID, got.Project)
+		}
+	}
+}
+
+// COMPLETENESS ONLY MOVES DOWNWARD. A collector that reports a gap has observed
+// a fact about the session, and a later clean report does not undo it -- the gap
+// still happened. Letting it upgrade back to complete would hide exactly the
+// telemetry outage this field exists to expose.
+func testTraceCompletenessOnlyEverDegrades(newStore func() store.Store) func(*testing.T) {
+	return func(t *testing.T) {
+		t.Helper()
+		ctx := context.Background()
+		now := time.Now().UTC().Truncate(time.Second)
+
+		for _, tc := range []struct{ first, second, want string }{
+			{"complete", "partial", "partial"},
+			{"partial", "complete", "partial"},
+			{"complete", "absent", "absent"},
+			{"absent", "complete", "absent"},
+			{"partial", "absent", "absent"},
+			{"complete", "complete", "complete"},
+			// An unrecognised value is not evidence: collapse to absent rather
+			// than trusting it.
+			{"complete", "who-knows", "absent"},
+		} {
+			st := newStore()
+			key := "s-" + tc.first + "-" + tc.second
+			must(t, st.AppendTrace(ctx, store.Trace{
+				SessionKey: key, Attempt: 1, Completeness: tc.first, UpdatedAt: now,
+			}))
+			must(t, st.AppendTrace(ctx, store.Trace{
+				SessionKey: key, Attempt: 1, Completeness: tc.second, UpdatedAt: now,
+			}))
+			got, _, err := st.GetTrace(ctx, key, 1)
+			must(t, err)
+			if got.Completeness != tc.want {
+				t.Fatalf("%s then %s = %q, want %q", tc.first, tc.second, got.Completeness, tc.want)
+			}
+		}
+	}
+}
+
+// found=false must be distinguishable from a recorded trace with no calls. One
+// means we never saw anything; the other means we watched and the agent called
+// nothing. Conflating them turns a telemetry outage into a verdict.
+func testMissingTraceIsNotAnEmptyTrace(newStore func() store.Store) func(*testing.T) {
+	return func(t *testing.T) {
+		t.Helper()
+		st := newStore()
+		ctx := context.Background()
+
+		_, found, err := st.GetTrace(ctx, "never-recorded", 1)
+		must(t, err)
+		if found {
+			t.Fatal("a session that was never recorded must report found=false")
+		}
+
+		must(t, st.AppendTrace(ctx, store.Trace{
+			SessionKey: "watched-idle", Attempt: 1, Completeness: "complete",
+			UpdatedAt: time.Now().UTC(),
+		}))
+		got, found, err := st.GetTrace(ctx, "watched-idle", 1)
+		must(t, err)
+		if !found {
+			t.Fatal("a recorded trace must report found=true even with no calls")
+		}
+		if len(got.Calls) != 0 || got.Completeness != "complete" {
+			t.Fatalf("got %+v, want a complete trace with no calls", got)
+		}
+	}
+}
+
+// A re-slung attempt is a DIFFERENT run of the same work. It must not inherit
+// the previous attempt's evidence, or a predicate would credit attempt 2 with
+// reads that only attempt 1 performed.
+func testTraceIsKeyedByAttempt(newStore func() store.Store) func(*testing.T) {
+	return func(t *testing.T) {
+		t.Helper()
+		st := newStore()
+		ctx := context.Background()
+		now := time.Now().UTC()
+
+		must(t, st.AppendTrace(ctx, store.Trace{
+			SessionKey: "s-attempts", Attempt: 1, Completeness: "complete", Turns: 1, UpdatedAt: now,
+			Calls: []store.TraceCall{{Tool: "read", Target: "README.md"}},
+		}))
+		got2, found, err := st.GetTrace(ctx, "s-attempts", 2)
+		must(t, err)
+		if found {
+			t.Fatalf("attempt 2 inherited attempt 1's evidence: %+v", got2)
+		}
+		got1, found, err := st.GetTrace(ctx, "s-attempts", 1)
+		must(t, err)
+		if !found || len(got1.Calls) != 1 {
+			t.Fatalf("attempt 1 = %+v found=%v, want its own single call", got1, found)
 		}
 	}
 }
