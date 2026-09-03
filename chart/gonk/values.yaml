@@ -583,6 +583,14 @@ networkPolicy:
   prometheus:
     namespaceSelector: {kubernetes.io/metadata.name: monitoring}
     podSelector: {}
+  # The LiteLLM proxy, for trajectory-evidence ingest only (gonk-p8j). Scoped to
+  # the proxy's own pod, NOT the namespace: a cronjob or sidecar living beside
+  # it must not inherit reachability to the meter. Set to null to remove the
+  # rule entirely -- the collector then simply fails to report, which degrades
+  # the evidence and never the service.
+  litellmProxy:
+    namespaceSelector: {kubernetes.io/metadata.name: litellm}
+    podSelector: {app.kubernetes.io/name: litellm}
   dns:
     namespaceSelector: {kubernetes.io/metadata.name: kube-system}
     ports: [53]
