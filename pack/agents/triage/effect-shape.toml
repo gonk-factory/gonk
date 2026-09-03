@@ -13,3 +13,29 @@ max = 1
 [label]
 min = 0
 max = -1  # unbounded (N)
+
+# WHAT TRIAGE MUST HAVE DONE TO BE ALLOWED TO SAY IT (gonk-hsb).
+#
+# The section above is what this agent may SAY; this one is what it must have
+# DONE. Read by pkg/trace from the BAKED pack, never from anything the agent can
+# write.
+#
+# THE ONE PREDICATE THAT PAYS FOR ITSELF: a reply-only or close verdict produces
+# NO ARTIFACT, so the four syntactic gates are the whole of the check and an
+# agent that reads nothing and writes a plausible diagnosis passes all of them.
+# Nothing downstream can catch it either, because there is no change to run a
+# suite against. Requiring an observed read of the issue's own target is the
+# floor under that.
+#
+# code-change is deliberately ABSENT from the list: it produces a diff, and the
+# verify pipeline judges that on outcome evidence, which beats process evidence
+# wherever both exist.
+[trajectory]
+read_tools = ["read", "Read"]
+# The rule that actually fires. A triage session's target is an ISSUE, and the
+# issue arrives inside the prompt -- reading it is not a tool call -- so a
+# target-read rule would never trigger. What is worth catching is narrower: a
+# verdict with no artifact, reached without opening a single file.
+require_any_read_for = ["reply-only", "close"]
+# Kept for when a session DOES have a named file target; inert until then.
+require_target_read_for = ["reply-only", "close"]

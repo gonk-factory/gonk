@@ -483,6 +483,9 @@ func TestOnlyThePromptGetIsUnauthenticated(t *testing.T) {
 		{"POST", "/v1/trace", false},
 		{"GET", "/v1/trace", false},
 		{"PUT", "/v1/trace", false},
+		// The read side is operator/broker data and is authenticated too: a
+		// trace names which files a session touched.
+		{"GET", "/v1/trace/s1?attempt=1", false},
 	}
 
 	for _, c := range cases {

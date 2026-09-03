@@ -84,6 +84,12 @@ const (
 	// pod-local transcript for; reproducing it here would be worse, because it
 	// would look like a control while being a field the agent fills in.
 	TracePath = "/v1/trace"
+
+	// TraceReadPathPrefix is the READ side, TraceReadPathPrefix+<session_key>,
+	// with the attempt as a query parameter. The broker fetches evidence here
+	// to classify it; like every other route but the prompt GET it is
+	// bearer-authenticated.
+	TraceReadPathPrefix = "/v1/trace/"
 )
 
 // PromptRequest is what the controller PUTs before creating the session.
@@ -122,6 +128,20 @@ type TraceRequest struct {
 type TraceCall struct {
 	Tool   string `json:"tool"`
 	Target string `json:"target,omitempty"`
+}
+
+// TraceView is the evidence recorded for one (session, attempt), as the broker
+// reads it back. A session with no row comes back with Completeness "absent"
+// and no calls -- never a 404 -- so a caller can tell "we observed nothing"
+// from "we could not ask".
+type TraceView struct {
+	SessionKey   string      `json:"session_key"`
+	Attempt      int         `json:"attempt"`
+	BeadID       string      `json:"bead_id,omitempty"`
+	Project      string      `json:"project,omitempty"`
+	Completeness string      `json:"completeness"`
+	Calls        []TraceCall `json:"calls,omitempty"`
+	Turns        int         `json:"turns,omitempty"`
 }
 
 // TraceResponse acknowledges an accepted report.

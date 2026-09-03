@@ -140,6 +140,10 @@ func main() {
 		code = runSweep(ctx, sweepDeps{
 			Meter: cfg.meter(), GC: cfg.gc(), GL: cfg.gl(), Apply: cfg.gl(), Store: cfg.store(), Log: log,
 			BotUsername: cfg.BotUsername, PackDir: cfg.PackDir,
+			// Off unless explicitly enabled: the fifth gate observes and logs
+			// what it WOULD reject until its false-positive rate is measured
+			// on real sessions (gonk-hsb).
+			EnforceTrajectory: os.Getenv("GONK_ENFORCE_TRAJECTORY") == "1",
 		})
 	case "check":
 		code = runCheck(ctx, checkDeps{

@@ -21,6 +21,11 @@ type tomlCard struct {
 // IMPORTANT: the broker reads this from the baked pack (/opt/gonk/pack), never
 // the /city copy -- reading from the baked pack sidesteps the `gc init`
 // block-stripping that would strip broker-only data (spec §6.1).
+// TrajectorySection is the effect-shape.toml key carrying trajectory
+// predicates. Declared here, beside the loader that must skip it, so the two
+// cannot drift apart silently.
+const TrajectorySection = "trajectory"
+
 func LoadShape(packDir, agent string) (Shape, error) {
 	path := filepath.Join(packDir, "agents", agent, "effect-shape.toml")
 	var raw map[string]tomlCard
@@ -29,6 +34,14 @@ func LoadShape(packDir, agent string) (Shape, error) {
 	}
 	kinds := make(map[Kind]Card, len(raw))
 	for k, c := range raw {
+		// [trajectory] is the ONE non-kind section this file may carry: what the
+		// agent must have DONE to be allowed to say what it says (gonk-hsb). It
+		// is read by pkg/trace, not here, and skipped rather than tolerated
+		// generally -- the "unknown kind" error below is what catches a typo'd
+		// kind, and that must keep working.
+		if k == TrajectorySection {
+			continue
+		}
 		kind := Kind(k)
 		if !knownKinds[kind] {
 			return Shape{}, fmt.Errorf("effects: shape %s has unknown kind %q", path, k)
