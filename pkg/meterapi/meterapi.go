@@ -73,6 +73,17 @@ const (
 	// token to distribute to a pod that deliberately holds no credentials.
 	// PUT and DELETE on the same path still require the admin bearer.
 	PromptPathPrefix = "/v1/prompt/"
+
+	// TracePath is trajectory-evidence ingest (gonk-p8j). The LiteLLM proxy
+	// callback POSTs here with what it observed a session request.
+	//
+	// IT IS BEARER-AUTHENTICATED AND MUST STAY THAT WAY. The agent pod can
+	// already reach this meter -- that is how it fetches its own prompt -- so an
+	// unauthenticated trace endpoint would let the subject of the evidence write
+	// the evidence. That is the precise failure the design note rejects the
+	// pod-local transcript for; reproducing it here would be worse, because it
+	// would look like a control while being a field the agent fills in.
+	TracePath = "/v1/trace"
 )
 
 // PromptRequest is what the controller PUTs before creating the session.
@@ -83,6 +94,45 @@ type PromptRequest struct {
 	Prompt   string `json:"prompt"`
 	Model    string `json:"model"`
 	Metadata string `json:"metadata,omitempty"`
+}
+
+// TraceRequest is one observation report from the proxy callback, for one
+// (session, attempt). Reports are INCREMENTAL and additive: the meter appends
+// calls and turns rather than replacing them, so a long session may produce
+// several of these.
+//
+// Deliberately carries NO prompt or response text. Tool names and a normalised
+// argument shape only -- bodies hold untrusted issue content and, on cloud
+// rungs, left our premises to begin with.
+type TraceRequest struct {
+	SessionKey string `json:"session_key"`
+	Attempt    int    `json:"attempt"`
+	BeadID     string `json:"bead_id,omitempty"`
+	Project    string `json:"project,omitempty"`
+	// Completeness is REQUIRED and must be one of complete|partial|absent. A
+	// collector that does not know must say "partial" or "absent"; there is no
+	// permitted silence, because a missing value would read as complete to any
+	// consumer that defaults.
+	Completeness string      `json:"completeness"`
+	Calls        []TraceCall `json:"calls,omitempty"`
+	Turns        int         `json:"turns,omitempty"`
+}
+
+// TraceCall is one observed tool invocation.
+type TraceCall struct {
+	Tool   string `json:"tool"`
+	Target string `json:"target,omitempty"`
+}
+
+// TraceResponse acknowledges an accepted report.
+type TraceResponse struct {
+	SessionKey string `json:"session_key"`
+	Attempt    int    `json:"attempt"`
+	// Completeness as STORED after folding this report into what was already
+	// there, which may be worse than what was sent: completeness only degrades.
+	Completeness string `json:"completeness"`
+	Calls        int    `json:"calls"`
+	Turns        int    `json:"turns"`
 }
 
 // PromptResponse is what the agent pod GETs, once.
