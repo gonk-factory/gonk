@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -188,4 +190,25 @@ func (m *meterAPI) PromptFetched(ctx context.Context, alias string) (bool, error
 		return false, fmt.Errorf("meter: GET %s: %d", path, code)
 	}
 	return out.Fetched, nil
+}
+
+// GetTrace reads the trajectory evidence recorded for one (session, attempt).
+//
+// A session with no recorded evidence comes back as "absent" rather than an
+// error, because that is a fact the classifier must act on: an unobserved
+// session is not a misbehaving one, and pkg/trace.Classify is built to say so.
+// A TRANSPORT failure is different and is returned as an error, so the caller
+// can tell "we observed nothing" from "we could not ask".
+func (m *meterAPI) GetTrace(ctx context.Context, sessionKey string, attempt int) (*meterapi.TraceView, error) {
+	var out meterapi.TraceView
+	path := meterapi.TraceReadPathPrefix + url.PathEscape(sessionKey) +
+		"?attempt=" + strconv.Itoa(attempt)
+	code, err := m.do(ctx, http.MethodGet, path, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("meter: GET trace: unexpected status %d", code)
+	}
+	return &out, nil
 }

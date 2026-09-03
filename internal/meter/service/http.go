@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/budget"
@@ -65,6 +66,7 @@ func NewMux(svc *Service, token, prevToken string, metricsHandler http.Handler) 
 	// the agent pod can reach this meter, so an unauthenticated trace endpoint
 	// would let the subject of the evidence write the evidence.
 	mux.HandleFunc("POST "+meterapi.TracePath, h.putTrace)
+	mux.HandleFunc("GET "+meterapi.TraceReadPathPrefix+"{session_key}", h.getTrace)
 	// POST /admin/spend/sync IS bearer-authenticated (unlike /healthz,
 	// /readyz, /metrics): it is on the same listener as everything else --
 	// meter has one port, unlike intake's public/private split -- and
@@ -814,6 +816,32 @@ func (h *handler) putTrace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stored)
+}
+
+// getTrace returns the evidence recorded for one (session, attempt).
+//
+// A SESSION WITH NO ROW IS REPORTED AS ABSENT, NOT AS 404. The caller must be
+// able to tell "we observed nothing" from "we could not ask", and those are
+// different failures with different correct responses: absent is a verdict
+// input, a transport error is a reason to retry. Returning 404 would push that
+// distinction into HTTP status handling at every call site.
+func (h *handler) getTrace(w http.ResponseWriter, r *http.Request) {
+	sessionKey := r.PathValue("session_key")
+	if sessionKey == "" {
+		writeError(w, http.StatusBadRequest, "session_key is required")
+		return
+	}
+	attempt, err := strconv.Atoi(r.URL.Query().Get("attempt"))
+	if err != nil || attempt <= 0 {
+		writeError(w, http.StatusBadRequest, "attempt must be a positive attempt number")
+		return
+	}
+	got, err := h.svc.GetTrace(r.Context(), sessionKey, attempt)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read trace")
+		return
+	}
+	writeJSON(w, http.StatusOK, got)
 }
 
 // takePrompt is the unauthenticated one. It CONSUMES: a second GET is 410, not

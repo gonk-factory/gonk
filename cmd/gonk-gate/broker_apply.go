@@ -251,6 +251,12 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 	if perr := effects.ValidatePaths(batch); perr != nil {
 		return false, "path: " + perr.Error(), nil
 	}
+	// The FIFTH GATE (gonk-hsb): not "is this batch well-formed" but "did the
+	// session do the work it claims to report". Observing-only until
+	// EnforceTrajectory is set -- see checkTrajectory.
+	if v := checkTrajectory(ctx, d, rec, agent, batch); v != "" {
+		return false, v, nil
+	}
 
 	// Shape-valid. Apply comment(s) first (deterministic order, independent of
 	// the agent's emit order), then labels.

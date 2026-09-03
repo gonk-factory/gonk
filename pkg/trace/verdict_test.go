@@ -181,3 +181,60 @@ func TestClassifyIsTotal(t *testing.T) {
 		}
 	}
 }
+
+// THE PREDICATE THAT ACTUALLY FIRES FOR TRIAGE. A triage session's target is an
+// issue, and the issue arrives inside the prompt, so a target-read rule would
+// never trigger. What is catchable is a verdict with no artifact reached
+// without opening a single file.
+func TestArtifactlessVerdictsRequireReadingSomething(t *testing.T) {
+	p := Policy{ReadTools: []string{"read"}, RequireAnyReadFor: []string{"reply-only", "close"}}
+
+	readNothing := complete(Call{Tool: "glob"}, Call{Tool: "grep"})
+	for _, v := range []string{"reply-only", "close", ""} {
+		got := Classify(Input{Trace: readNothing, Verdict: v}, p)
+		if got.Outcome != OutcomeViolated {
+			t.Fatalf("verdict %q after reading nothing = %q, want violated", v, got.Outcome)
+		}
+	}
+
+	readSomething := complete(Call{Tool: "read", Target: "anything.go"})
+	for _, v := range []string{"reply-only", "close"} {
+		if got := Classify(Input{Trace: readSomething, Verdict: v}, p); got.Outcome != OutcomeSatisfied {
+			t.Fatalf("verdict %q after a read = %q (%s)", v, got.Outcome, got.Reason)
+		}
+	}
+
+	// code-change is not gated here: it produces a diff for verify to judge.
+	if got := Classify(Input{Trace: readNothing, Verdict: "code-change"}, p); got.Outcome != OutcomeSatisfied {
+		t.Fatalf("code-change = %q, want satisfied", got.Outcome)
+	}
+
+	// And it must still never reject on missing evidence.
+	if got := Classify(Input{Trace: Trace{Completeness: Absent}, Verdict: "close"}, p); got.Rejects() {
+		t.Fatal("an unobserved trace rejected")
+	}
+}
+
+// The real trace from issue !48 must pass: it is the shape of an honest
+// session, and a predicate that rejects it is a predicate that re-slings real
+// beads.
+func TestTheFirstRealTraceIsNotRejected(t *testing.T) {
+	real48 := Trace{
+		Completeness: Complete, Turns: 8,
+		Calls: []Call{
+			{Tool: "glob"}, {Tool: "glob"}, {Tool: "glob"}, {Tool: "glob"},
+			{Tool: "read", Target: "/workspace/internal/paging/paging.go"},
+			{Tool: "read", Target: "/workspace/internal/paging/sort.go"},
+		},
+	}
+	p, err := LoadPolicy(packDir(t), "triage")
+	if err != nil {
+		t.Fatalf("LoadPolicy: %v", err)
+	}
+	for _, v := range []string{"reply-only", "close", "code-change"} {
+		got := Classify(Input{Trace: real48, Verdict: v, Target: "internal/paging/paging.go"}, p)
+		if got.Rejects() {
+			t.Fatalf("the real !48 trace was rejected for verdict %q: %s", v, got.Reason)
+		}
+	}
+}

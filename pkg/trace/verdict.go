@@ -57,10 +57,23 @@ type Policy struct {
 	// MinCalls is a per-tool floor.
 	MinCalls map[string]int
 	// RequireTargetReadFor lists the batch VERDICTS that may only be reached
-	// after the session demonstrably read its primary target. This is the
-	// predicate the slice exists for: reply-only and close produce no artifact,
-	// so nothing downstream can catch a confabulated diagnosis.
+	// after the session demonstrably read a NAMED target. Only checked when a
+	// target is actually known for the session.
 	RequireTargetReadFor []string
+	// RequireAnyReadFor lists the VERDICTS that require at least one read of
+	// ANYTHING.
+	//
+	// THIS IS THE PREDICATE THAT ACTUALLY BITES FOR TRIAGE, and the design note
+	// under-specified it. "A read of the session's primary target" assumes a
+	// target exists as a file, but a triage session's target is an ISSUE, and
+	// the issue arrives INSIDE the prompt -- reading it is not a tool call at
+	// all, so a target-read rule would silently never fire.
+	//
+	// What is actually worth catching is narrower and decidable: an agent that
+	// read NOTHING and still produced a confident diagnosis. That is the
+	// confabulation case, it needs no understanding of the work, and it stays
+	// set arithmetic over tool names.
+	RequireAnyReadFor []string
 	// ReadTools are the tool names that count as reading. Declared rather than
 	// hardcoded because harnesses name them differently.
 	ReadTools []string
@@ -69,7 +82,8 @@ type Policy struct {
 // Empty reports whether the policy asks for nothing.
 func (p Policy) Empty() bool {
 	return len(p.RequiredTools) == 0 && len(p.ForbiddenTools) == 0 &&
-		len(p.MinCalls) == 0 && len(p.RequireTargetReadFor) == 0
+		len(p.MinCalls) == 0 && len(p.RequireTargetReadFor) == 0 &&
+		len(p.RequireAnyReadFor) == 0
 }
 
 // Input is everything Classify needs. Kept as a struct so adding a field later
@@ -125,6 +139,10 @@ func Classify(in Input, p Policy) Verdict {
 		}
 	}
 
+	if contains(p.RequireAnyReadFor, effectiveVerdict(in.Verdict)) && !readAnything(in.Trace, p.ReadTools) {
+		return Verdict{OutcomeViolated,
+			"verdict " + effectiveVerdict(in.Verdict) + " produces no artifact, and this session read nothing"}
+	}
 	if in.Target != "" && contains(p.RequireTargetReadFor, effectiveVerdict(in.Verdict)) {
 		if !readTarget(in.Trace, p.ReadTools, in.Target) {
 			return Verdict{OutcomeViolated,
@@ -191,4 +209,15 @@ func sortedKeys(m map[string]int) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// readAnything reports whether the session read at all. The floor under
+// confabulation: a diagnosis reached without opening a single file.
+func readAnything(t Trace, readTools []string) bool {
+	for _, c := range t.Calls {
+		if len(readTools) == 0 || contains(readTools, c.Tool) {
+			return true
+		}
+	}
+	return false
 }

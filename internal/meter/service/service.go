@@ -1340,6 +1340,29 @@ func (s *Service) AppendTrace(ctx context.Context, req meterapi.TraceRequest) (m
 	}, nil
 }
 
+// GetTrace returns recorded evidence. A session with NO ROW comes back as
+// "absent" rather than as an error: not having observed a session is a fact
+// about the evidence, and the caller must be able to act on it.
+func (s *Service) GetTrace(ctx context.Context, sessionKey string, attempt int) (meterapi.TraceView, error) {
+	got, found, err := s.store.GetTrace(ctx, sessionKey, attempt)
+	if err != nil {
+		return meterapi.TraceView{}, err
+	}
+	if !found {
+		return meterapi.TraceView{
+			SessionKey: sessionKey, Attempt: attempt, Completeness: string(trace.Absent),
+		}, nil
+	}
+	calls := make([]meterapi.TraceCall, 0, len(got.Calls))
+	for _, c := range got.Calls {
+		calls = append(calls, meterapi.TraceCall{Tool: c.Tool, Target: c.Target})
+	}
+	return meterapi.TraceView{
+		SessionKey: got.SessionKey, Attempt: got.Attempt, BeadID: got.BeadID, Project: got.Project,
+		Completeness: got.Completeness, Calls: calls, Turns: got.Turns,
+	}, nil
+}
+
 func (s *Service) TakePrompt(ctx context.Context, alias string) (store.Prompt, bool, bool, error) {
 	return s.store.TakePrompt(ctx, alias, s.now())
 }

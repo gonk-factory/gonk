@@ -45,6 +45,13 @@ type sweepDeps struct {
 	// effect-shape.toml from. Defaulted in withDefaults.
 	PackDir string
 
+	// EnforceTrajectory turns the fifth gate from observing into rejecting
+	// (gonk-hsb). OFF by default and deliberately so: a predicate enabled on
+	// unmeasured evidence rejects honest batches, and a rejected batch on the
+	// triage path re-slings the bead onto a pricier rung. Turn it on when the
+	// false-positive rate has been measured on real sessions, not before.
+	EnforceTrajectory bool
+
 	// BotUsername authenticates the marker-carrying comment (a human quoting
 	// the marker must not satisfy the gate).
 	BotUsername string
