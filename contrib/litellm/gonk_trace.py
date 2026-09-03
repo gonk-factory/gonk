@@ -224,7 +224,23 @@ _TRACE_PATH = "/v1/trace"
 _TIMEOUT_SECONDS = 5.0
 
 
-class GonkTrajectoryCollector:
+# LiteLLM registers callbacks as CustomLogger instances, and the existing
+# finish_reason repair on this proxy subclasses it. A plain class risks being
+# ignored or rejected at registration, which would leave this collector silently
+# dead -- the worst outcome, because the evidence table would simply stay empty
+# and look like agents that never call tools.
+#
+# The fallback keeps the module importable WITHOUT litellm installed, which is
+# what lets the pure logic above be unit-tested in CI at all.
+try:  # pragma: no cover - exercised only inside the proxy image
+    from litellm.integrations.custom_logger import CustomLogger as _CustomLogger
+except Exception:  # pragma: no cover - the standalone/test path
+
+    class _CustomLogger:  # type: ignore[no-redef]
+        pass
+
+
+class GonkTrajectoryCollector(_CustomLogger):
     """Reports observed tool calls for gonk sessions to the gonk meter.
 
     Silent by construction. If the meter is unset, unreachable, or refuses the
