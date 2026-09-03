@@ -49,6 +49,33 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.meter.port }}
+    # THE LITELLM PROXY, for trajectory-evidence ingest only (gonk-p8j).
+    #
+    # This is a DELIBERATE widening of the meter's ingress and it is worth being
+    # precise about what it does and does not grant. The proxy needs to POST
+    # /v1/trace because it is the one collection point the agent pod cannot
+    # reach, edit, or even see -- which is the entire reason the evidence is
+    # worth having. Collecting it inside the pod would make it a field the agent
+    # fills in.
+    #
+    # It grants NETWORK REACHABILITY ONLY. Every route on this port still
+    # requires the bearer token, so this rule cannot read a budget, move a
+    # reservation, or take a prompt; it lets a pod that already holds the meter
+    # token talk to the meter. Scoped to the proxy's own pod labels rather than
+    # the whole namespace, so a sidecar or a cronjob in the litellm namespace
+    # does not inherit it.
+    {{- if .Values.networkPolicy.litellmProxy }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.litellmProxy.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.litellmProxy.podSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.meter.port }}
+    {{- end }}
     # Prometheus (/metrics is unauthenticated; the rest of the API is not).
     - from:
         - namespaceSelector:
