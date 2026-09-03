@@ -32,6 +32,7 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/pkg/opercfg"
 	"gitlab.orac.local/agentic/gonk-project/pkg/rung"
 	"gitlab.orac.local/agentic/gonk-project/pkg/spend"
+	"gitlab.orac.local/agentic/gonk-project/pkg/trace"
 )
 
 // keyBudgetDuration is LiteLLM's key `budget_duration`, pinned to match
@@ -1291,6 +1292,52 @@ func (s *Service) PutPrompt(ctx context.Context, alias string, req meterapi.Prom
 		Alias: alias, Prompt: req.Prompt, Model: req.Model, Metadata: req.Metadata,
 		CreatedAt: now, ExpiresAt: now.Add(promptTTL),
 	})
+}
+
+// AppendTrace folds one observation report into what was already recorded for a
+// (session, attempt) and returns the STORED state.
+//
+// It returns what is stored rather than what was sent because the two can
+// differ: completeness only ever degrades, so a collector reporting "complete"
+// against a trace already known to have a gap gets "partial" back. A caller
+// that echoed its own input would report a cleaner trace than exists.
+func (s *Service) AppendTrace(ctx context.Context, req meterapi.TraceRequest) (meterapi.TraceResponse, error) {
+	calls := make([]store.TraceCall, 0, len(req.Calls))
+	for _, c := range req.Calls {
+		if c.Tool == "" {
+			// A call with no tool name is not evidence of anything and would
+			// silently inflate counts a predicate later reasons over.
+			continue
+		}
+		calls = append(calls, store.TraceCall{Tool: c.Tool, Target: c.Target})
+	}
+	if err := s.store.AppendTrace(ctx, store.Trace{
+		SessionKey: req.SessionKey, Attempt: req.Attempt,
+		BeadID: req.BeadID, Project: req.Project,
+		Completeness: req.Completeness, Calls: calls, Turns: req.Turns,
+		UpdatedAt: s.now(),
+	}); err != nil {
+		return meterapi.TraceResponse{}, err
+	}
+	got, found, err := s.store.GetTrace(ctx, req.SessionKey, req.Attempt)
+	if err != nil {
+		return meterapi.TraceResponse{}, err
+	}
+	if !found {
+		// We just wrote it. Not finding it means the store is lying to us, and
+		// reporting a confident "complete" here would launder that.
+		return meterapi.TraceResponse{
+			SessionKey: req.SessionKey, Attempt: req.Attempt,
+			Completeness: string(trace.Absent),
+		}, nil
+	}
+	return meterapi.TraceResponse{
+		SessionKey:   got.SessionKey,
+		Attempt:      got.Attempt,
+		Completeness: got.Completeness,
+		Calls:        len(got.Calls),
+		Turns:        got.Turns,
+	}, nil
 }
 
 func (s *Service) TakePrompt(ctx context.Context, alias string) (store.Prompt, bool, bool, error) {

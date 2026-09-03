@@ -473,6 +473,16 @@ func TestOnlyThePromptGetIsUnauthenticated(t *testing.T) {
 		{"DELETE", "/v1/prompt/" + testNonceAlias, false},
 		// Status reveals whether a prompt was fetched; that is operator data.
 		{"GET", "/v1/prompt/" + testNonceAlias + "/status", false},
+
+		// TRAJECTORY INGEST MUST NEVER JOIN THE EXEMPTION (gonk-p8j). The agent
+		// pod can already reach this meter -- that is how it fetches its prompt
+		// -- so an unauthenticated trace endpoint would let the SUBJECT of the
+		// evidence WRITE the evidence, which is exactly why the design note
+		// rejects the pod-local transcript. It would be worse here, because it
+		// would look like a control.
+		{"POST", "/v1/trace", false},
+		{"GET", "/v1/trace", false},
+		{"PUT", "/v1/trace", false},
 	}
 
 	for _, c := range cases {

@@ -14,6 +14,7 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/pkg/opercfg"
 	"gitlab.orac.local/agentic/gonk-project/pkg/rung"
 	"gitlab.orac.local/agentic/gonk-project/pkg/spend"
+	"gitlab.orac.local/agentic/gonk-project/pkg/trace"
 )
 
 // maxBodyBytes bounds every request body. A .gonk.yml is tiny; nothing on
@@ -59,6 +60,11 @@ func NewMux(svc *Service, token, prevToken string, metricsHandler http.Handler) 
 	mux.HandleFunc("PUT "+meterapi.PromptPathPrefix+"{alias}", h.putPrompt)
 	mux.HandleFunc("GET "+meterapi.PromptPathPrefix+"{alias}", h.takePrompt)
 	mux.HandleFunc("GET "+meterapi.PromptPathPrefix+"{alias}/status", h.promptStatus)
+	// Trajectory evidence ingest (gonk-p8j). Bearer-authenticated by the default
+	// rule below -- ONLY the prompt GET is exempt, and this must never join it:
+	// the agent pod can reach this meter, so an unauthenticated trace endpoint
+	// would let the subject of the evidence write the evidence.
+	mux.HandleFunc("POST "+meterapi.TracePath, h.putTrace)
 	// POST /admin/spend/sync IS bearer-authenticated (unlike /healthz,
 	// /readyz, /metrics): it is on the same listener as everything else --
 	// meter has one port, unlike intake's public/private split -- and
@@ -771,6 +777,43 @@ func (h *handler) putPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// putTrace records what a collector observed for one (session, attempt).
+//
+// APPEND SEMANTICS: a report adds to what was already seen rather than
+// replacing it, because a collector reports incrementally as a session runs.
+// The response reports the STORED completeness after folding, which may be
+// worse than what was sent -- completeness only ever degrades.
+func (h *handler) putTrace(w http.ResponseWriter, r *http.Request) {
+	var req meterapi.TraceRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed trace body")
+		return
+	}
+	if req.SessionKey == "" {
+		writeError(w, http.StatusBadRequest, "session_key is required")
+		return
+	}
+	if req.Attempt <= 0 {
+		// Attempt is part of the identity: a trace filed against attempt 0 would
+		// merge evidence from runs that must stay separate.
+		writeError(w, http.StatusBadRequest, "attempt must be a positive attempt number")
+		return
+	}
+	// A REPORT WITH NO COMPLETENESS IS NOT ACCEPTED. Defaulting it would make an
+	// unobserved session indistinguishable from an idle one, which is the exact
+	// confusion this field exists to prevent -- so the collector must state it.
+	if !trace.Completeness(req.Completeness).Valid() {
+		writeError(w, http.StatusBadRequest, "completeness must be one of complete, partial, absent")
+		return
+	}
+	stored, err := h.svc.AppendTrace(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store trace")
+		return
+	}
+	writeJSON(w, http.StatusOK, stored)
 }
 
 // takePrompt is the unauthenticated one. It CONSUMES: a second GET is 410, not
