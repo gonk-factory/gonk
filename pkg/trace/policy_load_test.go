@@ -24,10 +24,17 @@ func TestShippedTriagePolicyRequiresAReadForArtifactlessVerdicts(t *testing.T) {
 	if p.Empty() {
 		t.Fatal("triage declares no trajectory predicates; the gate would be wired to nothing")
 	}
-	for _, v := range []string{"reply-only", "close"} {
-		if !contains(p.RequireTargetReadFor, v) {
-			t.Fatalf("verdict %q is not gated on a read; it produces no artifact and nothing else can catch it", v)
-		}
+	// close must be gated: ending a conversation without opening a file is
+	// indefensible whatever the wording.
+	if !contains(p.RequireAnyReadFor, "close") {
+		t.Fatal("close is not gated on a read; it is terminal and produces no artifact")
+	}
+	// reply-only must NOT be, on evidence: issue !49 showed an agent that
+	// searched badly, found nothing, and honestly asked for help. It claimed
+	// nothing, so there was nothing to confabulate, and rejecting it would
+	// re-sling a bead for being honest.
+	if contains(p.RequireAnyReadFor, "reply-only") {
+		t.Fatal("reply-only is gated on a read; that rejects an honest 'I could not find it'")
 	}
 	// code-change must NOT be here: it produces a diff the verify pipeline can
 	// judge on outcome evidence, which is the stronger instrument.

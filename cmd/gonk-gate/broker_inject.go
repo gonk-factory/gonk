@@ -141,6 +141,11 @@ func renderTriagePrompt(project string, issueIID int64, issueContext, checkout s
 			"first if it exists -- it is the project's own context and it overrides " +
 			"anything you would otherwise assume. You still hold no credentials, so do " +
 			"not try to reach GitLab.\n\n" +
+			"LOOK AT WHAT IS ACTUALLY IN THE TREE BEFORE YOU SEARCH FOR IT. List the " +
+			"directory first; do not guess at file extensions. On issue !49 a run " +
+			"globbed five times for the wrong languages, concluded no relevant code " +
+			"existed, and asked the reporter for help while the answer sat in a file " +
+			"it never listed.\n\n" +
 			"INVESTIGATE THE CODE BEFORE YOU ASK ANYTHING. Search for the behaviour the " +
 			"issue describes and read the code that implements it. Ask the reporter only " +
 			"for what the code CANNOT tell you -- their intent, their environment, exact " +
