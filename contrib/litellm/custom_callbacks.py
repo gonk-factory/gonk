@@ -79,6 +79,7 @@ class ToolCallFinishReasonFixer(CustomLogger):
                     delta = getattr(choice, "delta", None)
                     if delta is not None and getattr(delta, "tool_calls", None):
                         saw_tool_call.add(index)
+                        drop = []
                         for tc in delta.tool_calls or []:
                             fn = getattr(tc, "function", None)
                             if fn is None:
@@ -92,6 +93,30 @@ class ToolCallFinishReasonFixer(CustomLogger):
                                 names[key] = name
                             elif names.get(key):
                                 fn.name = names[key]
+                            elif not getattr(fn, "arguments", None):
+                                # THE SECOND SHAPE, and remembering cannot fix
+                                # it: a delta for a tool index whose OPENING was
+                                # never emitted, so there is no name to restore.
+                                # Measured on this proxy with five tools in the
+                                # request -- indices 0 and 2 arrived with names,
+                                # index 1 arrived with NEITHER a name NOR any
+                                # arguments.
+                                #
+                                # An entry with no name and no arguments carries
+                                # no information at all: it cannot be executed,
+                                # accumulated, or even identified. Its only
+                                # effect is to fail a client that validates each
+                                # delta, which is what aborts the agent's turn.
+                                # Dropping it invents nothing, which is the line
+                                # this repair must not cross.
+                                drop.append(tc)
+                        if drop:
+                            kept = [t for t in delta.tool_calls if t not in drop]
+                            # Never hand back an EMPTY tool_calls list: some
+                            # clients read its presence as "a tool call starts
+                            # here". None is the honest shape for "this delta
+                            # carries no tool call".
+                            delta.tool_calls = kept or None
                     if (
                         index in saw_tool_call
                         and getattr(choice, "finish_reason", None) == "stop"
