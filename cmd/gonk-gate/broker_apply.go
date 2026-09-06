@@ -308,6 +308,8 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 			continue
 		}
 		for _, lbl := range e.Add {
+			// The namespace is the ISSUE STORE'S, not the model's (gonk-prr).
+			lbl = normaliseLabel(lbl, labelPrefix(ctx, d, rec))
 			if aerr := d.Apply.AddIssueLabel(ctx, rec.ProjectID, targetIID(e, rec), lbl); aerr != nil {
 				d.Log.Warn("sweep: label apply failed (comment already posted)",
 					"bead", rec.BeadAnchor, "label", lbl, "err", aerr)

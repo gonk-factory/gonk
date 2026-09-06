@@ -138,3 +138,21 @@ func label(ctx context.Context, d sweepDeps, rec beadstore.Record, name string) 
 		d.Log.Warn("sweep: verdict label apply failed", "bead", rec.BeadAnchor, "label", name, "err", err)
 	}
 }
+
+// labelPrefix is the project's configured label namespace, or the shipped
+// default when the meter cannot tell us.
+//
+// Falling back to the default rather than to "" matters: an empty prefix
+// disables normalisation entirely, so a meter blip would silently let a run's
+// labels escape the namespace -- the exact defect being fixed.
+func labelPrefix(ctx context.Context, d sweepDeps, rec beadstore.Record) string {
+	const shippedDefault = "gonk::"
+	if d.Meter == nil || rec.Project == "" {
+		return shippedDefault
+	}
+	resp, err := d.Meter.Project(ctx, rec.Project)
+	if err != nil || resp == nil || resp.Effective == nil || resp.Effective.Triage.LabelPrefix == "" {
+		return shippedDefault
+	}
+	return resp.Effective.Triage.LabelPrefix
+}
