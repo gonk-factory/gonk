@@ -36,6 +36,15 @@ read_tools = ["read", "Read"]
 # issue arrives inside the prompt -- reading it is not a tool call -- so a
 # target-read rule would never trigger. What is worth catching is narrower: a
 # verdict with no artifact, reached without opening a single file.
-require_any_read_for = ["reply-only", "close"]
+# NARROWED TO close ON EVIDENCE, 2026-09-06 (issue !49). reply-only was a FALSE
+# POSITIVE class: the agent globbed five times, failed to find code that exists,
+# and honestly reported "I was unable to find any relevant code files -- could
+# you tell me more?". It CLAIMED NOTHING, so there was nothing to confabulate,
+# and rejecting it would have re-slung the bead for being honest.
+#
+# close is different in kind. Ending a conversation and closing somebody's issue
+# without having opened a single file is indefensible whatever the wording, so
+# the predicate holds there without needing to read the comment.
+require_any_read_for = ["close"]
 # Kept for when a session DOES have a named file target; inert until then.
 require_target_read_for = ["reply-only", "close"]
