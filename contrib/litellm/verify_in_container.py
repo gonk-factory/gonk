@@ -65,5 +65,33 @@ for w in weird:
         ok = False; print("   raised on", w, e)
 check("unexpected chunk shapes pass through without raising", ok)
 
+
+# gonk-217, second shape: a tool-call delta for an index whose opening was
+# never emitted -- no name, no arguments. Unfixable by remembering, and
+# information-free, so it must be dropped rather than passed through.
+out = run([chunk(O(index=0, function=fn("list", ""))),
+           chunk(O(index=1, function=fn(None, ""))),
+           chunk(O(index=2, function=fn("glob", "")))])
+mid = out[1].choices[0].delta.tool_calls
+check("nameless, argument-less delta is dropped", mid is None)
+check("named calls either side survive",
+      out[0].choices[0].delta.tool_calls[0].function.name == "list"
+      and out[2].choices[0].delta.tool_calls[0].function.name == "glob")
+
+# A nameless delta WITH arguments is a real continuation and must be kept and
+# repaired, never dropped.
+out = run([chunk(O(index=0, function=fn("read", ""))),
+           chunk(O(index=0, function=fn(None, '{"path":')))])
+kept = out[1].choices[0].delta.tool_calls
+check("nameless delta WITH arguments is kept and named",
+      kept is not None and kept[0].function.name == "read")
+
+# Mixed delta: one droppable entry beside a real one must not lose the real one.
+out = run([chunk(O(index=0, function=fn("read", ""))),
+           chunk(O(index=0, function=fn(None, "abc")), O(index=5, function=fn(None, "")))])
+kept = out[1].choices[0].delta.tool_calls
+check("a droppable entry does not take a real one with it",
+      kept is not None and len(kept) == 1 and kept[0].function.name == "read")
+
 print("\nRESULT:", "ALL PASS" if not fails else ("FAILURES: " + ", ".join(fails)))
 sys.exit(1 if fails else 0)
