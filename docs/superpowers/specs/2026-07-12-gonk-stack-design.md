@@ -168,7 +168,7 @@ instance-level system hook (`user_add_to_team`) makes invite detection instant;
 system hooks do not carry issue events, and group webhooks are GitLab Premium,
 so per-project webhooks are the CE-compatible event path.
 
-**Issues are reconciled too, and were not always.** Until 2026-09-07 the sentence
+**Issue-open events are reconciled too, and were not always.** Until 2026-09-07 the sentence
 above was only true of *projects*: memberships, `.gonk.yml`, hook provisioning and
 rig registration were reconciled, and nothing reconciled issues. For issue events
 the webhook was therefore the correctness path -- the exact thing this section
@@ -202,6 +202,14 @@ Three properties make that safe rather than merely helpful:
 `ReconcileSummary.issues_swept` reports it. **In steady state that number is zero**,
 because the webhook got there first; a non-zero value means events are being lost
 and is the signal to look at, not a routine count.
+
+**What is still NOT reconciled**, so that this section does not overstate itself
+a second time: the sweep synthesizes issue-**open** events only. A dropped
+`reopen` is not recovered (a reopened issue already carries a `gonk::` label, so
+the filter skips it), and a dropped **note** event -- somebody asking `@gonk` a
+question -- is not recovered at all, because the sweep never lists notes. For
+those two triggers the webhook remains the correctness path. Tracked as its own
+work; fix this paragraph when the code catches up, not before.
 
 A durable spool -- persisting a delivery before answering `200`, so the webhook
 stops being lossy at all -- is the level-triggered end state and belongs to the
