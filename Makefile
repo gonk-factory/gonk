@@ -273,7 +273,14 @@ lint:
 	  /root/go/bin/golangci-lint run ./...; \
 	else \
 	  echo "golangci-lint not installed; running $(LINT_IMAGE) in a container"; \
-	  $(PODMAN) run --rm --network=host -v "$$PWD":/w -w /w \
+	  : "--network=none, NOT host: the lint is fully offline (vendored deps," ; \
+	  : " GOPROXY=off), and on a WSL box podman's CNI bridge fails with" ; \
+	  : " 'table nat is incompatible, use nft' -- so --network=host made this" ; \
+	  : " fallback ERROR OUT rather than lint. That is how three errcheck" ; \
+	  : " violations reached main and left CI red for eight commits" ; \
+	  : " (gonk-vrf review, 2026-09-07): go vet and go test were clean, and" ; \
+	  : " the one gate that would have caught it could not run here." ; \
+	  $(PODMAN) run --rm --network=none -v "$$PWD":/w -w /w \
 	    -e GOFLAGS=-mod=vendor -e GOPROXY=off $(LINT_IMAGE) golangci-lint run ./...; \
 	fi
 
