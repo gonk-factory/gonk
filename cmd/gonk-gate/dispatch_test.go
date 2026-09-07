@@ -119,6 +119,9 @@ func TestDispatchPoursOnRun(t *testing.T) {
 	// formula. (scaffold used to be the example here and is now on the broker.)
 	args.Trigger = "mention-reply"
 	code := runDispatch(context.Background(), dispatchDeps{
+		// The agent must receive THIS project's key, not the controller's
+		// (gonk-8gb); dispatch fails closed without it.
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store,
 		Args: args,
 	})
@@ -180,6 +183,9 @@ func TestDispatchCreatesTriageSessionOnRun(t *testing.T) {
 	}}
 
 	code := runDispatch(context.Background(), dispatchDeps{
+		// The agent must receive THIS project's key, not the controller's
+		// (gonk-8gb); dispatch fails closed without it.
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store,
 		Args: baseDispatchArgs(),
 	})
@@ -253,12 +259,19 @@ func TestDispatchNeverSendsAReservedFormulaVarName(t *testing.T) {
 	gc := gcapitest.New(t)
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
 		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "some-model", Attempt: 1,
+		// Without a KeyRef there is no per-project key to give the agent, and
+		// dispatch fails closed rather than fall back to the admin key
+		// (gonk-8gb).
+		KeyRef:        meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 		ReservationID: "rsv-1",
 	}}
 
 	args := baseDispatchArgs()
 	args.Trigger = "mention-reply" // guards the still-live formula pour path
 	code := runDispatch(context.Background(), dispatchDeps{
+		// The agent must receive THIS project's key, not the controller's
+		// (gonk-8gb); dispatch fails closed without it.
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
 		Args: args,
 	})
@@ -293,6 +306,9 @@ func TestDispatchParksOnDefer(t *testing.T) {
 	}}
 
 	code := runDispatch(context.Background(), dispatchDeps{
+		// The agent must receive THIS project's key, not the controller's
+		// (gonk-8gb); dispatch fails closed without it.
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store,
 		Args: baseDispatchArgs(),
 	})
@@ -316,6 +332,9 @@ func TestDispatchStopsOnDeny(t *testing.T) {
 		Detail: "2 rungs, 2 gate failures", Attempt: 3,
 	}}
 	code := runDispatch(context.Background(), dispatchDeps{
+		// The agent must receive THIS project's key, not the controller's
+		// (gonk-8gb); dispatch fails closed without it.
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store,
 		Args: baseDispatchArgs(),
 	})
@@ -350,7 +369,10 @@ func TestDispatchAlwaysDecidesEvenWhenVarsCarryARung(t *testing.T) {
 	args.ReservationID = "rsv-1" // stale
 	args.Model = "m1"            // stale
 
-	code := runDispatch(context.Background(), dispatchDeps{Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store, Args: args})
+	code := runDispatch(context.Background(), dispatchDeps{
+		// The agent must receive THIS project's key, not the controller's
+		// (gonk-8gb); dispatch fails closed without it.
+		Keys: readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")), Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store, Args: args})
 	if code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
@@ -411,7 +433,10 @@ func TestDispatchFailsClosedWhenMeterIsDown(t *testing.T) {
 	}))
 	t.Cleanup(down.Close)
 
-	code := runDispatch(context.Background(), dispatchDeps{Meter: meterClient(down.URL), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(), Args: baseDispatchArgs()})
+	code := runDispatch(context.Background(), dispatchDeps{
+		// The agent must receive THIS project's key, not the controller's
+		// (gonk-8gb); dispatch fails closed without it.
+		Keys: readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")), Meter: meterClient(down.URL), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(), Args: baseDispatchArgs()})
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 (infra error)", code)
 	}
@@ -425,6 +450,9 @@ func TestDispatchFailsClosedWhenMeterIsDown(t *testing.T) {
 func TestDispatchRefusesWithoutCity(t *testing.T) {
 	gc := gcapitest.New(t)
 	code := runDispatch(context.Background(), dispatchDeps{
+		// The agent must receive THIS project's key, not the controller's
+		// (gonk-8gb); dispatch fails closed without it.
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(gc.URL()), GC: gc.Client(""), Store: beadstore.NewMemory(), Args: baseDispatchArgs(),
 	})
 	if code != 2 {
@@ -439,6 +467,9 @@ func TestDispatchRefusesUnknownTrigger(t *testing.T) {
 	args := baseDispatchArgs()
 	args.Trigger = "something-new"
 	code := runDispatch(context.Background(), dispatchDeps{
+		// The agent must receive THIS project's key, not the controller's
+		// (gonk-8gb); dispatch fails closed without it.
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(), Args: args,
 	})
 	if code != 2 {
