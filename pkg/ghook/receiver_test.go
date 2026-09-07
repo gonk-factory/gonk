@@ -250,15 +250,56 @@ func TestDuplicateEventDropped(t *testing.T) {
 	}
 }
 
-// Queue full is a drop, not a 5xx: GitLab does not retry webhooks, and a 5xx
-// only gets the hook disabled. Reconciliation is the correctness path (spec 5.2).
-func TestQueueFullDropsWith200(t *testing.T) {
+// A full queue is the ONLY drop reported as a failure, and it must not be a 200.
+//
+// It was a 200 until 2026-09-07, on the reasoning that "a 5xx only gets the hook
+// disabled". Measured against the live instance: a hook with twenty consecutive
+// `internal error` deliveries is still alert_status=executable, so this GitLab
+// does not auto-disable. GitLab still does not RETRY, so the 503 does not
+// recover the event -- the reconciler does that (spec 5.2). What the 503 buys is
+// that GitLab's delivery log and gonk's metrics agree about what happened,
+// instead of the log recording a discarded event as success.
+//
+// Contrast the 200s above: duplicate, bot-authored and unhandled-event all mean
+// "handled, deliberately". This one means "thrown away".
+func TestQueueFullIsReportedAsAFailureNotA200(t *testing.T) {
 	c := &capture{full: true}
 	w := post(t, newHandler(t, c), "Issue Hook", secretA, "application/json", issueOpen)
-	if w.Code != 200 {
-		t.Fatalf("code = %d, want 200", w.Code)
+	if w.Code == 200 {
+		t.Fatal("code = 200: a discarded event must not be recorded in GitLab's delivery log as success")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code = %d, want %d", w.Code, http.StatusServiceUnavailable)
 	}
 	if c.outcomes[0] != OutcomeQueueFull {
 		t.Fatalf("outcome = %q", c.outcomes[0])
+	}
+}
+
+// The other drops stay 200, because they are not drops of work: nothing was
+// thrown away. If this ever fails alongside the test above, someone has changed
+// "we discarded your event" and "we handled it" to the same answer again.
+func TestHandledOutcomesStay200(t *testing.T) {
+	botBody := strings.Replace(issueOpen, `"user":{"id":9`, `"user":{"id":7`, 1)
+
+	for _, tc := range []struct {
+		name  string
+		event string
+		body  string
+		want  Outcome
+	}{
+		{"bot authored", "Issue Hook", botBody, OutcomeBotAuthored},
+		{"unhandled event", "Pipeline Hook", issueOpen, OutcomeUnhandledEvent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &capture{}
+			w := post(t, newHandler(t, c), tc.event, secretA, "application/json", tc.body)
+			if w.Code != 200 {
+				t.Fatalf("code = %d, want 200 for outcome %s", w.Code, tc.want)
+			}
+			if c.outcomes[0] != tc.want {
+				t.Fatalf("outcome = %q, want %q", c.outcomes[0], tc.want)
+			}
+		})
 	}
 }
