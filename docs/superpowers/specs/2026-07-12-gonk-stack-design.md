@@ -342,10 +342,10 @@ What you can expect to find, in order:
 | `fetching prompt by reference (one-shot, by alias)` | the prompt fetch began |
 | `prompt fetched (N bytes)` | it arrived, and how big it was |
 | `using this session's per-project LiteLLM key` | WHICH key source won -- the metered one, or a fallback that announces itself as unmetered |
-| `rendered ... (model=...)` | which model was resolved, and from where |
+| `rendered ... (model=..., source=...)` | which model was resolved, and from which source -- a session running the static per-install default rather than the meter's rung decision is a different situation, and says so |
 | `provider check ok: opencode resolved only gonk/ models` | the agent cannot reach a model outside the meter |
 | `starting opencode run (non-interactive)` | the turn began |
-| `session end: ...` | every terminal path says so, including each refusal and why |
+| `session end: ...` | every non-zero exit says so, including each refusal and why. Enforced: `test/entrypoint` fails the build if any `exit` is not preceded by one |
 
 **Refusals are logged with their reason.** An agent that will not start says so:
 no model, no LiteLLM key, a consumed prompt, a failed provider check. Every one
@@ -357,11 +357,20 @@ names which one it hit.
 prompt bodies do not appear; paths, byte counts, exit codes and
 which-source-was-used do, and they are what make a session debuggable. This is
 enforced in CI rather than by convention: `test/entrypoint` fails the build if a
-log line interpolates anything that could carry a credential, and that check is
-itself verified by a negative control.
+log line interpolates a variable that may carry a credential, in either `${VAR}`
+or bare `$VAR` form and wherever on the line the call appears. That check has its
+own **negative control** (`TestTheRedactionCheckActuallyFails`), because a
+redaction check that cannot be shown to fail is one nobody should trust.
 
-The prompt fetch URL is also never logged, because it embeds `GC_ALIAS`, which is
-a capability (see the prompt-by-reference design note).
+**`GC_ALIAS` is treated as a credential, not an identifier.** It addresses both
+the prompt row and the rig checkout, and unlike the prompt (one-shot, 410 on a
+second read) **the rig grant is TTL-bounded and re-fetchable** — `pkg/rig`'s
+`DefaultGrantTTL` is 30 minutes with no consume-on-read. A full alias in a log
+operators are told to read would therefore be a live capability to the project's
+source tree for half an hour. So neither the alias nor any URL embedding it is
+logged: the session-start line carries a short **prefix** only, enough to
+correlate a pod with a session in the controller log and not enough to replay a
+grant.
 
 ## 9. Security posture
 
