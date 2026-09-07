@@ -1603,6 +1603,20 @@ spec:
               value: "registry.orac.local/agentic/gonk-project/gonk-agent:"
             - name: GC_K8S_NAMESPACE
               value: "gonk"
+            # The namespace the meter's KeySink writes per-project LiteLLM key
+            # Secrets into, which gonk-gate must read to inject the PROJECT key
+            # instead of the controller's own admin key (gonk-8gb).
+            #
+            # This must match the meter's GONK_KEYSINK_NAMESPACE exactly, and it
+            # is not optional: unset, client-go issues the Get with an EMPTY
+            # namespace, which Kubernetes treats as a CLUSTER-SCOPED read. Role
+            # gc-controller grants `secrets: [get]` in this namespace only, so a
+            # cluster-scoped read is denied and every dispatch fails closed with
+            # `cannot get resource "secrets" ... at the cluster scope` -- which
+            # reads like missing RBAC, and is not. Measured 2026-09-07 on issue
+            # 75/64: the Role was already correct; only this line was missing.
+            - name: GONK_KEYSINK_NAMESPACE
+              value: "gonk"
             - name: GC_K8S_SERVICE_ACCOUNT
               value: gc-agent
             - name: GC_K8S_PREBAKED
