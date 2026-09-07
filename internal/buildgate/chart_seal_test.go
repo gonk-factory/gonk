@@ -151,7 +151,11 @@ func hashChartTree(root string) (string, error) {
 				return "", err
 			}
 		}
-		fmt.Fprintf(h, "%s\x00%d\x00", rel, len(content))
+		// Errors are impossible on a hash.Hash and errcheck wants them handled
+		// anyway; Write never returns one either.
+		if _, err := fmt.Fprintf(h, "%s\x00%d\x00", rel, len(content)); err != nil {
+			return "", err
+		}
 		h.Write(content)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
@@ -535,9 +539,15 @@ func TestChartHashNoticesEveryKindOfChange(t *testing.T) {
 		{"template edited", func(r string) { mk(r, "templates/x.yaml", "kind: Y\n") }},
 		{"file added", func(r string) { mk(r, "tests/crd-schemas/z.json", "{}") }},
 		{"file renamed", func(r string) {
-			os.Rename(filepath.Join(r, "templates/x.yaml"), filepath.Join(r, "templates/y.yaml"))
+			if err := os.Rename(filepath.Join(r, "templates/x.yaml"), filepath.Join(r, "templates/y.yaml")); err != nil {
+				panic(err)
+			}
 		}},
-		{"file removed", func(r string) { os.Remove(filepath.Join(r, "values.schema.json")) }},
+		{"file removed", func(r string) {
+			if err := os.Remove(filepath.Join(r, "values.schema.json")); err != nil {
+				panic(err)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
