@@ -61,6 +61,16 @@ visible in the diff.
 So: when tempted to write "done", ask what a reviewer who distrusts you would
 demand as evidence — and go get that instead.
 
+**An API check must assert on a field it expects, never on the response being
+well-formed.** On 2026-09-07 a gitops image-tag bump was "verified" with
+`glab api .../tags/<tag> | python3 -c "json.load(...)"`, treating any parseable
+JSON as success. GitLab answers a missing tag with `{"message":"404 Tag Not
+Found"}` -- which parses perfectly -- so the check confirmed the API had
+replied, reported all four images present when none existed, and took gonk down
+with ImagePullBackOff. Earlier bumps had passed the identical check only because
+those tags happened to exist. Use `hack/require_image_tags.py` before any tag
+bump; it asserts the returned object's `name` equals the tag asked for.
+
 **Verification means observing the thing, not the proxy for it.** A green test
 run is not evidence a feature works in the deployment; a deployed image is not
 evidence the code path executes; a code path executing is not evidence it changed
