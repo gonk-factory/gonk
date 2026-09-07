@@ -107,7 +107,12 @@ type MROptions struct {
 }
 
 type Issue struct {
-	IID         int64    `json:"iid"`
+	IID int64 `json:"iid"`
+	// Author exists for the reconciler's issue sweep. The webhook path gets its
+	// loop guard from the event payload's user (ghook.Handler.BotUserID); a swept
+	// issue has no event, so without this the sweep would happily triage an issue
+	// the bot itself opened -- the same infinite loop, arriving by the other door.
+	Author      User     `json:"author"`
 	Title       string   `json:"title"`
 	State       string   `json:"state"`
 	Labels      []string `json:"labels"`

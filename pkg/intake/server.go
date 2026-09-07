@@ -25,8 +25,13 @@ type ReconcileSummary struct {
 	States      map[string]int `json:"states"`   // state -> count, same vocabulary as gonk_intake_projects
 	MeterPushes int            `json:"meter_pushes"`
 	Dispatched  int            `json:"dispatched"`
-	Errors      []string       `json:"errors,omitempty"` // never a token, never a secret
-	Result      string         `json:"result"`           // ok | partial | error
+	// IssuesSwept is how many open issues the reconciler handed to Dispatch this
+	// pass because nothing had triaged them (spec 5.2). In steady state it is
+	// ZERO -- the webhook got there first. A non-zero value means events were
+	// being lost, and is the signal an operator should be looking for.
+	IssuesSwept int      `json:"issues_swept"`
+	Errors      []string `json:"errors,omitempty"` // never a token, never a secret
+	Result      string   `json:"result"`           // ok | partial | error
 }
 
 // Pass is the seam server.go needs from the reconciler: kick an out-of-band

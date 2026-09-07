@@ -306,6 +306,15 @@ func newService(ctx context.Context, cfg Config, log *slog.Logger) (*service, er
 		GL: gl, Meter: meter, Cache: cache, Obs: metrics, Log: log,
 		Onboarder: &intake.GitLabOnboarder{GL: gl, BotUserID: me.ID, BotUsername: cfg.BotUsername, Version: cfg.Version, InstanceLadder: cfg.InstanceLadder, Obs: metrics},
 		Dispatch:  dp,
+		// The issue sweep (spec 5.2: "Reconciliation is the correctness path;
+		// webhooks are the latency optimization"). Same *Dispatch the webhook
+		// worker below uses, so a swept issue takes the identical path through
+		// the staleness window, Decide and the classification gate.
+		//
+		// Without this the reconciler is wired for projects only, and an issue
+		// event that was ACKed and then lost -- a restart, a full queue -- is
+		// lost permanently, because GitLab does not retry (gonk-vrf).
+		Issues:    dp,
 		BotUserID: me.ID, HookURL: cfg.WebhookPublicURL, HookToken: hookSecret,
 		TokenGen: cfg.WebhookTokenGen, SSLVerify: cfg.HookSSLVerify,
 		// NOTE: no Instance policy and no GroupPolicy. Intake does not hold
