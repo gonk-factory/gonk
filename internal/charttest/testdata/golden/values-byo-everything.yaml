@@ -5,7 +5,7 @@ kind: ServiceAccount
 metadata:
   name: gonk-meter
   labels:
-    helm.sh/chart: gonk-0.1.0
+    helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
     app.kubernetes.io/version: "0.1.0"
@@ -23,7 +23,7 @@ kind: ServiceAccount
 metadata:
   name: gonk
   labels:
-    helm.sh/chart: gonk-0.1.0
+    helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
     app.kubernetes.io/version: "0.1.0"
@@ -36,7 +36,7 @@ kind: ConfigMap
 metadata:
   name: gonk-litellm-model-prices
   labels:
-    helm.sh/chart: gonk-0.1.0
+    helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
     app.kubernetes.io/version: "0.1.0"
@@ -69,7 +69,7 @@ kind: ConfigMap
 metadata:
   name: gonk-operator-config
   labels:
-    helm.sh/chart: gonk-0.1.0
+    helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
     app.kubernetes.io/version: "0.1.0"
@@ -114,7 +114,7 @@ kind: Role
 metadata:
   name: gonk-meter
   labels:
-    helm.sh/chart: gonk-0.1.0
+    helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
     app.kubernetes.io/version: "0.1.0"
@@ -153,7 +153,7 @@ kind: RoleBinding
 metadata:
   name: gonk-meter
   labels:
-    helm.sh/chart: gonk-0.1.0
+    helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
     app.kubernetes.io/version: "0.1.0"
@@ -182,7 +182,7 @@ kind: Service
 metadata:
   name: gonk-intake-internal
   labels:
-    helm.sh/chart: gonk-0.1.0
+    helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
     app.kubernetes.io/version: "0.1.0"
@@ -210,7 +210,7 @@ kind: Service
 metadata:
   name: gonk-intake
   labels:
-    helm.sh/chart: gonk-0.1.0
+    helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
     app.kubernetes.io/version: "0.1.0"
@@ -239,7 +239,7 @@ kind: Service
 metadata:
   name: gonk-meter
   labels:
-    helm.sh/chart: gonk-0.1.0
+    helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
     app.kubernetes.io/version: "0.1.0"
@@ -266,7 +266,7 @@ kind: Deployment
 metadata:
   name: gonk-intake
   labels:
-    helm.sh/chart: gonk-0.1.0
+    helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
     app.kubernetes.io/version: "0.1.0"
@@ -288,7 +288,7 @@ spec:
   template:
     metadata:
       labels:
-        helm.sh/chart: gonk-0.1.0
+        helm.sh/chart: gonk-0.0.0-golden
         app.kubernetes.io/name: gonk
         app.kubernetes.io/instance: gonk
         app.kubernetes.io/version: "0.1.0"
@@ -482,7 +482,7 @@ kind: Deployment
 metadata:
   name: gonk-meter
   labels:
-    helm.sh/chart: gonk-0.1.0
+    helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
     app.kubernetes.io/version: "0.1.0"
@@ -506,7 +506,7 @@ spec:
   template:
     metadata:
       labels:
-        helm.sh/chart: gonk-0.1.0
+        helm.sh/chart: gonk-0.0.0-golden
         app.kubernetes.io/name: gonk
         app.kubernetes.io/instance: gonk
         app.kubernetes.io/version: "0.1.0"
@@ -518,7 +518,7 @@ spec:
         # from disk on each tick, so this is belt-and-braces -- but a config that
         # fails to validate should surface as a failed rollout, not a quiet
         # "kept the previous config" log line.)
-        checksum/operator-config: 3d93f3c00938c9d2665d9841e21fb7db4faebac7684951c3de9fc6a0d424ce48
+        checksum/operator-config: 3eba07b815fe423270ffea57b99008a3b8a6a6d9bad58e005485ead38127f84f
     spec:
       serviceAccountName: gonk-meter
       securityContext:

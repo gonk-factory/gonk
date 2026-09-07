@@ -16,3 +16,6 @@
 
 # Python bytecode from hack/ ops scripts.
 __pycache__/
+
+# Session worktrees are embedded git repos; never commit them.
+.claude/worktrees/
