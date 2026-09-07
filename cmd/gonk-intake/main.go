@@ -111,6 +111,12 @@ type Config struct {
 }
 
 func main() {
+	// The `netpol-probe` subcommand is the chart's helm-test hook. It shares
+	// this binary (and therefore the distroless intake image) rather than
+	// needing a shell image; see netpolprobe.go for why.
+	if len(os.Args) > 1 && os.Args[1] == "netpol-probe" {
+		os.Exit(runNetpolProbe(os.Args[2:]))
+	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	if err := run(log); err != nil {
 		log.Error("fatal", "err", err)

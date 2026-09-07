@@ -71,6 +71,22 @@ intake:
   ports:
     public: 8080
     private: 9090
+  # The reconciler's issue sweep: it re-dispatches open issues that carry no
+  # gonk:: label, so a webhook that was ACKed and then lost (a restart, a full
+  # queue) is recovered instead of gone (spec 5.2).
+  #
+  # THESE ARE SPEND CONTROLS. Every swept issue is a metered model call. Left
+  # empty they use intake's defaults -- 5 issues per project per pass, and only
+  # issues updated in the last 24h. The age bound is what keeps this a safety
+  # net rather than a backfill: unbounded, the first pass on a project with
+  # history triages its entire backlog. Measured on one project: 57 orders and
+  # 22.8% of its monthly token budget, versus 8 with the bound.
+  #
+  # To wind the sweep down without a code change, set issueSweep.maxAge very
+  # small (e.g. 1s): nothing is recent enough to qualify.
+  issueSweep:
+    limit: ""
+    maxAge: ""
   # The URL GitLab will POST to. Intake writes this into every hook it provisions,
   # so it is REQUIRED even when ingress.enabled is false (you may front it with a
   # Gateway or an IngressRoute outside this chart). OD-2.
@@ -538,6 +554,29 @@ networkPolicy:
   # until Cilium lands. Un-skipping it is the gate.
   agentPodSelector:
     app: gc-agent
+  # Does THIS cluster actually enforce the policies above? `helm test gonk` runs
+  # a probe that finds out, from a pod carrying agentPodSelector: it connects to
+  # one destination pod on a port the policy PERMITS and on a port it does not,
+  # plus a pod the policy never names. Enforced means the first works and the
+  # other two do not.
+  #
+  # READ THIS BEFORE SETTING enabled: false. This switch exists for clusters
+  # where the probe genuinely CANNOT run -- no egress at all, a PodSecurity
+  # admission policy that rejects the pod, no way to pull the image. It is NOT
+  # the way to deal with a red result. A red result means your cluster is not
+  # enforcing these policies, and turning the probe off does not change that; it
+  # only stops you knowing. On a cluster with no policy controller, leave this
+  # ON and be red.
+  enforcementProbe:
+    enabled: true
+    # Wait this long for the permitted destination before giving up. Policy
+    # programming for a brand-new pod is not instantaneous on any iptables-based
+    # controller, and a probe that races it reports a false NOT ENFORCED.
+    settleTimeout: 30s
+    # One connection attempt.
+    dialTimeout: 3s
+    # Bounds the pod independently of helm test's own 5m default.
+    deadlineSeconds: 180
   # OD-6 [ANSWERED]: GitLab runs IN-CLUSTER, namespace `gitlab`. Use the
   # namespaceSelector below. Do NOT use gitlab.cidrs for an in-cluster Service:
   # a CIDR there is a POD IP, and pod IPs move on every reschedule -- the policy

@@ -1,0 +1,114 @@
+{{- /*
+Does THIS cluster enforce the gonk-agent egress policy?
+
+The chart declares six NetworkPolicies. The API server accepts them whether or
+not any controller implements them -- which is exactly how gonk ran for months
+with policies that blocked nothing, on a cluster whose CNI is flannel. That is a
+property of the CLUSTER, not of the chart, so the chart ships the instrument
+alongside the claim and the operator does not have to take the README's word.
+
+A HELM TEST HOOK, NOT AN INSTALL HOOK. An install hook that failed would block
+the release, and on a cluster with no policy controller this SHOULD fail -- the
+chart must still install there. `helm test` is explicit to invoke and cannot
+wedge a release.
+
+SAFE UNDER FLUX, verified in source rather than assumed: helm-controller sets
+DefaultDataFilters = []DataFilter{IgnoreHookTestEvents} (internal/release/
+observation.go), commented "To prevent manual test triggers from a user to
+interfere with the checksum", so `helm test` creates no revision and provokes no
+reconcile. Hooks are also absent from rel.Manifest, so driftDetection ignores
+this pod. Do NOT switch this to Flux's spec.test.enable: Flux treats a test
+failure as a RELEASE failure subject to remediation, and this release sets
+remediateLastFailure and cleanupOnFail -- so on a cluster where the probe
+correctly fails, enabling it would roll back or uninstall gonk every reconcile.
+*/ -}}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.enforcementProbe.enabled .Values.intake.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  {{- /* Service names in this chart are literal, not fullname-prefixed
+      (service-gonk-intake-internal.yaml et al), so this matches them. */}}
+  name: gonk-netpol-probe
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: netpol-probe
+    {{- /*
+    The probe must carry EXACTLY the labels the gonk-agent policy selects on,
+    or it is testing nothing.
+
+    AND NOTHING SESSION-SHAPED. Gas City's k8s provider lists
+    app=gc-agent,status.phase=Running and skips only pods that have neither a
+    `gc-session` label nor a `gc-session-name` annotation -- so this pod is in
+    that query while it runs, and is excluded by one `continue` in a pinned
+    upstream dependency. Never add a gc-session label or annotation here.
+    internal/charttest asserts the selector labels are present and that no
+    session marker is.
+    */}}
+    {{- toYaml .Values.networkPolicy.agentPodSelector | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    {{- /*
+    before-hook-creation keeps the LAST run's pod for inspection, which is what
+    you want when the answer is "not enforced" and somebody has to look. The
+    cost is a lingering pod carrying the agent's labels; that is acceptable only
+    because of the invariant above, which is why it is tested.
+    */}}
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  {{- /* helm test's own default is 5m; bound the pod independently of it. */}}
+  activeDeadlineSeconds: {{ .Values.networkPolicy.enforcementProbe.deadlineSeconds }}
+  {{- /* The probe opens sockets. It needs no Kubernetes API access at all, and
+      must not run as gc-agent, which holds pods:[get]. */}}
+  serviceAccountName: default
+  automountServiceAccountToken: false
+  {{- with .Values.image.pullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: {{ include "gonk.image" (dict "ctx" . "image" .Values.intake.image) | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      args:
+        - netpol-probe
+        {{- /*
+        ONE DESTINATION POD, TWO PORTS. gonk-intake listens on 9090 (private)
+        and 8080 (public) in the same container, and the agent policy permits
+        the private port only. Same pod, same node, same route, same DNS zone --
+        the ONLY difference between these two legs is the port the policy names,
+        which is what makes the allow leg a valid control for the deny leg.
+        Legs that differ in namespace, subnet or NAT path prove nothing.
+        */}}
+        - -allow
+        - {{ printf "gonk-intake-internal:%d" (int .Values.intake.ports.private) | quote }}
+        - -deny
+        - {{ printf "gonk-intake:%d" (int .Values.intake.ports.public) | quote }}
+        {{- /*
+        A pod the policy does not name at all, so a CNI that enforces WHICH PODS
+        but ignores WHICH PORTS is distinguishable from one that enforces
+        neither. Without this leg those two look identical.
+        */}}
+        - -deny-l3
+        - {{ printf "gonk-controller:%d" (int .Values.gascity.supervisorPort) | quote }}
+        - -settle-timeout
+        - {{ .Values.networkPolicy.enforcementProbe.settleTimeout | quote }}
+        - -dial-timeout
+        - {{ .Values.networkPolicy.enforcementProbe.dialTimeout | quote }}
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+{{- end }}
