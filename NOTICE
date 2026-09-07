@@ -1,0 +1,35 @@
+gonk
+Copyright 2026 Steven Wagner
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this file except in compliance with the License. You may obtain a copy of the
+License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+--------------------------------------------------------------------------------
+Third-party material and provenance
+--------------------------------------------------------------------------------
+
+Gas City
+    gonk runs as a Gas City pack and its controller embeds Gas City
+    (gastownhall/gascity), which is MIT licensed:
+
+        MIT License
+        Copyright (c) 2025 Steve Yegge
+
+    The contents of pack/ were written CLEAN-ROOM from the MIT-licensed Gas City
+    specifications and loader source -- docs/reference/specs/pack-spec.md,
+    formula-spec-v2.md, docs/tutorials/07-orders.md, internal/config/pack.go,
+    internal/orders/order.go and internal/graphv2/invocation.go, at the revision
+    pinned in images/versions.env. See the header of pack/pack.toml.
+
+    NOTHING in this repository is derived from gastownhall/gascity-packs, which
+    carries no licence. That distinction is deliberate and load-bearing: material
+    from an unlicensed source could not be redistributed here at all.
+
+Vendored Go dependencies
+    vendor/ contains third-party Go modules redistributed under their own
+    licences, which are included alongside each module. As of this writing they
+    are MIT, ISC and Apache-2.0; none is copyleft. See vendor/modules.txt for the
+    module list and each module's own LICENSE file for its terms.
