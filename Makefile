@@ -224,6 +224,30 @@ export GOPROXY ?= off
 # every commit.
 gate: fmt vet test lint
 
+# Seal the chart: append `<version> <sha256 of chart/gonk>` to chart/CHART-SEAL.
+#
+# Run this AFTER bumping `version:` in chart/gonk/Chart.yaml. Under the
+# HelmRelease's reconcileStrategy: ChartVersion, Flux only deploys when that
+# version changes -- a chart edit that keeps the old version sits in git and
+# never reaches the cluster, with CI green (gonk-sjb). The ledger is append-only
+# and this target REFUSES to rewrite an existing entry, because rewriting is the
+# bug: Flux will not repackage a name+version it has already built.
+#
+# Pure Go on purpose -- no helm, no kubeconform. It must run in CI's golang
+# image and on a dev box that has neither.
+.PHONY: chart-seal chart-goldens
+chart-seal:
+	$(GO) test ./internal/buildgate/ -run TestChartSealMatchesTheChart -reseal -count=1
+
+# Regenerate the golden manifests. Separate from chart-seal because it needs
+# helm, and because a combined target that failed here would leave CHART-SEAL
+# already written -- a tree that PASSES the seal gate with stale goldens.
+#
+# A version bump alone does NOT need this: renders are normalized to
+# charttest.GoldenChartVersion, so bumping changes zero golden lines.
+chart-goldens:
+	$(GO) test -tags chart ./internal/charttest/ -run Golden -update -count=1
+
 fmt:
 	@out="$$(gofmt -l . | grep -v '^vendor/' || true)"; \
 	  if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi

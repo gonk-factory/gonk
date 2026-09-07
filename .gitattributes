@@ -1,0 +1,10 @@
+# The chart seal (internal/buildgate/chart_seal_test.go) hashes chart/gonk as it
+# sits in the working tree, and that hash is what decides whether Flux deploys a
+# chart change at all (gonk-sjb). If git ever rewrote line endings on checkout,
+# the hash would differ per platform and the gate would fail for everyone on the
+# other kind of machine -- for a reason that looks nothing like the cause.
+#
+# core.autocrlf and core.eol are unset here today and nothing under chart/ has
+# CRLF, so this is a guard against a future `text=auto`, not a fix. It matters
+# because this repo lives under /mnt/c and one Windows checkout would do it.
+chart/** -text

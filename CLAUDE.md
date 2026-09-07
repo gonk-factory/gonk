@@ -75,7 +75,13 @@ failures here more than once).
 **MANDATORY WORKFLOW:**
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
+2. **Run quality gates** (if code changed) - `make gate` (fmt, vet, test, lint)
+
+   **Run it BEFORE pushing, not after.** gonk commits go direct to main, so a
+   gate that only runs in CI is post-hoc detection, not prevention -- by the
+   time it goes red the commit is already on main. That matters most for the
+   chart seal (gonk-sjb): a chart edit that skips the version bump is one Flux
+   will never deploy, and the only thing that says so is `go test ./...`.
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash

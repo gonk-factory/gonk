@@ -15,21 +15,109 @@ package charttest
 
 import (
 	"bytes"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
 
-// ChartDir is chart/gonk, resolved from this file's own location so the tests do
-// not care what directory `go test` was invoked from.
-func ChartDir() string {
+// GoldenChartVersion is the version every render is normalized to.
+//
+// WHY THE GOLDENS DO NOT SEE THE REAL VERSION (gonk-sjb): _helpers.tpl emits
+// `helm.sh/chart: <name>-<version>` on every object -- 231 occurrences across
+// the eight profiles -- and the controller's `checksum/operator-config`
+// annotation hashes a ConfigMap that itself carries that label. So a plain
+// 0.1.0 -> 0.1.1 bump moved 478 golden lines, none of them a real change.
+//
+// Under reconcileStrategy: ChartVersion every chart edit MUST bump the version,
+// so that churn would land on top of every genuine chart diff forever -- in the
+// one gate whose stated purpose is that a moved volumeMount must not look like
+// a formatting change. Normalizing here makes a version bump a ZERO-line golden
+// diff. The real version is not unchecked: internal/buildgate's chart seal binds
+// it to the chart's content hash, which the goldens never did.
+const GoldenChartVersion = "0.0.0-golden"
+
+// SourceChartDir is the real chart/gonk in the working tree, resolved from this
+// file's own location so the tests do not care where `go test` was invoked.
+// Use it when you mean the chart AS COMMITTED; use ChartDir to render.
+func SourceChartDir() string {
 	_, self, _, _ := runtime.Caller(0)
 	return filepath.Join(filepath.Dir(self), "..", "..", "chart", "gonk")
+}
+
+var (
+	normOnce sync.Once
+	normDir  string
+	normErr  error
+)
+
+// ChartDir is a version-normalized COPY of chart/gonk, built once per test
+// binary. Everything that renders or lints goes through it -- including
+// Profile(), whose ci/ values files are copied alongside -- so no caller has to
+// know normalization happened.
+func ChartDir() string {
+	normOnce.Do(func() { normDir, normErr = normalizeChart(SourceChartDir()) })
+	if normErr != nil {
+		panic("charttest: cannot build the version-normalized chart copy: " + normErr.Error())
+	}
+	return normDir
+}
+
+var chartVersionLine = regexp.MustCompile(`(?m)^version:\s*\S+\s*$`)
+
+// normalizeChart copies the chart to a temp dir with Chart.yaml's version
+// rewritten to GoldenChartVersion. Only that one line changes; everything else
+// is byte-identical, so the goldens still assert the whole chart.
+func normalizeChart(src string) (string, error) {
+	dst, err := os.MkdirTemp("", "gonk-chart-normalized-")
+	if err != nil {
+		return "", err
+	}
+	err = filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if rel == "Chart.yaml" {
+			replaced := chartVersionLine.ReplaceAll(b, []byte("version: "+GoldenChartVersion))
+			if bytes.Equal(replaced, b) {
+				return fmt.Errorf("no top-level `version:` line in Chart.yaml to normalize")
+			}
+			b = replaced
+		}
+		return os.WriteFile(target, b, 0o644)
+	})
+	if err != nil {
+		os.RemoveAll(dst)
+		return "", err
+	}
+	return dst, nil
+}
+
+// cleanupNormalizedChart is called from TestMain.
+func cleanupNormalizedChart() {
+	if normDir != "" {
+		os.RemoveAll(normDir)
+	}
 }
 
 // Minimum is the smallest set of --set flags that satisfies values.schema.json.
