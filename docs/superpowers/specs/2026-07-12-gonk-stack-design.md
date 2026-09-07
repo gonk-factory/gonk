@@ -319,6 +319,50 @@ secret pointers only. The line between product and deployment.
 - OTLP traces stitched webhook -> order -> session attempt -> LiteLLM calls.
 - Audit: append-only gc event bus + per-bead history; Loki labels carry bead_id.
 
+### 8.1 The agent pod lifecycle log
+
+**`kubectl logs <session-pod>` is where you go to see how a gonk agent session
+went.** This is a guarantee, not an accident of implementation.
+
+The agent entrypoint writes every major branch and event of the session
+lifecycle to **pid 1's stdout**, which is the container log. It does so
+deliberately: Gas City launches the agent as
+`tmux new-session -d ... && sleep infinity`, and tmux DETACHES, so a process
+writing only to its own stderr reaches the tmux pane and nothing reaches the pod
+log. For a long time `kubectl logs` on a session pod was empty always, and that
+emptiness read as *nothing happened* rather than *you cannot see what happened*.
+
+What you can expect to find, in order:
+
+| line | tells you |
+|---|---|
+| `session start: alias=... agent=... attempt=...` | which session this pod is, before anything can fail |
+| `expecting: checkout=yes/no prompt=yes/no` | what this session was configured to receive |
+| `fetched session checkout into ...` | the working copy arrived (or a WARNING that it did not) |
+| `fetching prompt by reference (one-shot, by alias)` | the prompt fetch began |
+| `prompt fetched (N bytes)` | it arrived, and how big it was |
+| `using this session's per-project LiteLLM key` | WHICH key source won -- the metered one, or a fallback that announces itself as unmetered |
+| `rendered ... (model=...)` | which model was resolved, and from where |
+| `provider check ok: opencode resolved only gonk/ models` | the agent cannot reach a model outside the meter |
+| `starting opencode run (non-interactive)` | the turn began |
+| `session end: ...` | every terminal path says so, including each refusal and why |
+
+**Refusals are logged with their reason.** An agent that will not start says so:
+no model, no LiteLLM key, a consumed prompt, a failed provider check. Every one
+of those failures looks identical from outside the pod -- *session created,
+transcript empty* -- while having a completely different fix, so the entrypoint
+names which one it hit.
+
+**No unredacted secrets are ever written there.** Key values, bot tokens and
+prompt bodies do not appear; paths, byte counts, exit codes and
+which-source-was-used do, and they are what make a session debuggable. This is
+enforced in CI rather than by convention: `test/entrypoint` fails the build if a
+log line interpolates anything that could carry a credential, and that check is
+itself verified by a negative control.
+
+The prompt fetch URL is also never logged, because it embeds `GC_ALIAS`, which is
+a capability (see the prompt-by-reference design note).
+
 ## 9. Security posture
 
 - Agent pods: NetworkPolicy allows egress only to GitLab and LiteLLM. No direct
