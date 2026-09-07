@@ -32,7 +32,24 @@
 
 set -eu
 
-log() { printf 'gonk-agent-entrypoint: %s\n' "$1" >&2; }
+# ALSO WRITE TO THE POD'S STDOUT, NOT JUST THIS PROCESS'S STDERR (gonk-dot).
+#
+# Gas City launches us as `tmux new-session -d ... && sleep infinity`, and tmux
+# DETACHES -- so stderr here reaches the tmux pane and NOTHING reaches the
+# container log. `kubectl logs` on a session pod is empty, always, and that
+# emptiness reads as "nothing happened" rather than "you cannot see what
+# happened". On 2026-09-07 an agent was refusing to start for a reason this
+# function already printed -- no LiteLLM key -- and finding it took several
+# rounds of racing capture scripts against pods that live under a minute.
+#
+# /proc/1/fd/1 is pid 1's stdout, which IS the container log, regardless of how
+# many times tmux has re-parented us. Best effort: if it is not writable the
+# message still goes to stderr, because a logging line must never be the reason
+# an agent fails to start.
+log() {
+	printf 'gonk-agent-entrypoint: %s\n' "$1" >&2
+	printf 'gonk-agent-entrypoint: %s\n' "$1" >>/proc/1/fd/1 2>/dev/null || true
+}
 
 # ---- Step 1: install the commit-provenance hook -----------------------------
 # GONK_RIG_DIR defaults to the WORKDIR opencode is launched in (the rig
