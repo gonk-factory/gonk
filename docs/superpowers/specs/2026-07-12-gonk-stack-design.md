@@ -168,6 +168,45 @@ instance-level system hook (`user_add_to_team`) makes invite detection instant;
 system hooks do not carry issue events, and group webhooks are GitLab Premium,
 so per-project webhooks are the CE-compatible event path.
 
+**Issues are reconciled too, and were not always.** Until 2026-09-07 the sentence
+above was only true of *projects*: memberships, `.gonk.yml`, hook provisioning and
+rig registration were reconciled, and nothing reconciled issues. For issue events
+the webhook was therefore the correctness path -- the exact thing this section
+says it must not be -- and the failure was not theoretical. On 2026-09-07 issues
+65 and 67 on project 75 were delivered, answered `200`, accepted into intake's
+in-memory event channel, and lost when the pod restarted seconds later. GitLab
+does not retry a delivery it was told succeeded, so they were gone permanently;
+they sat untouched until a person noticed and filed replacements (gonk-vrf).
+
+Each pass now also lists a project's **open** issues and hands any carrying no
+`gonk::` label to the same dispatcher the webhook worker uses, as a synthesized
+issue event -- the same entry point on purpose, so the staleness window, the
+`Decide` rules and the classification gate cannot drift between the two paths.
+Three properties make that safe rather than merely helpful:
+
+- **The loop guard survives.** The webhook path refuses bot-authored events from
+  the payload's user; a swept issue has no payload, so the sweep applies the same
+  rule from the issue's author. Without it the infinite loop returns by the other
+  door.
+- **It is capped** (`DefaultIssueSweepLimit`, 5 per project per pass). Onboarding a
+  project with a large backlog would otherwise fire one metered triage per open
+  issue in a single pass. The budget ceiling would refuse them eventually, but
+  only after the money was spent, and a backlog is not urgent.
+- **Re-firing is harmless, and the label filter is not why.** The `gonk::` prefix is
+  per-project configurable and an issue dispatched seconds ago carries no label
+  yet, so the filter is an optimisation. The guarantee is the deterministic bead
+  anchor: meter keys `/decide` idempotency, ladder state and the reservation on it,
+  so a second order for the same issue rejoins the first reservation instead of
+  spending twice.
+
+`ReconcileSummary.issues_swept` reports it. **In steady state that number is zero**,
+because the webhook got there first; a non-zero value means events are being lost
+and is the signal to look at, not a routine count.
+
+A durable spool -- persisting a delivery before answering `200`, so the webhook
+stops being lossy at all -- is the level-triggered end state and belongs to the
+source-beads work, not here.
+
 ### 5.3 Onboarding MR (Renovate-style, deterministic, zero tokens)
 
 On detecting bot membership without `.gonk.yml`: push branch `gonk/onboard`, open
