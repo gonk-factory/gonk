@@ -29,3 +29,13 @@ pejorative has precedent (see: git).
   onboarding merge request, dispatch to Gas City (see `docs/adr/ADR-003-*.md`)
 - `cmd/` — later services (gonk-meter; later plans)
 - `pack/`, `images/`, `chart/`, `test/` — later plans
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+gonk runs as a [Gas City](https://github.com/gastownhall/gascity) pack and its
+controller embeds Gas City, which is MIT licensed. The contents of `pack/` were
+written clean-room from the MIT-licensed Gas City specifications and loader
+source; nothing here derives from `gastownhall/gascity-packs`, which carries no
+licence. See [NOTICE](NOTICE) for the detail.
