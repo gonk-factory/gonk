@@ -22,6 +22,36 @@ bd close <id>         # Complete work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 
+## Implementing a Plan
+
+**Write the plan down first, then have a DIFFERENT agent implement each part, then
+check the result against the plan.** Not the session that wrote it.
+
+The failure this exists to stop is real and repeated: a plan gets written, most of
+it gets built, and the session reports it done because the session is the same one
+that decided what "done" meant. It marks its own homework, and it does so holding
+every assumption that produced the gaps. Nothing catches the missing third.
+
+1. **Write the plan to a markdown file in the repo** before implementing. This is
+   the precondition for everything below -- a plan that exists only in a session's
+   context cannot be checked against, because there is nothing to check.
+2. **Dispatch a subagent per distinct part.** Independent parts can run in
+   parallel; give each one the plan file and the specific slice it owns.
+3. **Verify against the WHOLE plan, with a fresh agent.** Not "did the tests
+   pass" -- tests only assert what someone thought to assert. Ask: for each
+   numbered item in the plan, what is the evidence it was built, and where does
+   that evidence live? An item with no evidence is not done, whatever the diff
+   shows.
+4. **Report gaps as gaps.** Partial implementation is a normal outcome and must
+   be stated plainly, per-item, not averaged into "mostly done".
+
+**Verification means observing the thing, not the proxy for it.** A green test
+run is not evidence a feature works in the deployment; a deployed image is not
+evidence the code path executes; a code path executing is not evidence it changed
+the outcome. Prefer the measurement closest to the claim -- and never truncate
+the output you are verifying from (`head -N` on a test run has hidden real
+failures here more than once).
+
 ## Session Completion
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
