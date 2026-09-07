@@ -114,6 +114,9 @@ func main() {
 			Meter: cfg.meter(), GC: cfg.gc(), Store: cfg.store(), Forge: cfg.gl(), Log: log,
 			// The canned status comment's write side (gonk-yrs).
 			Apply: cfg.gl(), GL: cfg.gl(), BotUsername: cfg.BotUsername,
+			// Follows the meter's KeyRef to the project's virtual key, so the
+			// agent stops receiving the proxy admin key (gonk-8gb).
+			Keys: newSecretReader(os.Getenv("GONK_KEYSINK_NAMESPACE")),
 			// The per-session CHECKOUT (pkg/rig, gonk-msz). Both halves come from
 			// GONK_RIG_BASE_URL: gonk-gate POSTs the grant here, and the agent pod
 			// GETs from the same base with its own GC_ALIAS appended. Unset simply

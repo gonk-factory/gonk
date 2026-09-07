@@ -1083,6 +1083,28 @@ rules:
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [get, list, watch, create, update, patch, delete]
+  # GET ONLY, and only so the agent stops receiving the proxy ADMIN key
+  # (gonk-8gb). The meter keysinks each project's LiteLLM virtual key into a
+  # Secret here and dispatch already carried a POINTER to it; nothing followed
+  # the pointer, so `litellm_key` forwarded the controller's own mounted key --
+  # which is the LiteLLM MASTER key. Every session therefore authenticated as
+  # the proxy administrator, on a key with no alias and no budget, which is why
+  # the per-project ceiling was never consulted.
+  #
+  # THIS IS A NET REDUCTION IN PRIVILEGE, not an increase. The controller
+  # already holds the master key, which can create, read and delete every
+  # virtual key on that proxy; letting it read one project key is strictly less
+  # than that, and it is what allows the admin key to stop leaving this pod.
+  #
+  # get, never list: the controller resolves ONE secret whose name the meter
+  # supplied, and a list verb would let a compromised controller enumerate every
+  # project's credential rather than the one it was told about. resourceNames
+  # cannot be used -- the names derive from project paths that do not exist at
+  # install time (keysink.Slug) -- which is the same constraint the meter's own
+  # Role documents, and the same reason this namespace should hold nothing else.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
 ---
 # Source: gonk/templates/role-gonk-meter.yaml
 apiVersion: rbac.authorization.k8s.io/v1

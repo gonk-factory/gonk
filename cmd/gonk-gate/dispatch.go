@@ -75,6 +75,11 @@ type dispatchDeps struct {
 	// Only the broker path uses it. Satisfied by *glab.Client.
 	Forge brokerForgeReader
 
+	// Keys follows the meter's KeyRef to the project's own LiteLLM virtual key
+	// (gonk-8gb). Nil means no cluster access, and resolveLiteLLMKey then fails
+	// closed rather than substituting the controller's admin key.
+	Keys *secretReader
+
 	// Apply/GL/BotUsername exist ONLY for the canned status comment (gonk-yrs).
 	// When a bead is parked -- unmetered, over budget, quiet hours -- the
 	// reporter otherwise sees nothing at all, which is indistinguishable from
@@ -255,6 +260,16 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 		d.Log.Error("could not marshal meter metadata", "err", err, "bead", a.BeadAnchor)
 		return 1
 	}
+	// THE AGENT GETS THE PROJECT'S KEY, NOT THE CONTROLLER'S (gonk-8gb). Resolved
+	// BEFORE the vars map is built so a failure stops the dispatch instead of
+	// pouring a session that would authenticate as the proxy admin.
+	litellmKey, kerr := resolveLiteLLMKey(ctx, d.Keys, dec.KeyRef.SecretName, dec.KeyRef.SecretKey)
+	if kerr != nil {
+		d.Log.Error("refusing to dispatch: no per-project LiteLLM key",
+			"bead", a.BeadAnchor, "project", a.Project, "err", kerr)
+		return 1
+	}
+
 	vars := map[string]string{
 		"project":     a.Project,
 		"project_id":  fmt.Sprint(a.ProjectID),
@@ -286,6 +301,7 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 		// credential in the event bus and in every log line that echoes it.
 		"key_secret_name": dec.KeyRef.SecretName,
 		"key_secret_key":  dec.KeyRef.SecretKey,
+		// (litellm_key below now FOLLOWS this pointer -- see resolveLiteLLMKey.)
 
 		// v1-minimal session-config delivery (gonk-aql). Gas City's k8s session
 		// provider mounts no gonk secrets and controller env does not flow to
@@ -301,7 +317,7 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 		// credential in an order var" rule above -- a v1-only compromise the v2
 		// broker removes (it keeps all creds out of the pod).
 		"litellm_url": os.Getenv("GONK_LITELLM_URL"),
-		"litellm_key": readFileEnvValue("GONK_LITELLM_KEY_FILE"),
+		"litellm_key": litellmKey,
 		"bot_token":   readFileEnvValue("GONK_BOT_FILE"),
 	}
 
