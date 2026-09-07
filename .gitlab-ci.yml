@@ -31,6 +31,36 @@ include:
 
 stages: [lint, test, chart, images]
 
+# -----------------------------------------------------------------------------
+# A superseded pipeline cancels itself (gonk-7n2).
+#
+# MEASURED 2026-09-07: four commits in quick succession produced four pipelines
+# and roughly 56 jobs. Image jobs serialise on `resource_group:
+# gonk-images-$BUILD_ARCH` ACROSS pipelines, so the fourth -- the only one
+# anybody wanted to deploy -- was still queued an hour later behind three
+# pipelines building images for commits that had already been superseded.
+# Getting it required cancelling those three BY HAND, which is a workaround, and
+# an easy one to get backwards: cancel the pipeline whose images you actually
+# need and you wait another hour.
+#
+# `conservative` cancels a superseded pipeline WHOLE, but only if no job with
+# `interruptible: false` has started. `default: interruptible: true` below means
+# no such job exists, so a superseded pipeline is always cancelled outright and
+# reaches a TERMINAL state -- and reaching a terminal state is what releases the
+# resource_group. That release is measured, not assumed: cancelling those three
+# pipelines by hand on 2026-09-07 freed the group immediately and the wanted
+# build started within the minute.
+#
+# `on_job_failure: all`: if one kaniko build fails, the tag set for that commit
+# is incomplete and nothing can deploy it, so the other nine builds are an hour
+# of johnny and bailey spent on images no one can use. Stop the pipeline
+# instead. Jobs with `allow_failure: true` -- the manual escape hatch in
+# gonk_image_rules -- do not trigger this.
+workflow:
+  auto_cancel:
+    on_new_commit: conservative
+    on_job_failure: all
+
 variables:
   # Vendored + offline: the standing local gate is exactly
   #   GOFLAGS=-mod=vendor GOPROXY=off go test ./... -race
@@ -38,6 +68,21 @@ variables:
   # guarantees no job silently reaches out to a proxy the runner cannot see.
   GOFLAGS: "-mod=vendor"
   GOPROXY: "off"
+
+default:
+  # Every job in this pipeline is safe to cancel mid-flight, which is the
+  # precondition for the auto-cancel above. Nothing here mutates state outside
+  # the registry, and the kaniko jobs push their --destination tag as the LAST
+  # step: a cancelled build leaves NO $GONK_TAG-<arch> tag rather than a partial
+  # one. The layers it may already have written to --cache-repo are
+  # content-addressed and idempotent, so a half-warmed cache is just a cache.
+  #
+  # This is a `default:` rather than a keyword repeated on each job so that a NEW
+  # job is interruptible without anyone having to remember. Under
+  # `conservative`, one job that forgot would re-protect every superseded
+  # pipeline it appeared in -- restoring exactly the hour-long queue this
+  # removes, silently. internal/buildgate asserts that no job opts back out.
+  interruptible: true
 
 # -----------------------------------------------------------------------------
 # The Go gate (plan 01). Unchanged in intent; now explicitly offline/vendored.
