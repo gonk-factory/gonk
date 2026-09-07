@@ -19,3 +19,6 @@ __pycache__/
 
 # Session worktrees are embedded git repos; never commit them.
 .claude/worktrees/
+
+# Scratch watcher output from interactive sessions.
+*.log

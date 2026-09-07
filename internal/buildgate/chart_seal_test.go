@@ -1,12 +1,14 @@
 package buildgate
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -21,7 +23,18 @@ import (
 var reseal = flag.Bool("reseal", false, "append the current chart version and content hash to chart/CHART-SEAL")
 
 const (
-	sealFile     = "chart/CHART-SEAL"
+	// OUTSIDE chart/gonk on purpose. There is no .helmignore anywhere in this
+	// repo, so anything inside the chart directory IS packaged by `helm package`
+	// -- a seal living there would ship to every user and would have to exclude
+	// itself from its own hash, and an exclusion rule is one more thing that can
+	// be wrong. Verified: `helm package chart/gonk` contains neither this file
+	// nor chart/values-e2e.yaml.
+	sealFile = "chart/CHART-SEAL"
+
+	// Only chart/gonk is sealed. chart/values-e2e.yaml sits one level up and is
+	// DELIBERATELY unsealed: it is an e2e fixture, never packaged and never
+	// deployed, so forcing a chart release to edit it would be friction with no
+	// safety benefit -- and friction is what gets routed around.
 	sealChartDir = "chart/gonk"
 )
 
@@ -225,6 +238,63 @@ func sealProblems(entries []sealEntry, chartVer, computedHash string) []string {
 }
 
 // ---------------------------------------------------------------------------
+// Append-only, enforced rather than asserted
+// ---------------------------------------------------------------------------
+
+// committedSeal returns the ledger as of HEAD. ok is false when there is no
+// committed version to compare against -- no git, not a repository, or the file
+// is genuinely new -- which are the only cases where an unconstrained ledger is
+// legitimate.
+func committedSeal(root string) (entries []sealEntry, ok bool, err error) {
+	cmd := exec.Command("git", "-C", root, "show", "HEAD:"+sealFile)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if runErr := cmd.Run(); runErr != nil {
+		// `exists on disk, but not in HEAD` / `unknown revision` / no git at all.
+		return nil, false, nil
+	}
+	entries, err = parseSeal(stdout.Bytes())
+	if err != nil {
+		return nil, false, fmt.Errorf("%s at HEAD does not parse: %w", sealFile, err)
+	}
+	return entries, true, nil
+}
+
+// prefixProblems is what makes the ledger actually append-only.
+//
+// WITHOUT THIS the whole thing is bypassable with sanctioned commands: delete
+// chart/CHART-SEAL, run `make chart-seal`, and you get a fresh ONE-LINE ledger
+// at the current version whose monotonicity and no-duplicate checks are then
+// vacuously true -- so a chart edit with no version bump passes a green gate and
+// Flux never deploys it. Hand-editing the last hash does the same thing without
+// the delete. Both were reproduced against this repo on 2026-09-07.
+//
+// Comments and blank lines are deliberately NOT compared: the entries are, so
+// fixing a typo in the header is fine and rewriting history is not.
+func prefixProblems(committed, working []sealEntry) []string {
+	if len(working) < len(committed) {
+		return []string{fmt.Sprintf(
+			"%s has %d entries but HEAD has %d. The ledger is APPEND-ONLY -- releases are never "+
+				"removed. Deleting entries makes the monotonicity and duplicate checks vacuous, which "+
+				"is exactly how a chart change reaches main and never gets deployed.",
+			sealFile, len(working), len(committed))}
+	}
+	for i, c := range committed {
+		w := working[i]
+		if w.Version == c.Version && w.SHA256 == c.SHA256 {
+			continue
+		}
+		return []string{fmt.Sprintf(
+			"%s entry %d was CHANGED, not appended to.\n  HEAD:    %s %s\n  working: %s %s\n"+
+				"A released version is a fact about what Flux has already packaged; rewriting it here "+
+				"does not change that, it only hides that the current chart will never be deployed. "+
+				"Restore the entry and %s",
+			sealFile, i+1, c.Version, c.SHA256, w.Version, w.SHA256, resealHint)}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // The gate
 // ---------------------------------------------------------------------------
 
@@ -263,6 +333,21 @@ func TestChartSealMatchesTheChart(t *testing.T) {
 		t.Fatalf("parse %s: %v", sealFile, err)
 	}
 	for _, p := range sealProblems(entries, version, computed) {
+		t.Error(p)
+	}
+
+	// And that the ledger was appended to rather than rewritten. Without this
+	// every check above can be made vacuous by deleting the file and resealing.
+	committed, ok, err := committedSeal(root)
+	if err != nil {
+		t.Fatalf("read %s at HEAD: %v", sealFile, err)
+	}
+	if !ok {
+		t.Logf("no committed %s to compare against (new file, or no git here); "+
+			"the append-only check is skipped for this run", sealFile)
+		return
+	}
+	for _, p := range prefixProblems(committed, entries) {
 		t.Error(p)
 	}
 }
@@ -508,4 +593,66 @@ func execCopyTree(src, dst string) (string, error) {
 		}
 		return os.WriteFile(target, b, 0o644)
 	})
+}
+
+// The append-only property is the load-bearing one: without it every other
+// assertion here can be made vacuous by deleting the ledger and resealing.
+// Both of these were REPRODUCED against this repo on 2026-09-07 before the
+// prefix check existed, so they are regression tests, not hypotheticals.
+func TestTheAppendOnlyCheckActuallyFails(t *testing.T) {
+	const (
+		hashA = "1111111111111111111111111111111111111111111111111111111111111111"
+		hashB = "2222222222222222222222222222222222222222222222222222222222222222"
+		hashC = "3333333333333333333333333333333333333333333333333333333333333333"
+	)
+	committed := []sealEntry{{"0.1.0", hashA, 4}, {"0.1.1", hashB, 5}}
+
+	cases := []struct {
+		name     string
+		working  []sealEntry
+		wantSaid string
+	}{
+		{
+			// `rm chart/CHART-SEAL && make chart-seal`
+			name:     "ledger deleted and regenerated from scratch",
+			working:  []sealEntry{{"0.1.1", hashC, 4}},
+			wantSaid: "APPEND-ONLY",
+		},
+		{
+			// sed the last line's hash to match an edited chart
+			name:     "last hash rewritten in place",
+			working:  []sealEntry{{"0.1.0", hashA, 4}, {"0.1.1", hashC, 5}},
+			wantSaid: "was CHANGED, not appended to",
+		},
+		{
+			name:     "history reordered",
+			working:  []sealEntry{{"0.1.1", hashB, 4}, {"0.1.0", hashA, 5}},
+			wantSaid: "was CHANGED, not appended to",
+		},
+		{
+			name:     "an older release quietly dropped",
+			working:  []sealEntry{{"0.1.1", hashB, 4}},
+			wantSaid: "APPEND-ONLY",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			problems := prefixProblems(committed, tc.working)
+			if len(problems) == 0 {
+				t.Fatalf("prefixProblems accepted %q -- the ledger's other checks become vacuous", tc.name)
+			}
+			if !strings.Contains(strings.Join(problems, "\n"), tc.wantSaid) {
+				t.Errorf("failure did not explain itself; wanted %q in:\n%s", tc.wantSaid, strings.Join(problems, "\n"))
+			}
+		})
+	}
+
+	// A genuine append, and an unchanged ledger, must both pass -- or the check
+	// would simply reject everything and prove nothing.
+	if p := prefixProblems(committed, append(append([]sealEntry{}, committed...), sealEntry{"0.1.2", hashC, 6})); len(p) != 0 {
+		t.Errorf("prefixProblems rejected a legitimate append: %v", p)
+	}
+	if p := prefixProblems(committed, committed); len(p) != 0 {
+		t.Errorf("prefixProblems rejected an unchanged ledger: %v", p)
+	}
 }
