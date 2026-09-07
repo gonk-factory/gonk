@@ -51,6 +51,13 @@ log() {
 	printf 'gonk-agent-entrypoint: %s\n' "$1" >>/proc/1/fd/1 2>/dev/null || true
 }
 
+# ---- Step 0: say who we are, before anything can fail -----------------------
+# THE FIRST LINE IN THE CONTAINER LOG (gonk-dot). Everything below can refuse to
+# start, and a refusal is only actionable if the reader knows WHICH session
+# refused. Identity only -- no credential, no prompt text.
+log "session start: alias=${GC_ALIAS:-<unset>} agent=${GC_AGENT:-triage} attempt=${GC_WEBHOOK_ARG_ATTEMPT:-?}"
+log "expecting: checkout=$([ -n "${GONK_RIG_BASE_URL:-}" ] && echo yes || echo no) prompt=$([ -n "${GONK_PROMPT_URL:-}" ] && echo yes || echo no)"
+
 # ---- Step 1: install the commit-provenance hook -----------------------------
 # GONK_RIG_DIR defaults to the WORKDIR opencode is launched in (the rig
 # clone). A missing .git (no clone yet, or a non-git rig) is not fatal here --
@@ -184,6 +191,8 @@ done
 # captured and read by sweep, so the URL is never echoed -- printing it would
 # publish the capability into the transcript.
 if [ -z "${GONK_PROMPT}" ] && [ -n "${GONK_PROMPT_URL:-}" ] && [ -n "${GC_ALIAS:-}" ]; then
+	# The URL is NOT logged: it embeds GC_ALIAS, which is a capability.
+	log "fetching prompt by reference (one-shot, by alias)"
 	_purl="${GONK_PROMPT_URL%/}/v1/prompt/${GC_ALIAS}"
 	_pfile="${GONK_RUNTIME_DIR:-/tmp/gonk}/prompt.json"
 	mkdir -p "$(dirname "${_pfile}")"
@@ -232,6 +241,7 @@ if [ -z "${GONK_PROMPT}" ] && [ -n "${GONK_PROMPT_URL:-}" ] && [ -n "${GC_ALIAS:
 			# else took it. Exit distinctly so the logs say which, rather than
 			# looking like a delivery bug.
 			log "FATAL: prompt already consumed (410) -- respawn past the fetch, or theft"
+			log "session end: refused (prompt already consumed)"
 			exit 3
 			;;
 		*)
@@ -274,6 +284,7 @@ marker_value() {
 if [ -z "${GC_WEBHOOK_ARG_MODEL}" ]; then
 	log "no model: no <!-- gonk:model:... --> prompt marker, no GC_WEBHOOK_ARG_MODEL, no GONK_MODEL."
 	log "this is gonk-meter's rung decision and there is no built-in default -- refusing to start."
+	log "session end: refused (no model)"
 	exit 1
 fi
 
@@ -330,6 +341,7 @@ if [ -z "${GONK_LITELLM_KEY_FILE:-}" ]; then
 	fi
 	if [ -z "${_key}" ]; then
 		log "no LiteLLM key: set GONK_LITELLM_KEY_FILE, GONK_LITELLM_KEY, or GC_WEBHOOK_ARG_LITELLM_KEY -- refusing to start unauthenticated"
+		log "session end: refused (no LiteLLM key)"
 		exit 1
 	fi
 	GONK_LITELLM_KEY_FILE="${GONK_RUNTIME_DIR:-/tmp/gonk}/llkey"
@@ -341,6 +353,7 @@ fi
 
 if [ ! -f "${GONK_LITELLM_KEY_FILE}" ]; then
 	log "GONK_LITELLM_KEY_FILE=${GONK_LITELLM_KEY_FILE} does not exist -- refusing to start unattributed/unauthenticated"
+	log "session end: refused (key file missing)"
 	exit 1
 fi
 
@@ -437,10 +450,12 @@ export OPENCODE_DISABLE_MODELS_FETCH=1
 _models=$(opencode models 2>/dev/null); _rc=$?
 if [ "${_rc}" -ne 0 ]; then
 	log "opencode models exited ${_rc} -- cannot confirm the provider is gonk; refusing to start unmetered"
+	log "session end: refused (provider check failed)"
 	exit 1
 fi
 if [ -z "${_models}" ]; then
 	log "opencode models returned nothing -- cannot confirm the provider is gonk; refusing to start unmetered"
+	log "session end: refused (provider check empty)"
 	exit 1
 fi
 _foreign=$(printf '%s\n' "${_models}" | sed '/^[[:space:]]*$/d' | grep -v '^gonk/' || true)
@@ -544,7 +559,7 @@ if [ -n "${GONK_PROMPT}" ]; then
 	log "starting opencode run (non-interactive)"
 	opencode run -- "${_clean}"
 	_rc=$?
-	log "opencode run exited rc=${_rc}; holding so tmux stays alive for the transcript read (gonk-2tb)"
+	log "session end: opencode run exited rc=${_rc}; holding so tmux stays alive for the transcript read (gonk-2tb)"
 	# `wait` would return immediately (no background jobs); sleep in a loop is
 	# the portable hold. The sweep closes the session when it has judged.
 	while :; do sleep 3600; done
