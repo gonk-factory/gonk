@@ -125,6 +125,14 @@ spec:
             {{- end }}
             - name: GONK_LISTEN_ADDR
               value: ":{{ .Values.intake.ports.public }}"
+            {{- with .Values.intake.issueSweep.limit }}
+            - name: GONK_ISSUE_SWEEP_LIMIT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.intake.issueSweep.maxAge }}
+            - name: GONK_ISSUE_SWEEP_MAX_AGE
+              value: {{ . | quote }}
+            {{- end }}
             - name: GONK_PRIVATE_ADDR
               value: ":{{ .Values.intake.ports.private }}"
             - name: GONK_VERSION

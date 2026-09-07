@@ -2076,3 +2076,60 @@ spec:
 # Secret via ExternalSecret. The chart does NOT copy CNPG's secret, because copying
 # a credential from one Secret into another is exactly the kind of thing that ends
 # up in a git repo.
+---
+# Source: gonk/templates/test-netpol-probe.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gonk-netpol-probe
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: netpol-probe
+    app: gc-agent
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  activeDeadlineSeconds: 180
+  serviceAccountName: default
+  automountServiceAccountToken: false
+  imagePullSecrets:
+    - name: gitlab-registry-pull-creds
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: "registry.orac.local/agentic/gonk-project/gonk-intake:v0.1.0"
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      args:
+        - netpol-probe
+        - -allow
+        - "gonk-intake-internal:9090"
+        - -deny
+        - "gonk-intake:8080"
+        - -deny-l3
+        - "gonk-controller:9443"
+        - -settle-timeout
+        - "30s"
+        - -dial-timeout
+        - "3s"
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
