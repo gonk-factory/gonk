@@ -41,6 +41,7 @@ func TestBrokerRoundTripDispatchToAppliedComment(t *testing.T) {
 
 	// ---- 1. DISPATCH: decide, create the session, deliver the prompt --------
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
 	}}
 	forge := stubForge{iss: &glab.Issue{
@@ -51,6 +52,9 @@ func TestBrokerRoundTripDispatchToAppliedComment(t *testing.T) {
 	args := baseDispatchArgs()
 	args.ProjectID = p.ID
 	if code := runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row, and dispatch fails
+		// closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store,
 		Forge: forge, Args: args, SubmitAttempts: 3, SubmitBackoff: zeroBackoff,
 	}); code != 0 {

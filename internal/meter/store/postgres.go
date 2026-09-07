@@ -175,11 +175,16 @@ CREATE TABLE IF NOT EXISTS prompts (
 	prompt     TEXT NOT NULL,
 	model      TEXT NOT NULL,
 	metadata   TEXT NOT NULL,
+	-- The project virtual key for this session (gonk-8gb). ADDED, not baked into
+	-- the original table, so an existing deployment migrates without a dump:
+	-- CREATE TABLE IF NOT EXISTS never alters, hence the ALTER below.
+	litellm_key TEXT NOT NULL DEFAULT '',
 	created_at TIMESTAMPTZ NOT NULL,
 	fetched_at TIMESTAMPTZ,
 	expires_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS prompts_expires_at_idx ON prompts (expires_at);
+ALTER TABLE prompts ADD COLUMN IF NOT EXISTS litellm_key TEXT NOT NULL DEFAULT '';
 
 -- Trajectory evidence, one row per (session, attempt) -- gonk-p8j.
 -- ATTEMPT IS PART OF THE KEY: a re-slung attempt is a different run of the same
@@ -743,13 +748,14 @@ func (p *Postgres) SetWindow(ctx context.Context, w spend.Window) error {
 
 func (p *Postgres) PutPrompt(ctx context.Context, pr Prompt) error {
 	_, err := p.pool.Exec(ctx, `
-		INSERT INTO prompts (alias, prompt, model, metadata, created_at, fetched_at, expires_at)
-		VALUES ($1,$2,$3,$4,$5,NULL,$6)
+		INSERT INTO prompts (alias, prompt, model, metadata, litellm_key, created_at, fetched_at, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,NULL,$7)
 		ON CONFLICT (alias) DO UPDATE SET
 			prompt = EXCLUDED.prompt, model = EXCLUDED.model,
+			litellm_key = EXCLUDED.litellm_key,
 			metadata = EXCLUDED.metadata, created_at = EXCLUDED.created_at,
 			expires_at = EXCLUDED.expires_at`,
-		pr.Alias, pr.Prompt, pr.Model, pr.Metadata, pr.CreatedAt, nullTime(pr.ExpiresAt))
+		pr.Alias, pr.Prompt, pr.Model, pr.Metadata, pr.LiteLLMKey, pr.CreatedAt, nullTime(pr.ExpiresAt))
 	if err != nil {
 		return fmt.Errorf("store: put prompt: %w", err)
 	}
@@ -768,8 +774,8 @@ func (p *Postgres) TakePrompt(ctx context.Context, alias string, now time.Time) 
 		UPDATE prompts SET fetched_at = $2
 		WHERE alias = $1 AND fetched_at IS NULL
 		  AND (expires_at IS NULL OR expires_at > $2)
-		RETURNING alias, prompt, model, metadata, created_at, fetched_at, expires_at`,
-		alias, now).Scan(&pr.Alias, &pr.Prompt, &pr.Model, &pr.Metadata, &pr.CreatedAt, &fetched, &expires)
+		RETURNING alias, prompt, model, metadata, litellm_key, created_at, fetched_at, expires_at`,
+		alias, now).Scan(&pr.Alias, &pr.Prompt, &pr.Model, &pr.Metadata, &pr.LiteLLMKey, &pr.CreatedAt, &fetched, &expires)
 	if err == nil {
 		if fetched != nil {
 			pr.FetchedAt = *fetched
@@ -801,9 +807,9 @@ func (p *Postgres) PromptStatus(ctx context.Context, alias string) (Prompt, bool
 	var pr Prompt
 	var fetched, expires *time.Time
 	err := p.pool.QueryRow(ctx, `
-		SELECT alias, prompt, model, metadata, created_at, fetched_at, expires_at
+		SELECT alias, prompt, model, metadata, litellm_key, created_at, fetched_at, expires_at
 		FROM prompts WHERE alias = $1`, alias).
-		Scan(&pr.Alias, &pr.Prompt, &pr.Model, &pr.Metadata, &pr.CreatedAt, &fetched, &expires)
+		Scan(&pr.Alias, &pr.Prompt, &pr.Model, &pr.Metadata, &pr.LiteLLMKey, &pr.CreatedAt, &fetched, &expires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Prompt{}, false, nil
 	}

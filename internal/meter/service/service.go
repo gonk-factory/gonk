@@ -1290,7 +1290,8 @@ func (s *Service) PutPrompt(ctx context.Context, alias string, req meterapi.Prom
 	now := s.now()
 	return s.store.PutPrompt(ctx, store.Prompt{
 		Alias: alias, Prompt: req.Prompt, Model: req.Model, Metadata: req.Metadata,
-		CreatedAt: now, ExpiresAt: now.Add(promptTTL),
+		LiteLLMKey: req.LiteLLMKey,
+		CreatedAt:  now, ExpiresAt: now.Add(promptTTL),
 	})
 }
 

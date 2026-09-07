@@ -100,6 +100,21 @@ type PromptRequest struct {
 	Prompt   string `json:"prompt"`
 	Model    string `json:"model"`
 	Metadata string `json:"metadata,omitempty"`
+	// LiteLLMKey is the PROJECT'S virtual key for this session (gonk-8gb).
+	//
+	// IT RIDES THE PROMPT ROW BECAUSE THAT IS THE ONLY PER-SESSION CHANNEL THAT
+	// REACHES A POD. Order vars are env for the dispatch exec, not for the
+	// session; a session pod's env comes from resolved.Env, which Gas City
+	// builds from city/agent config -- so agent.toml is the only other route and
+	// it is per-INSTALL, which a per-PROJECT key cannot use. Proven by the env of
+	// a live agent pod: GONK_LITELLM_URL arrives from agent.toml and no
+	// per-session key arrives at all.
+	//
+	// This row is already the right shape for it: one-shot (a second GET is 410),
+	// short-TTL, and addressed by a 128-bit alias capability. Carrying the key
+	// here is strictly better than the alternative it replaces, which was the
+	// LiteLLM ADMIN key written into every agent.toml on the install.
+	LiteLLMKey string `json:"litellm_key,omitempty"`
 }
 
 // TraceRequest is one observation report from the proxy callback, for one
@@ -160,6 +175,8 @@ type PromptResponse struct {
 	Prompt   string `json:"prompt"`
 	Model    string `json:"model"`
 	Metadata string `json:"metadata,omitempty"`
+	// LiteLLMKey is this session's project key. See PromptRequest.
+	LiteLLMKey string `json:"litellm_key,omitempty"`
 }
 
 // PromptStatusResponse lets dispatch confirm the entrypoint actually fetched,

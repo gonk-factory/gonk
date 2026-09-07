@@ -85,6 +85,7 @@ func Run(t *testing.T, newStore func() store.Store) {
 	t.Run("PromptRoundTripAndOneShot", testPromptRoundTripAndOneShot(newStore))
 	t.Run("TakePromptHasExactlyOneWinnerUnderConcurrency", testTakePromptHasExactlyOneWinnerUnderConcurrency(newStore))
 	t.Run("ExpiredPromptReadsAsAbsentNotConsumed", testExpiredPromptReadsAsAbsentNotConsumed(newStore))
+	t.Run("PromptCarriesTheSessionKeyThroughTheStore", testPromptCarriesTheSessionKey(newStore))
 	t.Run("TraceAppendsRatherThanReplaces", testTraceAppendsRatherThanReplaces(newStore))
 	t.Run("TraceCompletenessOnlyEverDegrades", testTraceCompletenessOnlyEverDegrades(newStore))
 	t.Run("MissingTraceIsNotAnEmptyTrace", testMissingTraceIsNotAnEmptyTrace(newStore))
@@ -865,6 +866,34 @@ func testTraceIsKeyedByAttempt(newStore func() store.Store) func(*testing.T) {
 		must(t, err)
 		if !found || len(got1.Calls) != 1 {
 			t.Fatalf("attempt 1 = %+v found=%v, want its own single call", got1, found)
+		}
+	}
+}
+
+// The prompt row is the ONLY per-session channel that reaches an agent pod
+// (gonk-8gb), so the project key it carries has to survive the round trip. If it
+// does not, the agent starts with no credential at all and every transcript
+// comes back empty -- which is exactly how this was discovered.
+func testPromptCarriesTheSessionKey(newStore func() store.Store) func(*testing.T) {
+	return func(t *testing.T) {
+		t.Helper()
+		st := newStore()
+		ctx := context.Background()
+		now := time.Now().UTC()
+
+		must(t, st.PutPrompt(ctx, store.Prompt{
+			Alias: "a-with-key", Prompt: "do the thing", Model: "m",
+			LiteLLMKey: "sk-project-scoped", CreatedAt: now,
+			ExpiresAt: now.Add(time.Hour),
+		}))
+
+		got, found, consumed, err := st.TakePrompt(ctx, "a-with-key", now)
+		must(t, err)
+		if !found || consumed {
+			t.Fatalf("found=%v consumed=%v, want a fresh take", found, consumed)
+		}
+		if got.LiteLLMKey != "sk-project-scoped" {
+			t.Fatalf("LiteLLMKey = %q, want it to survive the round trip -- without it the agent starts unauthenticated", got.LiteLLMKey)
 		}
 	}
 }

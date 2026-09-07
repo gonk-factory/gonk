@@ -54,7 +54,9 @@ func (s stubForge) GetRawFile(_ context.Context, _ int64, path, _ string, _ int6
 func TestDispatchInjectsIssueContext(t *testing.T) {
 	gc := gcapitest.New(t)
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
-		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
+		Decision: meterapi.DecisionRun,
+		// Without a KeyRef there is no project key to put on the prompt row.
+		KeyRef: meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"}, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
 	}}
 	forge := stubForge{iss: &glab.Issue{
 		IID: 3, Title: "Login button does nothing on Safari", State: "opened",
@@ -63,6 +65,9 @@ func TestDispatchInjectsIssueContext(t *testing.T) {
 	}}
 
 	code := runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row now, and injection
+		// fails closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
 		Forge: forge, Args: baseDispatchArgs(),
 	})
@@ -99,11 +104,16 @@ func TestDispatchInjectsIssueContext(t *testing.T) {
 func TestDispatchProceedsWhenContextFetchFails(t *testing.T) {
 	gc := gcapitest.New(t)
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
-		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
+		Decision: meterapi.DecisionRun,
+		// Without a KeyRef there is no project key to put on the prompt row.
+		KeyRef: meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"}, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
 	}}
 	forge := stubForge{err: context.DeadlineExceeded}
 
 	code := runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row now, and injection
+		// fails closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
 		Forge: forge, Args: baseDispatchArgs(),
 	})
@@ -239,7 +249,10 @@ func TestCheckoutIsDecidedPerEventShape(t *testing.T) {
 // grantCheckout must be silent and harmless for a shape that needs no checkout,
 // and must never fail a dispatch when the rig is simply not configured.
 func TestGrantCheckoutIsANoOpWhenNotNeededOrNotConfigured(t *testing.T) {
-	d := dispatchDeps{Log: testLogger(io.Discard), Args: baseDispatchArgs(), Forge: stubForge{}}
+	d := dispatchDeps{
+		// The session's project key rides the prompt row, and dispatch fails
+		// closed without it (gonk-8gb).
+		Keys: readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")), Log: testLogger(io.Discard), Args: baseDispatchArgs(), Forge: stubForge{}}
 
 	if url, err := grantCheckout(context.Background(), d, "triage", "alias-a"); url != "" || err != nil {
 		t.Errorf("triage: got (%q, %v), want no checkout and no error", url, err)

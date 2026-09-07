@@ -649,10 +649,25 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 	// deletion is the point rather than a side effect: the prompt is no longer
 	// TYPED anywhere, so a `!` in an issue body is just text. Stripping bangs
 	// was lossy protection for a channel that no longer exists.
+	// The session's own project key rides the prompt row (gonk-8gb). It is the
+	// only per-session channel that reaches a pod: order vars are env for the
+	// dispatch exec, and a pod's env comes from resolved.Env, which Gas City
+	// builds from per-INSTALL city/agent config. Resolved here and passed with
+	// the prompt so a session that cannot be metered never gets one.
+	litellmKey, kerr := resolveLiteLLMKey(ctx, d.Keys, dec.KeyRef.SecretName, dec.KeyRef.SecretKey)
+	if kerr != nil {
+		// FAIL CLOSED. A session that cannot be metered must not run, and the
+		// old fallback -- the install-wide admin key -- is exactly what made
+		// that failure invisible.
+		d.Log.Error("refusing to inject: no per-project LiteLLM key",
+			"alias", alias, "bead", base.BeadAnchor, "err", kerr)
+		return 1
+	}
 	if err := d.Meter.PutPrompt(ctx, alias, meterapi.PromptRequest{
-		Prompt:   prompt,
-		Model:    dec.Model,
-		Metadata: metadataJSON,
+		Prompt:     prompt,
+		Model:      dec.Model,
+		Metadata:   metadataJSON,
+		LiteLLMKey: litellmKey,
 	}); err != nil {
 		d.Log.Error("could not store the session prompt; refusing to create a session that would idle",
 			"agent", agent, "alias", alias, "bead", a.BeadAnchor, "err", err)

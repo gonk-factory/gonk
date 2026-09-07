@@ -192,11 +192,19 @@ if [ -z "${GONK_PROMPT}" ] && [ -n "${GONK_PROMPT_URL:-}" ] && [ -n "${GC_ALIAS:
 			GONK_PROMPT=$(jq -r '.prompt // empty' <"${_pfile}")
 			_pmodel=$(jq -r '.model // empty' <"${_pfile}")
 			_pmeta=$(jq -r '.metadata // empty' <"${_pfile}")
+			# THIS SESSION'S PROJECT KEY (gonk-8gb). It rides the prompt row
+			# because that is the only per-session channel that reaches a pod:
+			# order vars are env for the dispatch exec, and pod env comes from
+			# resolved.Env, which Gas City builds from per-INSTALL agent config.
+			# Never logged, and never echoed into the rendered opencode config --
+			# it goes straight to the key file below.
+			_pkey=$(jq -r '.litellm_key // empty' <"${_pfile}")
 			# The model and metadata travel WITH the prompt so the overlay is
 			# rendered per session. That is what restores per-bead attribution
 			# (gonk-m6t) rather than attributing spend per install.
 			[ -n "${_pmodel}" ] && GC_WEBHOOK_ARG_MODEL="${_pmodel}"
 			[ -n "${_pmeta}" ] && GC_WEBHOOK_ARG_METADATA_JSON="${_pmeta}"
+			[ -n "${_pkey}" ] && GC_WEBHOOK_ARG_LITELLM_KEY="${_pkey}"
 			rm -f "${_pfile}"
 			log "prompt fetched (${#GONK_PROMPT} bytes)"
 			;;
@@ -293,6 +301,10 @@ if [ -z "${GONK_LITELLM_KEY_FILE:-}" ]; then
 	# and fails closed if it cannot, so GC_WEBHOOK_ARG_LITELLM_KEY being present
 	# means the meter vouched for it. The static value is the fallback for a
 	# non-gascity caller that sets no per-session key at all.
+	# The per-session key (delivered in the prompt row) wins. The static
+	# per-install value remains only as a fallback for a caller that supplies no
+	# prompt row at all, and it announces itself as unmetered when used --
+	# because a per-install key cannot be a per-project budget (gonk-8gb).
 	_key="${GC_WEBHOOK_ARG_LITELLM_KEY:-${GONK_LITELLM_KEY:-}}"
 	if [ -n "${GC_WEBHOOK_ARG_LITELLM_KEY:-}" ]; then
 		log "using this session's per-project LiteLLM key"
