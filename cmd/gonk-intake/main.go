@@ -85,6 +85,20 @@ type Config struct {
 	InstanceLadder []string
 
 	ReconcileInterval time.Duration // GONK_RECONCILE_INTERVAL (default 10m)
+	// IssueSweepLimit and IssueSweepMaxAge bound the reconciler's issue sweep.
+	// Zero leaves pkg/intake's defaults (5 per project per pass, 24h) in force.
+	//
+	// These are OPERATOR CONTROLS ON SPEND, and that is why they are env vars
+	// rather than constants: every swept issue is a metered model call. Without
+	// them, an operator watching an unexpected drain could not slow it, cap it
+	// or stop it without a rebuild.
+	//
+	// Zero means "use the default", so neither can be set to zero to disable the
+	// sweep. To wind it right down, set GONK_ISSUE_SWEEP_MAX_AGE very small
+	// (e.g. 1s): nothing is recent enough to qualify and the sweep becomes a
+	// no-op without touching the code path.
+	IssueSweepLimit  int           // GONK_ISSUE_SWEEP_LIMIT
+	IssueSweepMaxAge time.Duration // GONK_ISSUE_SWEEP_MAX_AGE
 	// StalenessWindow bounds how old a cached project entry may be before
 	// dispatch refuses to fire for it (pkg/intake.Dispatch.StalenessWindow). Zero
 	// resolves to intake's own safe default (30m) -- this is not a place to
@@ -314,8 +328,10 @@ func newService(ctx context.Context, cfg Config, log *slog.Logger) (*service, er
 		// Without this the reconciler is wired for projects only, and an issue
 		// event that was ACKed and then lost -- a restart, a full queue -- is
 		// lost permanently, because GitLab does not retry (gonk-vrf).
-		Issues:    dp,
-		BotUserID: me.ID, HookURL: cfg.WebhookPublicURL, HookToken: hookSecret,
+		Issues:           dp,
+		IssueSweepLimit:  cfg.IssueSweepLimit,
+		IssueSweepMaxAge: cfg.IssueSweepMaxAge,
+		BotUserID:        me.ID, HookURL: cfg.WebhookPublicURL, HookToken: hookSecret,
 		TokenGen: cfg.WebhookTokenGen, SSLVerify: cfg.HookSSLVerify,
 		// NOTE: no Instance policy and no GroupPolicy. Intake does not hold
 		// operator config and does not resolve -- gonk-meter does (Conflict A).
@@ -440,6 +456,21 @@ func loadConfig() (Config, error) {
 			return Config{}, fmt.Errorf("GONK_RECONCILE_INTERVAL: %w", err)
 		}
 		cfg.ReconcileInterval = d
+	}
+
+	if v := os.Getenv("GONK_ISSUE_SWEEP_LIMIT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return Config{}, fmt.Errorf("GONK_ISSUE_SWEEP_LIMIT: want a non-negative integer, got %q", v)
+		}
+		cfg.IssueSweepLimit = n
+	}
+	if v := os.Getenv("GONK_ISSUE_SWEEP_MAX_AGE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return Config{}, fmt.Errorf("GONK_ISSUE_SWEEP_MAX_AGE: want a non-negative duration, got %q", v)
+		}
+		cfg.IssueSweepMaxAge = d
 	}
 	if v := os.Getenv("GONK_DISPATCH_STALENESS_WINDOW"); v != "" {
 		d, err := time.ParseDuration(v)

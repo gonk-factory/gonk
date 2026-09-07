@@ -3,7 +3,12 @@ package intake
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"testing"
+	"time"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/ghook"
 	"gitlab.orac.local/agentic/gonk-project/pkg/glab"
@@ -141,8 +146,10 @@ func TestSweepNeverTriagesAnIssueTheBotOpened(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Fatalf("swept %d, want 1 (the bot's own issue must be skipped)", n)
+	if n != 1 || len(sw.got) != 1 {
+		// Fatal, not Error: indexing sw.got below would otherwise panic and take
+		// the whole package binary down, masking every test after it.
+		t.Fatalf("swept %d / dispatched %d, want 1 and 1 (the bot's own issue must be skipped)", n, len(sw.got))
 	}
 	if sw.got[0].Issue.IID != 2 {
 		t.Errorf("swept issue %d; the bot-authored one must never be triaged", sw.got[0].Issue.IID)
@@ -260,5 +267,86 @@ func TestSweepCapsHowMuchOnePassCanSpend(t *testing.T) {
 	sw.got = nil
 	if n, _ := r.sweepIssues(context.Background(), p); n != 2 {
 		t.Errorf("swept %d with IssueSweepLimit=2, want 2", n)
+	}
+}
+
+// ReconcileOnce must actually CALL the sweep. Deleting the call compiles, and
+// until this test existed it left every other test in this file green -- the
+// sweep would be live-looking code that never ran (gonk-vrf review 2026-09-07,
+// which demonstrated exactly that deletion).
+//
+// This is a SOURCE-LEVEL guard and its limit is worth stating: it proves the
+// call is written, not that it is reached. A behavioural test would have to
+// drive reconcileProject to a valid classification, which needs a fake GitLab
+// AND a fake meter -- that machinery lives in cmd/gonk-intake. What this catches
+// is the cheap, silent regression the review found: remove the call, everything
+// stays green.
+func TestReconcileOnceCallsTheSweep(t *testing.T) {
+	src, err := os.ReadFile("reconcile.go")
+	if err != nil {
+		t.Fatalf("read reconcile.go: %v", err)
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "reconcile.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse reconcile.go: %v", err)
+	}
+
+	var body *ast.BlockStmt
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "ReconcileOnce" {
+			body = fn.Body
+			break
+		}
+	}
+	if body == nil {
+		t.Fatal("no ReconcileOnce in reconcile.go -- renamed? this guard must be updated with it")
+	}
+
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "sweepIssues" {
+				found = true
+			}
+		}
+		return true
+	})
+	if !found {
+		t.Error("ReconcileOnce does not call sweepIssues. The sweep is compiled and tested " +
+			"but never runs, so a webhook that is ACKed and then lost stays lost (gonk-vrf).")
+	}
+}
+
+// The sweep is a safety net for events that were LOST, and a lost event is
+// recent. Without a recency bound the first pass against a project with history
+// treats years of backlog as lost events: measured on project 75, 57 orders
+// against stale July issues, 22.8% of that project's monthly token budget.
+func TestSweepIgnoresIssuesOlderThanTheRecencyBound(t *testing.T) {
+	now := time.Now()
+	gl := &sweepGL{issues: []glab.Issue{
+		{IID: 1, Author: glab.User{ID: 9}, UpdatedAt: now.Add(-2 * time.Hour)},
+		{IID: 2, Author: glab.User{ID: 9}, UpdatedAt: now.Add(-40 * 24 * time.Hour)}, // stale backlog
+	}}
+	sw := &countingSweeper{}
+	r, p := sweepReconciler(gl, sw)
+
+	n, err := r.sweepIssues(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("swept %d, want 1: a 40-day-old issue is backlog, not a lost event", n)
+	}
+	if sw.got[0].Issue.IID != 1 {
+		t.Errorf("swept issue %d, want 1", sw.got[0].Issue.IID)
+	}
+
+	// The bound must ALSO be pushed to the server, or a project with thousands
+	// of open issues costs fifty API calls a pass to then dispatch five.
+	if gl.gotOpt.UpdatedAfter.IsZero() {
+		t.Error("ListIssues was called without UpdatedAfter: the bound is client-side only")
+	}
+	if d := now.Sub(gl.gotOpt.UpdatedAfter); d < 23*time.Hour || d > 25*time.Hour {
+		t.Errorf("UpdatedAfter is %v ago, want ~%v", d, DefaultIssueSweepMaxAge)
 	}
 }
