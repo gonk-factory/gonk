@@ -1504,7 +1504,11 @@ spec:
               # appended: appending to EOF happens to land in [env] today only
               # because [env] is the last table, and that is not a property worth
               # depending on.
-              LITELLM_KEY=$(cat /etc/gonk/secrets/litellm/admin-key)
+              # The ADMIN key is deliberately NOT read here any more (gonk-8gb).
+              # It used to be written into every agent.toml, which handed each
+              # session the credential that can create, read and delete every
+              # virtual key on the proxy. The per-project key now arrives
+              # per-session from dispatch instead.
               for agent_dir in /city/agents/*/; do
                 agent_toml="${agent_dir}agent.toml"
                 [ -f "$agent_toml" ] || continue
@@ -1524,14 +1528,22 @@ spec:
                 # Not a credential: it is an in-cluster Service address, and the
                 # GRANT is what authorizes a fetch (see pkg/rig).
                 awk -v url='http://litellm.litellm.svc:4000' \
-                    -v key="$LITELLM_KEY" \
                     -v model='stub-local' \
                     -v rigbase='http://gonk-intake-internal.gonk.svc:9090' \
                     -v prompturl='http://gonk-meter.gonk.svc:8080' '
                   /^\[env\]/ && !seen {
                     print
                     printf "GONK_LITELLM_URL = \"%s\"\n", url
-                    printf "GONK_LITELLM_KEY = \"%s\"\n", key
+                    # GONK_LITELLM_KEY IS NO LONGER WRITTEN HERE (gonk-8gb).
+                    # This is a PER-INSTALL channel and the only key available to
+                    # it is the proxy ADMIN key, so writing it handed every agent
+                    # session the credential that can create, read and delete
+                    # every virtual key on the proxy -- and, because the static
+                    # value used to win in the entrypoint, it also meant the
+                    # per-project budget the meter provisions was never the one
+                    # being spent. The project's own key now arrives per-session
+                    # from dispatch, which resolves it from the meter'"'"'s KeyRef
+                    # and fails closed if it cannot.
                     if (model != "") printf "GONK_MODEL = \"%s\"\n", model
                     if (rigbase != "") printf "GONK_RIG_BASE_URL = \"%s\"\n", rigbase
                     if (prompturl != "") printf "GONK_PROMPT_URL = \"%s\"\n", prompturl
