@@ -1539,12 +1539,17 @@ spec:
                     # This is a PER-INSTALL channel and the only key available to
                     # it is the proxy ADMIN key, so writing it handed every agent
                     # session the credential that can create, read and delete
-                    # every virtual key on the proxy -- and, because the static
-                    # value used to win in the entrypoint, it also meant the
-                    # per-project budget the meter provisions was never the one
-                    # being spent. The project's own key now arrives per-session
-                    # from dispatch, which resolves it from the meter'"'"'s KeyRef
-                    # and fails closed if it cannot.
+                    # every virtual key on the proxy. Because the static value
+                    # also used to win in the entrypoint, the per-project budget
+                    # the meter provisions was never the one being spent. A
+                    # per-project key now arrives per-session from dispatch,
+                    # which resolves it from the KeyRef the meter supplies and
+                    # fails closed if it cannot.
+                    #
+                    # NOTE FOR EDITORS: this comment lives INSIDE a single-quoted
+                    # awk program. An apostrophe here terminates it and the shell
+                    # then tries to parse awk syntax -- which is exactly how this
+                    # block crash-looped the controller. Keep it apostrophe-free.
                     if (model != "") printf "GONK_MODEL = \"%s\"\n", model
                     if (rigbase != "") printf "GONK_RIG_BASE_URL = \"%s\"\n", rigbase
                     if (prompturl != "") printf "GONK_PROMPT_URL = \"%s\"\n", prompturl
