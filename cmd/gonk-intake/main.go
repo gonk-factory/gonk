@@ -99,6 +99,16 @@ type Config struct {
 	// no-op without touching the code path.
 	IssueSweepLimit  int           // GONK_ISSUE_SWEEP_LIMIT
 	IssueSweepMaxAge time.Duration // GONK_ISSUE_SWEEP_MAX_AGE
+	// BlockedProjects names projects gonk must never work on, however it came
+	// to see them (gonk-jn5). GONK_BLOCKED_PROJECTS, comma-separated, each
+	// entry a path with namespace ("agentic/gonk-project") or a numeric id.
+	//
+	// gonk's OWN repository belongs here. `membership=true` includes projects
+	// inherited through GROUP membership, and gonk-project sits in the same
+	// group as the repos gonk works on -- so adding the bot to that group would
+	// hand a code-writing agent a path to its own broker and gate, as a side
+	// effect of onboarding rather than as a decision.
+	BlockedProjects []string
 	// StalenessWindow bounds how old a cached project entry may be before
 	// dispatch refuses to fire for it (pkg/intake.Dispatch.StalenessWindow). Zero
 	// resolves to intake's own safe default (30m) -- this is not a place to
@@ -322,6 +332,22 @@ func newService(ctx context.Context, cfg Config, log *slog.Logger) (*service, er
 		StalenessWindow: cfg.StalenessWindow,
 	}
 
+	// FAIL CLOSED at startup. An entry that will not parse is one that would
+	// silently stop blocking, so refuse to start rather than run with a list
+	// that blocks less than the operator wrote (gonk-jn5). This is the same rule
+	// the chart applies to a missing Secret: fail LOUDLY, do not degrade.
+	blocked, err := intake.ParseBlocklist(cfg.BlockedProjects)
+	if err != nil {
+		return nil, fmt.Errorf("blocked projects: %w", err)
+	}
+	if blocked.Empty() {
+		log.Warn("NO PROJECTS ARE BLOCKED. gonk can act on every project its token can see, " +
+			"including its own repository if the bot is ever added to that group. " +
+			"Set GONK_BLOCKED_PROJECTS (intake.blockedProjects in the chart).")
+	} else {
+		log.Info("blocklist active", "projects", blocked.Entries())
+	}
+
 	rec := &intake.Reconciler{
 		GL: gl, Meter: meter, Cache: cache, Obs: metrics, Log: log,
 		Onboarder: &intake.GitLabOnboarder{GL: gl, BotUserID: me.ID, BotUsername: cfg.BotUsername, Version: cfg.Version, InstanceLadder: cfg.InstanceLadder, Obs: metrics},
@@ -335,6 +361,7 @@ func newService(ctx context.Context, cfg Config, log *slog.Logger) (*service, er
 		// event that was ACKed and then lost -- a restart, a full queue -- is
 		// lost permanently, because GitLab does not retry (gonk-vrf).
 		Issues:           dp,
+		Blocked:          blocked,
 		IssueSweepLimit:  cfg.IssueSweepLimit,
 		IssueSweepMaxAge: cfg.IssueSweepMaxAge,
 		BotUserID:        me.ID, HookURL: cfg.WebhookPublicURL, HookToken: hookSecret,
@@ -470,6 +497,13 @@ func loadConfig() (Config, error) {
 			return Config{}, fmt.Errorf("GONK_ISSUE_SWEEP_LIMIT: want a non-negative integer, got %q", v)
 		}
 		cfg.IssueSweepLimit = n
+	}
+	if v := os.Getenv("GONK_BLOCKED_PROJECTS"); v != "" {
+		for _, e := range strings.Split(v, ",") {
+			if e = strings.TrimSpace(e); e != "" {
+				cfg.BlockedProjects = append(cfg.BlockedProjects, e)
+			}
+		}
 	}
 	if v := os.Getenv("GONK_ISSUE_SWEEP_MAX_AGE"); v != "" {
 		d, err := time.ParseDuration(v)

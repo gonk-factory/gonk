@@ -96,6 +96,10 @@ type Summary struct {
 	// than re-derived from the Obs metric calls, which have no query API.
 	MeterPushes int
 	Dispatched  int
+	// Blocked counts projects skipped because they are on the blocklist. It is
+	// normally a small constant (gonk's own repository); a sudden rise means
+	// membership widened somewhere.
+	Blocked int
 	// IssuesSwept counts open issues the sweep handed to Dispatch this pass. It
 	// is a count of ATTEMPTS, not of dispatches: Handle re-applies the staleness
 	// window and the Decide rules and may drop any of them.
@@ -138,6 +142,11 @@ type Reconciler struct {
 	// the money is gone, and a backlog is not urgent. Capped, a backlog drains a
 	// few per pass and an operator has time to notice.
 	IssueSweepLimit int
+	// Blocked names projects gonk must never work on, however it came to see
+	// them (gonk-jn5). Enforced HERE as well as at dispatch: a blocked project
+	// must never be registered with meter, never have a webhook provisioned,
+	// and never enter the cache -- not merely be refused later.
+	Blocked Blocklist
 	// IssueSweepMaxAge bounds how far back the sweep looks. Zero means
 	// DefaultIssueSweepMaxAge.
 	//
@@ -484,6 +493,19 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) (Summary, error) {
 	seen := make(map[int64]bool, len(projects))
 	sum := Summary{Projects: len(projects)}
 	for _, p := range projects {
+		// Blocked projects are dropped BEFORE anything observes them. Not
+		// "reconciled and then refused": no meter registration, no webhook
+		// provisioning, no cache entry, so nothing downstream can act on one
+		// even by mistake. `seen` is deliberately NOT set, so a project that
+		// becomes blocked while already cached is de-registered by the
+		// vanished-membership sweep below, exactly as if the bot had been
+		// removed from it.
+		if r.Blocked.Blocked(p) {
+			sum.Blocked++
+			r.log().Warn("project is on the blocklist; not reconciling it",
+				"project", p.PathWithNamespace, "project_id", p.ID)
+			continue
+		}
 		seen[p.ID] = true
 		out, err := r.reconcileProject(ctx, p)
 		if out.meterPushed {

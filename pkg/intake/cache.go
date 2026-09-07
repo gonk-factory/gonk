@@ -28,6 +28,11 @@ type Entry struct {
 	// the real idempotency guarantee is the deterministic bead anchor, which the
 	// Gas City controller must honour (see "Cross-plan contracts").
 	ScaffoldFiredAt time.Time
+	// Blocked marks an entry whose project is on the blocklist. The reconciler
+	// normally prevents such an entry existing at all; this carries the fact to
+	// Decide so the dispatch layer refuses independently rather than trusting
+	// that prevention worked (gonk-jn5).
+	Blocked bool
 }
 
 func (e Entry) State() State { return e.Classification.State }

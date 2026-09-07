@@ -119,6 +119,16 @@ type Decision struct {
 func Decide(e Entry, ev *ghook.Event, botUsername string) Decision {
 	cls := e.Classification
 
+	// The blocklist is checked FIRST, ahead of every other rule, and separately
+	// from the reconciler's check (gonk-jn5). Belt and braces on purpose: the
+	// reconciler stops a blocked project entering the cache, and this stops one
+	// being acted on if it ever gets there another way -- a stale cache entry, a
+	// direct Handle call, a future code path nobody has written yet. A guard
+	// that exists at only one layer is a guard that a refactor can move around.
+	if e.Blocked {
+		return Decision{Reason: "blocked_project"}
+	}
+
 	switch ev.Kind {
 	case ghook.KindMergeRequest:
 		// MR events never dispatch work; they are reconcile signals (see Handle).

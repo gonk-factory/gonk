@@ -87,6 +87,28 @@ intake:
   issueSweep:
     limit: ""
     maxAge: ""
+  # Projects gonk must NEVER work on, however it came to see them (gonk-jn5).
+  # Each entry is a path with namespace ("agentic/gonk-project") or a numeric
+  # project id. An entry that is neither -- a bare "gonk-project", say -- makes
+  # intake REFUSE TO START, because it would parse cleanly and block nothing.
+  #
+  # GONK'S OWN REPOSITORY BELONGS HERE, and the default is not paranoia. GitLab's
+  # `membership=true` includes projects inherited through GROUP membership, and
+  # gonk-project sits in the same group as the repos gonk is meant to work on.
+  # Adding the bot to that group would give a code-writing agent a path to its
+  # own broker, gate and effect-shape.toml -- arriving as a side effect of
+  # onboarding somebody else, with no code change and nobody deciding it.
+  #
+  # This is the guard rather than "only onboard per-project", because gonk may
+  # legitimately need to watch every project on an instance: an instance-level
+  # budget ceiling can only be enforced by something that sees instance-level
+  # draw. Broad visibility is a requirement, so narrow visibility cannot be the
+  # safety property.
+  #
+  # An EMPTY list is legal and logs a warning at startup. Change the default
+  # only if you know why it is there.
+  blockedProjects:
+    - agentic/gonk-project
   # The URL GitLab will POST to. Intake writes this into every hook it provisions,
   # so it is REQUIRED even when ingress.enabled is false (you may front it with a
   # Gateway or an IngressRoute outside this chart). OD-2.
