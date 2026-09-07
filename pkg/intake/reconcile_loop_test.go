@@ -50,6 +50,9 @@ func (g *countingSlowGL) ListMergeRequests(context.Context, int64, glab.MRListOp
 func (g *countingSlowGL) ListMembers(context.Context, int64) ([]glab.Member, error) {
 	panic("not used")
 }
+func (g *countingSlowGL) ListIssues(context.Context, int64, glab.IssueListOptions) ([]glab.Issue, error) {
+	panic("not used")
+}
 
 func newLoopTestReconciler(gl GitLab) *Reconciler {
 	return &Reconciler{

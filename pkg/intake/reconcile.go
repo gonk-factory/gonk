@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"gitlab.orac.local/agentic/gonk-project/pkg/atags"
 	"gitlab.orac.local/agentic/gonk-project/pkg/ghook"
 	"gitlab.orac.local/agentic/gonk-project/pkg/glab"
 	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
@@ -26,6 +27,19 @@ type GitLab interface {
 	EditHook(ctx context.Context, projectID, hookID int64, o glab.HookOptions) (*glab.Hook, error)
 	ListMergeRequests(ctx context.Context, projectID int64, o glab.MRListOptions) ([]glab.MergeRequest, error)
 	ListMembers(ctx context.Context, projectID int64) ([]glab.Member, error)
+	ListIssues(ctx context.Context, projectID int64, o glab.IssueListOptions) ([]glab.Issue, error)
+}
+
+// IssueSweeper is the one method the issue sweep needs from *Dispatch. Nil is
+// legal: the reconciler simply does not sweep.
+//
+// It is deliberately the SAME entry point the webhook path uses, fed a
+// synthesized event, rather than a second dispatch route. A parallel path would
+// be a second place for the staleness window, the Decide rules and the
+// classification gate to drift apart, and those are the rules that stop gonk
+// spending money it should not.
+type IssueSweeper interface {
+	Handle(ctx context.Context, ev *ghook.Event)
 }
 
 // Onboarder opens the deterministic onboarding MR (Task 8). Nil is legal: the
@@ -82,6 +96,10 @@ type Summary struct {
 	// than re-derived from the Obs metric calls, which have no query API.
 	MeterPushes int
 	Dispatched  int
+	// IssuesSwept counts open issues the sweep handed to Dispatch this pass. It
+	// is a count of ATTEMPTS, not of dispatches: Handle re-applies the staleness
+	// window and the Decide rules and may drop any of them.
+	IssuesSwept int
 	// ErrorMsgs is one line per failed project, "path: err". Never a token, never
 	// a secret: pkg/glab's APIError and MeterClient.do both refuse to put
 	// credential material in an error string, so echoing these here (they end up
@@ -95,8 +113,33 @@ type Reconciler struct {
 	Cache     *Cache
 	Onboarder Onboarder
 	Dispatch  Scaffolder
-	Obs       Observer
-	Log       *slog.Logger
+	// Issues drives the issue sweep (spec 5.2). Nil disables it.
+	Issues IssueSweeper
+	// IssueLabelPrefix is the namespace the broker applies to labels it adds
+	// (`gonk::` by default). An open issue already carrying one has been triaged,
+	// so the sweep skips it.
+	//
+	// THIS IS AN OPTIMISATION, NOT THE SAFETY PROPERTY, and the distinction
+	// matters: the prefix is per-project configurable in the broker, so this can
+	// be wrong, and an issue dispatched seconds ago has no label yet either way.
+	// What makes a re-fire harmless is the deterministic bead anchor -- the meter
+	// keys /decide idempotency, ladder state and the reservation on it
+	// (cmd/gonk-gate/dispatch.go, dispatch_idempotency_test.go), so a second
+	// order for the same issue rejoins the first reservation instead of spending
+	// twice. Exactly the tradeoff Entry.ScaffoldFiredAt already documents.
+	IssueLabelPrefix string
+	// IssueSweepLimit caps how many issues one pass may hand to Dispatch, per
+	// project. Zero means DefaultIssueSweepLimit.
+	//
+	// THIS IS A SPEND GUARD, not a performance one. Onboard a project with a
+	// hundred open issues and an uncapped sweep fires a hundred triage orders in
+	// a single pass -- each one a real model call against the project's budget.
+	// The meter's ceiling would eventually refuse them, but "eventually" is after
+	// the money is gone, and a backlog is not urgent. Capped, a backlog drains a
+	// few per pass and an operator has time to notice.
+	IssueSweepLimit int
+	Obs             Observer
+	Log             *slog.Logger
 
 	BotUserID int64
 	HookURL   string // public webhook URL, WITHOUT the gen parameter
@@ -312,6 +355,7 @@ func (r *Reconciler) runPass(ctx context.Context) ReconcileSummary {
 		States:      stateCountsToWire(r.Cache.CountByState()),
 		MeterPushes: sum.MeterPushes,
 		Dispatched:  sum.Dispatched,
+		IssuesSwept: sum.IssuesSwept,
 		Errors:      sum.ErrorMsgs,
 		Result:      "ok",
 	}
@@ -430,6 +474,13 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) (Summary, error) {
 		}
 		if out.scaffoldFired {
 			sum.Dispatched++
+		}
+		if n, serr := r.sweepIssues(ctx, p); serr != nil {
+			sum.Errors++
+			sum.ErrorMsgs = append(sum.ErrorMsgs, fmt.Sprintf("%s: sweep issues: %s", p.PathWithNamespace, serr))
+			r.log().Error("issue sweep failed", "project", p.PathWithNamespace, "err", serr)
+		} else {
+			sum.IssuesSwept += n
 		}
 		if err != nil {
 			sum.Errors++
@@ -674,4 +725,127 @@ func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) (proj
 		}
 	}
 	return out, nil
+}
+
+// DefaultIssueLabelPrefix matches the broker's default label namespace
+// (cmd/gonk-gate/broker_label.go). See Reconciler.IssueLabelPrefix for why a
+// mismatch here costs an extra order rather than correctness.
+const DefaultIssueLabelPrefix = "gonk::"
+
+// DefaultIssueSweepLimit is deliberately small. The sweep is a SAFETY NET for
+// events that were lost, not a backfill tool: in steady state the webhook has
+// already handled everything and this finds nothing. A number this size drains
+// a surprise backlog over several passes instead of spending a project's month
+// in one.
+const DefaultIssueSweepLimit = 5
+
+// sweepIssues is the ISSUE half of spec 5.2, and it exists because the spec's
+// central claim was only half true:
+//
+//	"Reconciliation is the correctness path; webhooks are the latency
+//	 optimization."
+//
+// Reconciliation was implemented for PROJECTS -- memberships, .gonk.yml, hook
+// provisioning, rig registration -- and for nothing else. For issue events the
+// webhook was the ONLY path, which made it the correctness path, which is
+// exactly what the spec says it must not be.
+//
+// MEASURED CONSEQUENCE (gonk-vrf, 2026-09-07): issues 65 and 67 on project 75
+// were delivered, ACKed 200, accepted into an in-memory sink, and lost when the
+// pod restarted seconds later. GitLab does not retry, nothing reconciled them,
+// and they sat untouched until a human noticed. This closes that: an issue that
+// should have been triaged and was not gets picked up on the next pass.
+//
+// It returns the number of issues handed to Dispatch, which is a count of
+// ATTEMPTS. Handle re-applies the staleness window and the full Decide rules,
+// so it may drop every one of them.
+func (r *Reconciler) sweepIssues(ctx context.Context, p glab.Project) (int, error) {
+	if r.Issues == nil {
+		return 0, nil
+	}
+	entry, ok := r.Cache.Get(p.ID)
+	if !ok {
+		return 0, nil
+	}
+	// Ask the REAL rule whether this project could dispatch a triage at all,
+	// rather than re-deriving it. A project that cannot is one whose issues we
+	// must not even list -- listing costs an API call per pass forever, and for
+	// an unmanaged or denied project the answer can never change to yes without
+	// a reconcile that would update the cache first anyway.
+	if _, allowed := gate(entry, atags.TriggerIssueTriage); !allowed {
+		return 0, nil
+	}
+
+	issues, err := r.GL.ListIssues(ctx, p.ID, glab.IssueListOptions{State: "opened"})
+	if err != nil {
+		return 0, err
+	}
+
+	prefix := r.IssueLabelPrefix
+	if prefix == "" {
+		prefix = DefaultIssueLabelPrefix
+	}
+
+	limit := r.IssueSweepLimit
+	if limit <= 0 {
+		limit = DefaultIssueSweepLimit
+	}
+
+	swept := 0
+	for _, is := range issues {
+		if swept >= limit {
+			r.log().Warn("issue sweep hit its per-pass limit; the rest wait for the next pass",
+				"project", p.PathWithNamespace, "limit", limit, "open_issues", len(issues))
+			break
+		}
+		// The loop guard, which the webhook path gets from the event payload and
+		// a swept issue would otherwise get from nowhere. An issue the bot opened
+		// must never be triaged by the bot.
+		if r.BotUserID != 0 && is.Author.ID == r.BotUserID {
+			continue
+		}
+		if hasLabelPrefix(is.Labels, prefix) {
+			continue
+		}
+		r.Issues.Handle(ctx, &ghook.Event{
+			Kind: ghook.KindIssue,
+			Project: ghook.Project{
+				ID:                entry.Project.ID,
+				PathWithNamespace: entry.Project.PathWithNamespace,
+				DefaultBranch:     entry.Project.DefaultBranch,
+				WebURL:            entry.Project.WebURL,
+			},
+			// "open" because that is the only action Decide dispatches on, and a
+			// swept issue IS an open issue nobody triaged. The synthesized event
+			// carries no User: Decide does not read one for KindIssue, and the
+			// bot-author check above is the guard that would have needed it.
+			Issue: &ghook.Issue{
+				IID:         is.IID,
+				Action:      "open",
+				Title:       is.Title,
+				Description: is.Description,
+			},
+		})
+		swept++
+	}
+	if swept > 0 {
+		// Worth an INFO, not a debug: in steady state this never fires, because
+		// the webhook got there first. When it does fire, events were being lost
+		// and that is the thing an operator wants to see.
+		r.log().Info("issue sweep dispatched issues the webhook path never handled",
+			"project", p.PathWithNamespace, "count", swept, "open_issues", len(issues))
+	}
+	return swept, nil
+}
+
+// hasLabelPrefix reports whether any label sits in the broker's namespace.
+// Case-insensitive, because a GitLab label is case-preserving but matched
+// case-insensitively, so `Gonk::bug` and `gonk::bug` are one label.
+func hasLabelPrefix(labels []string, prefix string) bool {
+	for _, l := range labels {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(l)), strings.ToLower(prefix)) {
+			return true
+		}
+	}
+	return false
 }
