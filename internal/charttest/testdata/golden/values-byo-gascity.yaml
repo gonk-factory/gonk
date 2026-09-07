@@ -742,6 +742,10 @@ spec:
               value: "10m"
             - name: GONK_LISTEN_ADDR
               value: ":8080"
+            # Projects gonk must never work on. Unparseable entries make intake refuse
+            # to start -- fail closed, never "block less than was written" (gonk-jn5).
+            - name: GONK_BLOCKED_PROJECTS
+              value: "agentic/gonk-project"
             - name: GONK_PRIVATE_ADDR
               value: ":9090"
             - name: GONK_VERSION

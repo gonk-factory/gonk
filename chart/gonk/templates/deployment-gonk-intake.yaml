@@ -125,6 +125,12 @@ spec:
             {{- end }}
             - name: GONK_LISTEN_ADDR
               value: ":{{ .Values.intake.ports.public }}"
+            {{- with .Values.intake.blockedProjects }}
+            # Projects gonk must never work on. Unparseable entries make intake refuse
+            # to start -- fail closed, never "block less than was written" (gonk-jn5).
+            - name: GONK_BLOCKED_PROJECTS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- with .Values.intake.issueSweep.limit }}
             - name: GONK_ISSUE_SWEEP_LIMIT
               value: {{ . | quote }}

@@ -11,22 +11,11 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/pkg/glab/glabtest"
 )
 
-// The issue sweep can be unplugged in one line -- delete `Issues: dp` from
-// newService -- and every unit test in pkg/intake stays green, because they all
-// call sweepIssues directly. That is the dead-but-tested shape this project
-// keeps rediscovering, so the wiring gets its own assertion at the seam where it
-// actually happens.
-//
-// It also pins the two spend guards to non-zero, because a Reconciler built with
-// IssueSweepLimit or IssueSweepMaxAge left at zero falls back to the package
-// defaults -- which is correct, but only as long as somebody has checked that
-// the defaults are the ones in force.
-func TestNewServiceWiresTheIssueSweep(t *testing.T) {
-	gl := glabtest.New(t)
-	gl.Me = glab.User{ID: 99, Username: "gonk"}
-
+// wiringConfig is the minimum Config newService accepts, pointed at glabtest.
+func wiringConfig(t *testing.T, gl *glabtest.Server) Config {
+	t.Helper()
 	dir := t.TempDir()
-	cfg := Config{
+	return Config{
 		GitLabURL:         gl.URL(),
 		GitLabTokenFile:   writeFile(t, dir, "gitlab-token", "glabtest-token"),
 		WebhookSecretFile: writeFile(t, dir, "webhook-secret", strings.Repeat("b", 40)),
@@ -43,11 +32,30 @@ func TestNewServiceWiresTheIssueSweep(t *testing.T) {
 		PrivateAddr:       ":0",
 		Version:           "test",
 	}
+}
 
+func wiringService(t *testing.T, mutate func(*Config)) (*service, *glabtest.Server) {
+	t.Helper()
+	gl := glabtest.New(t)
+	gl.Me = glab.User{ID: 99, Username: "gonk"}
+	cfg := wiringConfig(t, gl)
+	if mutate != nil {
+		mutate(&cfg)
+	}
 	svc, err := newService(context.Background(), cfg, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("newService = %v", err)
 	}
+	return svc, gl
+}
+
+// The issue sweep can be unplugged in one line -- delete `Issues: dp` from
+// newService -- and every unit test in pkg/intake stays green, because they all
+// call sweepIssues directly. That is the dead-but-tested shape this project
+// keeps rediscovering, so the wiring gets its own assertion at the seam where it
+// actually happens.
+func TestNewServiceWiresTheIssueSweep(t *testing.T) {
+	svc, gl := wiringService(t, nil)
 	if svc.Reconciler == nil {
 		t.Fatal("no reconciler")
 	}
@@ -58,5 +66,36 @@ func TestNewServiceWiresTheIssueSweep(t *testing.T) {
 	if svc.Reconciler.BotUserID != gl.Me.ID {
 		t.Errorf("BotUserID = %d, want %d: without it the sweep triages the bot's own issues",
 			svc.Reconciler.BotUserID, gl.Me.ID)
+	}
+}
+
+// The blocklist is the only thing between a GitLab membership change and a
+// code-writing agent with a path to its own broker and gate (gonk-jn5). Same
+// unplug-in-one-line risk, same seam.
+func TestNewServiceWiresTheBlocklist(t *testing.T) {
+	svc, _ := wiringService(t, func(c *Config) {
+		c.BlockedProjects = []string{"agentic/gonk-project"}
+	})
+	if svc.Reconciler.Blocked.Empty() {
+		t.Fatal("Reconciler.Blocked is empty: the blocklist is parsed and then discarded, " +
+			"so a project on it would be reconciled and dispatched to anyway (gonk-jn5)")
+	}
+	if !svc.Reconciler.Blocked.Blocked(glab.Project{ID: 69, PathWithNamespace: "agentic/gonk-project"}) {
+		t.Error("the configured entry does not actually block the project it names")
+	}
+}
+
+// FAIL CLOSED AT STARTUP. An entry that will not parse is one that would block
+// less than the operator wrote, so the process must refuse to come up rather
+// than run with a list that silently protects nothing.
+func TestNewServiceRefusesToStartOnAnUnparseableBlocklist(t *testing.T) {
+	gl := glabtest.New(t)
+	gl.Me = glab.User{ID: 99, Username: "gonk"}
+	cfg := wiringConfig(t, gl)
+	// The dangerous typo: looks deliberate, parses as a name, matches nothing.
+	cfg.BlockedProjects = []string{"gonk-project"}
+
+	if _, err := newService(context.Background(), cfg, slog.New(slog.DiscardHandler)); err == nil {
+		t.Fatal("started with a blocklist entry that blocks nothing; it must fail closed")
 	}
 }
