@@ -282,7 +282,23 @@ if [ -z "${GONK_LITELLM_KEY_FILE:-}" ]; then
 	# it is the one channel Gas City leaves open, since resolved.Env comes from
 	# city/agent config. GC_WEBHOOK_ARG_LITELLM_KEY is accepted as a fallback for
 	# any non-gascity caller that does set it.
-	_key="${GONK_LITELLM_KEY:-${GC_WEBHOOK_ARG_LITELLM_KEY:-}}"
+	# PER-SESSION KEY WINS OVER THE STATIC ONE (gonk-8gb). GONK_LITELLM_KEY is a
+	# PER-INSTALL channel written into agent.toml at bootstrap; the project's own
+	# virtual key can only arrive per-session, because a project key is
+	# per-project and agent.toml is not. Preferring the static value meant every
+	# session used the install-wide key -- which was the proxy ADMIN key -- and
+	# the per-project budget the meter had provisioned was never consulted.
+	#
+	# The order matters more than it looks: dispatch now resolves the project key
+	# and fails closed if it cannot, so GC_WEBHOOK_ARG_LITELLM_KEY being present
+	# means the meter vouched for it. The static value is the fallback for a
+	# non-gascity caller that sets no per-session key at all.
+	_key="${GC_WEBHOOK_ARG_LITELLM_KEY:-${GONK_LITELLM_KEY:-}}"
+	if [ -n "${GC_WEBHOOK_ARG_LITELLM_KEY:-}" ]; then
+		log "using this session's per-project LiteLLM key"
+	elif [ -n "${GONK_LITELLM_KEY:-}" ]; then
+		log "WARNING: no per-session LiteLLM key; falling back to the static per-install key, which is NOT metered per project (gonk-8gb)"
+	fi
 	if [ -z "${_key}" ]; then
 		log "no LiteLLM key: set GONK_LITELLM_KEY_FILE, GONK_LITELLM_KEY, or GC_WEBHOOK_ARG_LITELLM_KEY -- refusing to start unauthenticated"
 		exit 1
