@@ -137,7 +137,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.Sink(ev) {
-		h.finish(w, event, OutcomeQueueFull, http.StatusOK)
+		// A full queue is the one drop we report as a FAILURE. Every other 200
+		// above means "handled": a duplicate really was handled, a bot comment
+		// really should be ignored. This one means we threw the event away.
+		//
+		// This used to be a 200, on the reasoning that "GitLab does not retry
+		// webhooks, and a 5xx only gets the hook disabled". HALF OF THAT IS
+		// MEASURABLY FALSE HERE. Checked 2026-09-07 against gitlab.orac.local
+		// 18.10.1 CE: project 75's stale hook 3 has TWENTY consecutive
+		// `internal error` deliveries recorded and is still
+		// alert_status=executable, disabled_until=null. This instance does not
+		// auto-disable a failing hook.
+		//
+		// The other half stands and is the real answer: GitLab does not retry,
+		// so a 503 does not get the event back either. What it buys is HONESTY
+		// -- the drop shows up in GitLab's own delivery log instead of being
+		// recorded there as success, so the two systems agree about what
+		// happened. Recovery is the reconciler's job, per spec 5.2:
+		// "Reconciliation is the correctness path; webhooks are the latency
+		// optimization."
+		h.finish(w, event, OutcomeQueueFull, http.StatusServiceUnavailable)
 		return
 	}
 	h.finish(w, event, OutcomeAccepted, http.StatusOK)
