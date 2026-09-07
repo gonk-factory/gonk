@@ -142,14 +142,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// really should be ignored. This one means we threw the event away.
 		//
 		// This used to be a 200, on the reasoning that "GitLab does not retry
-		// webhooks, and a 5xx only gets the hook disabled". HALF OF THAT IS
-		// MEASURABLY FALSE HERE. Checked 2026-09-07 against gitlab.orac.local
-		// 18.10.1 CE: project 75's stale hook 3 has TWENTY consecutive
-		// `internal error` deliveries recorded and is still
-		// alert_status=executable, disabled_until=null. This instance does not
-		// auto-disable a failing hook.
+		// webhooks, and a 5xx only gets the hook disabled".
 		//
-		// The other half stands and is the real answer: GitLab does not retry,
+		// THE AUTO-DISABLE HALF IS UNPROVEN, and I over-claimed it. On
+		// 2026-09-07 project 75's stale hook 3 had twenty consecutive
+		// `internal error` deliveries and still read alert_status=executable,
+		// which looked like proof that this instance never disables. It is not:
+		// that hook has since been deleted, no failing hook exists anywhere on
+		// the instance to re-check, and GitLab 18.10.1 CE documents project
+		// hooks failing four consecutive times as temporarily_disabled with
+		// backoff. Treat "it will not be disabled" as unverified.
+		//
+		// It does not change the answer, for two reasons that do hold. A
+		// temporary disable self-recovers. And reaching this line at all means
+		// sustaining a flood past a 256-deep channel drained by a dedicated
+		// goroutine -- if that is happening, a quiet 200 is the worse outcome.
+		//
+		// The rest stands and is the real answer: GitLab does not retry,
 		// so a 503 does not get the event back either. What it buys is HONESTY
 		// -- the drop shows up in GitLab's own delivery log instead of being
 		// recorded there as success, so the two systems agree about what

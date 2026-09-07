@@ -138,8 +138,25 @@ type Reconciler struct {
 	// the money is gone, and a backlog is not urgent. Capped, a backlog drains a
 	// few per pass and an operator has time to notice.
 	IssueSweepLimit int
-	Obs             Observer
-	Log             *slog.Logger
+	// IssueSweepMaxAge bounds how far back the sweep looks. Zero means
+	// DefaultIssueSweepMaxAge.
+	//
+	// THIS IS WHAT MAKES THE SWEEP A SAFETY NET RATHER THAN A BACKFILL. A LOST
+	// EVENT IS RECENT BY DEFINITION -- it was delivered, ACKed and dropped
+	// minutes ago. An issue nobody has touched in two months is not a lost
+	// event, it is backlog, and triaging it is a decision an operator should
+	// make deliberately rather than something a bug fix does on their behalf.
+	//
+	// Measured on project 75, 2026-09-07: unbounded, the first pass would have
+	// dispatched 57 orders against stale e2e issues dating to July -- 11.4M est
+	// tokens, 22.8% of that project's monthly budget, in under two hours.
+	// Bounded to 24h it dispatches 8, which are the ones that were actually
+	// lost. It also collapses the listing: `updated_after` is applied
+	// server-side, so a project with thousands of open issues is a page or two
+	// rather than fifty per pass.
+	IssueSweepMaxAge time.Duration
+	Obs              Observer
+	Log              *slog.Logger
 
 	BotUserID int64
 	HookURL   string // public webhook URL, WITHOUT the gen parameter
@@ -739,6 +756,11 @@ const DefaultIssueLabelPrefix = "gonk::"
 // in one.
 const DefaultIssueSweepLimit = 5
 
+// DefaultIssueSweepMaxAge is the recency bound. A day is comfortably longer
+// than any plausible outage-plus-restart window and comfortably shorter than
+// "the backlog".
+const DefaultIssueSweepMaxAge = 24 * time.Hour
+
 // sweepIssues is the ISSUE half of spec 5.2, and it exists because the spec's
 // central claim was only half true:
 //
@@ -776,7 +798,16 @@ func (r *Reconciler) sweepIssues(ctx context.Context, p glab.Project) (int, erro
 		return 0, nil
 	}
 
-	issues, err := r.GL.ListIssues(ctx, p.ID, glab.IssueListOptions{State: "opened"})
+	maxAge := r.IssueSweepMaxAge
+	if maxAge <= 0 {
+		maxAge = DefaultIssueSweepMaxAge
+	}
+	cutoff := time.Now().Add(-maxAge)
+
+	issues, err := r.GL.ListIssues(ctx, p.ID, glab.IssueListOptions{
+		State:        "opened",
+		UpdatedAfter: cutoff,
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -805,6 +836,14 @@ func (r *Reconciler) sweepIssues(ctx context.Context, p glab.Project) (int, erro
 			continue
 		}
 		if hasLabelPrefix(is.Labels, prefix) {
+			continue
+		}
+		// Belt and braces on the server-side bound. If `updated_after` is ever
+		// dropped -- an older GitLab, a proxy that strips query params -- the
+		// bound would silently vanish and the sweep would become the backfill it
+		// must not be. A filter that only works when the server cooperates is
+		// not a spend guard.
+		if !is.UpdatedAt.IsZero() && is.UpdatedAt.Before(cutoff) {
 			continue
 		}
 		r.Issues.Handle(ctx, &ghook.Event{

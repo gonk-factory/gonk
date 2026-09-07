@@ -3,6 +3,7 @@ package glab
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Each method here is getJSON (or paginate) over a request{...}, exactly like
@@ -67,6 +68,9 @@ func (c *Client) ListIssues(ctx context.Context, projectID int64, opts IssueList
 	}
 	if opts.Labels != "" {
 		q["labels"] = opts.Labels
+	}
+	if !opts.UpdatedAfter.IsZero() {
+		q["updated_after"] = opts.UpdatedAfter.UTC().Format(time.RFC3339)
 	}
 	return paginate[Issue](ctx, c, request{
 		method: "GET",

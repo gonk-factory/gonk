@@ -108,6 +108,10 @@ type MROptions struct {
 
 type Issue struct {
 	IID int64 `json:"iid"`
+	// UpdatedAt backs the sweep's recency bound. It is also checked
+	// client-side, because `updated_after` being silently ignored by a proxy or
+	// an older GitLab would turn the bound off without any error.
+	UpdatedAt time.Time `json:"updated_at"`
 	// Author exists for the reconciler's issue sweep. The webhook path gets its
 	// loop guard from the event payload's user (ghook.Handler.BotUserID); a swept
 	// issue has no event, so without this the sweep would happily triage an issue
@@ -129,6 +133,15 @@ type IssueOptions struct {
 type IssueListOptions struct {
 	State  string
 	Labels string
+	// UpdatedAfter bounds the listing server-side (GitLab's `updated_after`).
+	// Zero means unbounded.
+	//
+	// The reconciler's issue sweep depends on this, and not merely for
+	// efficiency: unbounded, its FIRST pass against a project with history
+	// treats every stale open issue as a lost event. Measured on project 75,
+	// 2026-09-07 -- 68 open issues, 57 of them untriaged and non-bot, dating
+	// back to July. Bounded to 24h: 8.
+	UpdatedAfter time.Time
 }
 
 type CommitAction struct {
