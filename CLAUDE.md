@@ -45,6 +45,22 @@ every assumption that produced the gaps. Nothing catches the missing third.
 4. **Report gaps as gaps.** Partial implementation is a normal outcome and must
    be stated plainly, per-item, not averaged into "mostly done".
 
+**BE STRICT ON YOUR OWN WORK — grade it the way you would grade someone else's.**
+The default failure is not dishonesty, it is generosity: the author knows what
+each line was *meant* to do, so a line that looks right reads as working. That is
+precisely the judgement a verifier does not have and why it must not be the
+author who makes it.
+
+This is measured, not theoretical. On 2026-09-07 this session implemented a
+five-item plan, reviewed it, and reported it complete. A fresh agent checking the
+same plan found **four of the five items PARTIAL**, including a `set -e` bug that
+silently reintroduced a defect fixed hours earlier, and a session capability
+being written into a log the same commit told operators to read. Every one was
+visible in the diff.
+
+So: when tempted to write "done", ask what a reviewer who distrusts you would
+demand as evidence — and go get that instead.
+
 **Verification means observing the thing, not the proxy for it.** A green test
 run is not evidence a feature works in the deployment; a deployed image is not
 evidence the code path executes; a code path executing is not evidence it changed

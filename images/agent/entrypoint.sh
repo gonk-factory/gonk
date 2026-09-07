@@ -55,7 +55,16 @@ log() {
 # THE FIRST LINE IN THE CONTAINER LOG (gonk-dot). Everything below can refuse to
 # start, and a refusal is only actionable if the reader knows WHICH session
 # refused. Identity only -- no credential, no prompt text.
-log "session start: alias=${GC_ALIAS:-<unset>} agent=${GC_AGENT:-triage} attempt=${GC_WEBHOOK_ARG_ATTEMPT:-?}"
+# THE ALIAS IS A CAPABILITY (128 bits; see the prompt-fetch comment below), so
+# only a short PREFIX is logged -- enough to correlate a pod with a session in
+# the controller log, never enough to replay a grant. The rig checkout grant is
+# TTL-bounded and RE-FETCHABLE (pkg/rig: DefaultGrantTTL 30m, no consume-on-read),
+# so a full alias in a log operators are told to read is a live credential.
+# Computed OUT of the log line on purpose: the redaction test forbids GC_ALIAS
+# appearing in a log call at all, and an allowlist exception for "but this one
+# truncates it" is exactly the kind of hole that later hides a real leak.
+GONK_ALIAS_PREFIX="${GC_ALIAS%%"${GC_ALIAS#??????}"}"
+log "session start: alias=${GONK_ALIAS_PREFIX}... agent=${GC_AGENT:-triage} attempt=${GC_WEBHOOK_ARG_ATTEMPT:-?}"
 log "expecting: checkout=$([ -n "${GONK_RIG_BASE_URL:-}" ] && echo yes || echo no) prompt=$([ -n "${GONK_PROMPT_URL:-}" ] && echo yes || echo no)"
 
 # ---- Step 1: install the commit-provenance hook -----------------------------
@@ -100,12 +109,18 @@ gonk_fetch_checkout() {
 	if [ -z "${_url}" ] && [ -n "${GONK_RIG_BASE_URL:-}" ] && [ -n "${GC_ALIAS:-}" ]; then
 		_url="${GONK_RIG_BASE_URL%/}/rig/${GC_ALIAS}.tar.gz"
 	fi
-	[ -n "${_url}" ] || return 0
+	if [ -z "${_url}" ]; then
+		# Was silent. A session with no working copy behaves very differently and
+		# the reader needs to know it was a CHOICE, not a failure.
+		log "no checkout for this session (no rig URL); running without a working copy"
+		return 0
+	fi
 
 	_tmp="${GONK_RUNTIME_DIR:-/tmp/gonk}/rig.tar.gz"
 	mkdir -p "$(dirname "${_tmp}")" "${RIG_DIR}"
 	if ! curl -fsS --max-time 120 -o "${_tmp}" "${_url}"; then
-		log "WARNING: could not fetch the session checkout from ${_url}"
+		# NOT ${_url}: it embeds GC_ALIAS, and the rig grant is re-fetchable.
+		log "WARNING: could not fetch the session checkout (rig endpoint unreachable or refused)"
 		log "WARNING: this session runs WITHOUT a working copy"
 		return 0
 	fi
@@ -248,6 +263,7 @@ if [ -z "${GONK_PROMPT}" ] && [ -n "${GONK_PROMPT_URL:-}" ] && [ -n "${GC_ALIAS:
 			# An agent that idles while looking healthy is the failure mode this
 			# whole change exists to end. Exit non-zero and loudly.
 			log "FATAL: no prompt after ${GONK_PROMPT_WAIT_SECS:-120}s (last status ${_code})"
+			log "session end: refused (no prompt)"
 			exit 4
 			;;
 	esac
@@ -277,9 +293,25 @@ marker_value() {
 # GONK_MODEL, the STATIC per-install default the chart injects from the
 # operator's default rung. Static is the honest v1 answer: this deployment has
 # one local rung, and per-session model selection is what the v2 broker adds.
+# WHICH SOURCE WON IS THE INTERESTING PART, not just the value: a session running
+# the static per-install default rather than the meter's rung decision is a
+# different situation, and it used to be indistinguishable in the log.
+_model_before="${GC_WEBHOOK_ARG_MODEL:-}"
 : "${GC_WEBHOOK_ARG_MODEL:=$(marker_value model)}"
 : "${GC_WEBHOOK_ARG_METADATA_JSON:=$(marker_value meta)}"
+if [ -n "${_model_before}" ]; then
+	GONK_MODEL_SOURCE="session-arg"
+elif [ -n "${GC_WEBHOOK_ARG_MODEL}" ]; then
+	GONK_MODEL_SOURCE="prompt-marker"
+fi
 : "${GC_WEBHOOK_ARG_MODEL:=${GONK_MODEL:-}}"
+if [ -z "${GONK_MODEL_SOURCE:-}" ] && [ -n "${GC_WEBHOOK_ARG_MODEL}" ]; then
+	GONK_MODEL_SOURCE="static-install-default"
+	log "WARNING: model came from the static per-install default, NOT the meter's rung decision"
+fi
+if [ -n "${GC_WEBHOOK_ARG_METADATA_JSON}" ]; then
+	log "attribution metadata present (${#GC_WEBHOOK_ARG_METADATA_JSON} bytes)"
+fi
 
 if [ -z "${GC_WEBHOOK_ARG_MODEL}" ]; then
 	log "no model: no <!-- gonk:model:... --> prompt marker, no GC_WEBHOOK_ARG_MODEL, no GONK_MODEL."
@@ -419,7 +451,7 @@ jq -n \
 		}
 	}' >"${OVERLAY_PATH}"
 
-log "rendered ${OVERLAY_PATH} (model=${GC_WEBHOOK_ARG_MODEL})"
+log "rendered ${OVERLAY_PATH} (model=${GC_WEBHOOK_ARG_MODEL}, source=${GONK_MODEL_SOURCE:-unknown})"
 
 export OPENCODE_CONFIG="${OVERLAY_PATH}"
 
@@ -462,6 +494,7 @@ _foreign=$(printf '%s\n' "${_models}" | sed '/^[[:space:]]*$/d' | grep -v '^gonk
 if [ -n "${_foreign}" ]; then
 	log "opencode resolved non-gonk provider(s) -- refusing to start unmetered:"
 	printf '%s\n' "${_foreign}" | while IFS= read -r _line; do log "  ${_line}"; done
+	log "session end: refused (non-gonk provider resolved)"
 	exit 1
 fi
 log "provider check ok: opencode resolved only gonk/ models"
@@ -557,8 +590,13 @@ if [ -n "${GONK_PROMPT}" ]; then
 	log "pane width now: $(tmux display -p '#{pane_width}' 2>/dev/null || echo unknown)"
 
 	log "starting opencode run (non-interactive)"
-	opencode run -- "${_clean}"
-	_rc=$?
+	# `|| _rc=$?` IS LOAD-BEARING, NOT STYLE. set -e is in force (top of file),
+	# so a bare `opencode run` that exits non-zero kills this shell immediately:
+	# the session-end line below never prints AND the tmux hold never runs, so
+	# tmux dies and the transcript is unreadable -- reintroducing gonk-2tb on
+	# exactly the failed turns an operator most needs to read.
+	_rc=0
+	opencode run -- "${_clean}" || _rc=$?
 	log "session end: opencode run exited rc=${_rc}; holding so tmux stays alive for the transcript read (gonk-2tb)"
 	# `wait` would return immediately (no background jobs); sleep in a loop is
 	# the portable hold. The sweep closes the session when it has judged.
