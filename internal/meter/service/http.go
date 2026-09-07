@@ -871,6 +871,10 @@ func (h *handler) takePrompt(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusOK, meterapi.PromptResponse{
 			Prompt: p.Prompt, Model: p.Model, Metadata: p.Metadata,
+			// The session's project key (gonk-8gb). Returned only on the
+			// one-shot TAKE, never on the status route, so a key is handed out
+			// exactly once to whoever holds the alias capability.
+			LiteLLMKey: p.LiteLLMKey,
 		})
 	}
 }

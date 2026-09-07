@@ -301,6 +301,7 @@ func TestDispatchParksOnDefer(t *testing.T) {
 	store := beadstore.NewMemory()
 	retry := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 		Decision: meterapi.DecisionDefer, Reason: meterapi.ReasonQuietHours,
 		Detail: "quiet hours until 07:00", RetryAfter: retry, Attempt: 1,
 	}}
@@ -328,6 +329,7 @@ func TestDispatchStopsOnDeny(t *testing.T) {
 	gc := gcapitest.New(t)
 	store := beadstore.NewMemory()
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 		Decision: meterapi.DecisionDeny, Reason: meterapi.ReasonLadderExhausted,
 		Detail: "2 rungs, 2 gate failures", Attempt: 3,
 	}}
@@ -361,6 +363,7 @@ func TestDispatchAlwaysDecidesEvenWhenVarsCarryARung(t *testing.T) {
 	gc := gcapitest.New(t)
 	store := beadstore.NewMemory()
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 		Decision: meterapi.DecisionRun, Rung: "expensive", Model: "m2", Attempt: 2, ReservationID: "rsv-2",
 		Metadata: map[string]string{"gonk_rung": "expensive"},
 	}}
@@ -407,8 +410,12 @@ func TestDispatchAlwaysDecidesEvenWhenVarsCarryARung(t *testing.T) {
 // Meter owns ladder state (Plan 03, Decision 2). A caller-supplied attempt is a
 // forgery vector: raise it and you skip straight to the most expensive rung.
 func TestDispatchNeverSendsAnAttempt(t *testing.T) {
-	fm := &fakeMeter{resp: meterapi.DecideResponse{Decision: meterapi.DecisionDefer, Attempt: 1, RetryAfter: time.Now().Add(time.Hour)}}
+	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		KeyRef: meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"}, Decision: meterapi.DecisionDefer, Attempt: 1, RetryAfter: time.Now().Add(time.Hour)}}
 	_ = runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row, and dispatch fails
+		// closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gcapitest.New(t).Client("gonk-city"),
 		Store: beadstore.NewMemory(), Args: baseDispatchArgs(),
 	})
@@ -463,7 +470,8 @@ func TestDispatchRefusesWithoutCity(t *testing.T) {
 // An unknown trigger pours nothing -- orderForTrigger is a closed set.
 func TestDispatchRefusesUnknownTrigger(t *testing.T) {
 	gc := gcapitest.New(t)
-	fm := &fakeMeter{resp: meterapi.DecideResponse{Decision: meterapi.DecisionRun, Rung: "cheap", Attempt: 1}}
+	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		KeyRef: meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"}, Decision: meterapi.DecisionRun, Rung: "cheap", Attempt: 1}}
 	args := baseDispatchArgs()
 	args.Trigger = "something-new"
 	code := runDispatch(context.Background(), dispatchDeps{

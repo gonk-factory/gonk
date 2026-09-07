@@ -46,11 +46,15 @@ func TestRoundTripLeavesNoLiveSessionBehind(t *testing.T) {
 	var alias string
 
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
 	}}
 	args := baseDispatchArgs()
 	args.ProjectID = p.ID
 	if code := runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row, and dispatch fails
+		// closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store,
 		Forge: stubForge{iss: &glab.Issue{IID: 3, Title: "t", State: "opened"}},
 		Args:  args, SubmitAttempts: 3, SubmitBackoff: zeroBackoff,
@@ -158,6 +162,7 @@ func TestDispatchClosesTheSessionWhenPromptDeliveryFails(t *testing.T) {
 	// channel is gone (gonk-mzd) and never-fetched is its successor.
 	fm := &fakeMeter{
 		resp: meterapi.DecideResponse{
+			KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 			Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
 		},
 		neverFetched: true,
@@ -167,6 +172,9 @@ func TestDispatchClosesTheSessionWhenPromptDeliveryFails(t *testing.T) {
 	args.IssueIID = 7
 
 	code := runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row, and dispatch fails
+		// closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store,
 		Forge: stubForge{iss: &glab.Issue{IID: 7, Title: "t", State: "opened"}},
 		Args:  args, SubmitAttempts: 2, SubmitBackoff: zeroBackoff,

@@ -30,12 +30,17 @@ import (
 func TestDispatchStoresThePromptBeforeCreatingTheSession(t *testing.T) {
 	gc := gcapitest.New(t)
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
-		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
+		Decision: meterapi.DecisionRun,
+		// Without a KeyRef there is no project key to put on the prompt row.
+		KeyRef: meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"}, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
 	}}
 
 	fm.createdAtPut = func() int { return len(gc.Created) }
 
 	code := runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row now, and injection
+		// fails closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
 		Forge: promptTestForge(), Args: baseDispatchArgs(),
 		SubmitAttempts: 3, SubmitBackoff: zeroBackoff,
@@ -67,12 +72,17 @@ func TestDispatchFailsWhenThePromptIsNeverFetched(t *testing.T) {
 	gc := gcapitest.New(t)
 	fm := &fakeMeter{
 		resp: meterapi.DecideResponse{
-			Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
+			Decision: meterapi.DecisionRun,
+			// Without a KeyRef there is no project key to put on the prompt row.
+			KeyRef: meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"}, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
 		},
 		neverFetched: true,
 	}
 
 	code := runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row now, and injection
+		// fails closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
 		Forge: promptTestForge(), Args: baseDispatchArgs(),
 		SubmitAttempts: 2, SubmitBackoff: zeroBackoff,
@@ -93,12 +103,17 @@ func TestDispatchFailsWhenThePromptIsNeverFetched(t *testing.T) {
 func TestStoredPromptCarriesModelAndAttributionMetadata(t *testing.T) {
 	gc := gcapitest.New(t)
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
-		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "qwen3-6-35b",
+		Decision: meterapi.DecisionRun,
+		// Without a KeyRef there is no project key to put on the prompt row.
+		KeyRef: meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"}, Rung: "cheap", Model: "qwen3-6-35b",
 		Attempt: 1, ReservationID: "rsv-1",
 		Metadata: map[string]string{"gonk_project": "group/repo", "gonk_rung": "cheap"},
 	}}
 
 	if code := runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row now, and injection
+		// fails closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
 		Forge: promptTestForge(), Args: baseDispatchArgs(),
 		SubmitAttempts: 3, SubmitBackoff: zeroBackoff,
@@ -123,9 +138,14 @@ func TestSessionAliasCarriesANonceAndIsNotReusedAcrossDispatches(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		gc := gcapitest.New(t)
 		fm := &fakeMeter{resp: meterapi.DecideResponse{
-			Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
+			Decision: meterapi.DecisionRun,
+			// Without a KeyRef there is no project key to put on the prompt row.
+			KeyRef: meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"}, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
 		}}
 		if code := runDispatch(context.Background(), dispatchDeps{
+			// The session's project key rides the prompt row now, and injection
+			// fails closed without it (gonk-8gb).
+			Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 			Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
 			Forge: promptTestForge(), Args: baseDispatchArgs(),
 			SubmitAttempts: 3, SubmitBackoff: zeroBackoff,

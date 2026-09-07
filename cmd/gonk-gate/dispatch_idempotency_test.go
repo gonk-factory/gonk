@@ -33,6 +33,7 @@ import (
 func TestASecondDispatchForTheSameAttemptCreatesNoSecondSession(t *testing.T) {
 	gc := gcapitest.New(t)
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
 	}}
 	forge := stubForge{iss: &glab.Issue{IID: 3, Title: "t", State: "opened"}}
@@ -41,6 +42,9 @@ func TestASecondDispatchForTheSameAttemptCreatesNoSecondSession(t *testing.T) {
 
 	deps := func() dispatchDeps {
 		return dispatchDeps{
+			// The session's project key rides the prompt row, and dispatch fails
+			// closed without it (gonk-8gb).
+			Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 			Meter: meter, GC: gc.Client("gonk-city"), Store: store,
 			Forge: forge, Args: baseDispatchArgs(),
 		}
@@ -80,9 +84,13 @@ func TestARealReSlingOnTheNextAttemptStillGetsItsOwnSession(t *testing.T) {
 	store := beadstore.NewMemory()
 
 	fm1 := &fakeMeter{resp: meterapi.DecideResponse{
+		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
 	}}
 	if code := runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row, and dispatch fails
+		// closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm1.server(t)), GC: gc.Client("gonk-city"), Store: store,
 		Forge: forge, Args: baseDispatchArgs(),
 	}); code != 0 {
@@ -90,9 +98,13 @@ func TestARealReSlingOnTheNextAttemptStillGetsItsOwnSession(t *testing.T) {
 	}
 
 	fm2 := &fakeMeter{resp: meterapi.DecideResponse{
+		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 2, ReservationID: "rsv-2",
 	}}
 	if code := runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row, and dispatch fails
+		// closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm2.server(t)), GC: gc.Client("gonk-city"), Store: store,
 		Forge: forge, Args: baseDispatchArgs(),
 	}); code != 0 {

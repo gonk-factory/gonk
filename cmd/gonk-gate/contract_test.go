@@ -57,6 +57,7 @@ func TestGateSemanticsAreSharedWithIntake(t *testing.T) {
 func TestBothGatesSendTheSameBeadID(t *testing.T) {
 	anchor := intake.BeadAnchor(42, 3) // the exact value Gate 1 sends
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 		Decision: meterapi.DecisionDefer, Attempt: 1, RetryAfter: time.Now().Add(time.Hour),
 	}}
 	args := baseDispatchArgs()
@@ -64,6 +65,9 @@ func TestBothGatesSendTheSameBeadID(t *testing.T) {
 	args.BeadID = "gk-1a2b" // Gas City id differs ON PURPOSE
 
 	_ = runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row, and dispatch fails
+		// closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
 		Meter: meterClient(fm.server(t)), GC: gcapitest.New(t).Client("gonk-city"),
 		Store: beadstore.NewMemory(), Args: args,
 	})

@@ -308,6 +308,8 @@ type Prompt struct {
 	CreatedAt time.Time
 	FetchedAt time.Time // zero until taken
 	ExpiresAt time.Time
+	// LiteLLMKey is the project virtual key for this session (gonk-8gb).
+	LiteLLMKey string
 }
 
 // Trace is stored trajectory evidence for one (session, attempt): what a
