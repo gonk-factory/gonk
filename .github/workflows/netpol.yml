@@ -106,7 +106,11 @@ jobs:
       - name: probe both ways
         env:
           IMAGE: gonk-intake:ci
-        run: ./hack/netpol_enforcement_e2e.sh
+        # Invoked through bash rather than relying on the exec bit: this repo is
+        # checked out on a /mnt/c path where the mode does not always survive,
+        # and a contributor on Windows would hit the same thing. The mode is set
+        # in git as well; this is the belt to that braces.
+        run: bash hack/netpol_enforcement_e2e.sh
 
       - name: dump cluster state on failure
         if: failure()
