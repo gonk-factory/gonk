@@ -1,0 +1,243 @@
+# Package and attest gonk's images and chart.
+#
+# DRY RUN IS THE DEFAULT, and it is a real one: it builds, generates an SBOM,
+# scans, packages the chart, PUSHES to a throwaway `ci-<sha>` tag, and then
+# signs and attests that digest. Signing and provenance cannot be exercised
+# any other way -- both bind to a digest that exists in a registry -- so a
+# "dry run" that skipped them would leave the two most failure-prone steps
+# untested until the day they matter.
+#
+# What a dry run does NOT do: publish release tags, create a GitHub Release, or
+# touch anything a consumer would resolve. The repository and its packages are
+# private, so `ci-<sha>` is visible to nobody outside it.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build, scan, sign and attest a ci-<sha> tag without cutting a release"
+        type: boolean
+        default: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  # ghcr.io/gonk-factory/gonk/<image>
+  IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+
+jobs:
+  images:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write        # push to GHCR
+      id-token: write        # keyless signing + provenance
+      attestations: write    # actions/attest-build-provenance
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: gonk-agent
+            dockerfile: images/Dockerfile.agent
+          - image: gonk-controller
+            dockerfile: images/Dockerfile.controller
+          - image: gonk-intake
+            dockerfile: images/Dockerfile.intake
+          - image: gonk-meter
+            dockerfile: images/Dockerfile.meter
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: resolve the tag
+        id: tag
+        run: |
+          set -euo pipefail
+          . images/versions.env
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            # Not a release: a throwaway tag nobody resolves, so signing and
+            # attestation run against a real digest without publishing one.
+            tag="ci-$(printf %s "${{ github.sha }}" | cut -c1-12)"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "gonk_version=${GONK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "go_version=${GO_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "distroless=${DISTROLESS_BASE}" >> "$GITHUB_OUTPUT"
+          echo "debian=${DEBIAN_BASE:-}" >> "$GITHUB_OUTPUT"
+          echo "opencode=${OPENCODE_VERSION:-}" >> "$GITHUB_OUTPUT"
+          echo "bd=${BD_VERSION:-}" >> "$GITHUB_OUTPUT"
+          echo "dolt=${DOLT_VERSION:-}" >> "$GITHUB_OUTPUT"
+          echo "gascity=${GASCITY_REF:-}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # amd64 only for now, deliberately. These Dockerfiles build with the
+      # BUILDER's architecture (GitLab builds each arch natively on its own
+      # node), so a multi-arch buildx build would run the Go compile under QEMU.
+      # Making them cross-compile is a Dockerfile change with its own blast
+      # radius on the working GitLab pipeline; it is tracked separately rather
+      # than smuggled in here.
+      - name: build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ steps.tag.outputs.tag }}
+          build-args: |
+            GONK_TAG=${{ steps.tag.outputs.tag }}
+            GO_VERSION=${{ steps.tag.outputs.go_version }}
+            DISTROLESS_BASE=${{ steps.tag.outputs.distroless }}
+            DEBIAN_BASE=${{ steps.tag.outputs.debian }}
+            OPENCODE_VERSION=${{ steps.tag.outputs.opencode }}
+            BD_VERSION=${{ steps.tag.outputs.bd }}
+            DOLT_VERSION=${{ steps.tag.outputs.dolt }}
+            GASCITY_REF=${{ steps.tag.outputs.gascity }}
+            TARGETARCH=amd64
+          provenance: false   # attested explicitly below instead
+          sbom: false         # generated explicitly below instead
+
+      # SLSA build provenance, bound to the digest. This is the attestation that
+      # answers "which workflow, from which commit, built this exact image".
+      # NOTE FOR THE DRY RUN: GitHub's attestation actions also use Sigstore.
+      # For a PRIVATE repository GitHub keeps attestations private rather than
+      # writing them to the public log, but that is a claim to VERIFY in the
+      # dry-run output rather than take on trust -- check whether a public Rekor
+      # entry appears for this repository before making anything public.
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.image }}.spdx.json
+          upload-artifact: false
+
+      - name: attest the SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom-${{ matrix.image }}.spdx.json
+          push-to-registry: true
+
+      - name: sign the image (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign version >/dev/null 2>&1 || {
+            curl -fsSL -o /tmp/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
+            sudo install -m 0755 /tmp/cosign /usr/local/bin/cosign
+          }
+          # THE TRANSPARENCY LOG IS PUBLIC. Keyless cosign uploads a signature
+          # entry to Rekor by default, and Rekor is world-readable -- so signing
+          # a private repository's image with tlog upload publishes the
+          # repository name and the digest to a public log, which partly defeats
+          # keeping the repo private.
+          #
+          # So: a real release (a v* tag) uploads, because public verifiability
+          # is the entire point of signing a published artefact. A dry run does
+          # not, because nothing it produces is meant to be verifiable by a
+          # stranger. The signature is still made and still attached to the
+          # image either way, so the mechanism is exercised.
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            cosign sign --yes "${IMAGE_PREFIX}/${{ matrix.image }}@${DIGEST}"
+          else
+            cosign sign --yes --tlog-upload=false \
+              "${IMAGE_PREFIX}/${{ matrix.image }}@${DIGEST}"
+          fi
+
+      # Vulnerability scan. It does NOT gate the build: a new CVE in a base
+      # image would otherwise make an unrelated release fail, and the honest
+      # answer is a report someone reads, not a red X nobody can act on today.
+      # It is uploaded so the result is durable rather than scrollback.
+      - name: scan for vulnerabilities
+        continue-on-error: true
+        uses: anchore/scan-action@v5
+        id: scan
+        with:
+          image: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          fail-build: false
+          severity-cutoff: high
+          output-format: sarif
+
+      - name: upload scan + sbom
+        uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain-${{ matrix.image }}
+          path: |
+            sbom-${{ matrix.image }}.spdx.json
+            ${{ steps.scan.outputs.sarif }}
+          if-no-files-found: warn
+
+  chart:
+    name: package the chart
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      # The chart's version is sealed against its content (internal/buildgate,
+      # gonk-sjb), so packaging it is also a check that the seal is current.
+      - name: helm package
+        run: |
+          set -euo pipefail
+          helm package chart/gonk --destination dist/
+          ls -l dist/
+
+      - name: upload the chart
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: dist/*.tgz
+
+  summary:
+    name: what was produced
+    needs: [images, chart]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: report
+        run: |
+          {
+            echo "## release run"
+            echo
+            echo "| what | value |"
+            echo "|---|---|"
+            echo "| mode | ${{ github.ref_type == 'tag' && 'RELEASE' || 'dry run (ci-<sha> tag, nothing published)' }} |"
+            echo "| images | ${{ needs.images.result }} |"
+            echo "| chart | ${{ needs.chart.result }} |"
+            echo
+            echo "A dry run still pushes, signs and attests a throwaway \`ci-<sha>\` tag:"
+            echo "signing and provenance bind to a digest in a registry, so they cannot"
+            echo "be exercised without one. Nothing a consumer resolves is published."
+          } >> "$GITHUB_STEP_SUMMARY"
