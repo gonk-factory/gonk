@@ -116,17 +116,38 @@ jobs:
 
       # SLSA build provenance, bound to the digest. This is the attestation that
       # answers "which workflow, from which commit, built this exact image".
-      # NOTE FOR THE DRY RUN: GitHub's attestation actions also use Sigstore.
-      # For a PRIVATE repository GitHub keeps attestations private rather than
-      # writing them to the public log, but that is a claim to VERIFY in the
-      # dry-run output rather than take on trust -- check whether a public Rekor
-      # entry appears for this repository before making anything public.
+      # MEASURED 2026-09-07, and it settled a question rather than confirming a
+      # guess. I had recorded "GitHub keeps attestations private for a private
+      # repo -- verify it". The real answer is stronger: they are NOT AVAILABLE
+      # AT ALL on this plan.
+      #
+      #   Failed to persist attestation: Feature not available for the
+      #   gonk-factory organization. To enable this feature, please upgrade the
+      #   billing plan, or make this repository public.
+      #
+      # So the attestation steps are gated on visibility. While the repo is
+      # private they SKIP rather than fail, which lets the rest of the
+      # supply-chain path -- SBOM, signing, scanning -- actually get exercised;
+      # a hard failure here left all of that untested. When the repo goes
+      # public they switch on by themselves, with no edit and nothing to
+      # remember.
+      #
+      # THE CONSEQUENCE IS WORTH STATING PLAINLY: provenance and SBOM
+      # attestations are UNTESTED until the repo is public. The first public
+      # release is therefore also the first real exercise of them, and should be
+      # treated as such rather than assumed to work.
       - name: attest build provenance
+        if: github.event.repository.visibility == 'public'
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+      - name: note that attestations were skipped
+        if: github.event.repository.visibility != 'public'
+        run: |
+          echo "::notice::Provenance and SBOM ATTESTATIONS SKIPPED -- GitHub does not offer them for a private repository on this plan. The SBOM is still generated and uploaded, and the image is still signed. Attestation activates automatically when this repository becomes public, and will be exercised for the first time then."
 
       - name: generate SBOM
         uses: anchore/sbom-action@v0
@@ -137,6 +158,7 @@ jobs:
           upload-artifact: false
 
       - name: attest the SBOM
+        if: github.event.repository.visibility == 'public'
         uses: actions/attest-sbom@v2
         with:
           subject-name: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
