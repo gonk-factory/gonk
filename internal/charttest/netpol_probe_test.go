@@ -49,35 +49,58 @@ func TestProbeIsNotMistakableForAnAgentSession(t *testing.T) {
 	}
 }
 
-// The legs are the whole design. Two ports on ONE destination pod, so the only
-// difference between the permitted and forbidden legs is the port the policy
-// names -- legs differing in namespace, subnet or NAT path prove nothing. Plus
-// one pod the policy never names, to separate a CNI that enforces WHICH PODS but
-// ignores WHICH PORTS from one that enforces neither.
-func TestProbeLegsMatchTheAgentPolicy(t *testing.T) {
+// The legs are the whole design, and the ALLOW leg has a constraint that is
+// easy to miss: NetworkPolicy is enforced on EGRESS AT THE SOURCE and on INGRESS
+// AT THE DESTINATION, so a leg is reachable only if BOTH say yes.
+//
+// The probe originally used gonk-intake:9090 because the agent's egress rule
+// names it -- and that rule is DEAD: intake's own policy admits only the traefik
+// and monitoring namespaces. On orac, which enforces nothing, the leg connected
+// and the probe looked fine. On a cluster that enforces, it would have failed
+// and the probe would have reported INCONCLUSIVE on a perfectly good cluster.
+//
+// So this test asserts the end-to-end property, not the egress half.
+func TestProbeAllowLegIsPermittedAtBothEnds(t *testing.T) {
 	out := Render(t, Minimum()...)
-	o := MustObject(t, out, "Pod", probePod)
+	probe := MustObject(t, out, "Pod", probePod)
+	agent := MustObject(t, out, "NetworkPolicy", "gonk-agent")
+	meter := MustObject(t, out, "NetworkPolicy", "gonk-meter")
 
-	for _, want := range []string{
-		"gonk-intake-internal:9090", // permitted: the policy names intake on the private port
-		"gonk-intake:8080",          // forbidden: SAME pod, port not named
-		"gonk-controller:9443",      // forbidden: pod not named at all
-	} {
-		if !strings.Contains(o.Doc, want) {
-			t.Errorf("probe does not target %s", want)
+	if !strings.Contains(probe.Doc, "gonk-meter:8080") {
+		t.Fatalf("the allow leg does not target gonk-meter:8080.\n"+
+			"It must be a destination BOTH policies permit; gonk-intake:9090 is not one, "+
+			"because intake's ingress admits only traefik and monitoring.\nprobe args:\n%s", probe.Doc)
+	}
+	// Source side: the agent may egress to the meter on 8080.
+	if !strings.Contains(agent.Doc, "component: meter") {
+		t.Error("the agent egress policy no longer names the meter, so the allow leg is not permitted at the source")
+	}
+	// Destination side: the meter admits the agent. THIS is the half that was
+	// missing, and the half that makes the leg actually work.
+	if !strings.Contains(meter.Doc, "app: gc-agent") {
+		t.Error("the meter ingress policy no longer admits app=gc-agent, so the allow leg " +
+			"would be blocked at the destination and the probe would report INCONCLUSIVE " +
+			"on a cluster that enforces correctly")
+	}
+}
+
+// The denied legs must be destinations the agent's egress does NOT name -- one
+// differing by port, one by pod, so a CNI that enforces pods but ignores ports
+// is distinguishable from one that enforces neither.
+func TestProbeDenyLegsAreNotPermitted(t *testing.T) {
+	out := Render(t, Minimum()...)
+	probe := MustObject(t, out, "Pod", probePod)
+	agent := MustObject(t, out, "NetworkPolicy", "gonk-agent")
+
+	for _, want := range []string{"gonk-intake:8080", "gonk-controller:9443"} {
+		if !strings.Contains(probe.Doc, want) {
+			t.Errorf("probe does not target the denied destination %s", want)
 		}
 	}
-
-	// And the policy must actually say what the legs assume. If someone widens
-	// the agent policy to allow intake:8080, the deny leg silently becomes a
-	// second allow leg and the probe reports NOT ENFORCED on a healthy cluster.
-	pol := MustObject(t, out, "NetworkPolicy", "gonk-agent")
-	if !strings.Contains(pol.Doc, "port: 9090") {
-		t.Error("the agent policy no longer permits intake:9090, so the probe's ALLOW leg is wrong")
-	}
-	if strings.Contains(pol.Doc, "port: 8080") && strings.Contains(pol.Doc, "component: intake") {
-		// meter:8080 is legitimately allowed; only an intake:8080 rule breaks us.
-		t.Log("note: the agent policy mentions 8080 -- confirm it is meter, not intake")
+	// The agent policy must not name the controller at all, or the L3 leg is
+	// testing an allowed destination and would always look "not enforced".
+	if strings.Contains(agent.Doc, "component: controller") {
+		t.Error("the agent egress policy now names the controller, so the L3 deny leg is no longer denied")
 	}
 }
 

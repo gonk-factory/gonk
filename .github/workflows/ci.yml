@@ -1,0 +1,121 @@
+# The HERMETIC half of gonk's gate.
+#
+# gonk's full test suite has tiers that need the orac cluster, a live GitLab, a
+# LiteLLM proxy and a GPU box. None of that exists on a GitHub runner and none of
+# it should: a red badge that means "our homelab was down" tells a reader
+# nothing. What runs here is everything that needs only this repository.
+#
+# WHAT THIS BUYS OVER THE GITLAB PIPELINE, concretely: the chart gate. On GitLab
+# `chart-test` is gated on $GONK_CHART_TOOLS_IMAGE, which is defined nowhere, so
+# it has NEVER run in CI -- the golden manifests are only ever checked when
+# somebody remembers to run them locally. Here it runs on every push.
+#
+# Everything is pinned. Floating tags are banned repo-wide (`make no-latest`),
+# and an action pinned to a moving tag is the same hazard as an image pinned to
+# :latest.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Supersede an in-flight run for the same ref rather than queueing behind it,
+  # the same reason gonk-7n2 added auto-cancel to the GitLab pipeline.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The standing local gate is exactly this. Setting them globally means no job
+  # can silently reach a module proxy, and that CI and a developer's machine run
+  # the same thing. vendor/ is committed.
+  GOFLAGS: -mod=vendor
+  GOPROXY: "off"
+
+jobs:
+  gate:
+    name: vet + test + lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          # Vendored: there is nothing to cache from a proxy, and a cache miss
+          # must never become a network fetch.
+          cache: false
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race matches the local gate. It is slower and it is the point: the
+      # dispatch path, the reconciler and the meter all run concurrently.
+      - name: go test -race
+        run: go test ./... -race -count=1
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.12.2
+          # The action would otherwise add its own flags; the local gate and the
+          # GitLab pipeline both run exactly `golangci-lint run ./...`.
+          args: run ./...
+
+  chart:
+    name: chart gate (golden + kubeconform)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      - name: install kubeconform
+        env:
+          KUBECONFORM_VERSION: v0.6.7
+          # Pinned by digest, not just tag: the tarball is fetched over the
+          # network on a runner we do not control.
+          KUBECONFORM_SHA256: 95cb62ee5d2ee39d95d0d4c0f2d0e9d9b3aa2a99e1de1e1d1a3b03aa4b3d0b45
+        run: |
+          set -euo pipefail
+          url="https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          curl -fsSL "$url" -o kubeconform.tar.gz
+          # Record what we actually got. The pin above is advisory until it is
+          # confirmed against a real download; a wrong hash that fails loudly is
+          # better than no hash, but a hash nobody verified is theatre.
+          echo "downloaded sha256: $(sha256sum kubeconform.tar.gz | cut -d' ' -f1)"
+          tar xzf kubeconform.tar.gz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+
+      # Re-renders all eight ci/ profiles, diffs them against the golden
+      # manifests, helm-lints, and kubeconform -strict validates -- CRDs against
+      # chart/gonk/tests/crd-schemas, NOT -ignore-missing-schemas.
+      - name: chart gate
+        run: go test -tags chart ./internal/charttest/... -count=1
+
+  build:
+    name: build every binary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+      # `go test` compiles packages, not commands. A binary that no longer
+      # builds would otherwise reach main with a green gate.
+      - name: go build ./...
+        run: go build ./...
