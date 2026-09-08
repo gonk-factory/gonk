@@ -1,0 +1,116 @@
+# Prove the gonk-agent egress policy is CORRECT, on clusters that enforce it.
+#
+# This gate exists because NOWHERE ELSE CAN RUN IT (gonk-v47):
+#   * orac runs flannel with no policy controller, so its NetworkPolicies are
+#     accepted and enforced by nothing -- `helm test gonk` measures exactly that
+#     and correctly reports NOT ENFORCED there (gonk-dku);
+#   * the GitLab runner's k8s executor is privileged=false, so no kind, no k3s,
+#     no DinD -- which is why that pipeline builds images with kaniko;
+#   * this workstation has k3d but only a podman shim, and k3d wants real Docker.
+# A GitHub runner has real Docker. That is the whole reason for the mirror.
+#
+# TWO CNIs ON PURPOSE. k3s bundles kube-router, which REJECTS a denied
+# connection (ECONNREFUSED); Calico DROPS it (timeout). The probe's verdict is
+# differential and must not depend on which -- a unit test asserts that against
+# fake dialers, and this asserts it against the real implementations. If the
+# probe ever starts keying on the errno, one of these two goes red.
+name: netpol-enforcement
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: netpol-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  enforce:
+    name: ${{ matrix.cni }} enforces the agent policy
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cni: k3s-kube-router   # rejects: ECONNREFUSED
+          - cni: kind-calico       # drops: timeout
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      # The probe is a subcommand of gonk-intake, so the image under test is the
+      # one that ships. Built here rather than pulled: registry.orac.local is a
+      # private LAN address and unreachable from a GitHub runner.
+      - name: build the gonk-intake image
+        env:
+          GOFLAGS: -mod=vendor
+          GOPROXY: "off"
+        run: |
+          set -euo pipefail
+          . images/versions.env
+          docker build -f images/Dockerfile.intake \
+            --build-arg GO_VERSION="${GO_VERSION}" \
+            --build-arg DISTROLESS_BASE="${DISTROLESS_BASE}" \
+            --build-arg TARGETARCH=amd64 \
+            --build-arg GONK_TAG=ci \
+            -t gonk-intake:ci .
+
+      - name: create a cluster that ENFORCES NetworkPolicy (k3s / kube-router)
+        if: matrix.cni == 'k3s-kube-router'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/v5.7.4/install.sh | TAG=v5.7.4 bash
+          # k3s ships kube-router's NetworkPolicy controller and enables it by
+          # default; --disable-network-policy would turn this gate into theatre.
+          k3d cluster create gonk --agents 0 --wait
+          k3d image import gonk-intake:ci -c gonk
+          kubectl wait --for=condition=Ready nodes --all --timeout=180s
+
+      - name: create a cluster that ENFORCES NetworkPolicy (kind / Calico)
+        if: matrix.cni == 'kind-calico'
+        run: |
+          set -euo pipefail
+          go install sigs.k8s.io/kind@v0.24.0
+          # kindnet does NOT implement NetworkPolicy, so it is disabled and
+          # Calico installed in its place. Leaving kindnet on would produce a
+          # cluster that silently enforces nothing -- exactly orac's failure.
+          cat > /tmp/kind.yaml <<EOF
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          networking:
+            disableDefaultCNI: true
+            podSubnet: "192.168.0.0/16"
+          EOF
+          "$(go env GOPATH)/bin/kind" create cluster --name gonk --config /tmp/kind.yaml --wait 120s
+          kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.2/manifests/calico.yaml
+          kubectl -n kube-system rollout status daemonset/calico-node --timeout=300s
+          kubectl wait --for=condition=Ready nodes --all --timeout=300s
+          "$(go env GOPATH)/bin/kind" load docker-image gonk-intake:ci --name gonk
+
+      # Runs the probe twice: once with NO policies (must say NOT ENFORCED) and
+      # once with the chart's policies applied (must say ENFORCED). The negative
+      # control is what stops a probe that always says ENFORCED passing quietly.
+      - name: probe both ways
+        env:
+          IMAGE: gonk-intake:ci
+        run: ./hack/netpol_enforcement_e2e.sh
+
+      - name: dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl -n gonk-netpol-e2e get pods,svc,netpol -o wide || true
+          kubectl -n gonk-netpol-e2e describe pods || true
+          kubectl -n gonk-netpol-e2e logs -l app=gc-agent --tail=100 || true

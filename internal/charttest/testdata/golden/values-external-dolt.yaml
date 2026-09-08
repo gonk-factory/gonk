@@ -1885,7 +1885,7 @@ spec:
       args:
         - netpol-probe
         - -allow
-        - "gonk-intake-internal:9090"
+        - "gonk-meter:8080"
         - -deny
         - "gonk-intake:8080"
         - -deny-l3

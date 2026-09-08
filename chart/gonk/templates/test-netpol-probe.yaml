@@ -83,15 +83,30 @@ spec:
       args:
         - netpol-probe
         {{- /*
-        ONE DESTINATION POD, TWO PORTS. gonk-intake listens on 9090 (private)
-        and 8080 (public) in the same container, and the agent policy permits
-        the private port only. Same pod, same node, same route, same DNS zone --
-        the ONLY difference between these two legs is the port the policy names,
-        which is what makes the allow leg a valid control for the deny leg.
-        Legs that differ in namespace, subnet or NAT path prove nothing.
+        THE ALLOW LEG MUST BE PERMITTED AT BOTH ENDS, and that is a narrower
+        constraint than it looks. NetworkPolicy is enforced on egress AT THE
+        SOURCE and on ingress AT THE DESTINATION, so a leg is only reachable if
+        both say yes.
+        
+        meter:8080 is the one pair that qualifies: the agent policy permits
+        egress to component=meter on 8080, and the meter policy permits ingress
+        from app=gc-agent on 8080. Checked, not assumed.
+        
+        gonk-intake:9090 does NOT qualify, even though the agent's egress rule
+        names it: the intake policy admits only the traefik and monitoring
+        namespaces, so that egress rule is dead and a probe using it would report
+        INCONCLUSIVE on a cluster that enforces correctly. That inconsistency is
+        filed as its own bug; do not "fix" it by pointing this leg back at it.
+        
+        THE COST, stated because it weakens the design: there is no single pod
+        with both a permitted and a forbidden port that is also ingress-permitted,
+        so the two legs differ in POD as well as port. The allow leg still proves
+        the probe has working networking and that policy permits something; it no
+        longer isolates "ignores ports" from "ignores pods" on its own. The L3
+        leg below is what preserves that distinction.
         */}}
         - -allow
-        - {{ printf "gonk-intake-internal:%d" (int .Values.intake.ports.private) | quote }}
+        - {{ printf "gonk-meter:%d" (int .Values.meter.port) | quote }}
         - -deny
         - {{ printf "gonk-intake:%d" (int .Values.intake.ports.public) | quote }}
         {{- /*
