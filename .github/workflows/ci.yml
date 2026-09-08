@@ -67,9 +67,12 @@ jobs:
         uses: golangci/golangci-lint-action@v7
         with:
           version: v2.12.2
-          # The action would otherwise add its own flags; the local gate and the
-          # GitLab pipeline both run exactly `golangci-lint run ./...`.
-          args: run ./...
+          # NO `run` HERE. The action supplies it, so `args: run ./...` becomes
+          # `golangci-lint run run ./...` and the second `run` is read as a path:
+          # "typechecking error: stat .../run: directory not found", exit 7. The
+          # effective command is `golangci-lint run ./...`, identical to
+          # `make lint` and to the GitLab pipeline.
+          args: ./...
 
   chart:
     name: chart gate (golden + kubeconform)
