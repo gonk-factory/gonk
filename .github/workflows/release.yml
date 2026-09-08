@@ -242,9 +242,70 @@ jobs:
           name: helm-chart
           path: dist/*.tgz
 
+  publish:
+    name: cut the GitHub Release
+    needs: [images, chart]
+    # ONLY on a v* tag. A dry run must never create a Release -- that is the one
+    # artefact a stranger resolves, and the difference between "we tested the
+    # pipeline" and "we shipped".
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # create the Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: collect the artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          find artefacts -type f | sort
+          cat > /tmp/notes.md <<'NOTES'
+          ## What this is
+
+          gonk is a self-hosted software factory: forge webhooks in, triaged
+          issues and reviewable changes out, with every model call metered
+          against a per-project budget.
+
+          ## Supply chain
+
+          Every image is signed and carries two attestations, verifiable without
+          trusting this text:
+
+              gh attestation verify oci://ghcr.io/gonk-factory/gonk/gonk-intake:TAG                 --owner gonk-factory
+              cosign verify ghcr.io/gonk-factory/gonk/gonk-intake:TAG                 --certificate-identity-regexp '^https://github.com/gonk-factory/gonk/'                 --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+          SLSA build provenance (slsa.dev/provenance/v1) and an SPDX SBOM
+          (spdx.dev/Document/v2.3) are attached to each image digest.
+
+          ## Known gaps, stated rather than omitted
+
+          NetworkPolicies ship with this chart and are **not enforced on every
+          cluster** -- they are enforced only if your CNI implements them.
+          Do not take our word for it:
+
+              helm test gonk -n <namespace>
+
+          reports ENFORCED or NOT ENFORCED for your cluster. On the maintainers'
+          own cluster it currently reports NOT ENFORCED, because it runs flannel
+          with no policy controller. The policies themselves are verified correct
+          against kube-router and Calico in CI.
+
+          Open security items are tracked in the repository's issue history.
+          NOTES
+          sed -i "s/TAG/${TAG}/g" /tmp/notes.md
+          gh release create "$TAG"             --repo "${{ github.repository }}"             --title "$TAG"             --notes-file /tmp/notes.md             $(find artefacts -type f -name '*.tgz' -o -name '*.spdx.json' | tr '\n' ' ')
+
   summary:
     name: what was produced
-    needs: [images, chart]
+    needs: [images, chart, publish]
     if: always()
     runs-on: ubuntu-24.04
     steps:
