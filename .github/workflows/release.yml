@@ -80,6 +80,11 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # Suppress the build-record artefact. It is telemetry nobody consumes here
+      # and it is the thing the release job tripped over.
+      - name: quieten the docker build record
+        run: echo "DOCKER_BUILD_RECORD_UPLOAD=false" >> "$GITHUB_ENV"
+
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -255,10 +260,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # BY PATTERN, not "everything". docker/build-push-action also uploads its
+      # own `<owner>~<repo>~<id>.dockerbuild` build records, and a bare
+      # download-artifact tries to fetch those too -- which is what failed the
+      # first real release: "Unable to download and extract artifact: Artifact
+      # download failed after 5 retries", with every artefact present and
+      # healthy. They are build telemetry, not release material.
       - name: collect the artefacts
         uses: actions/download-artifact@v4
         with:
+          pattern: "{helm-chart,supply-chain-*}"
           path: artefacts
+          merge-multiple: true
 
       - name: create the release
         env:
