@@ -84,7 +84,9 @@ and `/organization/list` to `0` after each run.
   ignored. Depth is exactly **org > team > key** — three tiers for GitLab's four
   levels.
 - **M12.** A key moves between teams via `/key/update {"team_id": B}` without
-  reissue; the same plaintext still authenticates.
+  reissue; the same plaintext still authenticates. **This plan deliberately does
+  not use it** — see §2.1. Recorded only so a future reader knows the capability
+  exists and that declining it was a choice.
 - **M13.** `/key/list?team_id=X&return_full_object=true` returns full objects
   carrying **`token`** (the hash) and **`created_at` at millisecond precision**
   (two keys 14 ms apart were distinguishable). Note the original gonk-bvy
@@ -125,7 +127,7 @@ GitLab instance        -> gonk                   instance ceiling
 
 ```
 organization_id = "gonk-" + <instance-slug> + "-g" + <numeric top-level group id>
-team_id         = "gonk-" + <instance-slug> + "-p" + <numeric project id>
+team_id         = "gonk-" + <instance-slug> + "-g" + <group id> + "-p" + <project id>
 ```
 
 Both are deterministic, public, and **injective** — numeric GitLab ids are unique
@@ -133,6 +135,37 @@ per instance and contain no separators, so `a/b` and `a-b` no longer collide.
 **gonk-uom2 becomes unreachable**, not merely fixed. Because both ids are
 caller-supplied (M1, M2), there is no server-generated UUID to hand back into
 gitops, and no chicken-and-egg on first install.
+
+### 2.1 A project that changes groups gets a NEW team and a NEW key
+
+The team id carries the **group** as well as the project, so transferring a
+project from group A to group B **changes the computed team id**. That is
+deliberate, and it is what makes the billing boundary honest:
+
+> Group A paid for the work up to the transfer; group B pays after it. There is
+> no migration of spend, and no key that outlives the change of ownership.
+
+So a transfer is an **onboarding**, not a move: mint a fresh key billing to
+group B's team, and **invalidate the group A key**. Concretely, gonk never calls
+`/key/update {"team_id": …}` (M12) and never re-parents a team with
+`/team/update {"organization_id": …}`.
+
+This is strictly simpler than the alternative and it is also the only correct
+one. Keying the team on the project alone would have forced a re-parent on
+transfer, which drags the team's accumulated spend into group B's organization
+counter — making group B pay for work group A already paid for, and corrupting
+both groups' ceilings in the same stroke.
+
+The old team is **tombstoned, not deleted** (§3.5): its spend is the durable
+record of what group A paid, and deleting it would discard exactly the evidence
+the billing boundary is meant to establish.
+
+Two consequences, both intended:
+
+- A transferred project starts the new group's period at **zero LiteLLM spend**.
+  gonk's own ledger (`pkg/spend`) is unaffected and still holds the full history.
+- The credential the agent holds **changes** at transfer. That is the
+  "invalidate" half of the rule, and it is the same code path as rotation.
 
 ### Why group -> org, reversing v3
 
@@ -183,6 +216,17 @@ that adds `ProjectID` (§3.3).
 
 ```
 EnsureProject(ctx, spec) (KeyInfo, error)
+
+0. TRANSFER CHECK. Compute the expected team_id from (group id, project id).
+   If the registration holds a DIFFERENT team_id, the project changed groups
+   (§2.1). Retire the old tenancy first, and only then continue at step 1:
+     - delete every key in the OLD team (this is the "invalidate" half of the
+       rule -- the credential the agent holds must stop working, not merely
+       stop being referenced)
+     - tombstone the OLD team at max_budget 0; do NOT delete it, and do NOT
+       re-parent it
+   The new team is then created from scratch by step 2, at zero spend, under
+   group B's org. Emit gonk_meter_litellm_project_transferred_total{from,to}.
 
 1. Ensure the ORG (group tier), then the TEAM (project tier), then the key.
    Each tier is idempotent by its caller-supplied primary key.
@@ -242,9 +286,14 @@ matching today's key behaviour and ADR-004's recorded limitation.
 
 ### 3.3 Schema and plumbing
 
-`registrations` gains `project_id BIGINT` and `key_hash TEXT` (replacing
-`key_alias`). `Service.resolveProject` currently **drops** `req.ProjectID`; it
-must carry it into `store.Registration`.
+`registrations` gains `team_id TEXT` and `key_hash TEXT` (replacing `key_alias`),
+plus `project_id BIGINT` for provenance. `Service.resolveProject` currently
+**drops** `req.ProjectID`; it must carry it into `store.Registration`.
+
+`team_id` is stored rather than only recomputed because it is the **previous**
+tenancy: §3.1 step 0 detects a group transfer precisely by comparing the stored
+team id against the freshly computed one. Without it, a transfer is invisible and
+the project would keep billing to its old group indefinitely.
 
 **Backfill matters more than it looks.** `Service.ReconcileKeys` — the loop that
 unsticks `key-missing`, i.e. the loop gonk-bvy's recovery requirement is about —
@@ -274,12 +323,29 @@ regression.
   spend, so rotation no longer loses history.)
 - De-onboarding -> **tombstone the team at `max_budget: 0`**, do not delete it;
   deleting discards the spend record. Requires `/team/update`, not `/team/delete`.
+- Group transfer (§2.1, §3.1 step 0) -> the same tombstone, applied to the old
+  team, plus deletion of its keys. A tombstoned team at `max_budget: 0` cannot
+  serve a request even if a credential for it were somehow retained, so the
+  invalidation is enforced at two layers rather than one.
+
+Because nothing re-parents a team and nothing moves a key between teams, the
+scoped credential needs **no** `/team/delete` and gonk holds no capability to
+merge two groups' spend. That is a property worth keeping: the billing boundary
+is enforced by what gonk *cannot* do, not only by what it declines to do.
 
 ### 3.6 Scoped credential
 
 `gonk-meter`'s `allowed_routes` gains `/team/new`, `/team/update`, `/team/info`,
-`/team/list`, and keeps `/key/list`, `/key/generate`, `/key/update`,
-`/key/delete`. It gets `/organization/info` (read, for M15's nested ceiling) but
+`/team/list`, and keeps `/key/list`, `/key/generate`, `/key/delete`.
+
+**`/key/update` is dropped.** Once keys carry no budget and are never moved
+between teams (§2.1, §4), nothing gonk does needs to mutate an existing key —
+every change is expressed as delete-and-mint. Removing the route means a
+compromised meter credential cannot silently re-point an existing key at another
+team or raise its ceiling. Likewise **`/team/delete` is not granted**: retirement
+is a tombstone, so the spend record cannot be destroyed by anything gonk holds.
+
+It gets `/organization/info` (read, for M15's nested ceiling) but
 **no `/organization/*` write route** — gonk does not own the group ceiling. The
 gitops Job's existing scope assertion (proves `/key/list` 200, `/chat/completions`
 403) is extended to prove `/organization/new` is 403.
@@ -306,31 +372,43 @@ restriction, and that is recorded as a deliberate choice, not an oversight.
 
 ---
 
-## 4. Migration (ordered so it is reversible until the last step)
+## 4. Cutover — a re-onboarding, not a migration
 
-Per project, one at a time:
+The same rule as §2.1 applies to the one-time move onto this scheme: **do not
+carry credentials across the boundary.** Per project, one at a time:
 
 1. Ensure the org and the team at the computed ceiling.
-2. `POST /key/update {"key": <hash>, "team_id": <team>}` to adopt the existing
-   key (M12 — no reissue, no interruption). The field is **`key`**, carrying the
-   hash — *not* `key_hash`, which is a `/key/list` filter, not an update field.
-3. **Verify the team ceiling binds** — `/team/info` shows the adopted spend and
-   a finite `max_budget` — *before* touching the key's own budget.
-4. Only then clear the key's budget with an explicit JSON `null` (M9). Note
-   `keyRequestBody.MaxBudget` is `*float64` with `omitempty`, so nil is
-   **omitted** ("no change"), not null ("clear"): this needs a distinct request
-   encoding. Until step 4, M8 means the stale key budget is the binding ceiling —
-   which is why step 3 must pass first.
+2. `POST /key/generate {team_id}` with **no** `max_budget` — a fresh credential
+   billing to the new team.
+3. `keysink.Put` the new plaintext; store the new `team_id` and `key_hash`.
+4. Delete the OLD key by its hash. The old credential must stop working, not
+   merely stop being referenced.
 
-**Rollback.** Steps 1-3 are reversible (move the key back; the team is inert).
-Step 4 is the one-way door: it removes the only ceiling today's code enforces. If
-the scheme must be backed out after step 4, key budgets must be restored from
-`MaxBudgetFor` before anything else.
+This deletes three problems the adopt-the-old-key version had:
 
-**Unmeasured and gating**: whether spend history survives the team move of step 2,
-and whether the move is accepted when the key's own `max_budget` exceeds the
-target team's (M7 says that direction is unvalidated at write time, which cuts
-both ways). Measure both on a scratch project before touching a real one.
+- **No `/key/update {"team_id"}`**, so M12 is not relied on and neither of v4's
+  two "unmeasured and gating" questions — does spend survive a team move, and is
+  a move accepted when the key's budget exceeds the target team's — needs
+  answering at all. They are now moot rather than outstanding.
+- **No `max_budget: null` clear**, so M9 and the `*float64`/`omitempty` encoding
+  trap (nil is *omitted*, meaning "no change", not "clear") never arise on this
+  path. M8's stale-key-budget hazard cannot occur, because the new key never had
+  a budget.
+- **No one-way door.** Rollback is: revert the code and let the ordinary
+  provisioning path re-mint per-key budgets from `MaxBudgetFor`. Nothing needs
+  restoring by hand.
+
+**The one real consequence, and it is intended.** A project's new team starts at
+**zero** LiteLLM spend even though the project has already spent against its old
+key this period. So in the cutover period a project can draw up to *(already
+spent) + (full team ceiling)*. This is bounded, one-time, and visible.
+
+gonk's own accounting is unaffected — `pkg/spend`'s tag-based ledger keeps the
+full history and the soft reservation gate still sees true month-to-date, so the
+looseness is confined to LiteLLM's hard backstop. Mitigate by either cutting over
+at a period boundary, or seeding the team's first-period `max_budget` at
+*(ceiling − month-to-date from gonk's ledger)* and letting it reset naturally.
+Pick one deliberately; do not leave it unstated.
 
 ---
 
@@ -364,5 +442,13 @@ admission gate, and the test-double rewrite.
    longer posts `key_aliases`.
 8. `org.max_budget >= max over projects of MaxBudgetFor(...)`, asserted before
    any team is created, so M7 cannot wedge the instance.
-9. Pre-migration rows without `project_id` surface a distinct counted condition,
-   not a silent skip.
+9. Pre-cutover rows without `team_id` surface a distinct counted condition, not
+   a silent skip.
+10. **Group transfer (§2.1).** A project whose group id changes produces a NEW
+    team under the new group's org, a NEW credential in the keysink, and an OLD
+    team that is tombstoned at `max_budget: 0` with its spend **intact**. Assert
+    all four, and assert the old key is gone — a transfer that leaves the
+    previous credential working has not invalidated anything.
+11. `grep` proves gonk never calls `/key/update` with a `team_id`, and never
+    calls `/team/update` with an `organization_id`. Both would silently merge two
+    groups' billing, and neither is reachable through any supported flow.
