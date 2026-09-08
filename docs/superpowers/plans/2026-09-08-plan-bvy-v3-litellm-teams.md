@@ -1,5 +1,14 @@
 # gonk-bvy v3: stop using `key_alias` as identity; make the LiteLLM *team* the project
 
+> **SUPERSEDED 2026-09-08 (same day) by `2026-09-08-plan-bvy-v4-litellm-teams.md`.**
+> An adversarial review returned this as *needs revision*: its §3.1 required
+> returning a plaintext LiteLLM reveals only once, its "adopt the oldest" rule
+> could not verify what it adopted, its operator-authored org ceiling would have
+> wedged every project on the shipped defaults, and its F3 -- labelled "the fact
+> the whole plan rests on" -- measured one key, not the two-keys-one-counter
+> claim gonk-bvy actually needs. v4 measures that claim and reverses the
+> group/instance mapping. Kept for the record.
+
 Status: PROPOSED, 2026-09-08
 Supersedes: `2026-09-07-plan-bvy-duplicate-litellm-keys.md` (v1 and v2)
 Related: gonk-uom2 (RigName not injective), gonk-ay87 (three-tier budget draw)
