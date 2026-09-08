@@ -60,7 +60,11 @@ jobs:
         run: go test ./... -race -count=1
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # v7 or later: v6 refuses golangci-lint v2 outright ("golangci-lint v2 is
+        # not supported by golangci-lint-action v6"). The linter version is
+        # pinned to the same v2.12.2 the GitLab pipeline and `make lint` use, so
+        # all three run the identical checks.
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.12.2
           # The action would otherwise add its own flags; the local gate and the
