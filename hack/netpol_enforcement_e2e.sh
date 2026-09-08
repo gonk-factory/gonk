@@ -30,6 +30,15 @@ log() { printf '\n=== %s\n' "$*"; }
 
 log "namespace $NS"
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+# The token controller creates the namespace's `default` ServiceAccount
+# asynchronously. A pod applied before it exists is refused with
+# `serviceaccount "default" not found` (seen on 2026-09-08, run 34291536045),
+# so wait for it rather than race it.
+for _ in $(seq 1 30); do
+  kubectl -n "$NS" get serviceaccount default >/dev/null 2>&1 && break
+  sleep 1
+done
+kubectl -n "$NS" get serviceaccount default >/dev/null
 
 log "destination stand-ins (the labels and ports the policy selects on)"
 kubectl -n "$NS" apply -f - <<EOF
