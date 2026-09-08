@@ -59,7 +59,7 @@ Each maps to a spec milestone and is closed only by an automated artefact.
 | # | Criterion | Spec | Closed by |
 |---|---|---|---|
 | E1 | `helm install chart/gonk -f chart/values-e2e.yaml` on kind in CI succeeds; after settle, zero agent pods and zero ready-unassigned work beads | M1, G1 | T-20 |
-| E2 | In CI, inviting the bot to a fresh gitlab-ce project yields the onboarding MR; merging it (without `.agent/`) makes the project dispatchable | M2, G2 | T-21, T-08 |
+| E2 | In CI, inviting the bot to a fresh gitlab-ce project yields the onboarding MR carrying `.gonk.yml` and the `.agent/` seed; merging it makes the project dispatchable with no further MR | M2, G2 | T-21, T-08 |
 | E3 | In CI, opening an issue yields exactly one bot comment carrying the bead marker plus `gonk::` labels, produced by the stub model through LiteLLM, with no PAT in the agent pod | M3, G3 | T-21 |
 | E4 | In CI, `/cost/bead/{anchor}` and `/cost/project/{id}` report the stub's token totals, and LiteLLM's key has a `max_budget` equal to the project ceiling; setting the ceiling below the reservation yields `defer` and no pod | M5, G4 | T-21, T-30, T-31 |
 | E5 | In CI, an `@gonk` mention on the triaged issue yields exactly one follow-up comment in that thread | G3 | T-24 |
@@ -136,15 +136,44 @@ extracts the batch from the tail; a test feeds a 300 KiB transcript with the
 batch at the end and asserts classification `complete`; the L1 synthetic
 session test uses a transcript above 64 KiB.
 
-**T-08 · Newly onboarded projects can reach triage · M · A**
+**T-08 · Onboarding ends with a triageable project and a `.agent/` seed · M · A**
 _Closes:_ `gonk-bgx`, `gonk-msz`. _Depends on:_ —.
-**Exit:** `pending` no longer gates triage; a project whose `.gonk.yml` is
-merged and has no `.agent/` classifies `enabled` and dispatches triage; the
-scaffold trigger is either (a) moved to the broker path with a `file` effect
-kind that opens an MR, or (b) removed from v1 with spec §5.3 amended — decide
-in the task, default (b) because spec §5.3's "no LLM actions until `.agent/`
-exists" is what caused `gonk-bgx` and the broker prompt reads the checkout
-directly.
+Navigator is **not** removed. ADR-007 §5 keeps the conventions-plus-lint half
+as the orientation tier and `.agent/` stays its project-side home. What
+changes: `.agent/` becomes optional context for triage instead of a
+precondition, and the seed arrives with the onboarding MR (deterministic,
+zero tokens) instead of from a metered session. Three parts, in order of
+value:
+1. **Remove the gate, keep the state.** `Decide` no longer returns
+   `state_pending` (`pkg/intake/dispatch.go:181`); `pending` remains a
+   classified, metric-visible state meaning "no `.agent/` yet". The broker
+   triage prompt includes `.agent/` contents first when the directory exists.
+   That prompt line is the v1 "thin loader"; there is no other.
+2. **The onboarding MR carries a `.agent/` seed.** Rendered by intake from
+   the real config values with the same discipline as the `.gonk.yml`
+   explanation: a README stating what `.agent/` is for and the two ways to
+   fill it in (run Navigator locally, or ask gonk to draft it once part 3
+   ships), plus skeleton files with the expected headings. The requester is
+   eased in by the MR, not by a session they must spawn.
+3. **The metered scaffold becomes opt-in and leaves v1.** `MayScaffold` and
+   the project-scoped trigger stay, gated on `actions.scaffold: true`
+   (default false; additive schema change). It runs on the broker path and
+   needs a `file` effect kind that opens an MR, which ADR-007 §6 says is
+   blocked on `gonk-066`. Until both exist the trigger is dormant, not
+   broken. Listed as v1.5 in §4's parked set.
+_Optional part 4 (S; may be its own task):_ a schema check on `.agent/` at
+reconcile time, like `.gonk.yml`, so an invalid `.agent/` is a distinct
+visible state and the prompt skips it. This is the v1 form of spec §7.2's
+"consistency gate"; `nav lint` and the `gonk-navigator` repo do not exist.
+**Exit:** a project with merged `.gonk.yml` and no `.agent/` dispatches
+triage (test in `pkg/intake`); the onboarding MR in `glabtest` contains
+`.gonk.yml` plus `.agent/README.md` and the skeleton files, and a test asserts
+a rendered *value* from config appears in the README, not merely that the
+file exists; `actions.scaffold` defaults false and `MayScaffold` is false when
+it is unset; the broker prompt test shows `.agent/` content precedes the
+issue when present; spec §5.3 amended to say `.agent/` is optional context
+and the seed ships with the onboarding MR; `gonk-bgx` and `gonk-msz` closed
+with a pointer to this task.
 
 **T-09 · Delete the formula layer (ADR-007 §3) · M · A**
 _Closes:_ `gonk-p2e`, `gonk-ecn` (half), R-08, review §5 "delete" rows 1–2.
@@ -789,7 +818,8 @@ and every roadmap phase ≥1, `gonk-6po` source beads epic and children,
 enforcement, `gonk-03f` buildkit epic and children, `gonk-6sp` Warp parity
 epic, `gonk-vpm` guided decoding, `gonk-ay87` three-tier draw (T-30 covers
 the project tier; group/instance tiers via LiteLLM teams is v1.5),
-`gonk-fm7.*` graphify follow-ups.
+`gonk-fm7.*` graphify follow-ups; the metered `.agent/` scaffold session
+(T-08 part 3) until the `file` effect kind and `gonk-066` land.
 
 ---
 
