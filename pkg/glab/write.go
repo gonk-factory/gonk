@@ -116,12 +116,21 @@ func (c *Client) AddIssueLabel(ctx context.Context, projectID, issueIID int64, l
 // comment-apply write: the read side (ListIssueNotes, notes.go) scans notes for
 // the bot's marker; this is how the bot posts one. Like AddIssueLabel it takes
 // the numeric project id and the issue IID, not a path.
+//
+// Sent as a JSON body, not the query-string form (`?body=<value>`) this used
+// to send (T-06, closes R-16): a comment body is unbounded model output, and
+// the query-string form has no room for one anywhere near the 64 KiB the
+// broker now allows -- a real comment routinely exceeds what a URL can carry
+// before hitting a proxy's/GitLab's own request-line limit (414), which is a
+// silent apply failure with no relation to whether the comment was valid.
+// JSON has no such ambient limit. This also keeps the comment text out of
+// access/proxy logs that record request lines but not bodies.
 func (c *Client) CreateIssueNote(ctx context.Context, projectID, issueIID int64, body string) (*Note, error) {
 	var n Note
 	if err := c.getJSON(ctx, request{
 		method: "POST",
 		path:   fmt.Sprintf("/api/v4/projects/%d/issues/%d/notes", projectID, issueIID),
-		query:  map[string]string{"body": body},
+		body:   map[string]string{"body": body},
 	}, &n); err != nil {
 		return nil, err
 	}
@@ -153,12 +162,17 @@ func (c *Client) CloseIssue(ctx context.Context, projectID, issueIID int64) erro
 // Only ever called with a note id the bot itself created and recognised by its
 // own marker -- GitLab will reject an edit of somebody else's note, but the
 // caller should not rely on that as the guard.
+//
+// Sent as a JSON body, not the query-string form this used to send (T-06,
+// closes R-16), for the same reason CreateIssueNote is: the edited body is the
+// same unbounded, up-to-64-KiB model output, and query-string encoding has no
+// room for it.
 func (c *Client) UpdateIssueNote(ctx context.Context, projectID, issueIID, noteID int64, body string) (*Note, error) {
 	var n Note
 	if err := c.getJSON(ctx, request{
 		method: "PUT",
 		path:   fmt.Sprintf("/api/v4/projects/%d/issues/%d/notes/%d", projectID, issueIID, noteID),
-		query:  map[string]string{"body": body},
+		body:   map[string]string{"body": body},
 	}, &n); err != nil {
 		return nil, err
 	}
