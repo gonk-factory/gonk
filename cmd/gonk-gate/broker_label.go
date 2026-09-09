@@ -4,12 +4,11 @@ import (
 	"fmt"
 	"strings"
 
-	"gitlab.orac.local/agentic/gonk-project/pkg/effects"
 	"gitlab.orac.local/agentic/gonk-project/pkg/intake"
 )
 
 // gonkLabelPrefix is the literal namespace every broker-authored label
-// constant below is written with (labelFixQueued, verdictLabel's returns,
+// constant below is written with (labelFixQueued, verdictLabels' values,
 // pkg/intake's DefaultDenyLabel/OnboardingIssueLabel). It is NOT the
 // project's CONFIGURED prefix -- that is labelPrefix in broker_verdict.go,
 // and a project can configure something else entirely -- those constants are
@@ -17,18 +16,6 @@ import (
 // strip that literal prefix back off to get the bare suffix ReservedLabels
 // stores and refuseReserved checks a label's suffix against.
 const gonkLabelPrefix = "gonk::"
-
-// reservedVerdicts is every effects.Verdict that verdictLabel (broker_verdict.go)
-// produces a DISTINCT gonk::verdict-* label for. It exists so
-// buildReservedLabels can derive those labels from verdictLabel itself rather
-// than restating its output, and so TestReservedLabelsCoverEveryVerdictLabel
-// has something to range over: a verdict added to pkg/effects and given a new
-// case in verdictLabel's switch, without also being added here, is exactly
-// the hole that test exists to catch -- verdictLabel would start minting a
-// new audit label an agent could immediately forge.
-var reservedVerdicts = []effects.Verdict{
-	effects.VerdictReplyOnly, effects.VerdictCodeChange, effects.VerdictClose,
-}
 
 // ReservedLabels is the post-prefix set of label values reserved for the
 // broker's OWN audit trail (T-05, closes R-02). These are written by the
@@ -38,15 +25,20 @@ var reservedVerdicts = []effects.Verdict{
 // it be queued. An agent-proposed label landing on one of these could forge
 // that record.
 //
-// DERIVED, not restated. broker_verdict.go's labelFixQueued,
-// labelNeedsMaintainer and verdictLabel() are the SAME PACKAGE as this file,
-// and pkg/intake's DefaultDenyLabel and OnboardingIssueLabel are one field
-// access away -- cmd/gonk-gate already imports pkg/intake
-// (contract_test.go), and package main may import any pkg/... freely; the
-// reverse direction (pkg/intake importing cmd/gonk-gate) is the one that
-// would be a cycle, and this file does not need it. So every entry here has
-// exactly one place it is spelled out: add a new broker-authored label by
-// adding it to buildReservedLabels, not by editing this map's literal.
+// DERIVED, not restated -- and, for the verdict labels specifically,
+// STRUCTURALLY unable to drift rather than merely tested against drifting.
+// broker_verdict.go's labelFixQueued, labelNeedsMaintainer and the
+// verdictLabels map are the SAME PACKAGE as this file; pkg/intake's
+// DefaultDenyLabel and OnboardingIssueLabel are one field access away --
+// cmd/gonk-gate already imports pkg/intake (contract_test.go), and package
+// main may import any pkg/... freely (the reverse, pkg/intake importing
+// cmd/gonk-gate, would be the cycle, and this file does not need it). The
+// verdict labels are not looked up via verdictLabel() one Verdict at a
+// time -- that would let a NEW switch case in verdictLabel go un-reserved
+// exactly as it would a hand-maintained list here. Instead buildReservedLabels
+// ranges over verdictLabels itself, the same map verdictLabel reads from, so
+// a verdict added there is reserved automatically: there is no second
+// enumeration of verdicts anywhere in this package to fall out of sync.
 var ReservedLabels = buildReservedLabels()
 
 func buildReservedLabels() map[string]bool {
@@ -58,8 +50,8 @@ func buildReservedLabels() map[string]bool {
 	reserve(labelNeedsMaintainer)
 	reserve(intake.DefaultDenyLabel)
 	reserve(intake.OnboardingIssueLabel)
-	for _, v := range reservedVerdicts {
-		reserve(verdictLabel(v))
+	for _, label := range verdictLabels {
+		reserve(label)
 	}
 	return set
 }

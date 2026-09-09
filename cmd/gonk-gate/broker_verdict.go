@@ -16,18 +16,29 @@ const (
 	labelFixQueued       = "gonk::fix-queued"
 )
 
-// verdictLabel is the audit trail for what gonk concluded. The closed set is
-// mirrored here deliberately rather than interpolated, so a new verdict cannot
-// silently produce a new label nobody is filtering on.
+// verdictLabels is the audit trail for what gonk concluded, and the ONE place
+// that trail is defined (T-05, closes R-02). verdictLabel looks a verdict up
+// here rather than switching on it, and buildReservedLabels
+// (broker_label.go) ranges over this SAME map to build ReservedLabels -- so
+// the switch and the reserved set cannot drift apart the way a mirrored
+// switch statement could: adding a verdict means adding one entry here, and
+// both verdictLabel's output and ReservedLabels's coverage of it follow from
+// that one entry automatically. There is no second place to remember.
+var verdictLabels = map[effects.Verdict]string{
+	effects.VerdictCodeChange: "gonk::verdict-code-change",
+	effects.VerdictClose:      "gonk::verdict-close",
+	effects.VerdictReplyOnly:  "gonk::verdict-reply-only",
+}
+
+// verdictLabel is the audit trail label for a verdict. An unrecognised
+// verdict (there should be none -- ParseBatch rejects an unknown one before
+// a batch ever reaches here) falls back to the reply-only label rather than
+// panicking or minting something unreserved.
 func verdictLabel(v effects.Verdict) string {
-	switch v {
-	case effects.VerdictCodeChange:
-		return "gonk::verdict-code-change"
-	case effects.VerdictClose:
-		return "gonk::verdict-close"
-	default:
-		return "gonk::verdict-reply-only"
+	if label, ok := verdictLabels[v]; ok {
+		return label
 	}
+	return verdictLabels[effects.VerdictReplyOnly]
 }
 
 // applyVerdict performs the deterministic action a validated verdict names.

@@ -216,32 +216,71 @@ func TestOnboardingLabelIsRefused(t *testing.T) {
 	}
 }
 
-// The drift guard: ReservedLabels is DERIVED from verdictLabel rather than
-// restating its output (see buildReservedLabels), so this is deliberately a
-// consistency check on that derivation rather than an independent
-// enumeration -- pkg/effects exposes no closed list of verdicts to check
-// against. What it DOES catch: a verdict added to reservedVerdicts
-// (broker_label.go) whose verdictLabel output was mistyped or mis-stripped
-// on the way into ReservedLabels, and -- via the unknown-verdict case below
-// -- confirms verdictLabel's default branch (what an unrecognised Verdict
-// maps to) is already covered rather than accidentally exempt.
+// This is NOT an independent drift guard -- buildReservedLabels
+// (broker_label.go) ranges over the SAME verdictLabels map this test ranges
+// over, so "every entry in verdictLabels is reserved" is true by
+// construction and this loop cannot, by itself, catch a verdict that is
+// missing FROM verdictLabels. That guarantee is structural, not tested: a
+// verdict added to pkg/effects and given an entry in verdictLabels
+// (broker_verdict.go) is reserved automatically, because there is only the
+// one map and both verdictLabel and buildReservedLabels read it -- there is
+// no second enumeration anywhere in this package a new verdict could be
+// added to without also reaching ReservedLabels. What this test DOES catch:
+// a real regression in the plumbing between the two -- a typo in the
+// "gonk::" strip, a label reaching ReservedLabels un-lowercased, or
+// normaliseLabel's refusal check falling out of sync with ReservedLabels
+// itself -- and, via the unknown-verdict case, that verdictLabel's fallback
+// for a verdict ABSENT from the map is the already-reserved reply-only
+// label rather than something unreserved.
 func TestReservedLabelsCoverEveryVerdictLabel(t *testing.T) {
-	for _, v := range reservedVerdicts {
-		label := verdictLabel(v)
+	if len(verdictLabels) == 0 {
+		t.Fatal("verdictLabels is empty; this test would pass vacuously")
+	}
+	for v, label := range verdictLabels {
 		suffix := strings.TrimPrefix(label, "gonk::")
 		if !ReservedLabels[suffix] {
-			t.Fatalf("verdictLabel(%q) = %q, but %q is not in ReservedLabels", v, label, suffix)
+			t.Fatalf("verdictLabels[%q] = %q, but %q is not in ReservedLabels", v, label, suffix)
 		}
 		if _, err := normaliseLabel(label, "gonk::"); err == nil {
-			t.Fatalf("normaliseLabel(%q) = nil error, want a refusal (it is verdictLabel(%q))", label, v)
+			t.Fatalf("normaliseLabel(%q) = nil error, want a refusal (it is verdictLabels[%q])", label, v)
 		}
 	}
-	// An unrecognised Verdict must fall through verdictLabel's default branch
-	// to reply-only -- itself in reservedVerdicts and asserted above -- rather
-	// than to some new, unreserved label.
-	unknown := effects.Verdict("some-future-verdict-nobody-taught-verdictLabel-about")
-	if got, want := verdictLabel(unknown), verdictLabel(effects.VerdictReplyOnly); got != want {
-		t.Fatalf("verdictLabel(unknown verdict) = %q, want the default %q", got, want)
+	// A Verdict with NO entry in verdictLabels (as opposed to one WITH an
+	// entry, covered above) must fall back to the reply-only label rather
+	// than to something unreserved.
+	unknown := effects.Verdict("some-future-verdict-nobody-added-to-verdictLabels")
+	if got, want := verdictLabel(unknown), verdictLabels[effects.VerdictReplyOnly]; got != want {
+		t.Fatalf("verdictLabel(unknown verdict) = %q, want the fallback %q", got, want)
+	}
+}
+
+// Structural, verified non-vacuously: a verdict added ONLY to verdictLabels
+// (broker_verdict.go), with nothing else in this package touched, must be
+// reserved and refused automatically. This is the property T-05's verifier
+// asked for in place of a test that merely re-checks the list it was given --
+// exercised here with a throwaway verdict/label pair rather than a real one,
+// added and removed in the same test so it proves the wiring without leaving
+// a permanent fixture behind.
+func TestAddingAVerdictLabelReservesItAutomatically(t *testing.T) {
+	const throwaway = effects.Verdict("t-05-throwaway-verdict")
+	const throwawayLabel = "gonk::verdict-t-05-throwaway"
+
+	if _, err := normaliseLabel(throwawayLabel, "gonk::"); err != nil {
+		t.Fatalf("before adding the verdict, normaliseLabel(%q) = %v, want it accepted (not yet reserved)", throwawayLabel, err)
+	}
+
+	verdictLabels[throwaway] = throwawayLabel
+	ReservedLabels = buildReservedLabels() // buildReservedLabels re-ranges over verdictLabels; nothing else touched
+	t.Cleanup(func() {
+		delete(verdictLabels, throwaway)
+		ReservedLabels = buildReservedLabels()
+	})
+
+	if got := verdictLabel(throwaway); got != throwawayLabel {
+		t.Fatalf("verdictLabel(%q) = %q, want %q", throwaway, got, throwawayLabel)
+	}
+	if _, err := normaliseLabel(throwawayLabel, "gonk::"); err == nil {
+		t.Fatalf("after adding verdictLabels[%q], normaliseLabel(%q) = nil error, want a refusal", throwaway, throwawayLabel)
 	}
 }
 
