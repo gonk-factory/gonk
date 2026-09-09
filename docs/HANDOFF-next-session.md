@@ -789,8 +789,16 @@ Then: **C4** (`gonk-gf3`, `sweep.go`) reads via `SessionID`→`GetSession`, `eff
 ## Environment / operational notes
 
 - **Throwaway e2e namespace `gonk-e2e-opencode-e1a3c471` is still running** (all gonk + ecosystem pods). GitLab project 75 = `agentic/gonk-e2e-1784441480`, bot user 49, hook id 3. Bailey GPU is up; the metered path (LiteLLM `stub-local` → `ollama_chat/qwen3:14b`) works. Teardown when done: delete the ns, delete hook 3, restore the GitLab local-webhook setting; keep bot 49 + project 75.
-- **⚠️ Rotate the GitLab bot token.** Earlier this session `gc config explain` printed the bot PAT in plaintext (it renders agent `[env]` unredacted). Rotate it. (The broker design removes the token from the pod anyway, but the leaked value should be rotated.) **Rotation date: OUTSTANDING — owner to confirm and fill in `<ROTATION-DATE-TBD>` below.** This is an owner action; nobody else can confirm when the rotation happened.
-  - Rotated on: `<ROTATION-DATE-TBD>`
+- **⚠️ Rotate the GitLab bot token.** Earlier this session `gc config explain` printed the bot PAT in plaintext (it renders agent `[env]` unredacted). Rotate it. (The broker design removes the token from the pod anyway, but the leaked value should be rotated.) **ROTATED — owner-confirmed 2026-09-09** (the Vault property is `eso/gonk/broker#gitlab_token`; see the note below about where these actually live).
+  - Rotated on: confirmed by the owner on 2026-09-09; the exact rotation date was not recorded at the time.
+  - **Where gonk's credentials actually live:** ONE Vault secret, `eso/gonk/broker`, with flat properties
+    (`gitlab_token`, `webhook_token`, `meter_api_token`, `litellm_admin_key`, `postgres_password`,
+    `gc_write_key`), mapped by the ExternalSecrets in `../gitops/clusters/orac/apps/gonk/`.
+    `chart/gonk/README.md` documents a per-concern layout (`eso/gonk/gitlab`, `eso/gonk/webhook`, ...)
+    that was never deployed. Believe gitops, not the chart README, until that is fixed.
+  - **There is no rotation slot 2 deployed.** No ExternalSecret maps any `*-previous` key, so the
+    README's no-outage rotation procedure does not exist in this cluster; a rotation is a hard
+    cutover with up to a 1h `refreshInterval` resync window.
 - **Local build → in-cluster registry push recipe** (CI image jobs are blocked by a homelab zot-mirror/Docker-Hub egress outage — infra, not our code; `lint`/`test`/`chart-lint` pass in CI): `kubectl port-forward -n gitlab svc/gitlab-registry 5000:5000`, `podman login localhost:5000 -u steve` (glab token), tag+push to `localhost:5000/agentic/gonk-project/<img>:<tag>` with `--tls-verify=false`. Ingress 499s on large layers, hence the port-forward.
 - **Upstream bug filed:** `gastownhall/gascity#4668` (formula-order dispatch drops caller vars). The broker slice **sidesteps it** (dispatch creates work directly, not via the `gonk-triage` formula), so it is not a blocker — it would only let us keep the tidier formula path if fixed.
 
