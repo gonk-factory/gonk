@@ -33,6 +33,10 @@ var forbidden = []string{
 	"GONK_LITELLM_KEY", "GC_WEBHOOK_ARG_LITELLM_KEY", "_key", "_pkey",
 	"GONK_BOT", "BOT_TOKEN",
 	"GONK_PROMPT", "_prompt",
+	// _clean holds the prompt body with only the gonk:model/gonk:meta marker
+	// lines stripped -- everything else the caller (or a hostile issue body)
+	// put in the prompt is still in it, same as GONK_PROMPT itself.
+	"_clean",
 	"GC_CITY_WRITE_KEY",
 	// GC_ALIAS IS A CAPABILITY, not merely an identifier: it addresses the
 	// prompt row AND the rig checkout, and the rig grant is TTL-bounded and

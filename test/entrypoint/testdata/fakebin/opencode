@@ -1,0 +1,36 @@
+#!/bin/sh
+# Fake `opencode` for the entrypoint fake-PATH test harness
+# (test/entrypoint/testdata/fakebin, see fakebin.go in this package).
+#
+# Reused across entrypoint tests -- T-02 only needs the script to exist on
+# PATH (its GC_ALIAS-unset scenario exits before opencode is ever invoked),
+# but T-03 exercises the provider check (`opencode models`) and the
+# non-interactive run (`opencode run -- <prompt>`), so both subcommands are
+# implemented here, generically, controlled by env vars rather than hardcoded
+# to one test's expectations.
+#
+#   opencode models
+#     Prints FAKE_OPENCODE_MODELS_OUTPUT (default: one "gonk/" model, so the
+#     entrypoint's provider check passes by default) and exits
+#     FAKE_OPENCODE_MODELS_EXIT (default 0).
+#
+#   opencode run -- <prompt>
+#     Exits FAKE_OPENCODE_RUN_EXIT (default 0) immediately. Never hangs --
+#     the entrypoint holds the shell open itself after this returns
+#     (gonk-2tb), so a fake that blocked here would wedge every test run.
+
+set -eu
+
+case "${1:-}" in
+models)
+	printf '%s\n' "${FAKE_OPENCODE_MODELS_OUTPUT:-gonk/default}"
+	exit "${FAKE_OPENCODE_MODELS_EXIT:-0}"
+	;;
+run)
+	exit "${FAKE_OPENCODE_RUN_EXIT:-0}"
+	;;
+*)
+	printf 'fake opencode: unhandled subcommand: %s\n' "${1:-<none>}" >&2
+	exit 1
+	;;
+esac

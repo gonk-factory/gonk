@@ -1,0 +1,48 @@
+#!/bin/sh
+# Fake `curl` for the entrypoint fake-PATH test harness
+# (test/entrypoint/testdata/fakebin, see fakebin.go in this package).
+#
+# Reused across entrypoint tests -- T-02 only needs the script to exist on
+# PATH (its GC_ALIAS-unset scenario exits before curl is ever invoked), but
+# T-03 exercises the rig checkout fetch and the prompt-fetch retry loop, both
+# of which call curl as:
+#
+#   curl -fsS --max-time N -o <file> <url>                     (checkout)
+#   curl -sS -o <file> -w '%{http_code}' --max-time N <url>     (prompt)
+#
+# so this fake understands `-o <file>` and, when asked, prints an HTTP status
+# code the way `-w '%{http_code}'` would -- everything else is accepted and
+# ignored, since the entrypoint's flags are fixed and this only needs to
+# track them, not implement curl.
+#
+#   FAKE_CURL_EXIT    exit code to return (default 0)
+#   FAKE_CURL_BODY    bytes written to the -o destination file, if any
+#                      (default: a fixed placeholder body)
+#   FAKE_CURL_STATUS  printed to stdout verbatim if the caller passed
+#                      -w '%{http_code}' (default: 200); this is what the
+#                      entrypoint's prompt-fetch loop reads as _code
+
+set -eu
+
+out=""
+want_status=0
+prev=""
+for arg in "$@"; do
+	case "${prev}" in
+	-o) out="${arg}" ;;
+	esac
+	case "${arg}" in
+	*%{http_code}*) want_status=1 ;;
+	esac
+	prev="${arg}"
+done
+
+if [ -n "${out}" ] && [ "${FAKE_CURL_EXIT:-0}" = "0" ]; then
+	printf '%s' "${FAKE_CURL_BODY:-fake curl body}" >"${out}"
+fi
+
+if [ "${want_status}" = "1" ]; then
+	printf '%s' "${FAKE_CURL_STATUS:-200}"
+fi
+
+exit "${FAKE_CURL_EXIT:-0}"

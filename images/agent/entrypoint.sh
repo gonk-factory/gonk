@@ -63,8 +63,25 @@ log() {
 # Computed OUT of the log line on purpose: the redaction test forbids GC_ALIAS
 # appearing in a log call at all, and an allowlist exception for "but this one
 # truncates it" is exactly the kind of hole that later hides a real leak.
+# `${GC_ALIAS:-}` (NOT bare ${GC_ALIAS}): under `set -u` an unset GC_ALIAS
+# would abort THIS expansion, before the log line below ever runs -- into a
+# detached tmux pane, so the pod's container log showed nothing at all
+# (R-06/R-37). Reassigning it here also makes every later `${GC_ALIAS:-}` in
+# this file consistent with a variable that is now always at least defined.
+GC_ALIAS="${GC_ALIAS:-}"
 GONK_ALIAS_PREFIX="${GC_ALIAS%%"${GC_ALIAS#??????}"}"
 log "session start: alias=${GONK_ALIAS_PREFIX}... agent=${GC_AGENT:-triage} attempt=${GC_WEBHOOK_ARG_ATTEMPT:-?}"
+
+# A pool session with no alias at all has no session identity and nothing to
+# fetch a checkout or a prompt for -- refuse now, LOUDLY, rather than limping
+# into steps that all silently no-op on an empty GC_ALIAS. Distinct exit code
+# so this is never confused with the other refusal paths below.
+if [ -z "${GC_ALIAS}" ]; then
+	log "no alias: GC_ALIAS is unset or empty -- refusing to start without a session identity"
+	log "session end: refused (no alias)"
+	exit 2
+fi
+
 log "expecting: checkout=$([ -n "${GONK_RIG_BASE_URL:-}" ] && echo yes || echo no) prompt=$([ -n "${GONK_PROMPT_URL:-}" ] && echo yes || echo no)"
 
 # ---- Step 1: install the commit-provenance hook -----------------------------
@@ -246,6 +263,7 @@ if [ -z "${GONK_PROMPT}" ] && [ -n "${GONK_PROMPT_URL:-}" ] && [ -n "${GC_ALIAS:
 			[ -n "${_pmodel}" ] && GC_WEBHOOK_ARG_MODEL="${_pmodel}"
 			[ -n "${_pmeta}" ] && GC_WEBHOOK_ARG_METADATA_JSON="${_pmeta}"
 			[ -n "${_pkey}" ] && GC_WEBHOOK_ARG_LITELLM_KEY="${_pkey}"
+			unset _pkey
 			rm -f "${_pfile}"
 			log "prompt fetched (${#GONK_PROMPT} bytes)"
 			;;
