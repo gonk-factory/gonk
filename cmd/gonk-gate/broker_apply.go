@@ -251,6 +251,15 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 	if perr := effects.ValidatePaths(batch); perr != nil {
 		return false, "path: " + perr.Error(), nil
 	}
+	// THE COMMENT GATE (T-06, closes R-03/R-16): checked before ANY write, the
+	// same discipline the path and label gates below use -- a batch with one
+	// quick-action or oversize comment produces ZERO GitLab writes, not a
+	// comment posted and a second one silently refused. ValidateComments
+	// refuses rather than strips a quick-action line: see pkg/effects/comment.go
+	// for exactly what the rule catches and what it deliberately does not.
+	if cerr := effects.ValidateComments(batch); cerr != nil {
+		return false, "comment: " + cerr.Error(), nil
+	}
 	// The FIFTH GATE (gonk-hsb): not "is this batch well-formed" but "did the
 	// session do the work it claims to report". Observing-only until
 	// EnforceTrajectory is set -- see checkTrajectory.

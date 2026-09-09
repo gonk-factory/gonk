@@ -250,12 +250,25 @@ func TestAddIssueLabel(t *testing.T) {
 // the caller can read back its id. Mirrors AddIssueLabel's param style (numeric
 // project id + issue iid + a plain string), and CreateIssue's created-object
 // return.
+//
+// The body must be JSON, not the query-string form (`?body=<value>`) this used
+// to send (T-06, closes R-16): a comment body is unbounded model output up to
+// 64 KiB, and a query string that long risks a 414 from GitLab or an
+// intervening proxy long before it risks anything about the CONTENT of the
+// comment. This asserts the request carries Content-Type: application/json
+// and that the body decodes to exactly the string passed in.
 func TestCreateIssueNote(t *testing.T) {
-	var gotMethod, gotPath, gotBody string
+	var gotMethod, gotPath, gotContentType string
+	var gotBody struct {
+		Body string `json:"body"`
+	}
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
-		gotBody = r.URL.Query().Get("body")
+		gotContentType = r.Header.Get("Content-Type")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decoding request body as JSON: %v", err)
+		}
 		_, _ = fmt.Fprint(w, `{"id":99,"body":"hello from the broker"}`)
 	}))
 	n, err := c.CreateIssueNote(context.Background(), 42, 7, "hello from the broker")
@@ -268,8 +281,50 @@ func TestCreateIssueNote(t *testing.T) {
 	if gotPath != "/api/v4/projects/42/issues/7/notes" {
 		t.Errorf("path = %q", gotPath)
 	}
-	if gotBody != "hello from the broker" {
-		t.Errorf("body = %q, want %q", gotBody, "hello from the broker")
+	if !strings.HasPrefix(gotContentType, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", gotContentType)
+	}
+	if gotBody.Body != "hello from the broker" {
+		t.Errorf("body = %q, want %q", gotBody.Body, "hello from the broker")
+	}
+	if n == nil || n.ID != 99 {
+		t.Fatalf("note = %+v, want id 99", n)
+	}
+}
+
+// UpdateIssueNote rewrites the canned-status note in place (gonk-yrs). Same
+// JSON-body requirement as CreateIssueNote and for the same reason (T-06,
+// closes R-16): the edited body is the same unbounded, up-to-64-KiB model
+// output.
+func TestUpdateIssueNote(t *testing.T) {
+	var gotMethod, gotPath, gotContentType string
+	var gotBody struct {
+		Body string `json:"body"`
+	}
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decoding request body as JSON: %v", err)
+		}
+		_, _ = fmt.Fprint(w, `{"id":99,"body":"the real answer"}`)
+	}))
+	n, err := c.UpdateIssueNote(context.Background(), 42, 7, 99, "the real answer")
+	if err != nil {
+		t.Fatalf("UpdateIssueNote = %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Errorf("method = %q, want PUT", gotMethod)
+	}
+	if gotPath != "/api/v4/projects/42/issues/7/notes/99" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if !strings.HasPrefix(gotContentType, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", gotContentType)
+	}
+	if gotBody.Body != "the real answer" {
+		t.Errorf("body = %q, want %q", gotBody.Body, "the real answer")
 	}
 	if n == nil || n.ID != 99 {
 		t.Fatalf("note = %+v, want id 99", n)

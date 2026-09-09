@@ -358,6 +358,62 @@ func TestSweepBrokerRefusesWholeBatchOnInvalidLabel(t *testing.T) {
 	}
 }
 
+// T-06 (closes R-03, R-16): a batch that is otherwise shape-valid but proposes
+// a comment containing a GitLab quick action (`/close`, on its own line) must
+// apply NOTHING -- not the label effect riding alongside it, and above all not
+// the comment itself, which is exactly the note GitLab would parse the quick
+// action out of. Mirrors TestSweepBrokerRefusesWholeBatchOnInvalidLabel: this
+// is the comment gate's mutation guard -- move the ValidateComments call in
+// applyBrokerBatch to AFTER the comment-apply loop (or delete it) and this
+// test starts seeing a posted comment, because by the time anything looked at
+// the body, it would already be out under the bot's own PAT.
+func TestSweepBrokerRefusesWholeBatchOnQuickAction(t *testing.T) {
+	gl := glabtest.New(t)
+	gl.Me = glab.User{ID: 1, Username: "gonk"}
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	gl.AddIssue(p.ID, 3, "opened")
+
+	gc := gcapitest.New(t)
+	gc.FinishSession("gonk.triage.p42.i3.a1", "thinking...\n"+
+		"GONK_BATCH_START\n"+
+		`{"effects":[{"kind":"comment","body":"Closing this as a duplicate.\n/close"},{"kind":"label","add":["gonk::bug"]}]}`+
+		"\nGONK_BATCH_END\n")
+	applier := &recordingApplier{}
+
+	store := beadstore.NewMemory()
+	rec := brokerRunningRecord(p.ID)
+	_ = store.Put(context.Background(), rec)
+	// Tokens were spent but no artifact landed => gate-failed => escalate,
+	// exactly like the out-of-shape and bad-label cases: a refused batch is a
+	// refused batch, whichever gate refused it.
+	fm := &fakeOutcomeMeter{
+		outcomeNext: "escalate", spendSynced: true,
+		sessionCost: meterapi.SessionCostResponse{TotalTokens: 1234, AsOf: rec.SessionEndedAt.Add(time.Second)},
+	}
+
+	code := runSweep(context.Background(), sweepDeps{
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), GL: gl.Client(), Apply: applier,
+		Store: store, BotUsername: "gonk", PackDir: repoPackDir,
+		SpendPollInterval: time.Millisecond, SpendDeadline: 20 * time.Millisecond,
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	// ZERO GitLab writes: not the comment carrying the quick action, not the
+	// label riding alongside it, not the broker's own verdict label -- the
+	// whole batch is refused before any of applyBrokerBatch's writes run.
+	if len(applier.notes) != 0 || len(applier.labels) != 0 {
+		t.Fatalf("a batch with a quick-action comment must apply NOTHING: notes=%+v labels=%+v", applier.notes, applier.labels)
+	}
+	reqs := fm.requests()
+	if len(reqs) != 1 || reqs[0].Outcome != meterapi.OutcomeGateFailed {
+		t.Fatalf("outcome = %+v, want one gate-failed (spent tokens, no artifact)", reqs)
+	}
+	if names := gc.PouredNames(); len(names) != 1 || names[0] != "gonk-dispatch" {
+		t.Fatalf("a rejected batch that spent tokens must re-sling: %v", names)
+	}
+}
+
 // No fence in the output => produced no batch => nothing applied => ladder.
 func TestSweepBrokerNoBatchAppliesNothing(t *testing.T) {
 	gl := glabtest.New(t)
