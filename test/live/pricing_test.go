@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/opercfg"
+	"gitlab.orac.local/agentic/gonk-project/test/harness"
 	"gopkg.in/yaml.v3"
 )
 
@@ -50,9 +51,7 @@ const (
 func mustEnv(t *testing.T) (url, key, ns string) {
 	t.Helper()
 	url, key = os.Getenv(envURL), os.Getenv(envKey)
-	if url == "" || key == "" {
-		t.Skipf("set %s and %s to run the live drift checks", envURL, envKey)
-	}
+	harness.RequireInfra(t, fmt.Sprintf("%s and %s (set both to run the live drift checks)", envURL, envKey), url != "" && key != "")
 	ns = os.Getenv(envNamespace)
 	if ns == "" {
 		ns = "gonk"
@@ -68,9 +67,7 @@ func deployedCatalog(t *testing.T, ns string) []opercfg.RungSpec {
 	t.Helper()
 	out, err := exec.Command("kubectl", "get", "cm", "gonk-operator-config",
 		"-n", ns, "-o", "jsonpath={.data.operator-config\\.yaml}").Output()
-	if err != nil {
-		t.Skipf("cannot read the deployed operator config (need kubectl access to %s): %v", ns, err)
-	}
+	harness.RequireInfra(t, fmt.Sprintf("kubectl access to the %s operator config (%v)", ns, err), err == nil)
 	var doc struct {
 		Rungs []opercfg.RungSpec `yaml:"rungs"`
 	}

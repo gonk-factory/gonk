@@ -314,6 +314,44 @@ func TestCheckPortsFreePassesForAFreePort(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------- RequireInfra (T-14)
+
+// RequireInfra must skip (not fail) a missing dependency when CI is unset --
+// a dev box routinely lacks a running litellm, a built image, or `sh`, and
+// `go test ./...` must stay usable without every one of them.
+func TestRequireInfraSkipsLocallyByDefault(t *testing.T) {
+	t.Setenv("CI", "")
+	var sub *testing.T
+	t.Run("inner", func(st *testing.T) {
+		sub = st
+		harness.RequireInfra(st, "thing not present", false)
+		st.Fatal("RequireInfra returned instead of skipping")
+	})
+	if !sub.Skipped() {
+		t.Fatal("RequireInfra did not skip when CI is unset and the dependency is missing")
+	}
+}
+
+// The CI=true / t.Fatal branch is NOT exercised here through a real subtest:
+// a subtest that actually fails cascades that failure up to this whole
+// package's `go test` result, which would make the very test proving
+// RequireInfra fails-under-CI also fail the build that runs it. That branch
+// is pinned instead by the pure decision function requireInfraAction, in
+// requireinfra_internal_test.go (package harness, white-box).
+
+// A present dependency must never skip or fail, under either environment.
+func TestRequireInfraPassesWhenDependencyIsPresent(t *testing.T) {
+	for _, ci := range []string{"", "true"} {
+		t.Setenv("CI", ci)
+		ok := t.Run("inner-CI="+ci, func(st *testing.T) {
+			harness.RequireInfra(st, "thing present", true)
+		})
+		if !ok {
+			t.Fatalf("RequireInfra(ok=true) failed the subtest with CI=%q", ci)
+		}
+	}
+}
+
 // ---------------------------------------------------------------- doctor
 
 // The doctor must fail fast, name the missing tool, and hand back a remedy --

@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"gitlab.orac.local/agentic/gonk-project/test/harness"
 )
 
 // controllerImage mirrors agentImage (agent_smoke_test.go) for the
@@ -20,9 +22,8 @@ func controllerImage(t *testing.T) (image string, pins map[string]string) {
 	}
 	tag := gonkTag(t, root, pins["GONK_VERSION"])
 	image = registry + "/gonk-controller:" + tag
-	if err := exec.Command("podman", "image", "exists", image).Run(); err != nil {
-		t.Skipf("image %s not present locally -- run `make controller-image` first (skip, not fail: this is a container smoke test, not a unit test)", image)
-	}
+	present := exec.Command("podman", "image", "exists", image).Run() == nil
+	harness.RequireInfra(t, "image "+image+" (run `make controller-image` first)", present)
 	return image, pins
 }
 

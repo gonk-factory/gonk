@@ -1,6 +1,19 @@
 version: "2"
 run:
   timeout: 5m
+  # Every custom //go:build tag under cmd/ pkg/ internal/ test/ (T-14,
+  # internal/buildgate's TestRepoBuildTagsFindsTheKnownSixMatchesTheTaskList
+  # pins the same six). Without this, golangci-lint only ever sees the
+  # DEFAULT (untagged) build -- every file behind one of these tags (the
+  # component/integration/images/live/chart/testclock suites) is invisible
+  # to it, tag or no tag in any CI job that runs it.
+  build-tags:
+    - component
+    - integration
+    - images
+    - live
+    - chart
+    - testclock
 linters:
   enable:
     - staticcheck
