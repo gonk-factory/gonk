@@ -799,6 +799,15 @@ Then: **C4** (`gonk-gf3`, `sweep.go`) reads via `SessionID`→`GetSession`, `eff
   - **There is no rotation slot 2 deployed.** No ExternalSecret maps any `*-previous` key, so the
     README's no-outage rotation procedure does not exist in this cluster; a rotation is a hard
     cutover with up to a 1h `refreshInterval` resync window.
+  - **LiteLLM admin key rotated 2026-09-09** (`eso/gonk/broker#litellm_admin_key`). The owner
+    assesses the `sk-` value that was in git history as pre-dating it.
+  - **History rewritten 2026-09-09** (`gonk-9scx`): `git filter-repo` scrubbed both gitleaks
+    findings from all 446 commits. A fresh clone from origin scans clean under the pinned
+    gitleaks 8.30.1. Everything from 2026-07-19 onward has a NEW SHA, and tag `v0.1.0` was
+    re-pointed -- **anyone holding an older clone must re-clone; a `git pull` will not reconcile.**
+    Pre-rewrite backup bundle: `/mnt/c/Users/steve/Code/gonk-pre-rewrite-20260909-085200.bundle`
+    (verified complete). Note the scrub does NOT un-publish: GitHub can keep unreachable objects
+    fetchable by direct SHA URL, which is why the key was rotated rather than merely hidden.
 - **Local build → in-cluster registry push recipe** (CI image jobs are blocked by a homelab zot-mirror/Docker-Hub egress outage — infra, not our code; `lint`/`test`/`chart-lint` pass in CI): `kubectl port-forward -n gitlab svc/gitlab-registry 5000:5000`, `podman login localhost:5000 -u steve` (glab token), tag+push to `localhost:5000/agentic/gonk-project/<img>:<tag>` with `--tls-verify=false`. Ingress 499s on large layers, hence the port-forward.
 - **Upstream bug filed:** `gastownhall/gascity#4668` (formula-order dispatch drops caller vars). The broker slice **sidesteps it** (dispatch creates work directly, not via the `gonk-triage` formula), so it is not a blocker — it would only let us keep the tidier formula path if fixed.
 
