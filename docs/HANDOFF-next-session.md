@@ -789,7 +789,8 @@ Then: **C4** (`gonk-gf3`, `sweep.go`) reads via `SessionID`→`GetSession`, `eff
 ## Environment / operational notes
 
 - **Throwaway e2e namespace `gonk-e2e-opencode-e1a3c471` is still running** (all gonk + ecosystem pods). GitLab project 75 = `agentic/gonk-e2e-1784441480`, bot user 49, hook id 3. Bailey GPU is up; the metered path (LiteLLM `stub-local` → `ollama_chat/qwen3:14b`) works. Teardown when done: delete the ns, delete hook 3, restore the GitLab local-webhook setting; keep bot 49 + project 75.
-- **⚠️ Rotate the GitLab bot token.** Earlier this session `gc config explain` printed the bot PAT in plaintext (it renders agent `[env]` unredacted). Rotate it. (The broker design removes the token from the pod anyway, but the leaked value should be rotated.)
+- **⚠️ Rotate the GitLab bot token.** Earlier this session `gc config explain` printed the bot PAT in plaintext (it renders agent `[env]` unredacted). Rotate it. (The broker design removes the token from the pod anyway, but the leaked value should be rotated.) **Rotation date: OUTSTANDING — owner to confirm and fill in `<ROTATION-DATE-TBD>` below.** This is an owner action; nobody else can confirm when the rotation happened.
+  - Rotated on: `<ROTATION-DATE-TBD>`
 - **Local build → in-cluster registry push recipe** (CI image jobs are blocked by a homelab zot-mirror/Docker-Hub egress outage — infra, not our code; `lint`/`test`/`chart-lint` pass in CI): `kubectl port-forward -n gitlab svc/gitlab-registry 5000:5000`, `podman login localhost:5000 -u steve` (glab token), tag+push to `localhost:5000/agentic/gonk-project/<img>:<tag>` with `--tls-verify=false`. Ingress 499s on large layers, hence the port-forward.
 - **Upstream bug filed:** `gastownhall/gascity#4668` (formula-order dispatch drops caller vars). The broker slice **sidesteps it** (dispatch creates work directly, not via the `gonk-triage` formula), so it is not a blocker — it would only let us keep the tidier formula path if fixed.
 
