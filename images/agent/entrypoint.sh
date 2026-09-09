@@ -74,12 +74,21 @@ log "session start: alias=${GONK_ALIAS_PREFIX}... agent=${GC_AGENT:-triage} atte
 
 # A pool session with no alias at all has no session identity and nothing to
 # fetch a checkout or a prompt for -- refuse now, LOUDLY, rather than limping
-# into steps that all silently no-op on an empty GC_ALIAS. Distinct exit code
-# so this is never confused with the other refusal paths below.
+# into steps that all silently no-op on an empty GC_ALIAS.
+#
+# exit 5, NOT 2: dash (and every other shell tested) exits 2 for its OWN
+# generic "parameter not set" abort under set -u -- which is precisely the
+# accidental failure this guard replaces. Reusing 2 here would make a
+# deliberate, logged refusal indistinguishable from an unguarded expansion
+# blowing up somewhere else in this script, to any reader (a controller, a
+# pod terminationMessage, `kubectl get pod -o jsonpath`) that only sees the
+# exit status. 1, 3 and 4 are already the other deliberate refusal codes
+# below (no model / prompt already consumed / no prompt), so 5 is the next
+# free one.
 if [ -z "${GC_ALIAS}" ]; then
 	log "no alias: GC_ALIAS is unset or empty -- refusing to start without a session identity"
 	log "session end: refused (no alias)"
-	exit 2
+	exit 5
 fi
 
 log "expecting: checkout=$([ -n "${GONK_RIG_BASE_URL:-}" ] && echo yes || echo no) prompt=$([ -n "${GONK_PROMPT_URL:-}" ] && echo yes || echo no)"

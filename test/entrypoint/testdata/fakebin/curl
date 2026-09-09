@@ -1,6 +1,7 @@
 #!/bin/sh
 # Fake `curl` for the entrypoint fake-PATH test harness
-# (test/entrypoint/testdata/fakebin, see fakebin.go in this package).
+# (test/entrypoint/testdata/fakebin, see fakepath_harness_test.go in this
+# package).
 #
 # Reused across entrypoint tests -- T-02 only needs the script to exist on
 # PATH (its GC_ALIAS-unset scenario exits before curl is ever invoked), but

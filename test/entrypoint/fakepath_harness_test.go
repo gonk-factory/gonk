@@ -19,12 +19,41 @@ import (
 )
 
 // fakebinDir resolves test/entrypoint/testdata/fakebin, the directory of
-// fake external-tool scripts (opencode, curl) this package ships.
+// fake external-tool scripts (opencode, curl) this package ships, and
+// verifies every entry in it is executable.
+//
+// THAT CHECK IS LOAD-BEARING, NOT DECORATION. These scripts were once
+// committed as mode 100644: this repo runs with core.fileMode=false on
+// WSL/drvfs, so the local working tree reports every file rwxrwxrwx
+// regardless of what git recorded, and the loss was invisible here. On a
+// real Linux checkout (CI), a non-executable file is silently skipped by
+// PATH lookup -- so `curl` or `opencode` in the fake dir would fall through
+// to the REAL binary. A test that hit the network or a real opencode
+// install would be a much worse failure than a red test right here.
 func fakebinDir(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(testdataDir(t), "fakebin")
-	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-		t.Fatalf("fake PATH dir missing or not a directory: %s (%v)", dir, err)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("fake PATH dir missing or unreadable: %s (%v)", dir, err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("fake PATH dir is empty: %s", dir)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			t.Fatalf("stat %s: %v", filepath.Join(dir, e.Name()), err)
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			t.Fatalf("%s is not executable (mode %s): PATH lookup will silently skip it and the "+
+				"entrypoint will fall through to the REAL binary instead of this fake. Fix with: "+
+				"git update-index --chmod=+x %s",
+				filepath.Join(dir, e.Name()), info.Mode().Perm(), filepath.Join(dir, e.Name()))
+		}
 	}
 	return dir
 }

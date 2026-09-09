@@ -52,8 +52,15 @@ func TestEntrypointSurvivesUnsetAlias(t *testing.T) {
 	if !errors.As(err, &exitErr) {
 		t.Fatalf("expected the script to exit non-zero with GC_ALIAS unset, got err=%v\noutput:\n%s", err, out)
 	}
-	if exitErr.ExitCode() == 0 {
-		t.Fatalf("expected a non-zero exit code, got 0\noutput:\n%s", out)
+	// Exactly 5, not merely "non-zero": dash's OWN "parameter not set" abort
+	// under set -u also exits 2 -- if this guard ever regressed back to an
+	// unguarded ${GC_ALIAS} expansion, a bare non-zero check would not catch
+	// it, because the accidental failure and the deliberate refusal would be
+	// indistinguishable by exit code alone. See the exit-code comment above
+	// the guard in entrypoint.sh for why 5 (not 2) was chosen.
+	const wantExitCode = 5
+	if exitErr.ExitCode() != wantExitCode {
+		t.Fatalf("expected exit code %d, got %d\noutput:\n%s", wantExitCode, exitErr.ExitCode(), out)
 	}
 	t.Logf("exit code %d; output:\n%s", exitErr.ExitCode(), out)
 }
