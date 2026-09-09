@@ -1,5 +1,18 @@
 # gonk-alw: an UNKNOWN create outcome must park the bead, not burn an attempt
 
+> **SUPERSEDED IN DIRECTION 2026-09-08 by the independent review's T-45**
+> (`docs/reviews/2026-09-08-delivery-plan.md`): Kubernetes Jobs replace Gas
+> City as the session runtime by default, with convoys re-evaluated in v3
+> behind a `SessionRuntime` interface.
+>
+> This plan is entirely about Gas City's startup ordering and its
+> create/submit/fetch handshake, so it **should not be implemented against a
+> runtime that is being replaced.** The DIAGNOSIS below still stands as a
+> measured record of what the current runtime does, and the defect it found
+> is worth carrying forward as a REQUIREMENT on whatever replaces it: an
+> unconfirmed create must never be treated as a silent success. Keep that
+> property; discard the implementation.
+
 Status: PROPOSED, 2026-09-08
 Issue: gonk-alw (P0) — *A cold controller accepts a session and silently never
 creates the pod*
