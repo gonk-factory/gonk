@@ -17,6 +17,7 @@ values committed here, so the two cannot disagree.
 | `actions.triage` | `true` | On a new issue, gonk reads it, applies labels, and posts one analysis comment. |
 | `actions.pipelines` | `false` | gonk will not touch failing pipelines. (Not implemented yet.) |
 | `actions.features` | `false` | gonk will not decompose designs into work items. (Not implemented yet.) |
+| `actions.scaffold` | `false` | gonk will not spend tokens drafting this project's `.agent/` context. This merge request already adds a seed you can fill in by hand for free; set this to `true` only if you would rather gonk read the repository and propose a draft. |
 | `budget.monthly_cost_usd` | `0` | **$0.** No paid model can be used on this project. Raising this is the only way to spend money here. |
 | `budget.monthly_tokens` | `50M` | Ceiling on tokens per calendar month across all of gonk's work here. |
 | `budget.per_task_tokens` | `2M` | Ceiling for a single work item, so one runaway task cannot eat the month. |
@@ -32,15 +33,18 @@ values committed here, so the two cannot disagree.
 
 ## What happens after you merge
 
-1. gonk opens a second merge request adding a `.agent/` directory: a short,
-   written-by-reading-this-repo description of what the project is and how it is
-   built. That is the first thing gonk does that uses a model, and it is
-   authorized by the budget you just merged.
-2. Until that lands, gonk does nothing else. Triage starts once `.agent/` exists.
+1. Triage starts. On the next issue opened here, gonk reads it, applies its
+   labels and posts one analysis comment. There is no second step to wait for.
+2. The `.agent/` directory this merge request adds is yours to fill in, and
+   filling it in is optional. It is where this project tells automated sessions
+   what it is, how it is built and what rules a change has to follow; gonk reads
+   it before the issue it is working on. Without it, triage answers from the code
+   alone -- a thinner answer, not a refused one. `.agent/README.md` explains
+   the two ways to fill it in.
 3. gonk never merges anything itself, ever, and never pushes outside `gonk/*`
    branches.
 
-## The file this adds
+## The files this adds
 
 ```yaml
 # gonk configuration. https://gitlab.orac.local/agentic/gonk-project
@@ -57,6 +61,10 @@ actions:
   triage: true
   pipelines: false
   features: false
+  scaffold: false          # let gonk spend tokens drafting .agent/ for you.
+                           # off by default: this merge request already adds a
+                           # .agent/ seed, and filling it in by hand costs
+                           # nothing and is more accurate.
 
 # Hard ceilings. These only ever tighten: the instance and group may impose a
 # lower limit, never a higher one.
@@ -84,6 +92,10 @@ provenance:
   commit_trailers: true
   include_usage: false     # true also records token/cost in commit trailers
 ```
+
+It also adds a `.agent/` seed -- `.agent/README.md`, `.agent/overview.md`, `.agent/build-and-test.md`, `.agent/conventions.md` --
+rendered from the same template as the file above, with no model involved. Every
+one of them is a skeleton with the headings filled in and the prose left to you.
 
 ## Turning it off
 

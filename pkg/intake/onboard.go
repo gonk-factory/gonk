@@ -14,6 +14,12 @@ import (
 // again and not open a second one.
 const OnboardingIssueLabel = "gonk::onboarding"
 
+// MaxOnboardFileBytes caps the presence probe Onboard makes against the
+// onboarding branch. The branch is gonk's own, but its contents are still
+// repository data and unbounded in principle, and this read only has to answer
+// a yes/no question.
+const MaxOnboardFileBytes int64 = 1 << 20
+
 // GitLabOnboarder opens the deterministic onboarding MR (spec 5.3).
 //
 // DETERMINISTIC. NO MODEL CALL. Every byte it writes comes from render.go.
@@ -32,6 +38,9 @@ type OnboardGitLab interface {
 	CreateMergeRequest(ctx context.Context, projectID int64, o glab.MROptions) (*glab.MergeRequest, error)
 	CreateBranch(ctx context.Context, projectID int64, branch, ref string) (*glab.Branch, error)
 	CreateCommit(ctx context.Context, projectID int64, o glab.CommitOptions) (*glab.Commit, error)
+	// GetRawFile answers "is this path already on the onboarding branch?", which
+	// is what decides a commit action's create-vs-update. See Onboard.
+	GetRawFile(ctx context.Context, projectID int64, path, ref string, maxBytes int64) ([]byte, error)
 	ListMembers(ctx context.Context, projectID int64) ([]glab.Member, error)
 	ListIssues(ctx context.Context, projectID int64, o glab.IssueListOptions) ([]glab.Issue, error)
 	CreateIssue(ctx context.Context, projectID int64, o glab.IssueOptions) (*glab.Issue, error)
@@ -66,29 +75,59 @@ func (o *GitLabOnboarder) Onboard(ctx context.Context, p glab.Project) error {
 		return fmt.Errorf("onboard: render config: %w", err)
 	}
 
+	// The .agent/ seed rides the SAME commit as .gonk.yml (spec 5.3). It used
+	// to arrive from a metered scaffold session after the merge, which made a
+	// project's first triage wait on a model call it had to pay for. This is
+	// deterministic, costs nothing, and is already there the moment the
+	// maintainer merges.
+	seed, err := RenderAgentSeed(OnboardingContext{
+		Project: p.PathWithNamespace, BotUsername: o.BotUsername, Version: o.Version,
+		Ladder: o.InstanceLadder,
+	})
+	if err != nil {
+		return fmt.Errorf("onboard: render .agent/ seed: %w", err)
+	}
+
 	// A branch may survive a crashed earlier attempt; that is not an error.
 	if _, err := o.GL.CreateBranch(ctx, p.ID, OnboardBranch, target); err != nil && !isAlreadyExists(err) {
 		return fmt.Errorf("onboard: create branch: %w", err)
 	}
 
-	action := "create"
+	// One commit, every file. Order is fixed (config first, then the seed in
+	// AgentSeedPaths order) so two runs produce the same commit.
+	//
+	// The action is chosen PER FILE: "create" fails when the file is present
+	// and "update" fails when it is absent, GitLab offers no upsert, and a
+	// leftover `gonk/onboard` branch from a crashed earlier attempt hits BOTH
+	// in one commit -- it can easily carry `.gonk.yml` and not the seed. The
+	// all-create-then-all-update retry this replaces could not commit that
+	// mixture at all, and would have wedged onboarding for the project until
+	// somebody deleted the branch by hand.
+	acts := make([]glab.CommitAction, 0, 1+len(seed))
+	appendAction := func(path, content string) {
+		// ONLY a 404 means "absent". Do NOT read this as `err == nil ->
+		// present`: glab.Client caps the response and returns an error when the
+		// file is LARGER than the cap, so a size error would be read as absence
+		// and turned into a "create" that GitLab rejects. Every other error --
+		// oversize, transient -- takes the "update" branch, which is right for
+		// the oversize case and self-correcting for the rest (the commit fails
+		// and the next reconcile pass tries again).
+		action := "update"
+		if _, err := o.GL.GetRawFile(ctx, p.ID, path, OnboardBranch, MaxOnboardFileBytes); glab.IsNotFound(err) {
+			action = "create"
+		}
+		acts = append(acts, glab.CommitAction{Action: action, FilePath: path, Content: content})
+	}
+	appendAction(ConfigPath, string(cfgBytes))
+	for _, f := range seed {
+		appendAction(f.Path, f.Content)
+	}
 	if _, err := o.GL.CreateCommit(ctx, p.ID, glab.CommitOptions{
 		Branch:        OnboardBranch,
 		CommitMessage: o.commitMessage(),
-		Actions: []glab.CommitAction{{
-			Action: action, FilePath: ConfigPath, Content: string(cfgBytes),
-		}},
+		Actions:       acts,
 	}); err != nil {
-		// The file may already exist on a leftover branch: retry as an update.
-		if _, uerr := o.GL.CreateCommit(ctx, p.ID, glab.CommitOptions{
-			Branch:        OnboardBranch,
-			CommitMessage: o.commitMessage(),
-			Actions: []glab.CommitAction{{
-				Action: "update", FilePath: ConfigPath, Content: string(cfgBytes),
-			}},
-		}); uerr != nil {
-			return fmt.Errorf("onboard: commit: %w", err)
-		}
+		return fmt.Errorf("onboard: commit: %w", err)
 	}
 
 	body, err := RenderOnboardingMR(OnboardingContext{
@@ -116,7 +155,7 @@ func (o *GitLabOnboarder) Onboard(ctx context.Context, p glab.Project) error {
 // commitMessage carries a provenance trailer (spec 6.1). This commit had no
 // model in it at all, and says so.
 func (o *GitLabOnboarder) commitMessage() string {
-	return "chore: add .gonk.yml (gonk onboarding)\n\n" +
+	return "chore: add .gonk.yml and the .agent/ seed (gonk onboarding)\n\n" +
 		"Generated-By: gonk/" + o.Version + " (deterministic onboarding; no model)\n"
 }
 

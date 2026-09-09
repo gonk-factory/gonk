@@ -211,7 +211,7 @@ func wireContractFixtures() map[string]any {
 
 	effective := &Effective{
 		Enabled:    true,
-		Actions:    Actions{Triage: true, Pipelines: true, Features: false},
+		Actions:    Actions{Triage: true, Pipelines: true, Features: false, Scaffold: true},
 		Ladder:     []string{"qwen-local", "gpt-4o"},
 		Continuity: "resume",
 		Triage:     Triage{LabelPrefix: "gonk::", RespondToMentions: true},

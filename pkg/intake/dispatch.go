@@ -178,9 +178,13 @@ func gate(e Entry, trigger string) (Decision, bool) {
 	if !e.Dispatchable() {
 		return Decision{Reason: "state_" + string(cls.State)}, false
 	}
-	if cls.State == StatePending {
-		return Decision{Reason: "state_pending"}, false // spec 5.3: triage waits for .agent/
-	}
+	// THERE IS NO `state_pending` DROP HERE ANY MORE (T-08). `pending` used to
+	// mean "triage waits for .agent/", and it cost every project a metered
+	// scaffold session before it could get a single issue triaged. The
+	// onboarding merge request now ships the `.agent/` seed itself, so a
+	// missing `.agent/` is a project that removed one -- a reason for a
+	// thinner prompt, not for refusing the work. The state itself survives,
+	// classified and counted; see Classify and AllStates.
 	if !cls.MayTriage() {
 		return Decision{Reason: "action_disabled"}, false
 	}
@@ -473,8 +477,9 @@ func MayFire(decision string) bool {
 	return decision == "run"
 }
 
-// FireScaffold is called by the reconciler for a pending project (spec 5.3: the
-// `.agent/` scaffold is the one metered action permitted while pending). It runs
+// FireScaffold is called by the reconciler for a project with no `.agent/` that
+// has opted into the metered scaffold (spec 5.3; MayScaffold owns that rule). It
+// is dormant under the default config, which sets `actions.scaffold: false`. It runs
 // the SAME Gate-1 path as Handle -- scaffold is an agent formula (`gonk-scaffold`,
 // Plan 04), so it needs a rung and a reservation exactly like triage does -- but
 // the work item is the PROJECT, not an issue, so its BeadAnchor/SessionKey are

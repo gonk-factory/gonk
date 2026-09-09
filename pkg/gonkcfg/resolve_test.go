@@ -480,3 +480,63 @@ func TestResolveScheduleDefaultsToNone(t *testing.T) {
 		t.Fatalf("schedule = %+v, want nil when no layer sets one", eff.Schedule)
 	}
 }
+
+// actions.scaffold is the T-08 opt-in for the METERED `.agent/` scaffold
+// session. The onboarding merge request now ships a deterministic `.agent/`
+// seed, so nothing should pay a model to write one unless a project asks.
+//
+// The three cases below are DIFFERENT CODE PATHS, and only the first is the
+// one a real .gonk.yml exercises: `actions:` absent entirely, `actions:`
+// present but silent on `scaffold`, and `scaffold: false` written out. A test
+// that only pinned the third would pass while the default was true.
+func TestResolveScaffoldDefaultsOff(t *testing.T) {
+	cases := map[string]func(*ProjectConfig){
+		"actions block absent": func(pc *ProjectConfig) { pc.Actions = ActionsPolicy{} },
+		"actions silent on scaffold": func(pc *ProjectConfig) {
+			pc.Actions = ActionsPolicy{Triage: b(true), Pipelines: b(false), Features: b(false)}
+		},
+		"scaffold written false": func(pc *ProjectConfig) {
+			pc.Actions = ActionsPolicy{Triage: b(true), Scaffold: b(false)}
+		},
+	}
+	for name, mut := range cases {
+		eff := Resolve(Policy{}, Policy{}, project(mut))
+		if eff.Actions.Scaffold {
+			t.Errorf("%s: Actions.Scaffold = true, want false (the metered scaffold is opt-in)", name)
+		}
+	}
+}
+
+// Opting in works, and coarser layers can still veto it -- the same rule every
+// other action follows (ADR-002).
+func TestResolveScaffoldOptInAndVeto(t *testing.T) {
+	optIn := func(pc *ProjectConfig) { pc.Actions = ActionsPolicy{Triage: b(true), Scaffold: b(true)} }
+
+	if eff := Resolve(Policy{}, Policy{}, project(optIn)); !eff.Actions.Scaffold {
+		t.Fatalf("scaffold: true in .gonk.yml must resolve on: %+v", eff.Actions)
+	}
+	veto := ActionsPolicy{Scaffold: b(false)}
+	if eff := Resolve(Policy{Actions: veto}, Policy{}, project(optIn)); eff.Actions.Scaffold {
+		t.Error("instance veto did not turn scaffold off")
+	} else if !eff.Actions.Triage {
+		t.Errorf("instance scaffold veto leaked into triage: %+v", eff.Actions)
+	}
+	if eff := Resolve(Policy{}, Policy{Actions: veto}, project(optIn)); eff.Actions.Scaffold {
+		t.Error("group veto did not turn scaffold off")
+	}
+}
+
+// The schema must ACCEPT the new key -- an additive change is only additive if
+// the validator agrees. `additionalProperties: false` on `actions` means an
+// unlisted key is a hard rejection, so this is the assertion that the published
+// schema and the Go struct actually shipped together.
+func TestScaffoldKeyValidatesAndDecodes(t *testing.T) {
+	raw := []byte("version: 1\nenabled: true\nactions: { triage: true, scaffold: true }\nladder: [qwen-local]\n")
+	pc, err := Load(raw)
+	if err != nil {
+		t.Fatalf("Load(actions.scaffold) = %v; the schema must accept the new key", err)
+	}
+	if pc.Actions.Scaffold == nil || !*pc.Actions.Scaffold {
+		t.Fatalf("actions.scaffold did not decode: %+v", pc.Actions)
+	}
+}

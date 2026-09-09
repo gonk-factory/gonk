@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"text/template"
+
+	"gitlab.orac.local/agentic/gonk-project/pkg/gonkcfg"
 )
 
 // OnboardBranch is the branch the onboarding MR is opened from (spec, Appendix A).
@@ -38,6 +40,10 @@ actions:
   triage: true
   pipelines: false
   features: false
+  scaffold: false          # let gonk spend tokens drafting .agent/ for you.
+                           # off by default: this merge request already adds a
+                           # .agent/ seed, and filling it in by hand costs
+                           # nothing and is more accurate.
 
 # Hard ceilings. These only ever tighten: the instance and group may impose a
 # lower limit, never a higher one.
@@ -111,11 +117,20 @@ func RenderOnboardingMR(c OnboardingContext) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	seed, err := RenderAgentSeed(c)
+	if err != nil {
+		return "", err
+	}
+	paths := make([]string, len(seed))
+	for i, f := range seed {
+		paths[i] = f.Path
+	}
 	var buf bytes.Buffer
 	if err := onboardingTmpl.Execute(&buf, struct {
 		OnboardingContext
-		Config string
-	}{c, string(cfg)}); err != nil {
+		Config    string
+		SeedPaths []string
+	}{c, string(cfg), paths}); err != nil {
 		return "", fmt.Errorf("intake: render onboarding MR: %w", err)
 	}
 	return buf.String(), nil
@@ -141,6 +156,7 @@ values committed here, so the two cannot disagree.
 | ` + "`actions.triage`" + ` | ` + "`true`" + ` | On a new issue, gonk reads it, applies labels, and posts one analysis comment. |
 | ` + "`actions.pipelines`" + ` | ` + "`false`" + ` | gonk will not touch failing pipelines. (Not implemented yet.) |
 | ` + "`actions.features`" + ` | ` + "`false`" + ` | gonk will not decompose designs into work items. (Not implemented yet.) |
+| ` + "`actions.scaffold`" + ` | ` + "`false`" + ` | gonk will not spend tokens drafting this project's ` + "`.agent/`" + ` context. This merge request already adds a seed you can fill in by hand for free; set this to ` + "`true`" + ` only if you would rather gonk read the repository and propose a draft. |
 | ` + "`budget.monthly_cost_usd`" + ` | ` + "`0`" + ` | **$0.** No paid model can be used on this project. Raising this is the only way to spend money here. |
 | ` + "`budget.monthly_tokens`" + ` | ` + "`50M`" + ` | Ceiling on tokens per calendar month across all of gonk's work here. |
 | ` + "`budget.per_task_tokens`" + ` | ` + "`2M`" + ` | Ceiling for a single work item, so one runaway task cannot eat the month. |
@@ -156,17 +172,24 @@ values committed here, so the two cannot disagree.
 
 ## What happens after you merge
 
-1. gonk opens a second merge request adding a ` + "`.agent/`" + ` directory: a short,
-   written-by-reading-this-repo description of what the project is and how it is
-   built. That is the first thing gonk does that uses a model, and it is
-   authorized by the budget you just merged.
-2. Until that lands, gonk does nothing else. Triage starts once ` + "`.agent/`" + ` exists.
+1. Triage starts. On the next issue opened here, gonk reads it, applies its
+   labels and posts one analysis comment. There is no second step to wait for.
+2. The ` + "`.agent/`" + ` directory this merge request adds is yours to fill in, and
+   filling it in is optional. It is where this project tells automated sessions
+   what it is, how it is built and what rules a change has to follow; gonk reads
+   it before the issue it is working on. Without it, triage answers from the code
+   alone -- a thinner answer, not a refused one. ` + "`.agent/README.md`" + ` explains
+   the two ways to fill it in.
 3. gonk never merges anything itself, ever, and never pushes outside ` + "`gonk/*`" + `
    branches.
 
-## The file this adds
+## The files this adds
 
 ` + "```yaml\n{{.Config}}```" + `
+
+It also adds a ` + "`.agent/`" + ` seed -- ` + "`{{range $i, $f := .SeedPaths}}{{if $i}}`, `{{end}}{{$f}}{{end}}`" + ` --
+rendered from the same template as the file above, with no model involved. Every
+one of them is a skeleton with the headings filled in and the prose left to you.
 
 ## Turning it off
 
@@ -176,3 +199,229 @@ de-onboards gonk. Setting ` + "`enabled: false`" + ` keeps the config but stops 
 ---
 Generated-By: gonk/{{.Version}} (deterministic onboarding; no model was used)
 `))
+
+// ---------------------------------------------------------------- .agent/ seed
+
+// AgentSeedFile is one file the onboarding merge request commits under
+// `.agent/`. Order is fixed and meaningful: it is the commit order, the order
+// the MR body lists, and the order a session's prompt splices them in.
+type AgentSeedFile struct {
+	Path    string
+	Content string
+}
+
+// AgentSeedPaths are the files the onboarding merge request seeds, in order.
+//
+// It is ALSO the list a triage prompt loads (cmd/gonk-gate's agentContextFiles,
+// which has a drift test against this one). pkg/glab has no tree-listing call
+// and this needs none: gonk seeds these names, so these are the names it can
+// ask for. A project is free to keep other files here -- people should read
+// them -- but v1's loader is thin on purpose and splices only these.
+var AgentSeedPaths = []string{
+	AgentDir + "/README.md",
+	AgentDir + "/overview.md",
+	AgentDir + "/build-and-test.md",
+	AgentDir + "/conventions.md",
+}
+
+// RenderAgentSeed renders the `.agent/` seed the onboarding merge request
+// commits alongside `.gonk.yml`.
+//
+// DETERMINISTIC, NO MODEL CALL -- the same discipline as the `.gonk.yml`
+// explanation, and for the same reason: this used to arrive from a metered
+// scaffold session, which meant a project could not be triaged until it had
+// paid for one. Seeding it here costs nothing and happens before the first
+// issue.
+//
+// The values it quotes are READ BACK OUT OF THE RENDERED CONFIG rather than
+// typed alongside it, so the seed cannot claim a label prefix or a ladder the
+// committed `.gonk.yml` does not actually set.
+func RenderAgentSeed(c OnboardingContext) ([]AgentSeedFile, error) {
+	raw, err := RenderDefaultConfig(c.Ladder)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := gonkcfg.Load(raw)
+	if err != nil {
+		// Unreachable while TestDefaultConfigIsValidAndEnabled passes, and a
+		// hard error anyway: a seed rendered from a config gonk cannot read
+		// would be describing settings nobody can confirm.
+		return nil, fmt.Errorf("intake: render .agent/ seed: the default config does not load: %w", err)
+	}
+	return renderAgentSeedFrom(c, cfg)
+}
+
+// renderAgentSeedFrom is RenderAgentSeed with the config supplied, so a test can
+// render the seed from a config that does NOT use the default values and prove
+// the prose follows them. Nothing in production calls it with anything but the
+// rendered default.
+func renderAgentSeedFrom(c OnboardingContext, cfg *gonkcfg.ProjectConfig) ([]AgentSeedFile, error) {
+	// NOT gonkcfg.Resolve. Intake has no operator policy and must never
+	// resolve one (see this package's doc comment); it reads the project
+	// layer's own literal values, which is all the seed quotes.
+	if cfg.Triage.LabelPrefix == nil {
+		return nil, fmt.Errorf("intake: render .agent/ seed: the config sets no triage.label_prefix, " +
+			"so the seed cannot state which labels gonk will use")
+	}
+	if len(cfg.Ladder) == 0 {
+		return nil, fmt.Errorf("intake: render .agent/ seed: the config has an empty ladder")
+	}
+	data := struct {
+		OnboardingContext
+		LabelPrefix string
+		Ladder      []string
+		SeedPaths   []string
+		AgentDir    string
+	}{c, *cfg.Triage.LabelPrefix, cfg.Ladder, AgentSeedPaths, AgentDir}
+
+	out := make([]AgentSeedFile, 0, len(AgentSeedPaths))
+	for _, path := range AgentSeedPaths {
+		tmpl, ok := agentSeedTmpl[path]
+		if !ok {
+			return nil, fmt.Errorf("intake: render .agent/ seed: no template for %q", path)
+		}
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, data); err != nil {
+			return nil, fmt.Errorf("intake: render %s: %w", path, err)
+		}
+		out = append(out, AgentSeedFile{Path: path, Content: buf.String()})
+	}
+	return out, nil
+}
+
+// SeedNotFilledIn is the marker every skeleton section carries until a human
+// replaces it. It is the honest signal a reader (and a session) needs: an empty
+// heading is indistinguishable from a heading somebody decided to leave empty.
+const SeedNotFilledIn = "NOT FILLED IN YET"
+
+var agentSeedTmpl = map[string]*template.Template{
+	AgentDir + "/README.md": template.Must(template.New("agent-readme").Parse(
+		`# ` + "`{{.AgentDir}}/`" + ` — this project's context for automated sessions
+
+This directory is the project's own description of itself, written for the
+automated sessions gonk runs here. What it says overrides anything a session
+would otherwise infer from reading the code.
+
+**gonk committed this seed as part of its onboarding merge request.** No model
+was used: it is a template with the headings filled in and the prose left to
+you. Every section still marked ` + "`" + SeedNotFilledIn + "`" + ` is one nobody has
+written yet.
+
+## It is optional
+
+gonk triages issues on **{{.Project}}** whether or not this directory has
+anything in it. Without it, a session answers from the code alone, which is a
+thinner answer. Filling it in is the cheapest way to make those answers
+specific to this repository.
+
+## What gonk reads
+
+A triage session is given these files, in this order, **before** the issue it
+was asked to look at:
+{{range .SeedPaths}}
+- ` + "`{{.}}`" + `{{end}}
+
+Other files kept here are not read by v1 of that loader. Put anything a person
+should read wherever you like; put anything a *session* must know in the files
+above.
+
+## Two ways to fill this in
+
+1. **Write it yourself, or run Navigator locally.** Navigator's conventions and
+   lint half is what this directory's shape comes from, and running it in a
+   local session fills these files from the repository in front of you. This is
+   the recommended route: it costs gonk nothing and you review every word as it
+   is written.
+2. **Ask gonk to draft it.** Set ` + "`actions.scaffold: true`" + ` in ` + "`.gonk.yml`" + `.
+   gonk will then read this repository in a metered session and open a second
+   merge request proposing content for these files, which you review and edit
+   like any other merge request. It is **off by default** and stays off until
+   you turn it on: it spends tokens against this project's budget, and a draft
+   written by reading the repo is a guess where you have knowledge.
+
+## What gonk already does here, without this directory
+
+These come from ` + "`.gonk.yml`" + ` and are quoted from the file this project
+actually committed, not from documentation that could drift from it:
+
+- Every label gonk applies starts with ` + "`{{.LabelPrefix}}`" + `, so its labels are
+  always distinguishable from yours.
+- It may use only these models, cheapest first: {{range $i, $r := .Ladder}}{{if $i}}, {{end}}` + "`{{$r}}`" + `{{end}}.
+- Mentioning ` + "`@{{.BotUsername}}`" + ` in an issue comment reaches it.
+
+---
+Generated-By: gonk/{{.Version}} (deterministic onboarding seed; no model was used)
+`)),
+
+	AgentDir + "/overview.md": template.Must(template.New("agent-overview").Parse(
+		`# What {{.Project}} is
+
+` + SeedNotFilledIn + ` — one paragraph: what this project does, and who or what
+consumes it. Say the thing a newcomer would otherwise have to infer from the
+directory names.
+
+## Main components
+
+` + SeedNotFilledIn + ` — the two or three parts somebody has to know about
+before they can read a diff here, and where each one lives.
+
+## What this project is NOT
+
+` + SeedNotFilledIn + ` — the wrong assumption a reader most often arrives with.
+This section earns its keep: it is the one a session cannot derive from the code.
+
+## Open questions
+
+` + SeedNotFilledIn + ` — anything genuinely undecided. An honest gap here is
+worth more than a confident guess, because every automated session reads this
+file and will repeat what it says.
+`)),
+
+	AgentDir + "/build-and-test.md": template.Must(template.New("agent-build").Parse(
+		`# Building, running and testing {{.Project}}
+
+## Build
+
+` + SeedNotFilledIn + ` — the exact command, and anything that has to exist
+before it will work.
+
+## Test
+
+` + SeedNotFilledIn + ` — the exact command that runs the tests, and what
+"green" means here. Name the check a change is expected to pass before it is
+proposed.
+
+## Run it locally
+
+` + SeedNotFilledIn + ` — how to get a working instance in front of you, or a
+plain statement that you cannot and why.
+
+## Things that look broken but are not
+
+` + SeedNotFilledIn + ` — the failures every newcomer reports once. Writing them
+down here is how a session stops reporting them too.
+`)),
+
+	AgentDir + "/conventions.md": template.Must(template.New("agent-conventions").Parse(
+		`# Conventions for {{.Project}}
+
+Rules a change here has to follow. Write the ones that are actually enforced;
+an aspiration recorded as a rule teaches a session to claim compliance it does
+not have.
+
+## Code
+
+` + SeedNotFilledIn + ` — layout, naming, error handling, anything a reviewer
+reliably asks for.
+
+## Commits and merge requests
+
+` + SeedNotFilledIn + ` — message shape, branch naming, what has to be in a
+merge request description.
+
+## Do not touch
+
+` + SeedNotFilledIn + ` — generated files, vendored trees, anything with an
+owner outside this repository.
+`)),
+}

@@ -51,8 +51,9 @@ type Onboarder interface {
 	Declined(ctx context.Context, p glab.Project) (bool, error)
 }
 
-// Scaffolder fires the .agent/ scaffold order for a project that just became
-// `pending` (spec 5.3: the one metered action authorized while pending). It is
+// Scaffolder fires the metered .agent/ scaffold order for a project that has no
+// `.agent/` AND has opted in with `actions.scaffold: true` (spec 5.3; see
+// Classification.MayScaffold, which is the only place that rule lives). It is
 // satisfied by *Dispatch (pkg/intake/dispatch.go, Task 9); the reconciler is
 // declared against the narrow interface it actually calls, rather than the
 // concrete type, so this package does not need Task 9's file to exist to build
@@ -772,8 +773,10 @@ func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) (proj
 
 	r.Cache.Put(p.ID, entry)
 
-	// spec 5.3: a `pending` project gets the .agent/ scaffold order -- the one
-	// metered action allowed while pending.
+	// spec 5.3: the metered .agent/ scaffold order. OPT-IN since T-08 -- the
+	// onboarding merge request seeds .agent/ deterministically, so MayScaffold
+	// now also requires `actions.scaffold: true` and this is dormant by default.
+	// Triage does NOT depend on it and never waits for it.
 	if entry.Classification.MayScaffold() && r.Dispatch != nil &&
 		time.Since(entry.ScaffoldFiredAt) > time.Hour {
 		if err := r.Dispatch.FireScaffold(ctx, entry); err != nil {

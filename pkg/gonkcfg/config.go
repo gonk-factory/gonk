@@ -21,6 +21,12 @@ type ActionsPolicy struct {
 	Triage    *bool `yaml:"triage"`
 	Pipelines *bool `yaml:"pipelines"`
 	Features  *bool `yaml:"features"`
+	// Scaffold authorizes the metered `.agent/` scaffold session (spec 5.3).
+	// It is OFF unless a project writes `scaffold: true`, because the
+	// onboarding merge request now ships a deterministic `.agent/` seed and
+	// the metered scaffold is an opt-in extra rather than a step every project
+	// must pay for.
+	Scaffold *bool `yaml:"scaffold"`
 }
 
 type Schedule struct {
