@@ -95,11 +95,19 @@ func (c *Client) CreateIssue(ctx context.Context, projectID int64, opts IssueOpt
 // parameter of the issue-edit endpoint: GitLab treats re-adding a label
 // already present as a no-op, so no read-before-write is needed. Used by
 // intake's Gate-1 deny path (its ONLY GitLab write on the dispatch path).
+//
+// Sent as a JSON body carrying add_labels as a ONE-ELEMENT ARRAY, not the
+// query-string form (`?add_labels=<value>`) this used to send. GitLab treats
+// a query-string add_labels as a comma-separated list, so a label value that
+// happened to contain a comma silently applied more labels than the caller
+// named -- one label effect from an agent-authored batch could apply two
+// labels. GitLab's array form has no such splitting: each array element is
+// applied verbatim as one label (T-05, closes R-02).
 func (c *Client) AddIssueLabel(ctx context.Context, projectID, issueIID int64, label string) error {
 	return c.getJSON(ctx, request{
 		method: "PUT",
 		path:   fmt.Sprintf("/api/v4/projects/%d/issues/%d", projectID, issueIID),
-		query:  map[string]string{"add_labels": label},
+		body:   map[string][]string{"add_labels": {label}},
 	}, nil)
 }
 

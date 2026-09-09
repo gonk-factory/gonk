@@ -257,6 +257,25 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 	if v := checkTrajectory(ctx, d, rec, agent, batch); v != "" {
 		return false, v, nil
 	}
+	// THE LABEL GATE (T-05, closes R-02): checked before ANY write -- comments
+	// and the scaffold MR included -- so a batch with one bad label effect
+	// produces ZERO GitLab writes, not a comment posted and a label silently
+	// dropped. normaliseLabel refuses rather than repairs a comma, a
+	// whitespace-only or oversize value, or an attempt to mint one of the
+	// broker's own audit labels (ReservedLabels); refusing that one effect
+	// must refuse the whole batch, because a half-applied batch is not one a
+	// human can reconstruct the refusal reason for from the issue afterward.
+	prefix := labelPrefix(ctx, d, rec)
+	for _, e := range batch.Effects {
+		if e.Kind != effects.KindLabel {
+			continue
+		}
+		for _, lbl := range e.Add {
+			if _, lerr := normaliseLabel(lbl, prefix); lerr != nil {
+				return false, "label: " + lerr.Error(), nil
+			}
+		}
+	}
 
 	// Shape-valid. Apply comment(s) first (deterministic order, independent of
 	// the agent's emit order), then labels.
@@ -309,10 +328,14 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 		}
 		for _, lbl := range e.Add {
 			// The namespace is the ISSUE STORE'S, not the model's (gonk-prr).
-			lbl = normaliseLabel(lbl, labelPrefix(ctx, d, rec))
-			if aerr := d.Apply.AddIssueLabel(ctx, rec.ProjectID, targetIID(e, rec), lbl); aerr != nil {
+			// The error is ignored here, not unchecked: the label gate above
+			// already ran normaliseLabel over every effect in this batch with
+			// this same prefix and refused the batch on the first error, so by
+			// the time this loop runs every label in it is known-good.
+			norm, _ := normaliseLabel(lbl, prefix)
+			if aerr := d.Apply.AddIssueLabel(ctx, rec.ProjectID, targetIID(e, rec), norm); aerr != nil {
 				d.Log.Warn("sweep: label apply failed (comment already posted)",
-					"bead", rec.BeadAnchor, "label", lbl, "err", aerr)
+					"bead", rec.BeadAnchor, "label", norm, "err", aerr)
 			}
 		}
 	}
