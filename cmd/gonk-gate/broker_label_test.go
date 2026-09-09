@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"gitlab.orac.local/agentic/gonk-project/pkg/effects"
 )
 
 // The observed failure (gonk-prr): the agent typed a slash where the project
@@ -127,6 +129,43 @@ func TestOverlengthLabelIsRefused(t *testing.T) {
 	}
 }
 
+// The 255-byte cap must be checked on the label as it will actually be SENT,
+// i.e. after the configured prefix is applied -- not on the raw input. A
+// 255-byte bare label plus "gonk::" is 261 bytes on the wire, over GitLab's
+// own cap, even though the raw label alone was exactly at it.
+func TestOverlengthLabelIsRefusedAfterPrefixIsApplied(t *testing.T) {
+	bare := strings.Repeat("a", 255)
+	if _, err := normaliseLabel(bare, "gonk::"); err == nil {
+		t.Fatalf("normaliseLabel(255-byte label, %q) = nil error, want a refusal (261 bytes after the prefix)", "gonk::")
+	}
+	// The boundary: a label that is exactly 255 bytes AFTER the prefix is
+	// applied must be accepted, not refused by an off-by-one.
+	fits := strings.Repeat("a", 255-len("gonk::"))
+	got, err := normaliseLabel(fits, "gonk::")
+	if err != nil {
+		t.Fatalf("a label that is exactly 255 bytes after the prefix was refused: %v", err)
+	}
+	if len(got) != 255 {
+		t.Fatalf("normalised label is %d bytes, want exactly 255", len(got))
+	}
+}
+
+// The length check is byte-based, not rune-based: len() on a Go string
+// already counts bytes, but a future switch to utf8.RuneCountInString would
+// silently let a multi-byte label through GitLab's byte-denominated cap
+// without any test here noticing. "é" is 2 bytes in UTF-8, so 150 of them is
+// 300 bytes -- over the cap by byte count though only 150 runes.
+func TestMultiByteLabelLengthIsByteBased(t *testing.T) {
+	tooLong := strings.Repeat("é", 150) // 150 runes, 300 bytes
+	if _, err := normaliseLabel(tooLong, ""); err == nil {
+		t.Fatal("a 300-byte (150-rune) label = nil error, want a refusal")
+	}
+	ok := strings.Repeat("é", 100) // 100 runes, 200 bytes: under the cap
+	if _, err := normaliseLabel(ok, ""); err != nil {
+		t.Fatalf("a 200-byte (100-rune) label was refused: %v", err)
+	}
+}
+
 // Exit criterion 2: an agent cannot mint one of the broker's own audit
 // labels -- gonk::fix-queued is written by applyCodeChangeVerdict to route a
 // finding to a maintainer queue, and it must mean that gonk concluded it, not
@@ -164,6 +203,45 @@ func TestReservedLabelsAreRefusedThroughNamespaceRepair(t *testing.T) {
 func TestReservedLabelsAreRefusedEvenWithNoPrefix(t *testing.T) {
 	if _, err := normaliseLabel("denied", ""); err == nil {
 		t.Fatal("normaliseLabel(\"denied\", \"\") = nil error, want a refusal")
+	}
+}
+
+// gonk::onboarding (pkg/intake.OnboardingIssueLabel) is the marker
+// GitLabOnboarder uses to find its own "I need Developer" issue again rather
+// than opening a second one -- gonk-written, same class as fix-queued/denied,
+// and just as forgeable if an agent could apply it to an arbitrary issue.
+func TestOnboardingLabelIsRefused(t *testing.T) {
+	if _, err := normaliseLabel("gonk::onboarding", "gonk::"); err == nil {
+		t.Fatal("normaliseLabel(\"gonk::onboarding\", \"gonk::\") = nil error, want a refusal")
+	}
+}
+
+// The drift guard: ReservedLabels is DERIVED from verdictLabel rather than
+// restating its output (see buildReservedLabels), so this is deliberately a
+// consistency check on that derivation rather than an independent
+// enumeration -- pkg/effects exposes no closed list of verdicts to check
+// against. What it DOES catch: a verdict added to reservedVerdicts
+// (broker_label.go) whose verdictLabel output was mistyped or mis-stripped
+// on the way into ReservedLabels, and -- via the unknown-verdict case below
+// -- confirms verdictLabel's default branch (what an unrecognised Verdict
+// maps to) is already covered rather than accidentally exempt.
+func TestReservedLabelsCoverEveryVerdictLabel(t *testing.T) {
+	for _, v := range reservedVerdicts {
+		label := verdictLabel(v)
+		suffix := strings.TrimPrefix(label, "gonk::")
+		if !ReservedLabels[suffix] {
+			t.Fatalf("verdictLabel(%q) = %q, but %q is not in ReservedLabels", v, label, suffix)
+		}
+		if _, err := normaliseLabel(label, "gonk::"); err == nil {
+			t.Fatalf("normaliseLabel(%q) = nil error, want a refusal (it is verdictLabel(%q))", label, v)
+		}
+	}
+	// An unrecognised Verdict must fall through verdictLabel's default branch
+	// to reply-only -- itself in reservedVerdicts and asserted above -- rather
+	// than to some new, unreserved label.
+	unknown := effects.Verdict("some-future-verdict-nobody-taught-verdictLabel-about")
+	if got, want := verdictLabel(unknown), verdictLabel(effects.VerdictReplyOnly); got != want {
+		t.Fatalf("verdictLabel(unknown verdict) = %q, want the default %q", got, want)
 	}
 }
 
