@@ -248,8 +248,16 @@ chart-seal:
 chart-goldens:
 	$(GO) test -tags chart ./internal/charttest/ -run Golden -update -count=1
 
+# Scan the REPO's own Go files, not everything under the tree. `gofmt -l .`
+# walks into git worktrees under .worktrees/ and .claude/worktrees/, each of
+# which carries its own vendor/ -- so a single leftover worktree made `make
+# gate` fail on thousands of vendored files it does not own, and a gate that
+# cannot run is the same as no gate (gonk-n50's lesson, and the --network=host
+# lint break on 2026-09-07). Excluding by path prefix keeps working when a
+# worktree is nested deeper than the old '^vendor/' filter could see.
 fmt:
-	@out="$$(gofmt -l . | grep -v '^vendor/' || true)"; \
+	@out="$$(gofmt -l . | grep -v -e '^vendor/' -e '/vendor/' \
+	    -e '^\.worktrees/' -e '^\.claude/worktrees/' || true)"; \
 	  if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 
 vet:
