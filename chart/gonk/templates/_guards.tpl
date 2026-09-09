@@ -96,6 +96,17 @@
   {{- fail "secrets.ledger.existingSecret is empty. gonk-meter's ledger is Postgres/CNPG (ADR-004; there is no dolt-backed ledger any more), and none of the three ledger.postgres.mode values (shared, cnpg, external) derive a DSN automatically the way the bundled Dolt used to -- even mode=cnpg's generated Cluster Secret must be pointed at explicitly. Provision the ledger DSN Secret (see chart/gonk/README.md and Task 6 Step 5b's four-object gitops recipe for mode=shared)." -}}
 {{- end -}}
 
+{{- /* R-48/T-26 (interim until T-56 deletes Dolt): Dolt is not root-open.
+       G16 above already guarantees SOME Dolt endpoint always exists (bundled
+       or dolt.external.host), so secrets.dolt.existingSecret is required
+       unconditionally, not just when dolt.enabled -- an external Dolt still
+       needs the gc-password key for the controller to authenticate as
+       anything other than a credential this chart would otherwise have to
+       generate or default, which is the exact thing this task closes. */ -}}
+{{- if not .Values.secrets.dolt.existingSecret -}}
+  {{- fail "secrets.dolt.existingSecret is empty. The bundled Dolt's root password (root-password) and the `gc` user's password (gc-password) both live in this Secret -- the chart creates and defaults NEITHER, on purpose (R-48: Dolt used to be root/no-password/reachable-from-any-pod). An external Dolt (dolt.enabled=false) still needs the gc-password key: it is what the controller authenticates with. Provision the Secret (see chart/gonk/README.md's secret table) and set secrets.dolt.existingSecret." -}}
+{{- end -}}
+
 {{- /* G10: a NetworkPolicy that selects nothing, or everything. */ -}}
 {{- if .Values.networkPolicy.enabled -}}
   {{- if not .Values.networkPolicy.agentPodSelector -}}

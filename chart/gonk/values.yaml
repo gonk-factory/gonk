@@ -298,8 +298,15 @@ gascity:
 # be (`docs/environment.md`: the beads backend enum is dolt/doltlite; sqlite/
 # coordstore were removed and hard-error). CNPG can only ever replace the LEDGER.
 #
-# The shipped Dolt auths as root / empty password / --no-tls, host/port only --
-# there is no user/password/DSN to configure, so the chart does not pretend to.
+# R-48 (T-26, INTERIM until T-56 deletes Dolt entirely at the Gas City cutover):
+# root is no longer root-open. DOLT_ROOT_HOST is "localhost" (root usable only
+# from inside the dolt pod itself, never cross-pod), root's password comes from
+# secrets.dolt.existingSecret (never a chart literal), and the controller
+# connects as a `gc` user this same Secret provisions, GRANT-scoped to ONLY the
+# beads database (never GRANT ALL PRIVILEGES ON *.*). TLS is still off --
+# dolthub 2.1.7's sql-server has no TLS flag at all (see the args comment
+# below) -- so the wire is still plaintext; only the credential/reachability
+# half of R-48 is closed here. See chart/gonk/README.md's secret table.
 # =============================================================================
 dolt:
   enabled: true           # deploy the bundled Dolt StatefulSet. false => external
@@ -317,6 +324,15 @@ dolt:
                           # Task 0: the LEDGER is never a Dolt database (see
                           # ADR-004 / docs/spikes/dolt-reservation-isolation.md) --
                           # this server backs beads ONLY, full stop.
+  gcUser:
+    # R-48/T-26: the ONLY credential the controller connects to Dolt with. The
+    # bundled server creates this user at first boot (DOLT_USER/DOLT_PASSWORD,
+    # from secrets.dolt) GRANT ALL ON `bd_<dolt.database>`.* -- never on *.* --
+    # so a pod that reaches this user can touch the beads database and nothing
+    # else. An external Dolt (dolt.enabled=false) must provision the SAME user
+    # with the SAME grant out of band; the chart cannot reach into it. The
+    # password lives in secrets.dolt.keys.gcPassword, never here.
+    username: gc
   port: 3306
   external:
     host: ""              # REQUIRED when enabled=false. Gas City AND the ledger use it.
@@ -420,6 +436,26 @@ secrets:
     existingSecret: gonk-ledger
     keys:
       dsn: dsn
+  # R-48/T-26 (interim until T-56 deletes Dolt): the bundled Dolt's root
+  # password AND the `gc` user's password (dolt.gcUser.username). BOTH are
+  # PLAIN env vars at the consumer -- the dolthub image's docker-entrypoint.sh
+  # (DOLT_ROOT_PASSWORD/DOLT_PASSWORD) and Gas City's `gc` binary
+  # (GC_DOLT_PASSWORD) each read os.Getenv with NO `_FILE` fallback, verified
+  # against their source (dolthub/dolt docker/docker-entrypoint.sh;
+  # cmd/gc/dolt_sql_health.go at GASCITY_REF) -- so unlike every other secret
+  # in this table, neither can be handed to the consumer as a mounted file
+  # directly. Both are STILL never a secretKeyRef/envFrom (chart-wide rule,
+  # TestSecretsAreNeverEnvironmentVariables): the chart file-mounts this
+  # Secret exactly like the others, and the dolt/controller command wrappers
+  # `cat` the mounted file into a shell `export` at container start, so the
+  # value never appears in the rendered manifest or the Pod object -- only in
+  # the mounted file and the target process's own environment.
+  dolt:
+    existingSecret: gonk-dolt
+    keys:
+      rootPassword: root-password  # bundled Dolt only (dolt.enabled=true)
+      gcPassword: gc-password      # REQUIRED whenever beads is reachable at
+                                    # all -- bundled or external Dolt (G16)
   # The ed25519 PRIVATE signing key gonk-intake AND the in-controller gonk-gate use
   # to mint X-GC-City-Write grants for the grant-gated controller (gascity.writeAuth
   # above holds its PUBLIC half). Provisioned OUT OF BAND (Vault/1Password ->

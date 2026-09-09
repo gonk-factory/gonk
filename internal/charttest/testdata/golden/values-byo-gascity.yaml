@@ -1093,8 +1093,10 @@ spec:
         - name: dolt
           image: docker.io/dolthub/dolt-sql-server:2.1.7
           imagePullPolicy: IfNotPresent
-          # Auth is root / empty password / --no-tls, host+port only. There is no
-          # credential to configure, so the chart does not pretend to (env doc).
+          # R-48/T-26 (interim until T-56 deletes Dolt): root is no longer
+          # root-open. See the command wrapper below for how the two Secret
+          # keys (secrets.dolt) reach this container as env vars WITHOUT ever
+          # being a secretKeyRef or a chart literal.
           env:
             # HOME is LOAD-BEARING (gonk-fsl in-cluster re-smoke, blocker C). The
             # dolthub image assumes it runs as root (HOME=/root) and sets no HOME
@@ -1105,15 +1107,33 @@ spec:
             # controller template solves the identical uid/HOME problem the same way.
             - name: HOME
               value: /var/lib/dolt
-            # dolt sql-server creates root@${DOLT_ROOT_HOST:-localhost} on FIRST
-            # init. The default root@localhost rejects the controller's CROSS-POD
-            # login (gonk-fsl in-cluster re-smoke, blocker B: `Error 1045 Access
-            # denied for user 'root'`) -- loopback masked it in every local smoke.
-            # `%` creates a remotely-usable root so the Gas City beads store is
-            # reachable from the controller pod. Still no password, still --no-tls
-            # (the documented Dolt auth model -- there is no user/pass/DSN key).
+            # R-48: root is bound to localhost ONLY -- the entrypoint's own
+            # default when DOLT_ROOT_HOST is unset, but pinned explicitly so a
+            # future edit cannot silently widen it back to "%" the way the
+            # blocker-B fix once did. Root is therefore reachable ONLY via a
+            # shell inside this pod (`kubectl exec` + `dolt sql-client`), never
+            # cross-pod -- closing the "any pod can `mysql -h gonk-dolt -u
+            # root`" finding. The controller's cross-pod login (the reason
+            # DOLT_ROOT_HOST was widened to "%" in the first place) now uses
+            # the `gc` user below instead, via DOLT_USER_HOST="%".
             - name: DOLT_ROOT_HOST
+              value: "localhost"
+            # The user the controller connects as (dolt.gcUser.username),
+            # GRANT-scoped by the entrypoint's create_user_from_env to ONLY
+            # DOLT_DATABASE below (GRANT ALL ON `db`.* -- never GRANT ALL
+            # PRIVILEGES ON *.*, which is what root gets). Verified against
+            # dolthub/dolt docker/docker-entrypoint.sh's create_user_from_env.
+            - name: DOLT_USER
+              value: "gc"
+            # Reachable cross-pod (unlike root, above): this is the credential
+            # the controller (a different pod) dials in with.
+            - name: DOLT_USER_HOST
               value: "%"
+            # Matches the --dolt-database flag `gc init` is passed
+            # (workload-gonk-controller.yaml: "bd_" + dolt.database) -- the
+            # ONE database DOLT_USER is granted on.
+            - name: DOLT_DATABASE
+              value: "bd_gonk"
           # The dolthub image ENTRYPOINT (docker-entrypoint.sh) already runs
           # `dolt sql-server --host=0.0.0.0 --port=3306 "$@"` AND does the
           # DOLT_ROOT_HOST bootstrap (blocker B). Passing sql-server/--host/--port
@@ -1126,13 +1146,35 @@ spec:
           # off by default unless tls_cert/tls_key is set) -- passing it is a fatal
           # `unknown option 'no-tls'` crash (gonk-fsl re-smoke, blocker E). Pass only
           # --data-dir (not injected by the entrypoint); host/port come from it.
+          #
+          # R-48/T-26: DOLT_ROOT_PASSWORD and DOLT_PASSWORD cannot be plain
+          # `env:` values (the chart never reads a Secret's content at render
+          # time, and a chart-generated/default password is exactly what this
+          # task closes) and cannot be a secretKeyRef (this chart's own rule --
+          # TestSecretsAreNeverEnvironmentVariables -- forbids it: that would
+          # put the credential in the Pod spec, visible to `kubectl get pod -o
+          # yaml` and every audit log). So `command` REPLACES the image's
+          # default ENTRYPOINT+CMD with an equivalent invocation
+          # (`tini -- docker-entrypoint.sh`, from the image's own Dockerfile)
+          # wrapped in a shell that `cat`s the two FILE-mounted Secret keys
+          # (secrets.dolt, mounted below exactly like every other secret in
+          # this chart) into env vars for JUST this process, right before
+          # exec-ing it. The value never appears in the rendered manifest.
+          command: ["/bin/sh", "-c"]
           args:
-            - --data-dir=/var/lib/dolt
+            - |
+              set -eu
+              export DOLT_ROOT_PASSWORD="$(cat /etc/gonk/secrets/dolt/root-password)"
+              export DOLT_PASSWORD="$(cat /etc/gonk/secrets/dolt/gc-password)"
+              exec tini -- docker-entrypoint.sh --data-dir=/var/lib/dolt
           ports:
             - name: mysql
               containerPort: 3306
-          # A TCP probe only: authenticating a real query would need a client, and
-          # this server has no credential to authenticate anyway.
+          # A TCP probe only: an authenticating probe would need a client AND a
+          # copy of the credential in the probe command (visible via `kubectl
+          # describe pod`) -- readiness is "the port accepts a connection",
+          # not "the gc user's grant is correct" (the charttest render suite
+          # covers the latter).
           livenessProbe:
             tcpSocket: {port: mysql}
             initialDelaySeconds: 15
@@ -1156,6 +1198,21 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/dolt
+            - name: secret-dolt
+              mountPath: /etc/gonk/secrets/dolt
+              readOnly: true
+      volumes:
+        - name: secret-dolt
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-dolt
+                  items:
+                    - key: root-password
+                      path: root-password
+                    - key: gc-password
+                      path: gc-password
   volumeClaimTemplates:
     - metadata:
         name: data

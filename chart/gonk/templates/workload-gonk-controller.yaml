@@ -77,10 +77,22 @@ spec:
         - name: bootstrap-city
           image: {{ include "gonk.image" (dict "ctx" . "image" .Values.gascity.image) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # R-48/T-26: the `gc` user's password, read from the FILE-mounted
+          # secrets.dolt.keys.gcPassword Secret key below and exported for
+          # ONLY this process -- it is never a Kubernetes-native secret
+          # reference and never a chart literal (see the gonk.controllerEnv
+          # definition of GC_DOLT_USER for why the user, unlike the password,
+          # is a plain env entry instead). NOTE: this explanation lives in a
+          # real YAML comment, ABOVE the script, on purpose -- a comment
+          # INSIDE the `args` block scalar becomes literal shell-script DATA
+          # in the rendered manifest, and would trip
+          # TestSecretsAreNeverEnvironmentVariables's chart-wide grep for the
+          # very k8s primitive this wrapper exists to avoid.
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -eu
+              export GC_DOLT_PASSWORD="$(cat {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "dolt-gc" "key" .Values.secrets.dolt.keys.gcPassword) }})"
               cp -r /opt/gonk/pack/. /city/
               # --name gonk is LOAD-BEARING: `gc start --foreground` serves the city
               # under the name in city.toml [workspace], and intake dials
@@ -208,6 +220,8 @@ spec:
             # the agent pod holds no forge creds; only the controller container
             # mounts the bot PAT (for the broker's own dispatch/sweep forge calls).
             {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "litellm") | nindent 12 }}
+            # R-48/T-26: the `gc` user's password (see the export above).
+            {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "dolt-gc") | nindent 12 }}
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
       containers:
@@ -220,7 +234,18 @@ spec:
           # `gc register` MUST NOT be used -- it daemonizes a second supervisor that
           # then kills PID 1. The city dir is passed explicitly, so no registration
           # is needed.
-          command: ["/bin/sh", "-c", "exec gc start --foreground /city"]
+          #
+          # R-48/T-26: same shell-wrapper pattern as the initContainer above --
+          # GC_DOLT_PASSWORD is read from the FILE-mounted Secret key and
+          # exported for only this process, never a secretKeyRef or a chart
+          # literal, right before the `exec` that becomes PID 1.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              export GC_DOLT_PASSWORD="$(cat {{ include "gonk.secretPath" (dict "root" .Values.secrets.mountRoot "name" "dolt-gc" "key" .Values.secrets.dolt.keys.gcPassword) }})"
+              exec gc start --foreground /city
           env:
             {{- include "gonk.controllerEnv" . | nindent 12 }}
             # WRITE-AUTH (gonk-fsl / gonk-5we). GC_CITY_WRITE_PUBKEY turns on
@@ -408,6 +433,8 @@ spec:
             # env from exec orders -- see the GONK_*_FILE comment above.
             {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "litellm") | nindent 12 }}
             {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "gitlab-bot") | nindent 12 }}
+            # R-48/T-26: the `gc` user's password (see the export in `command` above).
+            {{- include "gonk.secretMount" (dict "root" .Values.secrets.mountRoot "name" "dolt-gc") | nindent 12 }}
       volumes:
         # /city and /home/gonk MUST be writable by uid 65532 (smoke U2): gc init
         # writes the city into /city and gc writes ~/.gc under HOME. emptyDir, shared
@@ -428,6 +455,10 @@ spec:
         # (gonk-aql): the LiteLLM virtual key and the GitLab bot token, 0400.
         {{- include "gonk.secretVolume" (dict "name" "litellm" "secret" .Values.secrets.litellm.existingSecret "keys" (list .Values.secrets.litellm.keys.adminKey)) | nindent 8 }}
         {{- include "gonk.secretVolume" (dict "name" "gitlab-bot" "secret" .Values.secrets.gitlab.existingSecret "keys" (list .Values.secrets.gitlab.keys.token)) | nindent 8 }}
+        # R-48/T-26: the `gc` user's password. Only the gc-password key is
+        # projected here -- the controller never needs (and must never have)
+        # secrets.dolt.keys.rootPassword, mounted only into the dolt pod itself.
+        {{- include "gonk.secretVolume" (dict "name" "dolt-gc" "secret" .Values.secrets.dolt.existingSecret "keys" (list .Values.secrets.dolt.keys.gcPassword)) | nindent 8 }}
         {{- if .Values.gitlab.caCert.existingConfigMap }}
         # The private-CA bundle (trust-manager publishes `trust-bundle` into every
         # namespace). gc clones the city's git remote from https://gitlab.orac.local,

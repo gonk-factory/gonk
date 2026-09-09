@@ -76,6 +76,25 @@ ClusterSecretStore **`vault-backend`**, Vault KV path **`eso/gonk/<concern>`**.
 | `gonk-litellm` | `admin-key` | `eso/gonk/litellm` | `/etc/gonk/secrets/litellm/admin-key` | `LITELLM_ADMIN_KEY_FILE` | meter |
 | `gonk-litellm` | `admin-key-previous` *(slot 2, opt-in)* | `eso/gonk/litellm` | `/etc/gonk/secrets/litellm/admin-key-previous` | `LITELLM_ADMIN_KEY_PREVIOUS_FILE` | meter |
 | `gonk-ledger` | `dsn` | `eso/gonk/ledger` *(or CNPG's generated Secret)* | `/etc/gonk/secrets/ledger/dsn` | `GONK_METER_STORE_DSN_FILE` | meter |
+| `gonk-dolt` | `root-password` | `eso/gonk/dolt` | `/etc/gonk/secrets/dolt/root-password` | `DOLT_ROOT_PASSWORD` *(see note below)* | dolt |
+| `gonk-dolt` | `gc-password` | `eso/gonk/dolt` | `/etc/gonk/secrets/dolt/gc-password` (dolt) and `/etc/gonk/secrets/dolt-gc/gc-password` (controller) | `DOLT_PASSWORD` (dolt) / `GC_DOLT_PASSWORD` (controller) *(see note below)* | dolt, controller |
+
+**`gonk-dolt`'s two keys are a second, NARROWER deviation, on top of the file-mount
+one above (R-48 / T-26, interim until T-56 deletes Dolt entirely).** Every OTHER
+row's consumer reads the mounted FILE directly (`*_FILE` env names its path). The
+dolthub image's own `docker-entrypoint.sh` and Gas City's `gc` binary do not
+support that — both read `DOLT_ROOT_PASSWORD`/`DOLT_PASSWORD`/`GC_DOLT_PASSWORD` as
+plain env vars with no file-based fallback (verified against their source, not
+assumed). So the Secret is STILL mounted as a file, exactly like every other row
+— never a `secretKeyRef`, never a Pod-spec literal — but the dolt StatefulSet's
+`command` and the controller's `command`/init `args` each `cat` their file into an
+`export` for THEIR OWN process only, immediately before exec-ing the real
+entrypoint. The value never appears in `helm template` output or a live Pod
+object; it exists only in the mounted file and that one process's environment.
+`TestDoltIsNotRootOpen` (`internal/charttest`) asserts the rendered wiring
+directly. Root itself is bound to `DOLT_ROOT_HOST=localhost` (unreachable
+cross-pod, closing R-48); the controller never authenticates as root, only as
+the `gc` user, GRANT-scoped to the beads database alone.
 
 Plus one **non-credential** mount, just as load-bearing:
 
