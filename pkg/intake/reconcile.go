@@ -681,6 +681,20 @@ type projectOutcome struct {
 func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) (projectOutcome, error) {
 	var out projectOutcome
 	if p.Archived {
+		// ReconcileOnce already set seen[p.ID] = true before calling us (it has
+		// to: an archived project is still a membership, not a vanished one), so
+		// the vanished-membership sweep below will never see this project as
+		// gone and will never DELETE its meter registration. This is the only
+		// place that observes Archived, so deregistering has to happen here, or
+		// the LiteLLM key outlives the project's archival.
+		if e, ok := r.Cache.Get(p.ID); ok {
+			if err := r.Meter.Deregister(ctx, e.Project.PathWithNamespace); err != nil {
+				r.Obs.MeterPush("error")
+				r.log().Warn("failed to deregister archived project", "project", e.Project.PathWithNamespace, "err", err)
+				return out, err // keep cached; retry deregistration next pass
+			}
+			r.Obs.MeterPush("ok")
+		}
 		r.Cache.Delete(p.ID)
 		return out, nil
 	}

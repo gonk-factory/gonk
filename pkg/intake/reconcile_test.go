@@ -366,6 +366,38 @@ func TestReconcileDeletesProjectsTheBotLeft(t *testing.T) {
 	}
 }
 
+// Archiving a project is not a de-onboard the vanished-membership sweep can
+// see: the bot is still a member, so ListMemberProjects still returns it and
+// `seen[p.ID]` is set before reconcileProject ever runs. If reconcileProject
+// only dropped the cache entry without deregistering, the sweep would never
+// notice and the LiteLLM key would stay live for a project nobody can push
+// to anymore. Regression guard for R-15.
+func TestReconcileDeregistersArchivedProject(t *testing.T) {
+	gl := glabtest.New(t)
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	p.PutFile(".gonk.yml", []byte("version: 1\nenabled: true\nladder: [qwen-local]\n"))
+	m := newFakeMeter(t)
+	r := newReconciler(t, gl, m)
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.Cache.Get(p.ID); !ok {
+		t.Fatal("setup: project must be cached before archiving it")
+	}
+
+	gl.SetArchived(p.ID, true) // still a membership -- just archived
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(m.deletes) != 1 || !strings.Contains(m.deletes[0], "group%2Frepo") {
+		t.Fatalf("archiving must DELETE the meter registration exactly once (URL-escaped): %v", m.deletes)
+	}
+	if _, ok := r.Cache.Get(p.ID); ok {
+		t.Fatal("archived project must leave the cache")
+	}
+}
+
 // One bad project must not stop the others.
 func TestReconcileContinuesPastOneProjectError(t *testing.T) {
 	gl := glabtest.New(t)

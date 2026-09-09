@@ -264,6 +264,20 @@ func (s *Server) SetIssueState(projectID, iid int64, state string) {
 	s.t.Fatalf("glabtest: SetIssueState: no issue iid=%d in project %d", iid, projectID)
 }
 
+// SetArchived flips a project's archived flag, as GitLab reports it on the
+// next ListMemberProjects call -- the reconciler's only signal that a
+// project was archived (it stays a membership, unlike RemoveProject).
+func (s *Server) SetArchived(projectID int64, archived bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[projectID]
+	if !ok {
+		s.t.Fatalf("glabtest: SetArchived: unknown project %d", projectID)
+		return
+	}
+	p.Archived = archived
+}
+
 // AddNote appends a note to an issue. system marks a GitLab-generated audit
 // note (label changes, etc.) rather than authored text -- the gate must
 // never mistake one for the bot's marker comment.
