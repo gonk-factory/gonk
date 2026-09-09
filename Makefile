@@ -171,11 +171,30 @@ BANNED_TAG := :late$(empty)st
 # alpine CI image via `apk add grep`, and locally). NOTE: like BANNED_TAG's own
 # $(empty) trick, this comment must never spell the token as one contiguous
 # string, or `grep -rn ... Makefile` would trip on the comment itself.
+# THIRD FALSE-POSITIVE SOURCE FIXED (T-04): `! grep ... || (echo FAIL; exit
+# 1)` only distinguishes zero exit from nonzero exit -- it cannot tell "grep
+# found nothing" (exit 1, the pass case) apart from "grep itself errored"
+# (exit >=2: a bad flag, an unreadable file, anything). Both looked like
+# "no match" and both flipped `!` to a silent pass. Capture grep's actual
+# exit code instead: 0 is a real hit (fail, banned tag found), 1 is a clean
+# scan (pass), and anything else is a grep error (fail, with grep's own
+# stderr shown so the error is visible instead of swallowed).
 no-latest:
 	@paths="images Makefile test"; \
 	  [ -d chart ] && paths="$$paths chart"; \
-	  ! grep -rn --exclude-dir=crd-schemas '$(BANNED_TAG)' $$paths 2>/dev/null || \
-	  (echo "FAIL: a floating image tag was found. Pin an exact tag (docs/environment.md)." && exit 1)
+	  out=$$(grep -rn --exclude-dir=crd-schemas '$(BANNED_TAG)' $$paths 2>&1); \
+	  code=$$?; \
+	  if [ $$code -eq 0 ]; then \
+	    echo "$$out"; \
+	    echo "FAIL: a floating image tag was found. Pin an exact tag (docs/environment.md)."; \
+	    exit 1; \
+	  elif [ $$code -eq 1 ]; then \
+	    exit 0; \
+	  else \
+	    echo "$$out" >&2; \
+	    echo "FAIL: grep exited $$code scanning for a floating image tag -- that is a scan error, not a clean pass." >&2; \
+	    exit 1; \
+	  fi
 
 # lint-pack runs the pack's anti-drift greps (Plan 04, Task 4, Step 7). The
 # same three properties are ALSO asserted as permanent Go tests in
