@@ -14,7 +14,8 @@
       "properties": {
         "triage": { "type": "boolean" },
         "pipelines": { "type": "boolean" },
-        "features": { "type": "boolean" }
+        "features": { "type": "boolean" },
+        "scaffold": { "type": "boolean" }
       }
     },
     "schedule": {

@@ -287,6 +287,11 @@ type Actions struct {
 	Triage    bool `json:"triage"`
 	Pipelines bool `json:"pipelines"`
 	Features  bool `json:"features"`
+	// Scaffold: the metered `.agent/` scaffold session is opt-in (spec 5.3).
+	// A meter that predates this field simply omits it, and `omitempty` is
+	// deliberately ABSENT so the wire always states the answer -- an absent
+	// key decodes to false, which is the fail-closed direction.
+	Scaffold bool `json:"scaffold"`
 }
 
 type Triage struct {
@@ -327,7 +332,7 @@ type Effective struct {
 func EffectiveFrom(e gonkcfg.Effective) Effective {
 	out := Effective{
 		Enabled:    e.Enabled,
-		Actions:    Actions{Triage: e.Actions.Triage, Pipelines: e.Actions.Pipelines, Features: e.Actions.Features},
+		Actions:    Actions{Triage: e.Actions.Triage, Pipelines: e.Actions.Pipelines, Features: e.Actions.Features, Scaffold: e.Actions.Scaffold},
 		Ladder:     append([]string(nil), e.Ladder...),
 		Continuity: e.Continuity,
 		Triage:     Triage{LabelPrefix: e.Triage.LabelPrefix, RespondToMentions: e.Triage.RespondToMentions},

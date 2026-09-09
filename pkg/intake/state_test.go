@@ -3,6 +3,7 @@ package intake
 import (
 	"testing"
 
+	"gitlab.orac.local/agentic/gonk-project/pkg/gonkcfg"
 	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
 )
 
@@ -62,17 +63,45 @@ func TestClassifyValid(t *testing.T) {
 	}
 }
 
-func TestClassifyPendingUntilAgentDirExists(t *testing.T) {
+// `pending` is still CLASSIFIED -- it is a metric label and must keep its name
+// -- but it no longer withholds triage (T-08, spec 5.3). The onboarding merge
+// request seeds `.agent/` itself, so a project without one gets a thinner
+// prompt, not a refusal.
+func TestClassifyPendingStillTriages(t *testing.T) {
 	c := Classify(obs(func(o *Observation) { o.AgentDirPresent = false }), active(nil))
 	if c.State != StatePending {
-		t.Fatalf("state = %q", c.State)
+		t.Fatalf("state = %q, want %q (the state is classified, not removed)", c.State, StatePending)
 	}
-	// spec 5.3: no LLM actions while pending EXCEPT the scaffold MR itself.
-	if c.MayTriage() {
-		t.Fatal("triage must not run while a project is pending")
+	if !c.MayTriage() {
+		t.Fatal("a pending project must still triage: .agent/ is context, not a precondition")
 	}
-	if !c.MayScaffold() {
-		t.Fatal("pending is exactly the state where the scaffold MR is authorized")
+	if c.Reason == "" {
+		t.Fatal("pending must explain itself")
+	}
+}
+
+// The METERED scaffold is opt-in. Default false, and false is what a real
+// onboarded .gonk.yml resolves to -- see pkg/gonkcfg's TestResolveScaffoldDefaultsOff
+// for the three ways a config can be silent about it.
+func TestMayScaffoldRequiresTheOptIn(t *testing.T) {
+	pendingNoOptIn := Classify(obs(func(o *Observation) { o.AgentDirPresent = false }), active(nil))
+	if pendingNoOptIn.MayScaffold() {
+		t.Fatal("the metered scaffold fired without actions.scaffold: true")
+	}
+
+	pendingOptedIn := Classify(obs(func(o *Observation) { o.AgentDirPresent = false }),
+		active(func(r *meterapi.ProjectResponse) { r.Effective.Actions.Scaffold = true }))
+	if !pendingOptedIn.MayScaffold() {
+		t.Fatal("actions.scaffold: true on a project with no .agent/ must authorize the scaffold session")
+	}
+
+	// Opting in does NOT make it fire where there is already an .agent/.
+	scaffolded := Classify(obs(nil), active(func(r *meterapi.ProjectResponse) {
+		r.Effective.Actions.Scaffold = true
+	}))
+	if scaffolded.State != StateValid || scaffolded.MayScaffold() {
+		t.Fatalf("scaffold must not re-run over an existing .agent/: state=%q MayScaffold=%v",
+			scaffolded.State, scaffolded.MayScaffold())
 	}
 }
 
@@ -211,5 +240,52 @@ func TestLooksInvalidIsAdvisoryOnly(t *testing.T) {
 	c = Classify(garbage, nil)
 	if c.State != StateUnsynced || !c.LooksInvalid {
 		t.Fatalf("unsynced + LooksInvalid expected, got %+v", c)
+	}
+}
+
+// The default is checked through the WHOLE chain a real project travels, not
+// just at the last hop. `actions.scaffold` is absent from these configs
+// entirely -- one omits the `actions` block too -- and the question is what
+// intake ends up believing after gonkcfg.Resolve and the meter's wire
+// projection have had their turn. Asserting only on a hand-built
+// meterapi.Effective would leave the two hops in between untested, and those
+// are exactly where a "sensible default" gets added by accident.
+//
+// (The Resolve call is a TEST calling it, not intake: this package never
+// resolves, and there is no production path here that could.)
+func TestScaffoldIsOffThroughTheWholeConfigChain(t *testing.T) {
+	onboarding, err := RenderDefaultConfig([]string{"qwen-local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name       string
+		raw        string
+		wantTriage bool // triage is its own opt-in; scaffold is the subject here
+	}{
+		{"no actions block at all", "version: 1\nenabled: true\nladder: [qwen-local]\n", false},
+		{"actions without scaffold", "version: 1\nenabled: true\nactions: { triage: true }\nladder: [qwen-local]\n", true},
+		{"the onboarding config", string(onboarding), true},
+	}
+	for _, tc := range cases {
+		cfg, err := gonkcfg.Load([]byte(tc.raw))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		eff := meterapi.EffectiveFrom(gonkcfg.Resolve(gonkcfg.Policy{}, gonkcfg.Policy{}, *cfg))
+		c := Classify(obs(func(o *Observation) {
+			o.ConfigBytes = []byte(tc.raw)
+			o.AgentDirPresent = false
+		}), active(func(r *meterapi.ProjectResponse) { r.Effective = &eff }))
+
+		if c.State != StatePending {
+			t.Fatalf("%s: state = %q, want pending (the fixture has no .agent/)", tc.name, c.State)
+		}
+		if c.MayScaffold() {
+			t.Errorf("%s: MayScaffold() = true; a config that never says `scaffold` must not buy one", tc.name)
+		}
+		if got := c.MayTriage(); got != tc.wantTriage {
+			t.Errorf("%s: MayTriage() = %v, want %v", tc.name, got, tc.wantTriage)
+		}
 	}
 }

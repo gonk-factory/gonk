@@ -123,10 +123,36 @@ func TestDecideTriageOnNewIssue(t *testing.T) {
 	}
 }
 
-func TestDecideDrops(t *testing.T) {
-	pending := validEntry()
-	pending.Classification = Classify(obs(func(o *Observation) { o.AgentDirPresent = false }), active(nil))
+// *** CRITERION 1 OF T-08. ***
+// A project with a merged `.gonk.yml` and NO `.agent/` dispatches triage. This
+// used to be dropped with Reason "state_pending": `.agent/` was a precondition,
+// so every project had to buy a metered scaffold session before its first issue
+// could be looked at. The onboarding merge request now ships the `.agent/` seed
+// itself, so the only thing a missing `.agent/` costs is prompt context.
+//
+// Note what is NOT relaxed: the project is `pending` because meter says active
+// AND we looked in the repo, so it still has a resolved policy, a provisioned
+// key and `actions.triage: true`. Nothing unmetered got in.
+func TestDecideTriagesWithoutAgentDir(t *testing.T) {
+	e := validEntry()
+	e.Classification = Classify(obs(func(o *Observation) { o.AgentDirPresent = false }), active(nil))
+	if e.Classification.State != StatePending {
+		t.Fatalf("fixture is not the case under test: state = %q", e.Classification.State)
+	}
 
+	d := Decide(e, issueEvent("open"), "gonk")
+	if !d.Dispatch {
+		t.Fatalf("a merged .gonk.yml with no .agent/ must dispatch triage; got drop %q", d.Reason)
+	}
+	if d.Trigger != atags.TriggerIssueTriage {
+		t.Fatalf("trigger = %q, want %q", d.Trigger, atags.TriggerIssueTriage)
+	}
+	if d.SessionKey != SessionKey(42, 3) || d.BeadAnchor != BeadAnchor(42, 3) {
+		t.Fatalf("decision = %+v", d)
+	}
+}
+
+func TestDecideDrops(t *testing.T) {
 	unsynced := validEntry()
 	unsynced.Classification = Classify(obs(nil), nil) // meter has not answered
 
@@ -147,7 +173,6 @@ func TestDecideDrops(t *testing.T) {
 	}{
 		"issue update is not a trigger": {validEntry(), issueEvent("update"), "not_a_trigger"},
 		"issue close is not a trigger":  {validEntry(), issueEvent("close"), "not_a_trigger"},
-		"pending project":               {pending, issueEvent("open"), "state_pending"},
 		"policy not resolved":           {unsynced, issueEvent("open"), "state_unsynced"},
 		"no virtual key yet":            {keyMissing, issueEvent("open"), "state_key-missing"},
 		"triage not enabled":            {noTriage, issueEvent("open"), "action_disabled"},

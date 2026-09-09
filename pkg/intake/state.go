@@ -29,6 +29,10 @@ const ConfigPath = ".gonk.yml"
 
 // AgentDir is the Navigator-style context directory (spec 5.3). Its absence is
 // what makes a project `pending`.
+//
+// `pending` is a description, not a gate (T-08): triage runs without `.agent/`,
+// it just runs with less context. The label is load-bearing for metrics
+// (AllStates below is the metric label domain) -- do not rename it.
 const AgentDir = ".agent"
 
 type State string
@@ -104,13 +108,42 @@ func (c Classification) eff() meterapi.Effective {
 // here purely to avoid firing an order that will certainly be denied. It must
 // therefore be a SUBSET of meter's rules -- never a superset, or we silently
 // drop work meter would have allowed.
+//
+// PENDING TRIAGES (T-08). `.agent/` used to be a PRECONDITION for triage: a
+// project without one sat at `pending` and dispatched nothing until a metered
+// scaffold session wrote the directory. That gate is gone. The onboarding merge
+// request now carries a deterministic `.agent/` seed, so a project that still
+// has no `.agent/` is one whose maintainers chose not to keep one -- and
+// triaging without the project's own context is a WEAKER answer, not an
+// unauthorized one. `pending` survives as a classified, metric-visible state
+// meaning exactly that: no `.agent/` yet. It no longer withholds work.
 func (c Classification) MayTriage() bool {
-	return c.State == StateValid && c.eff().Actions.Triage
+	switch c.State {
+	case StateValid, StatePending:
+		return c.eff().Actions.Triage
+	}
+	return false
 }
 
-// MayScaffold: spec 5.3 -- the .agent/ scaffold MR is the one metered action
-// permitted while a project is pending, authorized by the just-merged config.
-func (c Classification) MayScaffold() bool { return c.State == StatePending }
+// MayScaffold: the METERED `.agent/` scaffold session (spec 5.3), which is now
+// OPT-IN -- `actions.scaffold: true`, default false.
+//
+// Two conditions, and both matter. The state check keeps it to projects that
+// have no `.agent/` (writing one over an existing directory is not this
+// trigger's job). The action check is the opt-in: since the onboarding merge
+// request seeds `.agent/` deterministically and for zero tokens, no project
+// should pay a model to write one unless it asks.
+//
+// THIS IS DELIBERATELY STRICTER THAN METER'S GATE, which is the one place in
+// this file that direction is correct rather than a bug. Intake is the ONLY
+// caller of the scaffold trigger (Dispatch.FireScaffold, reached from the
+// reconciler), so a rule here is enforcement, not a pre-filter that could
+// silently drop work another caller would have made. rung.ActionFor still gates
+// the trigger on actions.triage; a project that opts into scaffold without
+// triage is refused by meter, which is the fail-closed direction.
+func (c Classification) MayScaffold() bool {
+	return c.State == StatePending && c.eff().Actions.Scaffold
+}
 
 // MayOnboard: the deterministic onboarding MR. Not gated on Actions (the project
 // has no config yet to opt in with) and not a metered action.
@@ -195,10 +228,11 @@ func Classify(obs Observation, mr *meterapi.ProjectResponse) Classification {
 		return c
 	}
 
-	// Active. The remaining question is ours: is the repo scaffolded?
+	// Active. The remaining question is ours: is the repo scaffolded? This
+	// SPLITS the state; it no longer withholds work (see MayTriage).
 	if !obs.AgentDirPresent {
 		c.State = StatePending
-		c.Reason = "no " + AgentDir + "/ yet: scaffold merge request pending"
+		c.Reason = "no " + AgentDir + "/ yet: triage runs without the project's own context"
 		return c
 	}
 	c.State = StateValid

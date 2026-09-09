@@ -10,6 +10,7 @@ import (
 	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
 	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi/gcapitest"
 	"gitlab.orac.local/agentic/gonk-project/pkg/glab"
+	"gitlab.orac.local/agentic/gonk-project/pkg/intake"
 	"gitlab.orac.local/agentic/gonk-project/pkg/meterapi"
 )
 
@@ -287,7 +288,7 @@ func TestScaffoldCheckoutPromptSaysTheRepoIsPresent(t *testing.T) {
 // Claiming a checkout that is not there is the precise gonk-msz failure: the
 // model goes looking, finds an empty directory, and fills the gap itself.
 func TestTriagePromptMentionsTheRepoOnlyWhenGranted(t *testing.T) {
-	without := renderTriagePrompt("acme/widget", 3, "Title: x", "")
+	without := renderTriagePrompt("acme/widget", 3, "", "Title: x", "")
 	if strings.Contains(without, "checked out in your working directory") {
 		t.Errorf("triage claims a checkout with none granted:\n%s", without)
 	}
@@ -295,10 +296,109 @@ func TestTriagePromptMentionsTheRepoOnlyWhenGranted(t *testing.T) {
 		t.Error("the no-checkout prompt must still carry the injected issue")
 	}
 
-	with := renderTriagePrompt("acme/widget", 3, "Title: x", "http://intake:9090/rig/a.tar.gz")
+	with := renderTriagePrompt("acme/widget", 3, "", "Title: x", "http://intake:9090/rig/a.tar.gz")
 	for _, want := range []string{"checked out in your working directory", ".agent/", "hold no credentials"} {
 		if !strings.Contains(with, want) {
 			t.Errorf("granted-checkout triage prompt missing %q:\n%s", want, with)
+		}
+	}
+}
+
+// *** CRITERION 4 OF T-08. ***
+// The project's own `.agent/` context is spliced in AHEAD of the issue, and a
+// project with no `.agent/` gets the prompt it got before -- byte for byte.
+//
+// The suffix assertion is the load-bearing half. Checking only "the agent block
+// appears somewhere" would pass a rewrite that also reshuffled the issue block
+// for every project on earth; requiring the no-agent prompt to survive VERBATIM
+// as the tail of the with-agent prompt is what makes "optional" mean optional.
+func TestTriagePromptPutsAgentContextBeforeTheIssue(t *testing.T) {
+	const agentCtx = "--- .agent/overview.md ---\nWidget is a sandwich toaster."
+	const issueCtx = "Title: the toast is cold\n\nBody: it is cold"
+
+	without := renderTriagePrompt("acme/widget", 3, "", issueCtx, "")
+	if strings.Contains(without, ".agent/ directory. IT OVERRIDES") {
+		t.Errorf("a project with no .agent/ was told it has one:\n%s", without)
+	}
+	if !strings.Contains(without, issueCtx) {
+		t.Fatal("the no-context prompt must still carry the injected issue")
+	}
+
+	with := renderTriagePrompt("acme/widget", 3, agentCtx, issueCtx, "")
+	if !strings.HasSuffix(with, without) {
+		t.Fatalf("adding .agent/ context changed the rest of the prompt; the no-agent "+
+			"prompt must survive verbatim as the tail.\n--- with ---\n%s\n--- without ---\n%s",
+			with, without)
+	}
+	iAgent := strings.Index(with, "sandwich toaster")
+	iIssue := strings.Index(with, "the toast is cold")
+	if iAgent < 0 || iIssue < 0 {
+		t.Fatalf("prompt lost one of its two contexts:\n%s", with)
+	}
+	if iAgent > iIssue {
+		t.Errorf(".agent/ context (at %d) must precede the issue body (at %d)", iAgent, iIssue)
+	}
+	// The seed's own placeholder marker must be called out, or an unedited
+	// skeleton reads as a set of assertions about the project.
+	if !strings.Contains(with, "NOT FILLED IN") {
+		t.Error("the prompt must tell the agent how to read an unfilled seed section")
+	}
+}
+
+// buildAgentContext reads the seeded paths and reports ABSENCE AS EMPTY, not as
+// an error: `.agent/` is optional context (T-08), so a project without one must
+// not produce a warning-worthy failure.
+func TestBuildAgentContextReadsTheSeedAndToleratesAbsence(t *testing.T) {
+	ctx := context.Background()
+
+	empty, err := buildAgentContext(ctx, stubForge{}, 1)
+	if err != nil {
+		t.Fatalf("a project with no .agent/ must not be an error: %v", err)
+	}
+	if empty != "" {
+		t.Fatalf("want empty context for a project with no .agent/, got %q", empty)
+	}
+
+	got, err := buildAgentContext(ctx, stubForge{files: map[string]string{
+		".agent/README.md":      "readme body",
+		".agent/conventions.md": "conventions body",
+		"README.md":             "the repo readme, which is NOT .agent/ context",
+	}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{".agent/README.md", "readme body", ".agent/conventions.md", "conventions body"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("context missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "NOT .agent/ context") {
+		t.Errorf("the loader read a file outside .agent/:\n%s", got)
+	}
+	// Order follows agentContextFiles, not map iteration.
+	if strings.Index(got, "readme body") > strings.Index(got, "conventions body") {
+		t.Errorf("files are not spliced in agentContextFiles order:\n%s", got)
+	}
+
+	// A forge that cannot be reached at all IS an error -- that is the case an
+	// operator can act on, and it must not be confused with "no .agent/".
+	if _, err := buildAgentContext(ctx, stubForge{repoErr: fmt.Errorf("boom")}, 1); err == nil {
+		t.Error("an unreachable forge must be reported, not silently read as an absent .agent/")
+	}
+}
+
+// The prompt loader and the onboarding seed are two hand-written lists in two
+// packages. Seeding a file nothing reads is a silent waste; this fails when
+// that happens.
+func TestAgentContextFilesCoverTheOnboardingSeed(t *testing.T) {
+	read := make(map[string]bool, len(agentContextFiles))
+	for _, p := range agentContextFiles {
+		read[p] = true
+	}
+	for _, p := range intake.AgentSeedPaths {
+		if !read[p] {
+			t.Errorf("the onboarding merge request seeds %q but the triage prompt never reads it "+
+				"(add it to agentContextFiles)", p)
 		}
 	}
 }

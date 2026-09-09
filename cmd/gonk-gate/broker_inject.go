@@ -120,10 +120,31 @@ func brokerSessionAlias(agent string, projectID, issueIID int64, attempt int) st
 // failed -- a degraded, reference-only prompt. The exact emit wording may be
 // tightened after C2's first live run confirms the fenced batch survives the
 // GetSession(peek) read (C5).
-func renderTriagePrompt(project string, issueIID int64, issueContext, checkout string) string {
+func renderTriagePrompt(project string, issueIID int64, agentContext, issueContext, checkout string) string {
 	context := issueContext
 	if strings.TrimSpace(context) == "" {
 		context = "(issue context unavailable -- triage from the issue reference alone)"
+	}
+	// THE PROJECT'S OWN CONTEXT COMES FIRST, ahead of the issue -- this is the
+	// v1 thin loader (T-08). `.agent/` is what makes a triage judgement specific
+	// to THIS repository instead of generic, and until now nothing on the
+	// no-checkout path read it at all.
+	//
+	// It is a PREFIX rather than a section spliced into the body on purpose:
+	// when there is no `.agent/`, this string is empty and the prompt is byte
+	// for byte the one triage produced before. That property is asserted in
+	// broker_inject_test.go, and it is what keeps "the directory is optional"
+	// from quietly meaning "the prompt changed for everyone".
+	agent := ""
+	if strings.TrimSpace(agentContext) != "" {
+		agent = "This project's own context, from its `.agent/` directory. IT OVERRIDES\n" +
+			"anything you would otherwise assume about this repository, and you should\n" +
+			"read it before the issue below. It may still be the unedited seed gonk\n" +
+			"committed when the project was onboarded: any section marked NOT FILLED IN\n" +
+			"YET is a section nobody has written, so treat it as absent rather than as a\n" +
+			"statement about the project.\n\n" +
+			agentContext + "\n\n" +
+			"--- end of the project's context; the issue follows ---\n\n"
 	}
 	// Mentioned ONLY when a checkout was actually granted and fetched. Claiming a
 	// working copy that is not there is the precise failure gonk-msz was: the
@@ -154,7 +175,7 @@ func renderTriagePrompt(project string, issueIID int64, issueContext, checkout s
 			"files you relied on. If you searched and genuinely found nothing relevant, " +
 			"say that explicitly rather than asking a question you could have answered.\n"
 	}
-	return fmt.Sprintf(`Triage GitLab issue #%d in project `+"`%s`"+`. Here is the issue, already
+	return fmt.Sprintf(`%sTriage GitLab issue #%d in project `+"`%s`"+`. Here is the issue, already
 fetched for you -- do NOT fetch anything yourself:
 
 %s
@@ -195,7 +216,7 @@ GONK_BATCH_END.
 The batch must be valid JSON on a SINGLE line. Keep the comment to one
 paragraph, and if you must include a line break write it as \n inside the
 string -- a real line break inside a JSON string is invalid and costs you the
-whole batch.`, issueIID, project, context, repo)
+whole batch.`, agent, issueIID, project, context, repo)
 }
 
 // renderScaffoldPrompt builds the scaffold session's initial message.
@@ -441,10 +462,15 @@ type repoReader interface {
 //
 // triage: YES. The issue is still injected -- that does not change -- but the
 // project's own .agent/ context is the thing that makes a triage judgement
-// specific to THIS repository rather than generic. That context is exactly what
-// scaffold exists to write, and until now nothing read it: the v1 formula told
-// the agent to "Load .agent/ from the repository first" with no repository
-// present, which is the same empty-directory failure as gonk-msz.
+// specific to THIS repository rather than generic. The v1 formula told the agent
+// to "Load .agent/ from the repository first" with no repository present, which
+// is the same empty-directory failure as gonk-msz.
+//
+// Note the checkout is no longer the ONLY way that context arrives (T-08):
+// buildAgentContext splices the seeded .agent/ files into the prompt
+// controller-side, so a project gets its own context even when no working copy
+// could be granted. The checkout still matters -- it is what lets the agent read
+// the CODE the issue is about.
 //
 // A missing checkout stays non-fatal here. renderTriagePrompt only mentions the
 // working copy when one was actually granted, so a fetch failure degrades to
@@ -509,6 +535,73 @@ func buildRepoContext(ctx context.Context, r repoReader, projectID int64) (strin
 	}
 	return b.String(), nil
 }
+
+// agentContextFiles are the `.agent/` paths a triage prompt loads, in order.
+//
+// They are the paths gonk's own onboarding seed writes (pkg/intake's
+// AgentSeedPaths), which is what makes a fixed list workable at all: pkg/glab
+// has no tree-listing call, and asking for names gonk itself chose is not a
+// guess. TestAgentContextFilesCoverTheOnboardingSeed fails if the seed grows a
+// file this list does not read.
+//
+// A project may keep other files under `.agent/`; v1's loader is thin on
+// purpose and does not read them. `.agent/README.md` says so, so a maintainer
+// is not left wondering why a fifth file had no effect.
+var agentContextFiles = []string{
+	".agent/README.md",
+	".agent/overview.md",
+	".agent/build-and-test.md",
+	".agent/conventions.md",
+}
+
+// maxAgentContextBytes caps the WHOLE `.agent/` block spliced into a triage
+// prompt. Repository content is caller-controlled and unbounded, and rung 1
+// serves a 16384-token total window that already carries opencode's preamble,
+// the issue body (up to maxIssueBodyBytes) and the emit instructions. This is
+// deliberately no larger than the issue's own cap: the project's context frames
+// the answer, the issue IS the question.
+const maxAgentContextBytes = 8 << 10 // 8 KiB total
+
+// buildAgentContext reads the project's `.agent/` directory controller-side --
+// the pod holds no forge credentials, the same division of labour as
+// buildIssueContext and buildRepoContext.
+//
+// ABSENCE IS NOT AN ERROR, and that is the whole point of T-08: `.agent/` is
+// optional context, not a precondition. A project with no such directory gets
+// ("", nil) and a prompt identical to the one triage used before. An error is
+// returned only when the forge could not be asked at all, so the caller can log
+// something a person can act on.
+func buildAgentContext(ctx context.Context, r repoReader, projectID int64) (string, error) {
+	if r == nil {
+		return "", fmt.Errorf("no repo reader configured")
+	}
+	proj, err := r.GetProject(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("get project: %w", err)
+	}
+	ref := proj.DefaultBranch
+	if ref == "" {
+		ref = "main"
+	}
+
+	var b strings.Builder
+	for _, path := range agentContextFiles {
+		if b.Len() >= maxAgentContextBytes {
+			fmt.Fprintf(&b, "\n[further %s files omitted: context budget reached]\n", agentDirName)
+			break
+		}
+		raw, ferr := r.GetRawFile(ctx, projectID, path, ref, maxRepoFileBytes)
+		if ferr != nil || len(raw) == 0 {
+			continue // absent, or unreadable: absence is information, not failure
+		}
+		fmt.Fprintf(&b, "--- %s ---\n%s\n\n", path, capBody(string(raw), maxRepoFileBytes))
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+// agentDirName is the directory those paths live in, named once so a message
+// about it cannot disagree with the paths above.
+const agentDirName = ".agent/"
 
 // capBody truncates an untrusted issue body to at most max bytes, appending a
 // visible marker so the agent (and a human reading the transcript) knows the
@@ -638,7 +731,16 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 			d.Log.Warn("could not grant a checkout for triage; prompting without a working copy",
 				"err", cerr, "bead", a.BeadAnchor, "project", a.Project)
 		}
-		prompt = renderTriagePrompt(a.Project, a.IssueIID, issueContext, checkout)
+		// The project's own `.agent/`, read controller-side for the same reason
+		// the issue is: the pod holds no forge credentials. Best-effort and
+		// silent when the directory is absent -- that is the common case and
+		// not a problem, it just makes the prompt thinner.
+		agentContext, aerr := buildAgentContext(ctx, d.Forge, a.ProjectID)
+		if aerr != nil {
+			d.Log.Warn("could not read the project's .agent/ context; prompting without it",
+				"err", aerr, "bead", a.BeadAnchor, "project", a.Project)
+		}
+		prompt = renderTriagePrompt(a.Project, a.IssueIID, agentContext, issueContext, checkout)
 	}
 	// STORE THE PROMPT BEFORE CREATING THE SESSION (gonk-mzd). The pod can be
 	// up and asking before CreateSession returns, so a prompt written after the

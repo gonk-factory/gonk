@@ -24,7 +24,7 @@ type Effective struct {
 	Provenance     EffectiveProvenance
 }
 
-type Actions struct{ Triage, Pipelines, Features bool }
+type Actions struct{ Triage, Pipelines, Features, Scaffold bool }
 
 type EffectiveBudget struct {
 	MonthlyCostUSD float64       // +Inf when unlimited
@@ -77,6 +77,7 @@ func Resolve(instance, group Policy, project ProjectConfig) Effective {
 		Triage:    andAction(project.Actions.Triage, instance.Actions.Triage, group.Actions.Triage),
 		Pipelines: andAction(project.Actions.Pipelines, instance.Actions.Pipelines, group.Actions.Pipelines),
 		Features:  andAction(project.Actions.Features, instance.Actions.Features, group.Actions.Features),
+		Scaffold:  andAction(project.Actions.Scaffold, instance.Actions.Scaffold, group.Actions.Scaffold),
 	}
 
 	// Tighten-only budgets.

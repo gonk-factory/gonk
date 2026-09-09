@@ -119,9 +119,14 @@ func requireOneMR(t *testing.T, w *World, projectID int64, sourceBranch string) 
 	return mrs[0]
 }
 
-// mergeOnboardingMR merges the onboarding MR and lands its .gonk.yml on the
-// default branch (glabtest does not copy branch files on merge, so the harness
-// writes the committed bytes onto main, exactly as a real merge would).
+// mergeOnboardingMR merges the onboarding MR and lands EVERY file it committed
+// on the default branch (glabtest does not copy branch files on merge, so the
+// harness writes the committed bytes onto main, exactly as a real merge would).
+//
+// That is `.gonk.yml` AND the `.agent/` seed (T-08). Landing only the config
+// would model an onboarding merge request that no longer exists, and would make
+// every test downstream of a merge see a `pending` project the real flow does
+// not produce.
 func mergeOnboardingMR(t *testing.T, w *World, p *glabtest.Project, mr glab.MergeRequest, ladder []string) {
 	t.Helper()
 	cfg, err := intake.RenderDefaultConfig(ladder)
@@ -129,6 +134,15 @@ func mergeOnboardingMR(t *testing.T, w *World, p *glabtest.Project, mr glab.Merg
 		t.Fatalf("render default config: %v", err)
 	}
 	p.PutFile(".gonk.yml", cfg)
+	seed, err := intake.RenderAgentSeed(intake.OnboardingContext{
+		Project: p.PathWithNamespace, BotUsername: "gonk", Version: "test", Ladder: ladder,
+	})
+	if err != nil {
+		t.Fatalf("render .agent/ seed: %v", err)
+	}
+	for _, f := range seed {
+		p.PutFile(f.Path, []byte(f.Content))
+	}
 	w.GitLab.SetMRState(p.ID, mr.IID, "merged", baseClock)
 }
 
