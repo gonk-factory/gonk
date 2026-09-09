@@ -3,7 +3,7 @@ name: gonk
 description: A local software factory for self-hosted GitLab — a Gas City pack plus glue.
 type: application
 # The CHART version. Bump on any chart change. It is not the app version.
-version: 0.1.5
+version: 0.1.6
 # The default app version. Image tags are set per-image and have no default
 # (OD-1): a chart that renders and cannot pull is worse than one that refuses.
 appVersion: "0.1.0"

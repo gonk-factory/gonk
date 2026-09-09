@@ -272,10 +272,16 @@ pre-commit hook. Conform; do not invent.
 - **Copy `clusters/orac/apps/renovate/`** — it is nearly gonk's twin (GitLab bot
   PAT + webhook secret + CA trust). `apps/nagus/` is the model for a
   first-party image + shared CNPG.
-- **Secrets:** ClusterSecretStore `vault-backend`, Vault KV path
-  `eso/gonk/<concern>` (hierarchical — newer convention; older entries are flat).
+- **Secrets:** ClusterSecretStore `vault-backend`. **gonk is one of the flat
+  entries, not the hierarchical convention:** every gonk credential but one lives
+  in a single Vault secret, `eso/gonk/broker`, as properties (`gitlab_token`,
+  `webhook_token`, `meter_api_token`, `litellm_admin_key`, `postgres_password`,
+  `gc_write_key`). The exception is `eso/gonk/dolt` (`root-password`,
+  `gc-password`), added 2026-09-09 for the chart's Dolt credentials. Verified
+  against `clusters/orac/apps/gonk/` — do not infer paths from `eso/gonk/<concern>`.
   Rotation is opt-in via `homelab.orac.local/rotation: enabled` + annotations,
-  as renovate's PAT does. **Gotcha, from a real incident: write the Vault value
+  as renovate's PAT does — **but no gonk ExternalSecret maps a `*-previous` key,
+  so gonk rotations are hard cutovers with up to a 1h resync** (`gonk-9snw`). **Gotcha, from a real incident: write the Vault value
   BEFORE merging the ExternalSecret** — a missing key leaves the ExternalSecret
   NotReady and can wedge the whole reconcile.
   *Deviation:* house style consumes secrets as **env** (`secretKeyRef`); gonk

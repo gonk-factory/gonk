@@ -51,14 +51,36 @@ fails the build if a policy template loses it.
 
 **No secret value appears in `values.yaml`. No secret is committed. No secret is
 an env var.** The path is: **Vault/1Password → ExternalSecret → k8s Secret →
-projected file mount → the binary reads the file.** Every credential has **two
-rotation slots** so a rotation is not an outage.
+projected file mount → the binary reads the file.**
 
 **The chart creates no Secrets. If these do not exist, the pods will not start.**
 Projected volumes are `optional: false`, which is the loud failure we want.
 
 Every one of these is delivered by an **ExternalSecret** in the gitops repo, from
-ClusterSecretStore **`vault-backend`**, Vault KV path **`eso/gonk/<concern>`**.
+ClusterSecretStore **`vault-backend`**.
+
+> **What is actually deployed, as of 2026-09-09.** This section used to describe a
+> per-concern Vault path per credential (`eso/gonk/gitlab`, `eso/gonk/webhook`, …)
+> and two rotation slots for every credential. **Neither was ever deployed on this
+> cluster.** Checked against `clusters/orac/apps/gonk/` in the gitops repo:
+>
+> - **One Vault secret holds nearly everything: `eso/gonk/broker`**, with flat
+>   properties (`gitlab_token`, `webhook_token`, `meter_api_token`,
+>   `litellm_admin_key`, `postgres_password`, `gc_write_key`). The lone exception is
+>   **`eso/gonk/dolt`** (`root-password`, `gc-password`), added later for T-26.
+> - **There is no rotation slot 2.** No ExternalSecret maps any `*-previous` key.
+>   The chart can *mount* slot 2; nothing populates it. A rotation here is a **hard
+>   cutover** with up to a 1h `refreshInterval` resync window — not the no-outage
+>   procedure described below. The bot PAT was rotated on 2026-09-09 on the strength
+>   of the old wording, before anyone checked.
+> - **Two properties feed two ExternalSecrets each, in different namespaces:**
+>   `meter_api_token` (`gonk-meter-api` in `gonk`, `litellm-gonk-meter` in
+>   `litellm`) and `postgres_password` (`gonk-ledger` in `gonk`, `gonk-db-role` in
+>   `foundation/databases-app`). Rotating either needs both to resync.
+>
+> The `Vault path` column below is corrected to match. The rotation procedure that
+> follows describes the chart's *capability*, not this cluster's *configuration*;
+> making it true means deploying the `*-previous` mappings (`gonk-9snw`).
 
 > ***Write the Vault value BEFORE merging the ExternalSecret.*** A missing key
 > leaves the ExternalSecret NotReady and can **wedge the entire Flux reconcile** —
@@ -66,16 +88,16 @@ ClusterSecretStore **`vault-backend`**, Vault KV path **`eso/gonk/<concern>`**.
 
 | Secret (default name) | Key | Vault path | Mounted at | Env var | Consumer |
 |---|---|---|---|---|---|
-| `gonk-gitlab` | `token` | `eso/gonk/gitlab` | `/etc/gonk/secrets/gitlab/token` | `GONK_GITLAB_TOKEN_FILE` | intake |
-| `gonk-gitlab` | `token-previous` *(rotation slot 2, opt-in)* | `eso/gonk/gitlab` | `/etc/gonk/secrets/gitlab/token-previous` | `GONK_GITLAB_TOKEN_PREVIOUS_FILE` | intake |
-| `gonk-gitlab` | `admin-token` *(only when `gitlab.mode=split-credential`)* | `eso/gonk/gitlab` | `/etc/gonk/secrets/gitlab/admin-token` | `GONK_GITLAB_ADMIN_TOKEN_FILE` | intake |
-| `gonk-webhook` | `token` | `eso/gonk/webhook` | `/etc/gonk/secrets/webhook/token` | `GONK_WEBHOOK_SECRET_FILE` | intake |
-| `gonk-webhook` | `token-previous` *(rotation slot 2, opt-in)* | `eso/gonk/webhook` | `/etc/gonk/secrets/webhook/token-previous` | `GONK_WEBHOOK_SECRET_PREVIOUS_FILE` | intake |
-| `gonk-meter-api` | `token` | `eso/gonk/meter-api` | `/etc/gonk/secrets/meter-api/token` | `GONK_METER_TOKEN_FILE` | **intake and meter** |
-| `gonk-meter-api` | `token-previous` *(slot 2, opt-in)* | `eso/gonk/meter-api` | `/etc/gonk/secrets/meter-api/token-previous` | `GONK_METER_TOKEN_PREVIOUS_FILE` | **meter only** (it is the verifier; intake presents slot 1) |
-| `gonk-litellm` | `admin-key` | `eso/gonk/litellm` | `/etc/gonk/secrets/litellm/admin-key` | `LITELLM_ADMIN_KEY_FILE` | meter |
-| `gonk-litellm` | `admin-key-previous` *(slot 2, opt-in)* | `eso/gonk/litellm` | `/etc/gonk/secrets/litellm/admin-key-previous` | `LITELLM_ADMIN_KEY_PREVIOUS_FILE` | meter |
-| `gonk-ledger` | `dsn` | `eso/gonk/ledger` *(or CNPG's generated Secret)* | `/etc/gonk/secrets/ledger/dsn` | `GONK_METER_STORE_DSN_FILE` | meter |
+| `gonk-gitlab` | `token` | `eso/gonk/broker#gitlab_token` | `/etc/gonk/secrets/gitlab/token` | `GONK_GITLAB_TOKEN_FILE` | intake |
+| `gonk-gitlab` | `token-previous` *(slot 2 — **NOT DEPLOYED**, no ExternalSecret maps it)* | — | `/etc/gonk/secrets/gitlab/token-previous` | `GONK_GITLAB_TOKEN_PREVIOUS_FILE` | intake |
+| `gonk-gitlab` | `admin-token` *(only when `gitlab.mode=split-credential`; **NOT DEPLOYED**)* | — | `/etc/gonk/secrets/gitlab/admin-token` | `GONK_GITLAB_ADMIN_TOKEN_FILE` | intake |
+| `gonk-webhook` | `token` | `eso/gonk/broker#webhook_token` | `/etc/gonk/secrets/webhook/token` | `GONK_WEBHOOK_SECRET_FILE` | intake |
+| `gonk-webhook` | `token-previous` *(slot 2 — **NOT DEPLOYED**)* | — | `/etc/gonk/secrets/webhook/token-previous` | `GONK_WEBHOOK_SECRET_PREVIOUS_FILE` | intake |
+| `gonk-meter-api` | `token` | `eso/gonk/broker#meter_api_token` *(also feeds `litellm-gonk-meter` in ns `litellm`)* | `/etc/gonk/secrets/meter-api/token` | `GONK_METER_TOKEN_FILE` | **intake and meter** |
+| `gonk-meter-api` | `token-previous` *(slot 2 — **NOT DEPLOYED**)* | — | `/etc/gonk/secrets/meter-api/token-previous` | `GONK_METER_TOKEN_PREVIOUS_FILE` | **meter only** (it is the verifier; intake presents slot 1) |
+| `gonk-litellm` | `admin-key` | `eso/gonk/broker#litellm_admin_key` | `/etc/gonk/secrets/litellm/admin-key` | `LITELLM_ADMIN_KEY_FILE` | meter |
+| `gonk-litellm` | `admin-key-previous` *(slot 2 — **NOT DEPLOYED**)* | — | `/etc/gonk/secrets/litellm/admin-key-previous` | `LITELLM_ADMIN_KEY_PREVIOUS_FILE` | meter |
+| `gonk-ledger` | `dsn` | `eso/gonk/broker#postgres_password` *(or CNPG's generated Secret)* | `/etc/gonk/secrets/ledger/dsn` | `GONK_METER_STORE_DSN_FILE` | meter |
 | `gonk-dolt` | `root-password` | `eso/gonk/dolt` | `/etc/gonk/secrets/dolt/root-password` | `DOLT_ROOT_PASSWORD` *(see note below)* | dolt |
 | `gonk-dolt` | `gc-password` | `eso/gonk/dolt` | `/etc/gonk/secrets/dolt/gc-password` (dolt) and `/etc/gonk/secrets/dolt-gc/gc-password` (controller) | `DOLT_PASSWORD` (dolt) / `GC_DOLT_PASSWORD` (controller) *(see note below)* | dolt, controller |
 
@@ -136,16 +158,25 @@ spec:
     name: gonk-gitlab                          # the Secret gonk mounts
   data:
     - secretKey: token
-      remoteRef: {key: eso/gonk/gitlab, property: token}
+      remoteRef: {key: eso/gonk/broker, property: gitlab_token}
+    # NOTE: this is the real, deployed shape -- one flat Vault secret
+    # (eso/gonk/broker) with a property per credential, NOT a path per concern.
     # add token-previous only once you have written it to Vault, and only when
     # you set secrets.rotation.gitlabPrevious: true — a projected volume with a
-    # key that does not exist makes the pod fail to start.
+    # key that does not exist makes the pod fail to start. No cluster deploys
+    # slot 2 today; see the note at the top of this section.
 ```
 
-### Rotation — uniform across all three credentials, no exception, no outage
+### Rotation — the chart's capability, NOT this cluster's configuration
 
-Both GitLab PAT slots are mounted, so there is no single-slot exception any more.
-The procedure is the same for every credential:
+> **Read this first.** The procedure below requires slot 2 to be populated, and
+> **no ExternalSecret on this cluster maps any `*-previous` key**. As deployed, a
+> rotation is a hard cutover: write the new value, wait up to the 1h
+> `refreshInterval`, and the old credential stops working when ESO resyncs.
+> Making the procedure below true means deploying the slot-2 mappings first
+> (`gonk-9snw`). The chart side already works; only the gitops side is missing.
+
+Once slot 2 exists, the procedure is the same for every credential:
 
 1. Write **new → slot 1**, **old → slot 2** in Vault.
 2. Set `secrets.rotation.<x>Previous: true` (e.g. `gitlabPrevious`).
