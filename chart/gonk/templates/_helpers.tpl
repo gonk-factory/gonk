@@ -188,6 +188,18 @@ gonk-dolt.{{ .Release.Namespace }}.svc
   value: {{ include "gonk.doltHost" . | quote }}
 - name: GC_DOLT_PORT
   value: {{ include "gonk.doltPort" . | quote }}
+# R-48/T-26: the controller connects to Dolt as the `gc` user (dolt.gcUser.
+# username), never root -- GC_DOLT_USER is not a credential (just a name), so
+# unlike GC_DOLT_PASSWORD it can be a plain value here. `gc init` picks up
+# GC_DOLT_USER as its --dolt-user fallback and `gc start`'s bd bridge mirrors
+# it into BEADS_DOLT_SERVER_USER (cmd/gc/bd_env.go's mirrorBeadsDoltServerEnv
+# at GASCITY_REF) -- no --dolt-user flag is needed at either call site.
+# GC_DOLT_PASSWORD is set separately by each caller's own command wrapper,
+# `cat`ing the FILE-mounted secrets.dolt.keys.gcPassword Secret key -- it
+# cannot live here because this helper is plain `env:` entries, and the
+# password can never be a chart-visible value (see the same helper's callers).
+- name: GC_DOLT_USER
+  value: {{ .Values.dolt.gcUser.username | quote }}
 # GC_SESSION -- the REAL session-provider env override. cmd/gc's
 # effectiveProviderName(cfg.Session.Provider) returns $GC_SESSION when set, so
 # this is the documented way to force a provider from the environment. (The

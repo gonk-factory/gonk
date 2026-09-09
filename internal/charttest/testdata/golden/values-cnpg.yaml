@@ -1859,10 +1859,22 @@ spec:
         - name: bootstrap-city
           image: registry.orac.local/agentic/gonk-project/gonk-controller:v0.1.0
           imagePullPolicy: IfNotPresent
+          # R-48/T-26: the `gc` user's password, read from the FILE-mounted
+          # secrets.dolt.keys.gcPassword Secret key below and exported for
+          # ONLY this process -- it is never a Kubernetes-native secret
+          # reference and never a chart literal (see the gonk.controllerEnv
+          # definition of GC_DOLT_USER for why the user, unlike the password,
+          # is a plain env entry instead). NOTE: this explanation lives in a
+          # real YAML comment, ABOVE the script, on purpose -- a comment
+          # INSIDE the `args` block scalar becomes literal shell-script DATA
+          # in the rendered manifest, and would trip
+          # TestSecretsAreNeverEnvironmentVariables's chart-wide grep for the
+          # very k8s primitive this wrapper exists to avoid.
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -eu
+              export GC_DOLT_PASSWORD="$(cat /etc/gonk/secrets/dolt-gc/gc-password)"
               cp -r /opt/gonk/pack/. /city/
               # --name gonk is LOAD-BEARING: `gc start --foreground` serves the city
               # under the name in city.toml [workspace], and intake dials
@@ -1987,6 +1999,18 @@ spec:
               value: "gonk-dolt.gonk.svc"
             - name: GC_DOLT_PORT
               value: "3306"
+            # R-48/T-26: the controller connects to Dolt as the `gc` user (dolt.gcUser.
+            # username), never root -- GC_DOLT_USER is not a credential (just a name), so
+            # unlike GC_DOLT_PASSWORD it can be a plain value here. `gc init` picks up
+            # GC_DOLT_USER as its --dolt-user fallback and `gc start`'s bd bridge mirrors
+            # it into BEADS_DOLT_SERVER_USER (cmd/gc/bd_env.go's mirrorBeadsDoltServerEnv
+            # at GASCITY_REF) -- no --dolt-user flag is needed at either call site.
+            # GC_DOLT_PASSWORD is set separately by each caller's own command wrapper,
+            # `cat`ing the FILE-mounted secrets.dolt.keys.gcPassword Secret key -- it
+            # cannot live here because this helper is plain `env:` entries, and the
+            # password can never be a chart-visible value (see the same helper's callers).
+            - name: GC_DOLT_USER
+              value: "gc"
             # GC_SESSION -- the REAL session-provider env override. cmd/gc's
             # effectiveProviderName(cfg.Session.Provider) returns $GC_SESSION when set, so
             # this is the documented way to force a provider from the environment. (The
@@ -2017,6 +2041,10 @@ spec:
             - name: secret-litellm
               mountPath: /etc/gonk/secrets/litellm
               readOnly: true
+            # R-48/T-26: the `gc` user's password (see the export above).
+            - name: secret-dolt-gc
+              mountPath: /etc/gonk/secrets/dolt-gc
+              readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -2033,7 +2061,18 @@ spec:
           # `gc register` MUST NOT be used -- it daemonizes a second supervisor that
           # then kills PID 1. The city dir is passed explicitly, so no registration
           # is needed.
-          command: ["/bin/sh", "-c", "exec gc start --foreground /city"]
+          #
+          # R-48/T-26: same shell-wrapper pattern as the initContainer above --
+          # GC_DOLT_PASSWORD is read from the FILE-mounted Secret key and
+          # exported for only this process, never a secretKeyRef or a chart
+          # literal, right before the `exec` that becomes PID 1.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              export GC_DOLT_PASSWORD="$(cat /etc/gonk/secrets/dolt-gc/gc-password)"
+              exec gc start --foreground /city
           env:
             - name: HOME
               value: /home/gonk
@@ -2041,6 +2080,18 @@ spec:
               value: "gonk-dolt.gonk.svc"
             - name: GC_DOLT_PORT
               value: "3306"
+            # R-48/T-26: the controller connects to Dolt as the `gc` user (dolt.gcUser.
+            # username), never root -- GC_DOLT_USER is not a credential (just a name), so
+            # unlike GC_DOLT_PASSWORD it can be a plain value here. `gc init` picks up
+            # GC_DOLT_USER as its --dolt-user fallback and `gc start`'s bd bridge mirrors
+            # it into BEADS_DOLT_SERVER_USER (cmd/gc/bd_env.go's mirrorBeadsDoltServerEnv
+            # at GASCITY_REF) -- no --dolt-user flag is needed at either call site.
+            # GC_DOLT_PASSWORD is set separately by each caller's own command wrapper,
+            # `cat`ing the FILE-mounted secrets.dolt.keys.gcPassword Secret key -- it
+            # cannot live here because this helper is plain `env:` entries, and the
+            # password can never be a chart-visible value (see the same helper's callers).
+            - name: GC_DOLT_USER
+              value: "gc"
             # GC_SESSION -- the REAL session-provider env override. cmd/gc's
             # effectiveProviderName(cfg.Session.Provider) returns $GC_SESSION when set, so
             # this is the documented way to force a provider from the environment. (The
@@ -2265,6 +2316,10 @@ spec:
             - name: secret-gitlab-bot
               mountPath: /etc/gonk/secrets/gitlab-bot
               readOnly: true
+            # R-48/T-26: the `gc` user's password (see the export in `command` above).
+            - name: secret-dolt-gc
+              mountPath: /etc/gonk/secrets/dolt-gc
+              readOnly: true
       volumes:
         # /city and /home/gonk MUST be writable by uid 65532 (smoke U2): gc init
         # writes the city into /city and gc writes ~/.gc under HOME. emptyDir, shared
@@ -2317,6 +2372,18 @@ spec:
                   items:
                     - key: token
                       path: token
+        # R-48/T-26: the `gc` user's password. Only the gc-password key is
+        # projected here -- the controller never needs (and must never have)
+        # secrets.dolt.keys.rootPassword, mounted only into the dolt pod itself.
+        - name: secret-dolt-gc
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-dolt
+                  items:
+                    - key: gc-password
+                      path: gc-password
         # The private-CA bundle (trust-manager publishes `trust-bundle` into every
         # namespace). gc clones the city's git remote from https://gitlab.orac.local,
         # whose cert is signed by the cluster CA; SSL_CERT_FILE names this path.
@@ -2376,8 +2443,10 @@ spec:
         - name: dolt
           image: docker.io/dolthub/dolt-sql-server:2.1.7
           imagePullPolicy: IfNotPresent
-          # Auth is root / empty password / --no-tls, host+port only. There is no
-          # credential to configure, so the chart does not pretend to (env doc).
+          # R-48/T-26 (interim until T-56 deletes Dolt): root is no longer
+          # root-open. See the command wrapper below for how the two Secret
+          # keys (secrets.dolt) reach this container as env vars WITHOUT ever
+          # being a secretKeyRef or a chart literal.
           env:
             # HOME is LOAD-BEARING (gonk-fsl in-cluster re-smoke, blocker C). The
             # dolthub image assumes it runs as root (HOME=/root) and sets no HOME
@@ -2388,15 +2457,33 @@ spec:
             # controller template solves the identical uid/HOME problem the same way.
             - name: HOME
               value: /var/lib/dolt
-            # dolt sql-server creates root@${DOLT_ROOT_HOST:-localhost} on FIRST
-            # init. The default root@localhost rejects the controller's CROSS-POD
-            # login (gonk-fsl in-cluster re-smoke, blocker B: `Error 1045 Access
-            # denied for user 'root'`) -- loopback masked it in every local smoke.
-            # `%` creates a remotely-usable root so the Gas City beads store is
-            # reachable from the controller pod. Still no password, still --no-tls
-            # (the documented Dolt auth model -- there is no user/pass/DSN key).
+            # R-48: root is bound to localhost ONLY -- the entrypoint's own
+            # default when DOLT_ROOT_HOST is unset, but pinned explicitly so a
+            # future edit cannot silently widen it back to "%" the way the
+            # blocker-B fix once did. Root is therefore reachable ONLY via a
+            # shell inside this pod (`kubectl exec` + `dolt sql-client`), never
+            # cross-pod -- closing the "any pod can `mysql -h gonk-dolt -u
+            # root`" finding. The controller's cross-pod login (the reason
+            # DOLT_ROOT_HOST was widened to "%" in the first place) now uses
+            # the `gc` user below instead, via DOLT_USER_HOST="%".
             - name: DOLT_ROOT_HOST
+              value: "localhost"
+            # The user the controller connects as (dolt.gcUser.username),
+            # GRANT-scoped by the entrypoint's create_user_from_env to ONLY
+            # DOLT_DATABASE below (GRANT ALL ON `db`.* -- never GRANT ALL
+            # PRIVILEGES ON *.*, which is what root gets). Verified against
+            # dolthub/dolt docker/docker-entrypoint.sh's create_user_from_env.
+            - name: DOLT_USER
+              value: "gc"
+            # Reachable cross-pod (unlike root, above): this is the credential
+            # the controller (a different pod) dials in with.
+            - name: DOLT_USER_HOST
               value: "%"
+            # Matches the --dolt-database flag `gc init` is passed
+            # (workload-gonk-controller.yaml: "bd_" + dolt.database) -- the
+            # ONE database DOLT_USER is granted on.
+            - name: DOLT_DATABASE
+              value: "bd_gonk"
           # The dolthub image ENTRYPOINT (docker-entrypoint.sh) already runs
           # `dolt sql-server --host=0.0.0.0 --port=3306 "$@"` AND does the
           # DOLT_ROOT_HOST bootstrap (blocker B). Passing sql-server/--host/--port
@@ -2409,13 +2496,35 @@ spec:
           # off by default unless tls_cert/tls_key is set) -- passing it is a fatal
           # `unknown option 'no-tls'` crash (gonk-fsl re-smoke, blocker E). Pass only
           # --data-dir (not injected by the entrypoint); host/port come from it.
+          #
+          # R-48/T-26: DOLT_ROOT_PASSWORD and DOLT_PASSWORD cannot be plain
+          # `env:` values (the chart never reads a Secret's content at render
+          # time, and a chart-generated/default password is exactly what this
+          # task closes) and cannot be a secretKeyRef (this chart's own rule --
+          # TestSecretsAreNeverEnvironmentVariables -- forbids it: that would
+          # put the credential in the Pod spec, visible to `kubectl get pod -o
+          # yaml` and every audit log). So `command` REPLACES the image's
+          # default ENTRYPOINT+CMD with an equivalent invocation
+          # (`tini -- docker-entrypoint.sh`, from the image's own Dockerfile)
+          # wrapped in a shell that `cat`s the two FILE-mounted Secret keys
+          # (secrets.dolt, mounted below exactly like every other secret in
+          # this chart) into env vars for JUST this process, right before
+          # exec-ing it. The value never appears in the rendered manifest.
+          command: ["/bin/sh", "-c"]
           args:
-            - --data-dir=/var/lib/dolt
+            - |
+              set -eu
+              export DOLT_ROOT_PASSWORD="$(cat /etc/gonk/secrets/dolt/root-password)"
+              export DOLT_PASSWORD="$(cat /etc/gonk/secrets/dolt/gc-password)"
+              exec tini -- docker-entrypoint.sh --data-dir=/var/lib/dolt
           ports:
             - name: mysql
               containerPort: 3306
-          # A TCP probe only: authenticating a real query would need a client, and
-          # this server has no credential to authenticate anyway.
+          # A TCP probe only: an authenticating probe would need a client AND a
+          # copy of the credential in the probe command (visible via `kubectl
+          # describe pod`) -- readiness is "the port accepts a connection",
+          # not "the gc user's grant is correct" (the charttest render suite
+          # covers the latter).
           livenessProbe:
             tcpSocket: {port: mysql}
             initialDelaySeconds: 15
@@ -2439,6 +2548,21 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/dolt
+            - name: secret-dolt
+              mountPath: /etc/gonk/secrets/dolt
+              readOnly: true
+      volumes:
+        - name: secret-dolt
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-dolt
+                  items:
+                    - key: root-password
+                      path: root-password
+                    - key: gc-password
+                      path: gc-password
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -243,6 +243,17 @@
           "type": "string",
           "minLength": 1
         },
+        "gcUser": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "username": {
+              "type": "string",
+              "minLength": 1,
+              "description": "R-48/T-26: the ONLY user the controller connects to Dolt as, GRANT-scoped to ONLY the beads database. Its password lives in secrets.dolt.keys.gcPassword, never here."
+            }
+          }
+        },
         "port": {
           "type": "integer",
           "minimum": 1,
@@ -305,7 +316,8 @@
         "webhook",
         "meterAPI",
         "litellm",
-        "ledger"
+        "ledger",
+        "dolt"
       ],
       "properties": {
         "mountRoot": {
@@ -326,6 +338,10 @@
         },
         "ledger": {
           "$ref": "#/$defs/secretRef"
+        },
+        "dolt": {
+          "$ref": "#/$defs/secretRef",
+          "description": "R-48/T-26: the bundled Dolt's root password (keys.rootPassword, bundled Dolt only) and the `gc` user's password (keys.gcPassword, required whenever any Dolt -- bundled or external -- is reachable). Consumed as an env var, not a file, at the point the dolthub image and Gas City's `gc` binary each read it -- see chart/gonk/README.md."
         },
         "gcWriteKey": {
           "type": "object",
