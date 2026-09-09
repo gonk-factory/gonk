@@ -2,6 +2,7 @@ package glab
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -207,12 +208,24 @@ func TestPaginateCapsHostilePages(t *testing.T) {
 // deny label). It must PUT the issue with add_labels, and rely on GitLab's own
 // idempotency (re-adding a present label is a no-op) rather than doing a
 // read-before-write.
+//
+// The body must be JSON carrying add_labels as an ARRAY, not a query string
+// (T-05, closes R-02): GitLab splits a query-string add_labels on commas, so
+// the old form let a label value containing a comma apply more than one
+// label. This asserts the request is JSON and decodes to exactly the one
+// label passed in.
 func TestAddIssueLabel(t *testing.T) {
-	var gotMethod, gotPath, gotLabels string
+	var gotMethod, gotPath, gotContentType string
+	var gotBody struct {
+		AddLabels []string `json:"add_labels"`
+	}
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
-		gotLabels = r.URL.Query().Get("add_labels")
+		gotContentType = r.Header.Get("Content-Type")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decoding request body as JSON: %v", err)
+		}
 		_, _ = fmt.Fprint(w, `{}`)
 	}))
 	if err := c.AddIssueLabel(context.Background(), 42, 7, "gonk::denied"); err != nil {
@@ -224,8 +237,11 @@ func TestAddIssueLabel(t *testing.T) {
 	if gotPath != "/api/v4/projects/42/issues/7" {
 		t.Errorf("path = %q", gotPath)
 	}
-	if gotLabels != "gonk::denied" {
-		t.Errorf("add_labels = %q, want gonk::denied", gotLabels)
+	if !strings.HasPrefix(gotContentType, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", gotContentType)
+	}
+	if want := []string{"gonk::denied"}; len(gotBody.AddLabels) != 1 || gotBody.AddLabels[0] != want[0] {
+		t.Errorf("add_labels = %v, want %v", gotBody.AddLabels, want)
 	}
 }
 

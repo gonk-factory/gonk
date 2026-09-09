@@ -304,6 +304,60 @@ func TestSweepBrokerRejectsOutOfShapeBatch(t *testing.T) {
 	}
 }
 
+// T-05 (closes R-02): a batch that is otherwise shape-valid but proposes a
+// label the broker refuses -- here gonk::fix-queued, one of gonk's own audit
+// labels -- must apply NOTHING, not just skip the bad label effect. This is
+// the label gate's mutation guard: move the label-gate loop in
+// applyBrokerBatch to AFTER the comment-apply loop (or delete it) and this
+// test starts seeing a posted comment, because the batch's one comment effect
+// would already have gone out before the bad label was ever looked at.
+func TestSweepBrokerRefusesWholeBatchOnInvalidLabel(t *testing.T) {
+	gl := glabtest.New(t)
+	gl.Me = glab.User{ID: 1, Username: "gonk"}
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	gl.AddIssue(p.ID, 3, "opened")
+
+	gc := gcapitest.New(t)
+	gc.FinishSession("gonk.triage.p42.i3.a1", "thinking...\n"+
+		"GONK_BATCH_START\n"+
+		`{"effects":[{"kind":"comment","body":"Looks like a Safari-only CSS bug."},{"kind":"label","add":["gonk::bug","gonk::fix-queued"]}]}`+
+		"\nGONK_BATCH_END\n")
+	applier := &recordingApplier{}
+
+	store := beadstore.NewMemory()
+	rec := brokerRunningRecord(p.ID)
+	_ = store.Put(context.Background(), rec)
+	// Tokens were spent but no artifact landed => gate-failed => escalate,
+	// exactly like the out-of-shape case: a refused batch is a refused batch,
+	// whichever gate refused it.
+	fm := &fakeOutcomeMeter{
+		outcomeNext: "escalate", spendSynced: true,
+		sessionCost: meterapi.SessionCostResponse{TotalTokens: 1234, AsOf: rec.SessionEndedAt.Add(time.Second)},
+	}
+
+	code := runSweep(context.Background(), sweepDeps{
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), GL: gl.Client(), Apply: applier,
+		Store: store, BotUsername: "gonk", PackDir: repoPackDir,
+		SpendPollInterval: time.Millisecond, SpendDeadline: 20 * time.Millisecond,
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	// ZERO GitLab writes: not the comment, not the good label alongside the bad
+	// one, not the broker's own verdict label -- the whole batch is refused
+	// before any of applyBrokerBatch's writes run.
+	if len(applier.notes) != 0 || len(applier.labels) != 0 {
+		t.Fatalf("a batch with one refused label must apply NOTHING: notes=%+v labels=%+v", applier.notes, applier.labels)
+	}
+	reqs := fm.requests()
+	if len(reqs) != 1 || reqs[0].Outcome != meterapi.OutcomeGateFailed {
+		t.Fatalf("outcome = %+v, want one gate-failed (spent tokens, no artifact)", reqs)
+	}
+	if names := gc.PouredNames(); len(names) != 1 || names[0] != "gonk-dispatch" {
+		t.Fatalf("a rejected batch that spent tokens must re-sling: %v", names)
+	}
+}
+
 // No fence in the output => produced no batch => nothing applied => ladder.
 func TestSweepBrokerNoBatchAppliesNothing(t *testing.T) {
 	gl := glabtest.New(t)
