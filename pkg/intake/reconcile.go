@@ -687,14 +687,21 @@ func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) (proj
 		// gone and will never DELETE its meter registration. This is the only
 		// place that observes Archived, so deregistering has to happen here, or
 		// the LiteLLM key outlives the project's archival.
-		if e, ok := r.Cache.Get(p.ID); ok {
-			if err := r.Meter.Deregister(ctx, e.Project.PathWithNamespace); err != nil {
-				r.Obs.MeterPush("error")
-				r.log().Warn("failed to deregister archived project", "project", e.Project.PathWithNamespace, "err", err)
-				return out, err // keep cached; retry deregistration next pass
-			}
-			r.Obs.MeterPush("ok")
+		//
+		// Deregister UNCONDITIONALLY, off `p` itself, not gated on a cache hit.
+		// The cache is derived-only and rebuilds empty on every restart
+		// (cache.go): a project that is already archived when a fresh replica
+		// (or the first pass after a restart/rollout) sees it was never
+		// Cache.Put in the first place, so a cache-gated deregister would skip
+		// it forever. MeterClient.Deregister documents deleting an unknown
+		// project as a 204, not a 404, so the extra idempotent DELETE this
+		// causes on an already-deregistered project is free.
+		if err := r.Meter.Deregister(ctx, p.PathWithNamespace); err != nil {
+			r.Obs.MeterPush("error")
+			r.log().Warn("failed to deregister archived project", "project", p.PathWithNamespace, "err", err)
+			return out, err // keep cached; retry deregistration next pass
 		}
+		r.Obs.MeterPush("ok")
 		r.Cache.Delete(p.ID)
 		return out, nil
 	}

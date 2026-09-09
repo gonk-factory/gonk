@@ -398,6 +398,80 @@ func TestReconcileDeregistersArchivedProject(t *testing.T) {
 	}
 }
 
+// The cache is DERIVED ONLY (cache.go): it rebuilds empty on every intake
+// restart, reschedule, rollout or fresh replica. A project that is already
+// archived the first time such a fresh reconciler ever observes it was never
+// Cache.Put, so a deregister gated on a cache hit would skip it forever --
+// exactly the hole a cache-gated fix would silently reintroduce. Deregister
+// must fire off the live GitLab project, not the cache.
+func TestReconcileDeregistersArchivedProjectOnColdCache(t *testing.T) {
+	gl := glabtest.New(t)
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	p.PutFile(".gonk.yml", []byte("version: 1\nenabled: true\nladder: [qwen-local]\n"))
+	gl.SetArchived(p.ID, true) // already archived before the reconciler ever sees it
+	m := newFakeMeter(t)
+	r := newReconciler(t, gl, m) // fresh Reconciler: empty cache, first pass ever
+
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(m.deletes) != 1 || !strings.Contains(m.deletes[0], "group%2Frepo") {
+		t.Fatalf("a cold-cache first pass must still DELETE the meter registration for an already-archived project (URL-escaped): %v", m.deletes)
+	}
+	if _, ok := r.Cache.Get(p.ID); ok {
+		t.Fatal("an already-archived project must never enter the cache")
+	}
+}
+
+// When the deregister DELETE itself fails, reconcileProject keeps the cache
+// entry so the next pass retries (mirroring the vanished-membership sweep's
+// own failure handling) instead of forgetting a still-live key. The cost:
+// the retained entry keeps its pre-archival StateValid classification, so it
+// stays Dispatchable() until a later pass's retry succeeds. Pinned here as
+// the intended behaviour, not left as an unverified side effect: it is the
+// same trade the sweep already makes (never forget a live key), and the
+// window closes on the very next successful reconcile pass.
+func TestReconcileArchivedProjectStaysDispatchableUntilDeregisterRetrySucceeds(t *testing.T) {
+	gl := glabtest.New(t)
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	p.PutFile(".gonk.yml", []byte("version: 1\nenabled: true\nladder: [qwen-local]\n"))
+	m := newFakeMeter(t)
+	r := newReconciler(t, gl, m)
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	gl.SetArchived(p.ID, true)
+	m.failNow.Store(true) // meter is down; the deregister DELETE will fail
+	sum, err := r.ReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatalf("a per-project deregister failure must not abort the pass: %v", err)
+	}
+	if sum.Errors != 1 {
+		t.Fatalf("sum.Errors = %d, want 1 (the failed deregister)", sum.Errors)
+	}
+
+	e, ok := r.Cache.Get(p.ID)
+	if !ok {
+		t.Fatal("a failed deregister must keep the cache entry so the next pass retries")
+	}
+	if !e.Dispatchable() {
+		t.Fatalf("documenting current behaviour: the retained entry is still Dispatchable() during the retry window: %+v", e)
+	}
+
+	m.failNow.Store(false) // meter recovers
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.deletes) != 1 {
+		t.Fatalf("deletes = %d, want 1 once the retry succeeds", len(m.deletes))
+	}
+	if _, ok := r.Cache.Get(p.ID); ok {
+		t.Fatal("archived project must leave the cache once deregister succeeds")
+	}
+}
+
 // One bad project must not stop the others.
 func TestReconcileContinuesPastOneProjectError(t *testing.T) {
 	gl := glabtest.New(t)
