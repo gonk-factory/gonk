@@ -17,6 +17,7 @@
 package buildgate
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -106,42 +107,63 @@ func noLatestSkipDir(root, path string) bool {
 	return false
 }
 
-// noLatestScanFile runs the no-latest checks over one file's lines, skipping
-// Helm template directives (which legitimately embed `{{ ... }}` in place of
-// a literal tag -- that is resolved at install time, not something this
-// static scan can or should evaluate) and Go source (which is scanned by the
-// normal Go build/vet/test gate, not this Dockerfile/Helm-values heuristic,
-// and whose own identifiers -- e.g. a struct field named `image`, or this
-// file's own doc comments about the scan -- are not image references).
-func noLatestScanFile(t *testing.T, path string) {
-	t.Helper()
-	if filepath.Ext(path) == ".go" {
-		return
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	// The FROM heuristic only makes sense for actual Dockerfiles: a line
-	// beginning "from ..." is a real English word too, and Helm block
-	// comments (chart/gonk/templates/test-netpol-probe.yaml's NetworkPolicy
-	// prose, e.g.) contain sentences like "...ingress from app=gc-agent on
-	// 8080." that are not FROM instructions. Every FROM instruction in this
-	// repo lives in a file named Dockerfile* (images/Dockerfile.*,
-	// images/stubmodel/Dockerfile); restricting the check to those loses no
-	// real coverage.
-	isDockerfile := strings.HasPrefix(filepath.Base(path), "Dockerfile")
+// noLatestFromProseFiles: the ONLY two files in this repo where a real
+// English sentence happens to match the case-insensitive `^\s*FROM\s+`
+// heuristic without being a Dockerfile instruction --
+// chart/gonk/templates/test-netpol-probe.yaml's Helm block-comment prose
+// ("...ingress from app=gc-agent on 8080.") and
+// chart/gonk/smoke/gc-controller-smoke.md's runbook prose ("From a
+// **separate** pod in the ns, ..."). This is an EXCLUDE list, not an
+// allow-list of "files that look like Dockerfiles": an earlier version of
+// this check only ran the FROM heuristic when the basename started with
+// "Dockerfile", which is exactly backwards for a security gate -- an
+// untagged `FROM debian` (Docker resolves that to :latest) in a
+// differently-named build file such as images/Containerfile or
+// images/agent.dockerfile would have escaped silently. Docker does not care
+// what the file is called, so this check does not get to either. New prose
+// that trips this in the future gets added here; a new build file never
+// needs to be.
+var noLatestFromProseFiles = []string{
+	"chart/gonk/templates/test-netpol-probe.yaml",
+	"chart/gonk/smoke/gc-controller-smoke.md",
+}
 
-	lines := strings.Split(string(b), "\n")
+func noLatestIsKnownFromProseFile(path string) bool {
+	p := filepath.ToSlash(path)
+	for _, suffix := range noLatestFromProseFiles {
+		if strings.HasSuffix(p, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// noLatestLineProblems scans already-read file content and returns one
+// human-readable problem string per no-latest violation found -- it does not
+// touch a *testing.T, so it can be exercised directly by
+// TestTheNoLatestGateActuallyFails without needing fixture files on disk.
+// Skips Helm template directive lines (`{{ ... }}` is resolved at install
+// time, not something this static scan can or should evaluate) and Go
+// source entirely (scanned by the normal Go build/vet/test gate instead;
+// its own identifiers -- e.g. a struct field named `image` -- are not image
+// references).
+func noLatestLineProblems(path string, content string) []string {
+	if filepath.Ext(path) == ".go" {
+		return nil
+	}
+	skipFrom := noLatestIsKnownFromProseFile(path)
+
+	var problems []string
+	lines := strings.Split(content, "\n")
 	stages := noLatestStageNames(lines)
 	for i, line := range lines {
 		if strings.Contains(line, "{{") {
 			continue
 		}
 		if strings.Contains(line, noLatestBannedTag) {
-			t.Errorf("%s:%d: contains a floating %q tag -- pin an exact tag (docs/environment.md)", path, i+1, noLatestBannedTag)
+			problems = append(problems, fmt.Sprintf("%s:%d: contains a floating %q tag -- pin an exact tag (docs/environment.md)", path, i+1, noLatestBannedTag))
 		}
-		if isDockerfile {
+		if !skipFrom {
 			if m := noLatestFromRe.FindStringSubmatch(line); m != nil {
 				ref := m[1]
 				if ref == "scratch" || stages[ref] || noLatestWholeVarRe.MatchString(ref) {
@@ -151,16 +173,30 @@ func noLatestScanFile(t *testing.T, path string) {
 					continue
 				}
 				if !noLatestHasTag(ref) {
-					t.Errorf("%s:%d: FROM %q has no tag -- pin an exact tag or digest (docs/environment.md)", path, i+1, ref)
+					problems = append(problems, fmt.Sprintf("%s:%d: FROM %q has no tag -- pin an exact tag or digest (docs/environment.md)", path, i+1, ref))
 				}
 			}
 		}
 		if m := noLatestImageRe.FindStringSubmatch(line); m != nil {
 			ref := strings.Trim(m[1], `"'`)
 			if !noLatestHasTag(ref) {
-				t.Errorf("%s:%d: image: %q has no tag -- pin an exact tag or digest (docs/environment.md)", path, i+1, ref)
+				problems = append(problems, fmt.Sprintf("%s:%d: image: %q has no tag -- pin an exact tag or digest (docs/environment.md)", path, i+1, ref))
 			}
 		}
+	}
+	return problems
+}
+
+// noLatestScanFile reads path off disk and reports every problem
+// noLatestLineProblems finds in it.
+func noLatestScanFile(t *testing.T, path string) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	for _, p := range noLatestLineProblems(path, string(b)) {
+		t.Error(p)
 	}
 }
 
@@ -198,6 +234,85 @@ func TestNothingSaysLatest(t *testing.T) {
 		if walkErr != nil {
 			t.Fatalf("walk %s: %v", target, walkErr)
 		}
+	}
+}
+
+// TestTheNoLatestGateActuallyFails proves each violation shape
+// noLatestLineProblems exists to catch actually produces a problem. A check
+// whose failure path is never exercised is a check that can quietly stop
+// checking -- see the Makefile's own no-latest recipe, whose `!` idiom did
+// exactly that for a grep error until T-04.
+//
+// The "untagged FROM in a file NOT named Dockerfile*" case pins a regression:
+// an earlier version of this file only ran the FROM check when the file's
+// basename started with "Dockerfile", which let an untagged `FROM debian`
+// (Docker resolves that to :latest) in e.g. images/Containerfile or
+// images/agent.dockerfile escape both this test and `make no-latest` (whose
+// grep only matches the literal banned substring, not an absent tag)
+// entirely. Docker does not care what the build file is named, so this test
+// does not get to either.
+func TestTheNoLatestGateActuallyFails(t *testing.T) {
+	cases := []struct {
+		name     string
+		path     string
+		content  string
+		wantSaid string
+	}{
+		{
+			name:     "explicit banned tag, in a file that is NOT a Dockerfile",
+			path:     "chart/gonk/values.yaml",
+			content:  "repository: registry.example/gonk-agent" + noLatestBannedTag + "\n",
+			wantSaid: "floating",
+		},
+		{
+			name:     "untagged FROM in a file named Dockerfile.*",
+			path:     "images/Dockerfile.agent",
+			content:  "FROM debian\n",
+			wantSaid: "has no tag",
+		},
+		{
+			name:     "untagged FROM in a build file NOT named Dockerfile* -- the exact hole an earlier isDockerfile allow-list left open",
+			path:     "images/Containerfile",
+			content:  "FROM debian\n",
+			wantSaid: "has no tag",
+		},
+		{
+			name:     "untagged FROM in a .dockerfile-suffixed file, also not matching Dockerfile*",
+			path:     "images/agent.dockerfile",
+			content:  "FROM debian\n",
+			wantSaid: "has no tag",
+		},
+		{
+			name:     "untagged image: reference",
+			path:     "chart/gonk/templates/workload-gonk-controller.yaml",
+			content:  "image: registry.example/gonk-agent\n",
+			wantSaid: "has no tag",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			problems := noLatestLineProblems(tc.path, tc.content)
+			if len(problems) == 0 {
+				t.Fatalf("noLatestLineProblems(%q, %q) found nothing -- this is exactly the shape the gate exists to catch", tc.path, tc.content)
+			}
+			if !strings.Contains(strings.Join(problems, "\n"), tc.wantSaid) {
+				t.Errorf("wanted %q in:\n%s", tc.wantSaid, strings.Join(problems, "\n"))
+			}
+		})
+	}
+
+	// And the passing cases, so the above is not vacuously true of every
+	// input: a correctly digest-pinned FROM in a non-Dockerfile-named file,
+	// and the two known prose files that must NOT be flagged for saying
+	// "from" in an English sentence.
+	if p := noLatestLineProblems("images/Containerfile", "FROM debian:12@sha256:"+strings.Repeat("a", 64)+"\n"); len(p) != 0 {
+		t.Errorf("noLatestLineProblems rejected a correctly pinned FROM: %v", p)
+	}
+	if p := noLatestLineProblems("chart/gonk/templates/test-netpol-probe.yaml", "  from app=gc-agent on 8080.\n"); len(p) != 0 {
+		t.Errorf("noLatestLineProblems flagged known NetworkPolicy prose as an untagged FROM: %v", p)
+	}
+	if p := noLatestLineProblems("chart/gonk/smoke/gc-controller-smoke.md", "From a **separate** pod in the ns\n"); len(p) != 0 {
+		t.Errorf("noLatestLineProblems flagged known runbook prose as an untagged FROM: %v", p)
 	}
 }
 
