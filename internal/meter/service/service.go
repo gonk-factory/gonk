@@ -1189,6 +1189,11 @@ func (s *Service) RefreshGauges(ctx context.Context) error {
 // infra-failed attempt for each -- a session that dies silently retries its
 // rung instead of escalating. A session that reported (Settled == true) is
 // not dead; ExpireReservations never returns it.
+//
+// It also sweeps past-ExpiresAt prompt rows (T-34, interim until T-56 deletes
+// the table). TakePrompt already scrubs litellm_key the moment a row is
+// fetched; this is the other half -- a row nobody ever fetched still holds a
+// live key until it expires, and the janitor is what actually drops it.
 func (s *Service) Janitor(ctx context.Context) error {
 	expired, err := s.store.ExpireReservations(ctx, s.now())
 	if err != nil {
@@ -1207,6 +1212,9 @@ func (s *Service) Janitor(ctx context.Context) error {
 		for project, n := range byProject {
 			s.metrics.RecordReservationsExpired(project, n)
 		}
+	}
+	if _, err := s.store.ExpirePrompts(ctx, s.now()); err != nil {
+		return fmt.Errorf("service: janitor: expire prompts: %w", err)
 	}
 	return nil
 }

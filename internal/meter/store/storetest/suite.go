@@ -86,6 +86,8 @@ func Run(t *testing.T, newStore func() store.Store) {
 	t.Run("TakePromptHasExactlyOneWinnerUnderConcurrency", testTakePromptHasExactlyOneWinnerUnderConcurrency(newStore))
 	t.Run("ExpiredPromptReadsAsAbsentNotConsumed", testExpiredPromptReadsAsAbsentNotConsumed(newStore))
 	t.Run("PromptCarriesTheSessionKeyThroughTheStore", testPromptCarriesTheSessionKey(newStore))
+	t.Run("TakePromptScrubsKey", testTakePromptScrubsKey(newStore))
+	t.Run("JanitorExpiresPrompts", testJanitorExpiresPrompts(newStore))
 	t.Run("TraceAppendsRatherThanReplaces", testTraceAppendsRatherThanReplaces(newStore))
 	t.Run("TraceCompletenessOnlyEverDegrades", testTraceCompletenessOnlyEverDegrades(newStore))
 	t.Run("MissingTraceIsNotAnEmptyTrace", testMissingTraceIsNotAnEmptyTrace(newStore))
@@ -894,6 +896,108 @@ func testPromptCarriesTheSessionKey(newStore func() store.Store) func(*testing.T
 		}
 		if got.LiteLLMKey != "sk-project-scoped" {
 			t.Fatalf("LiteLLMKey = %q, want it to survive the round trip -- without it the agent starts unauthenticated", got.LiteLLMKey)
+		}
+	}
+}
+
+// testTakePromptScrubsKey is T-34: a LiteLLM virtual key sitting in the prompts
+// row after the prompt has been fetched is a live credential at rest. The take
+// itself must still hand the key to the WINNING caller (that is
+// testPromptCarriesTheSessionKey, above, and this test re-checks it) -- the
+// property this test adds is that the row LEFT IN THE STORE no longer holds
+// it. Those are different assertions: a store that returns the key once but
+// never clears the column would pass every other prompt test in this suite and
+// still leave the credential sitting there.
+func testTakePromptScrubsKey(newStore func() store.Store) func(*testing.T) {
+	return func(t *testing.T) {
+		t.Helper()
+		ctx, s := context.Background(), newStore()
+		now := time.Now().UTC()
+		alias := "gonk.triage.p42.i6.a1.SCRUBSCRUBSCRUBSCRUBSCRUBSC"
+
+		must(t, s.PutPrompt(ctx, store.Prompt{
+			Alias: alias, Prompt: "do the thing", Model: "m",
+			LiteLLMKey: "sk-must-not-persist", CreatedAt: now,
+			ExpiresAt: now.Add(time.Hour),
+		}))
+
+		got, found, consumed, err := s.TakePrompt(ctx, alias, now)
+		must(t, err)
+		if !found || consumed {
+			t.Fatalf("found=%v consumed=%v, want a fresh take", found, consumed)
+		}
+		if got.LiteLLMKey != "sk-must-not-persist" {
+			t.Fatalf("TakePrompt's return value lost the key: got %q, want it handed to the winner", got.LiteLLMKey)
+		}
+
+		// The row itself, read back WITHOUT consuming (PromptStatus never
+		// consumes -- dispatch polls it), must no longer carry the key. This is
+		// the assertion that actually proves the scrub: TakePrompt returning the
+		// key once says nothing about what got persisted.
+		st, found, err := s.PromptStatus(ctx, alias)
+		must(t, err)
+		if !found {
+			t.Fatal("prompt row vanished after take -- want it still present (fetched), just scrubbed")
+		}
+		if st.LiteLLMKey != "" {
+			t.Fatalf("litellm_key = %q after take, want scrubbed empty -- the key is a live credential at rest until T-56 deletes this table", st.LiteLLMKey)
+		}
+	}
+}
+
+// testJanitorExpiresPrompts is the other half of T-34: TakePrompt scrubs a
+// FETCHED row's key immediately, but a row nobody ever fetches keeps its key
+// until something drops the row -- and that something is ExpirePrompts, which
+// the janitor now calls on every tick (service.Service.Janitor). This test
+// exercises the store method directly (the conformance suite has no service
+// fixture that runs against both backends -- see internal/meter/service, whose
+// Janitor tests are Memory-only), with a mix of rows so a implementation that
+// drops the WRONG ones, or the wrong COUNT, cannot pass by accident.
+func testJanitorExpiresPrompts(newStore func() store.Store) func(*testing.T) {
+	return func(t *testing.T) {
+		t.Helper()
+		ctx, s := context.Background(), newStore()
+		now := time.Now().UTC()
+
+		expiredAlias := "gonk.triage.p9.i1.a1.JANITOREXPIREDJANITOREXPI"
+		liveAlias := "gonk.triage.p9.i2.a1.JANITORLIVEJANITORLIVEJAN"
+		fetchedLiveAlias := "gonk.triage.p9.i3.a1.JANITORFETCHEDJANITORFETC"
+
+		must(t, s.PutPrompt(ctx, store.Prompt{
+			Alias: expiredAlias, Prompt: "p", Model: "m",
+			LiteLLMKey: "sk-expired", CreatedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour),
+		}))
+		must(t, s.PutPrompt(ctx, store.Prompt{
+			Alias: liveAlias, Prompt: "p", Model: "m",
+			LiteLLMKey: "sk-live", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		}))
+		must(t, s.PutPrompt(ctx, store.Prompt{
+			Alias: fetchedLiveAlias, Prompt: "p", Model: "m",
+			LiteLLMKey: "sk-fetched-live", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		}))
+		if _, found, consumed, err := s.TakePrompt(ctx, fetchedLiveAlias, now); err != nil || !found || consumed {
+			t.Fatalf("setup take of fetchedLiveAlias: found=%v consumed=%v err=%v", found, consumed, err)
+		}
+
+		n, err := s.ExpirePrompts(ctx, now)
+		must(t, err)
+		if n != 1 {
+			t.Fatalf("ExpirePrompts swept %d rows, want exactly 1 (only the past-ExpiresAt one)", n)
+		}
+
+		if _, found, err := s.PromptStatus(ctx, expiredAlias); err != nil || found {
+			t.Fatalf("expired prompt survived the sweep: found=%v err=%v", found, err)
+		}
+		if _, found, err := s.PromptStatus(ctx, liveAlias); err != nil || !found {
+			t.Fatalf("unexpired, unfetched prompt was swept: found=%v err=%v", found, err)
+		}
+		if _, found, err := s.PromptStatus(ctx, fetchedLiveAlias); err != nil || !found {
+			t.Fatalf("unexpired, already-fetched prompt was swept: found=%v err=%v", found, err)
+		}
+
+		// A second sweep at the same `now` must find nothing left to do.
+		if again, err := s.ExpirePrompts(ctx, now); err != nil || again != 0 {
+			t.Fatalf("second sweep = %d, %v, want 0 (nothing left expired)", again, err)
 		}
 	}
 }

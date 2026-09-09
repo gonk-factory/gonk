@@ -345,6 +345,12 @@ func (m *Memory) PutPrompt(ctx context.Context, p Prompt) error {
 // TakePrompt is read-and-mark under the SAME write lock, so two concurrent
 // callers cannot both observe an unconsumed row. In the memory store that is
 // what the postgres implementation buys with a single UPDATE ... RETURNING.
+//
+// The winning caller gets LiteLLMKey in the RETURNED Prompt (it still has to
+// reach the agent pod), but the copy left in m.prompts has it scrubbed (T-34):
+// a virtual key sitting in a row after the prompt has been fetched is a live
+// credential at rest, and nothing legitimate reads it back out of the store
+// after a take -- PromptStatus's HTTP response does not even carry the field.
 func (m *Memory) TakePrompt(ctx context.Context, alias string, now time.Time) (Prompt, bool, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -360,9 +366,12 @@ func (m *Memory) TakePrompt(ctx context.Context, alias string, now time.Time) (P
 	if !p.FetchedAt.IsZero() {
 		return p, true, true, nil
 	}
+	out := p
+	out.FetchedAt = now
 	p.FetchedAt = now
+	p.LiteLLMKey = "" // scrubbed from the store; out still carries the real value
 	m.prompts[alias] = p
-	return p, true, false, nil
+	return out, true, false, nil
 }
 
 func (m *Memory) PromptStatus(ctx context.Context, alias string) (Prompt, bool, error) {

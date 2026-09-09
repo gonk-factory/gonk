@@ -767,14 +767,37 @@ func (p *Postgres) PutPrompt(ctx context.Context, pr Prompt) error {
 // it, exactly one matches the WHERE, and the loser gets no rows. Doing this as
 // SELECT-then-UPDATE would make the guarantee decorative -- the same reasoning
 // ReserveIfFits already documents for the overspend race.
+//
+// The SAME UPDATE also scrubs litellm_key (T-34): a virtual key sitting in the
+// row after the prompt has been fetched is a live credential at rest, and a
+// separate "UPDATE fetched_at" then "UPDATE litellm_key = ”" would leave a
+// window -- a crash, or a concurrent reader via PromptStatus -- where the row
+// is marked fetched but the key has not yet been cleared. The caller still
+// needs the ORIGINAL key to hand to the winning pod, so the `pre` CTE reads it
+// before the update -- all within this one SQL statement, one round trip, one
+// snapshot. (A data-modifying WITH clause's auxiliary SELECTs run against the
+// snapshot as of the start of the query, so `pre` sees the pre-update value
+// even though `upd` is clearing the column in the same statement.) `pre` and
+// `upd` share the identical WHERE clause, so the CROSS JOIN in the outer
+// SELECT is exact: zero rows in `upd` (lost race, wrong alias, already
+// consumed, expired) yields zero rows overall, same as before.
 func (p *Postgres) TakePrompt(ctx context.Context, alias string, now time.Time) (Prompt, bool, bool, error) {
 	var pr Prompt
 	var fetched, expires *time.Time
 	err := p.pool.QueryRow(ctx, `
-		UPDATE prompts SET fetched_at = $2
-		WHERE alias = $1 AND fetched_at IS NULL
-		  AND (expires_at IS NULL OR expires_at > $2)
-		RETURNING alias, prompt, model, metadata, litellm_key, created_at, fetched_at, expires_at`,
+		WITH pre AS (
+			SELECT litellm_key FROM prompts
+			WHERE alias = $1 AND fetched_at IS NULL
+			  AND (expires_at IS NULL OR expires_at > $2)
+		), upd AS (
+			UPDATE prompts SET fetched_at = $2, litellm_key = ''
+			WHERE alias = $1 AND fetched_at IS NULL
+			  AND (expires_at IS NULL OR expires_at > $2)
+			RETURNING alias, prompt, model, metadata, created_at, fetched_at, expires_at
+		)
+		SELECT upd.alias, upd.prompt, upd.model, upd.metadata, pre.litellm_key,
+		       upd.created_at, upd.fetched_at, upd.expires_at
+		FROM upd, pre`,
 		alias, now).Scan(&pr.Alias, &pr.Prompt, &pr.Model, &pr.Metadata, &pr.LiteLLMKey, &pr.CreatedAt, &fetched, &expires)
 	if err == nil {
 		if fetched != nil {
