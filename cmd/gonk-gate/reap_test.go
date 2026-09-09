@@ -25,6 +25,12 @@ import (
 
 const reapNow = "2026-08-03T12:00:00Z"
 
+// testNonce is a syntactically valid nonce segment -- 26 characters from
+// brokerSessionAlias's base32 alphabet, matching the length its 128-bit
+// crypto/rand suffix always produces -- for aliases this file hand-builds
+// rather than minting through brokerSessionAlias itself.
+const testNonce = "AAAAAAAAAAAAAAAAAAAAAAAAAA"
+
 func reapClock(t *testing.T) func() time.Time {
 	t.Helper()
 	now, err := time.Parse(time.RFC3339, reapNow)
@@ -49,12 +55,16 @@ func reapDeps(t *testing.T, gc *gcapitest.Server, store beadstore.Store, log *st
 // bead store claiming it, old enough to be past the grace window.
 func TestReaperClosesAnOrphanedSession(t *testing.T) {
 	gc := gcapitest.New(t)
-	gc.CreateSessionAt("gonk.triage.p42.i3.a1", gcapitest.SessionRunning, "2026-08-01T00:00:00Z")
+	alias := brokerSessionAlias("triage", 42, 3, 1)
+	gc.CreateSessionAt(alias, gcapitest.SessionRunning, "2026-08-01T00:00:00Z")
 
 	runReap(context.Background(), reapDeps(t, gc, beadstore.NewMemory(), nil))
 
 	if live := gc.LiveSessions(); len(live) != 0 {
 		t.Fatalf("orphan survived the reaper: %v", live)
+	}
+	if len(gc.Closed) != 1 || gc.Closed[0] != alias {
+		t.Fatalf("CloseSession was not called for the orphan: Closed = %v, want [%s]", gc.Closed, alias)
 	}
 }
 
@@ -64,7 +74,7 @@ func TestReaperClosesAnOrphanedSession(t *testing.T) {
 // leak the reaper prevents.
 func TestReaperNeverTouchesASessionWithARunningBead(t *testing.T) {
 	gc := gcapitest.New(t)
-	alias := "gonk.triage.p42.i3.a1"
+	alias := brokerSessionAlias("triage", 42, 3, 1)
 	gc.CreateSessionAt(alias, gcapitest.SessionRunning, "2026-08-01T00:00:00Z")
 
 	store := beadstore.NewMemory()
@@ -78,6 +88,9 @@ func TestReaperNeverTouchesASessionWithARunningBead(t *testing.T) {
 	if live := gc.LiveSessions(); len(live) != 1 || live[0] != alias {
 		t.Fatalf("THE REAPER KILLED A LIVE AGENT. live = %v, want [%s]", live, alias)
 	}
+	if len(gc.Closed) != 0 {
+		t.Fatalf("CloseSession was called for a session a running bead claims: Closed = %v", gc.Closed)
+	}
 }
 
 // The grace window. A dispatch creates the session and only writes its record
@@ -87,7 +100,7 @@ func TestReaperNeverTouchesASessionWithARunningBead(t *testing.T) {
 func TestReaperLeavesYoungSessionsAloneEvenWithNoRecord(t *testing.T) {
 	gc := gcapitest.New(t)
 	// Created one minute ago: mid-dispatch, no record written yet.
-	gc.CreateSessionAt("gonk.triage.p42.i9.a1", gcapitest.SessionRunning, "2026-08-03T11:59:00Z")
+	gc.CreateSessionAt("gonk.triage.p42.i9.a1."+testNonce, gcapitest.SessionRunning, "2026-08-03T11:59:00Z")
 
 	runReap(context.Background(), reapDeps(t, gc, beadstore.NewMemory(), nil))
 
@@ -104,6 +117,36 @@ func TestReaperGraceWindowComfortablyExceedsTheDeliveryDeadline(t *testing.T) {
 	}
 }
 
+// gonkSessionAlias must match every shape brokerSessionAlias actually mints:
+// the issue-scoped triage form and the project-scoped scaffold form (issue 0).
+// A reaper that cannot match either of these matches nothing gonk creates.
+func TestGonkSessionAliasMatchesBrokerAliases(t *testing.T) {
+	triage := brokerSessionAlias("triage", 75, 35, 1)
+	if !gonkSessionAlias.MatchString(triage) {
+		t.Errorf("gonkSessionAlias did not match a triage alias: %q", triage)
+	}
+
+	scaffold := brokerSessionAlias("scaffold", 75, 0, 1)
+	if !gonkSessionAlias.MatchString(scaffold) {
+		t.Errorf("gonkSessionAlias did not match a scaffold alias: %q", scaffold)
+	}
+}
+
+// The nonce is REQUIRED, not optional. An alias in the pre-nonce shape is
+// either stale (nothing mints it any more) or not ours, and a near-miss on the
+// prefix must still fail even with a syntactically valid trailer.
+func TestGonkSessionAliasRejectsAliasesWithoutTheNonce(t *testing.T) {
+	for _, alias := range []string{
+		"gonk.triage.p1.a1",    // old-style, pre-nonce, project-scoped
+		"gonk.triage.p1.i1.a1", // old-style, pre-nonce, issue-scoped
+		"gonkish.triage.p1.a1", // near-miss on the prefix
+	} {
+		if gonkSessionAlias.MatchString(alias) {
+			t.Errorf("gonkSessionAlias matched %q; want no match", alias)
+		}
+	}
+}
+
 // Match on OUR alias scheme only. The city may hold sessions gonk did not create
 // -- pool sessions, the control-dispatcher, a human's ad-hoc session. Closing
 // someone else's session is not a leak fix, it is an outage.
@@ -115,13 +158,14 @@ func TestReaperNeverTouchesSessionsGonkDidNotCreate(t *testing.T) {
 		"triage-adhoc-58f5c50f2a", // someone's manual probe
 		"gonkish.triage.p1.a1",    // near-miss on our prefix
 		"notgonk.triage.p1.a1",
+		"gonk.triage.p1.a1", // old-style, pre-nonce: no broker mints this any more
 	} {
 		gc.CreateSessionAt(id, gcapitest.SessionRunning, "2026-08-01T00:00:00Z")
 	}
 
 	runReap(context.Background(), reapDeps(t, gc, beadstore.NewMemory(), nil))
 
-	if live := gc.LiveSessions(); len(live) != 5 {
+	if live := gc.LiveSessions(); len(live) != 6 {
 		t.Fatalf("the reaper closed sessions gonk did not create. survivors = %v", live)
 	}
 }
@@ -131,7 +175,7 @@ func TestReaperNeverTouchesSessionsGonkDidNotCreate(t *testing.T) {
 // this is the recovery path for gonk-xkm's loud "ITS POD IS LEAKED" error.
 func TestReaperClosesASessionWhoseBeadIsAlreadyDone(t *testing.T) {
 	gc := gcapitest.New(t)
-	alias := "gonk.triage.p42.i3.a1"
+	alias := "gonk.triage.p42.i3.a1." + testNonce
 	gc.CreateSessionAt(alias, gcapitest.SessionRunning, "2026-08-01T00:00:00Z")
 
 	store := beadstore.NewMemory()
@@ -153,7 +197,7 @@ func TestReaperClosesASessionWhoseBeadIsAlreadyDone(t *testing.T) {
 // thing the reaper could do and it must fail closed.
 func TestReaperRefusesToActWhenTheBeadStoreCannotBeRead(t *testing.T) {
 	gc := gcapitest.New(t)
-	gc.CreateSessionAt("gonk.triage.p42.i3.a1", gcapitest.SessionRunning, "2026-08-01T00:00:00Z")
+	gc.CreateSessionAt("gonk.triage.p42.i3.a1."+testNonce, gcapitest.SessionRunning, "2026-08-01T00:00:00Z")
 
 	var logged strings.Builder
 	d := reapDeps(t, gc, failingStore{}, &logged)
@@ -175,8 +219,8 @@ func TestReaperFollowsPaginationToTheEnd(t *testing.T) {
 	gc := gcapitest.New(t)
 	gc.ListPageSize = 2
 	for _, id := range []string{
-		"gonk.triage.p1.i1.a1", "gonk.triage.p1.i2.a1", "gonk.triage.p1.i3.a1",
-		"gonk.triage.p1.i4.a1", "gonk.triage.p1.i5.a1",
+		"gonk.triage.p1.i1.a1." + testNonce, "gonk.triage.p1.i2.a1." + testNonce, "gonk.triage.p1.i3.a1." + testNonce,
+		"gonk.triage.p1.i4.a1." + testNonce, "gonk.triage.p1.i5.a1." + testNonce,
 	} {
 		gc.CreateSessionAt(id, gcapitest.SessionRunning, "2026-08-01T00:00:00Z")
 	}
@@ -193,7 +237,7 @@ func TestReaperFollowsPaginationToTheEnd(t *testing.T) {
 // reap it immediately). Unknown age resolves toward leaving it alone.
 func TestReaperTreatsAnUnreadableAgeAsTooYoung(t *testing.T) {
 	gc := gcapitest.New(t)
-	gc.CreateSessionAt("gonk.triage.p42.i3.a1", gcapitest.SessionRunning, "not-a-timestamp")
+	gc.CreateSessionAt("gonk.triage.p42.i3.a1."+testNonce, gcapitest.SessionRunning, "not-a-timestamp")
 
 	runReap(context.Background(), reapDeps(t, gc, beadstore.NewMemory(), nil))
 
@@ -209,7 +253,7 @@ func TestReaperTreatsAnUnreadableAgeAsTooYoung(t *testing.T) {
 // assert the orphan is gone.
 func TestSweepActuallyRunsTheReaper(t *testing.T) {
 	gc := gcapitest.New(t)
-	gc.CreateSessionAt("gonk.triage.p42.i3.a1", gcapitest.SessionRunning, "2026-08-01T00:00:00Z")
+	gc.CreateSessionAt("gonk.triage.p42.i3.a1."+testNonce, gcapitest.SessionRunning, "2026-08-01T00:00:00Z")
 
 	// No running and no parked beads, so the sweep's own passes are no-ops and
 	// the only thing that can close this session is the reaper.

@@ -32,15 +32,21 @@ const reapGrace = 10 * time.Minute
 
 // gonkSessionAlias matches ONLY the aliases brokerSessionAlias mints:
 //
-//	gonk.{agent}.p{projectID}.a{attempt}            (project-scoped, e.g. scaffold)
-//	gonk.{agent}.p{projectID}.i{issueIID}.a{attempt}
+//	gonk.{agent}.p{projectID}.a{attempt}.{nonce}            (project-scoped, e.g. scaffold)
+//	gonk.{agent}.p{projectID}.i{issueIID}.a{attempt}.{nonce}
+//
+// The trailing nonce segment is brokerSessionAlias's 128-bit crypto/rand
+// suffix, base32-encoded with no padding: always 26 characters from [A-Z2-7]
+// (ceil(128/5)). It is REQUIRED here, not optional -- an alias without one is
+// either pre-nonce (gonk-mzd made the nonce load-bearing for every alias this
+// broker mints) or not ours, and either way the reaper must not touch it.
 //
 // Anchored at both ends on purpose. The city holds sessions gonk did not create
 // -- Gas City's own control-dispatcher, pool sessions, a human's ad-hoc probe --
 // and closing one of those is not a leak fix, it is an outage. A near-miss like
 // "gonkish.triage.p1.a1" must not match, which is what the leading `^gonk\.`
 // and the strict segment shapes buy.
-var gonkSessionAlias = regexp.MustCompile(`^gonk\.[a-z][a-z0-9-]*\.p\d+(\.i\d+)?\.a\d+$`)
+var gonkSessionAlias = regexp.MustCompile(`^gonk\.[a-z][a-z0-9-]*\.p\d+(\.i\d+)?\.a\d+\.[A-Z2-7]{26}$`)
 
 // runReap closes gonk-created sessions that no live bead claims.
 //
