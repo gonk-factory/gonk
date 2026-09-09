@@ -267,6 +267,13 @@ type Store interface {
 	// stored and already taken: the caller answers 410, not 404. The two are
 	// opposite diagnoses -- "never delivered" versus "respawn or theft" -- and
 	// collapsing them would hide exactly the case worth seeing.
+	//
+	// TakePrompt ALSO scrubs p.LiteLLMKey out of the row, in the SAME statement
+	// that marks it fetched (T-34, interim until T-56 deletes this table at the
+	// Gas City cutover). The RETURNED Prompt still carries the real key -- the
+	// winning caller has to hand it to the pod -- but nothing legitimate reads
+	// it back out of the store after a take, so leaving it there is a live
+	// credential sitting at rest for no reason.
 	TakePrompt(ctx context.Context, alias string, now time.Time) (p Prompt, found bool, consumed bool, err error)
 
 	// AppendTrace records observed tool-call evidence for one (session, attempt)

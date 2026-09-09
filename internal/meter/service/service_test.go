@@ -1014,6 +1014,40 @@ func TestExpiredReservationBecomesAnInfraFailure(t *testing.T) {
 	}
 }
 
+// TestJanitorSweepsExpiredPrompts is the wiring half of T-34: the store-level
+// conformance suite (storetest.testJanitorExpiresPrompts) proves ExpirePrompts
+// itself works on both backends, but that alone does not prove anything ever
+// CALLS it in production. Service.Janitor is what the janitor tick actually
+// runs, so this checks THAT function -- not the store method directly -- drops
+// a past-TTL prompt row.
+func TestJanitorSweepsExpiredPrompts(t *testing.T) {
+	f := newTestService(t)
+	ctx := context.Background()
+
+	alias := "gonk.triage.p1.i1.a1.JANITORWIRINGJANITORWIRING"
+	if err := f.store.PutPrompt(ctx, store.Prompt{
+		Alias: alias, Prompt: "p", Model: "m",
+		LiteLLMKey: "sk-should-be-swept",
+		CreatedAt:  f.clock, ExpiresAt: f.clock.Add(30 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, found, err := f.store.PromptStatus(ctx, alias); err != nil || !found {
+		t.Fatalf("setup: prompt not visible before expiry: found=%v err=%v", found, err)
+	}
+
+	f.advance(31 * time.Minute) // past the prompt's ExpiresAt
+	if err := f.svc.Janitor(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, found, err := f.store.PromptStatus(ctx, alias); err != nil || found {
+		t.Fatalf("prompt survived a janitor tick past its ExpiresAt: found=%v err=%v -- "+
+			"Service.Janitor must call store.ExpirePrompts", found, err)
+	}
+}
+
 // ==================================================================
 // Operator config hot-reload (ADR-002's instance kill switch)
 // ==================================================================
