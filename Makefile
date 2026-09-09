@@ -279,11 +279,35 @@ fmt:
 	    -e '^\.worktrees/' -e '^\.claude/worktrees/' || true)"; \
 	  if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 
+# VET_BUILD_TAGS: every custom //go:build tag under cmd/ pkg/ internal/ test/
+# that the default (untagged) `go vet ./...` never compiles, so it never
+# type-checks the component/integration/images/live/chart/testclock suites
+# either (T-14). Keep in sync with .golangci.yml's run.build-tags and
+# internal/buildgate's TestRepoBuildTagsFindsTheKnownSixMatchesTheTaskList,
+# which pins this same set against a real scan of the tree.
+VET_BUILD_TAGS := component integration images live chart testclock
+
 vet:
 	$(GO) vet ./...
+	@for t in $(VET_BUILD_TAGS); do \
+	  echo "go vet -tags $$t ./..."; \
+	  $(GO) vet -tags $$t ./... || exit 1; \
+	done
 
+# TestEveryBuildTagRunsInCI (internal/buildgate) is DELIBERATELY red: T-14
+# added it to assert every //go:build tag under cmd/pkg/internal/test
+# appears in a `go test … -tags <tag>` line in .github/workflows/ci.yml, and
+# today component/integration/images/live/testclock do not (only chart
+# does). This package runs in the ordinary gate on purpose (see
+# nolatest_test.go's package doc), so without the SAME -skip ci.yml's own
+# `go test` step carries, this one intentionally-red test would fail
+# `make gate` for every contributor on every branch -- worse than the gap it
+# exists to surface. The finding is not hidden: run
+# `go test ./internal/buildgate/ -count=1 -v` directly (no -skip) to see it.
+# TODO(2026-09-08, T-15/T-16/T-17): narrow or remove this exclusion as each
+# task lands the CI job it covers.
 test:
-	$(GO) test ./... -race -count=1
+	$(GO) test ./... -race -count=1 -skip '^TestEveryBuildTagRunsInCI$$'
 
 # lint runs the SAME golangci-lint the CI job runs, pinned to the same tag.
 #
@@ -292,12 +316,29 @@ test:
 # findings were discovered in CI instead. That happened (gonk-mzd: nine findings,
 # one pipeline). The container fallback means there is no excuse and no version
 # skew: if the binary is present it is used, otherwise the pinned image is.
-LINT_IMAGE ?= golangci/golangci-lint:v2.12.2
+#
+# LINT_VERSION_NUM has no leading "v" because `golangci-lint version` prints
+# the bare number ("golangci-lint has version 2.12.2 built with go1.26.2
+# from ..."); LINT_VERSION adds it back for the image tag, matching the SAME
+# release .gitlab-ci.yml and .github/workflows/ci.yml pin.
+LINT_VERSION_NUM := 2.12.2
+LINT_VERSION := v$(LINT_VERSION_NUM)
+LINT_IMAGE ?= golangci/golangci-lint:$(LINT_VERSION)
 lint:
-	@if command -v golangci-lint >/dev/null 2>&1; then \
-	  golangci-lint run ./...; \
+	@bin=""; \
+	if command -v golangci-lint >/dev/null 2>&1; then \
+	  bin=golangci-lint; \
 	elif [ -x /root/go/bin/golangci-lint ]; then \
-	  /root/go/bin/golangci-lint run ./...; \
+	  bin=/root/go/bin/golangci-lint; \
+	fi; \
+	if [ -n "$$bin" ]; then \
+	  got=$$($$bin version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1); \
+	  if [ "$$got" != "$(LINT_VERSION_NUM)" ]; then \
+	    echo "host golangci-lint ($$bin) reports version $${got:-<unknown>}, but CI is pinned to $(LINT_VERSION) -- refusing to run a mismatched linter, which can report different findings than the pin (new/removed checks, changed defaults) and pass locally while CI still fails it, or the reverse"; \
+	    echo "fix: install $(LINT_VERSION), or take $$bin off PATH (and /root/go/bin) to fall back to the pinned $(LINT_IMAGE) container below"; \
+	    exit 1; \
+	  fi; \
+	  $$bin run ./...; \
 	else \
 	  echo "golangci-lint not installed; running $(LINT_IMAGE) in a container"; \
 	  : "--network=none, NOT host: the lint is fully offline (vendored deps," ; \

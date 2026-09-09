@@ -32,15 +32,14 @@ import (
 
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/litellm"
 	"gitlab.orac.local/agentic/gonk-project/pkg/opercfg"
+	"gitlab.orac.local/agentic/gonk-project/test/harness"
 )
 
 func liveConfig(t *testing.T) (base, master string) {
 	t.Helper()
 	base = strings.TrimRight(os.Getenv("GONK_LITELLM_URL"), "/")
 	master = os.Getenv("GONK_LITELLM_MASTER_KEY")
-	if base == "" || master == "" {
-		t.Skip("set GONK_LITELLM_URL and GONK_LITELLM_MASTER_KEY to run the live component test")
-	}
+	harness.RequireInfra(t, "GONK_LITELLM_URL and GONK_LITELLM_MASTER_KEY (set both to run the live component test)", base != "" && master != "")
 	return base, master
 }
 

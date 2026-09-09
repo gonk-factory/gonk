@@ -30,6 +30,7 @@ import (
 
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/store"
 	"gitlab.orac.local/agentic/gonk-project/internal/meter/store/storetest"
+	"gitlab.orac.local/agentic/gonk-project/test/harness"
 )
 
 // defaultPostgresDSN matches `docker run ... -e POSTGRES_PASSWORD=gonk
@@ -59,9 +60,7 @@ func newTestDatabase(t *testing.T) *store.Postgres {
 		t.Fatalf("parse admin DSN: %v", err)
 	}
 	admin, err := pgx.ConnectConfig(ctx, adminCfg)
-	if err != nil {
-		t.Fatalf("connect to postgres admin db (is it up? see the docstring at the top of this file): %v", err)
-	}
+	harness.RequireInfra(t, fmt.Sprintf("postgres admin connection (is it up? see the docstring at the top of this file): %v", err), err == nil)
 	// admin stays open for the LIFE OF THE TEST, not just this setup call: the
 	// DROP DATABASE below runs in a t.Cleanup, long after newTestDatabase has
 	// returned, so closing admin here (e.g. via a bare `defer`) would close it

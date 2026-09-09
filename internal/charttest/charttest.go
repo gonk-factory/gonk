@@ -107,7 +107,7 @@ func normalizeChart(src string) (string, error) {
 		return os.WriteFile(target, b, 0o644)
 	})
 	if err != nil {
-		os.RemoveAll(dst)
+		_ = os.RemoveAll(dst) // best-effort cleanup of the half-written copy; the walk error above is what matters
 		return "", err
 	}
 	return dst, nil
@@ -116,7 +116,7 @@ func normalizeChart(src string) (string, error) {
 // cleanupNormalizedChart is called from TestMain.
 func cleanupNormalizedChart() {
 	if normDir != "" {
-		os.RemoveAll(normDir)
+		_ = os.RemoveAll(normDir) // best-effort: TestMain is exiting either way
 	}
 }
 

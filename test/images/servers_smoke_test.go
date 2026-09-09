@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"gitlab.orac.local/agentic/gonk-project/test/harness"
 )
 
 func intakeImage(t *testing.T) (image string, pins map[string]string) {
@@ -26,9 +28,8 @@ func intakeImage(t *testing.T) (image string, pins map[string]string) {
 	}
 	tag := gonkTag(t, root, pins["GONK_VERSION"])
 	image = registry + "/gonk-intake:" + tag
-	if err := exec.Command("podman", "image", "exists", image).Run(); err != nil {
-		t.Skipf("image %s not present locally -- run `make intake-image` first (skip, not fail: this is a container smoke test, not a unit test)", image)
-	}
+	present := exec.Command("podman", "image", "exists", image).Run() == nil
+	harness.RequireInfra(t, "image "+image+" (run `make intake-image` first)", present)
 	return image, pins
 }
 
@@ -44,9 +45,8 @@ func meterImage(t *testing.T) (image string, pins map[string]string) {
 	}
 	tag := gonkTag(t, root, pins["GONK_VERSION"])
 	image = registry + "/gonk-meter:" + tag
-	if err := exec.Command("podman", "image", "exists", image).Run(); err != nil {
-		t.Skipf("image %s not present locally -- run `make meter-image` first (skip, not fail: this is a container smoke test, not a unit test)", image)
-	}
+	present := exec.Command("podman", "image", "exists", image).Run() == nil
+	harness.RequireInfra(t, "image "+image+" (run `make meter-image` first)", present)
 	return image, pins
 }
 
@@ -63,9 +63,8 @@ func meterTestclockImage(t *testing.T) (image string, pins map[string]string) {
 	}
 	tag := gonkTag(t, root, pins["GONK_VERSION"]) + "-testclock"
 	image = registry + "/gonk-meter:" + tag
-	if err := exec.Command("podman", "image", "exists", image).Run(); err != nil {
-		t.Skipf("image %s not present locally -- run `make meter-testclock-image` first (skip, not fail: this is a container smoke test, not a unit test)", image)
-	}
+	present := exec.Command("podman", "image", "exists", image).Run() == nil
+	harness.RequireInfra(t, "image "+image+" (run `make meter-testclock-image` first)", present)
 	return image, pins
 }
 

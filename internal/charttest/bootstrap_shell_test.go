@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"gitlab.orac.local/agentic/gonk-project/test/harness"
 	"gopkg.in/yaml.v3"
 )
 
@@ -24,9 +25,8 @@ import (
 // the text was exactly what was intended. It was valid YAML and valid Helm
 // output; it simply was not a valid shell program. That is the gap this closes.
 func TestRenderedInitScriptsParseAsShell(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("no sh available")
-	}
+	_, lookErr := exec.LookPath("sh")
+	harness.RequireInfra(t, "sh on PATH", lookErr == nil)
 
 	var checked int
 	for _, o := range Objects(t, Render(t, Minimum()...)) {

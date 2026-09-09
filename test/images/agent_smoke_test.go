@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/atags"
+	"gitlab.orac.local/agentic/gonk-project/test/harness"
 )
 
 // repoRoot walks up from this file's own directory (test/images/) to the
@@ -89,9 +90,8 @@ func agentImage(t *testing.T) (image string, pins map[string]string) {
 	// Confirm the image actually exists locally before running anything
 	// against it -- a clearer failure than "podman run" 125-ing on every
 	// subtest individually.
-	if err := exec.Command("podman", "image", "exists", image).Run(); err != nil {
-		t.Skipf("image %s not present locally -- run `make images` first (skip, not fail: this is a container smoke test, not a unit test)", image)
-	}
+	present := exec.Command("podman", "image", "exists", image).Run() == nil
+	harness.RequireInfra(t, "image "+image+" (run `make images` first)", present)
 	return image, pins
 }
 
