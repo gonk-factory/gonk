@@ -38,8 +38,13 @@ type GitLab interface {
 // be a second place for the staleness window, the Decide rules and the
 // classification gate to drift apart, and those are the rules that stop gonk
 // spending money it should not.
+//
+// Handle reports whether it actually fired an order (Gate 1's `run` decision
+// reached FireOrder), not merely whether it was called. sweepIssues needs that
+// to tell an ATTEMPT (handed to Dispatch) from a real dispatch (Decide said
+// yes) -- see Summary.Dispatched, which must count the latter only.
 type IssueSweeper interface {
-	Handle(ctx context.Context, ev *ghook.Event)
+	Handle(ctx context.Context, ev *ghook.Event) bool
 }
 
 // Onboarder opens the deterministic onboarding MR (Task 8). Nil is legal: the
@@ -217,6 +222,28 @@ type Reconciler struct {
 	passDone     chan struct{}
 	lastSummary  ReconcileSummary
 	haveSummary  bool
+}
+
+// NewReconciler is the sanctioned way to build a Reconciler: it fails closed
+// on a configuration that would disable a safety property, exactly the way
+// ghook.NewHandler already does for BotUserID. In particular BotUserID must be
+// a positive GitLab user id -- at its zero value the issue-sweep loop guard
+// silently no-ops (sweepIssues: `r.BotUserID != 0 && is.Author.ID ==
+// r.BotUserID` treats unset as "guard disabled", not "misconfigured"), gonk
+// can react to its own issues, and spend runs away.
+//
+// r is returned as-is (not copied: Reconciler carries a sync.Mutex and a
+// sync.Once, which must never be copied by value), so the caller builds the
+// struct literal as before and wraps the result in NewReconciler before using
+// it, rather than filling in fields on a value this function hands back.
+func NewReconciler(r *Reconciler) (*Reconciler, error) {
+	if r == nil {
+		return nil, errors.New("intake: nil Reconciler")
+	}
+	if r.BotUserID <= 0 {
+		return nil, fmt.Errorf("intake: BotUserID must be a positive GitLab user id, got %d (the issue-sweep loop guard cannot be disabled)", r.BotUserID)
+	}
+	return r, nil
 }
 
 // initPass lazily wires the Loop/Kick/WaitForNextPass machinery. Safe to call
@@ -515,12 +542,22 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) (Summary, error) {
 		if out.scaffoldFired {
 			sum.Dispatched++
 		}
-		if n, serr := r.sweepIssues(ctx, p); serr != nil {
+		swept, dispatched, serr := r.sweepIssues(ctx, p)
+		if serr != nil {
 			sum.Errors++
 			sum.ErrorMsgs = append(sum.ErrorMsgs, fmt.Sprintf("%s: sweep issues: %s", p.PathWithNamespace, serr))
 			r.log().Error("issue sweep failed", "project", p.PathWithNamespace, "err", serr)
 		} else {
-			sum.IssuesSwept += n
+			sum.IssuesSwept += swept
+			// dispatched counts every order the sweep actually FIRED (Decide said
+			// `run` and FireOrder succeeded), not every issue handed to Dispatch --
+			// IssuesSwept already covers attempts. Before this, a swept issue that
+			// fired never reached Summary.Dispatched at all: only reconcileProject's
+			// scaffold path did, so an operator watching Dispatched during an
+			// incident where the WEBHOOK was down and the sweep was the only thing
+			// firing triage orders would see zero and conclude nothing was
+			// dispatching, when it was.
+			sum.Dispatched += dispatched
 		}
 		if err != nil {
 			sum.Errors++
@@ -762,6 +799,11 @@ func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) (proj
 	entry := Entry{Project: p, Classification: cls, LastReconcile: time.Now(), LastMeterSync: lastSync}
 	if hadPrev {
 		entry.ScaffoldFiredAt = prev.ScaffoldFiredAt
+		// Carried forward the same way ScaffoldFiredAt is, and for the same
+		// reason: this Entry is rebuilt from scratch every pass, so without this
+		// line sweepIssues' per-issue dispatch memory would be wiped on every
+		// reconcile before the sweep ever got to read it.
+		entry.TriageDispatchedAt = prev.TriageDispatchedAt
 	}
 
 	if cls.MayOnboard() && r.Onboarder != nil {
@@ -807,6 +849,15 @@ const DefaultIssueSweepLimit = 5
 // "the backlog".
 const DefaultIssueSweepMaxAge = 24 * time.Hour
 
+// TriageSweepSuppressWindow is how long the sweep remembers a fired triage
+// dispatch for one issue before it will hand that issue to Dispatch again,
+// mirroring the one-hour window reconcileProject already applies to
+// ScaffoldFiredAt. Without it, an issue the broker has not yet labelled --
+// applying the label takes a real triage session, which spans reconcile
+// passes -- gets swept and re-dispatched on every intervening pass instead of
+// once (see Entry.TriageDispatchedAt).
+const TriageSweepSuppressWindow = time.Hour
+
 // sweepIssues is the ISSUE half of spec 5.2, and it exists because the spec's
 // central claim was only half true:
 //
@@ -824,16 +875,18 @@ const DefaultIssueSweepMaxAge = 24 * time.Hour
 // and they sat untouched until a human noticed. This closes that: an issue that
 // should have been triaged and was not gets picked up on the next pass.
 //
-// It returns the number of issues handed to Dispatch, which is a count of
-// ATTEMPTS. Handle re-applies the staleness window and the full Decide rules,
-// so it may drop every one of them.
-func (r *Reconciler) sweepIssues(ctx context.Context, p glab.Project) (int, error) {
+// It returns (swept, dispatched, err). swept is the number of issues handed to
+// Dispatch -- a count of ATTEMPTS: Handle re-applies the staleness window and
+// the full Decide rules, so it may drop every one of them. dispatched is the
+// subset Handle reports as an actual fire, which is what Summary.Dispatched
+// must count.
+func (r *Reconciler) sweepIssues(ctx context.Context, p glab.Project) (int, int, error) {
 	if r.Issues == nil {
-		return 0, nil
+		return 0, 0, nil
 	}
 	entry, ok := r.Cache.Get(p.ID)
 	if !ok {
-		return 0, nil
+		return 0, 0, nil
 	}
 	// Ask the REAL rule whether this project could dispatch a triage at all,
 	// rather than re-deriving it. A project that cannot is one whose issues we
@@ -841,7 +894,7 @@ func (r *Reconciler) sweepIssues(ctx context.Context, p glab.Project) (int, erro
 	// an unmanaged or denied project the answer can never change to yes without
 	// a reconcile that would update the cache first anyway.
 	if _, allowed := gate(entry, atags.TriggerIssueTriage); !allowed {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	maxAge := r.IssueSweepMaxAge
@@ -855,7 +908,7 @@ func (r *Reconciler) sweepIssues(ctx context.Context, p glab.Project) (int, erro
 		UpdatedAfter: cutoff,
 	})
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	prefix := r.IssueLabelPrefix
@@ -868,7 +921,20 @@ func (r *Reconciler) sweepIssues(ctx context.Context, p glab.Project) (int, erro
 		limit = DefaultIssueSweepLimit
 	}
 
+	// Copy forward only the still-live suppressions. Anything older than the
+	// window can no longer suppress a re-fire, so dropping it here -- on every
+	// pass, whether or not it matches a currently-open issue -- is what keeps
+	// this map bounded: a project's issue history is unbounded, this must not be.
+	now := time.Now()
+	fired := make(map[int64]time.Time, len(entry.TriageDispatchedAt))
+	for iid, at := range entry.TriageDispatchedAt {
+		if now.Sub(at) < TriageSweepSuppressWindow {
+			fired[iid] = at
+		}
+	}
+
 	swept := 0
+	dispatched := 0
 	for _, is := range issues {
 		if swept >= limit {
 			r.log().Warn("issue sweep hit its per-pass limit; the rest wait for the next pass",
@@ -892,7 +958,14 @@ func (r *Reconciler) sweepIssues(ctx context.Context, p glab.Project) (int, erro
 		if !is.UpdatedAt.IsZero() && is.UpdatedAt.Before(cutoff) {
 			continue
 		}
-		r.Issues.Handle(ctx, &ghook.Event{
+		// Entry.TriageDispatchedAt: the sweep already fired for this issue inside
+		// the suppress window and the label has not shown up yet. Skip without
+		// counting it as an attempt -- it is not one, it is the memory doing its
+		// job.
+		if _, ok := fired[is.IID]; ok {
+			continue
+		}
+		did := r.Issues.Handle(ctx, &ghook.Event{
 			Kind: ghook.KindIssue,
 			Project: ghook.Project{
 				ID:                entry.Project.ID,
@@ -912,7 +985,13 @@ func (r *Reconciler) sweepIssues(ctx context.Context, p glab.Project) (int, erro
 			},
 		})
 		swept++
+		if did {
+			fired[is.IID] = now
+			dispatched++
+		}
 	}
+	entry.TriageDispatchedAt = fired
+	r.Cache.Put(p.ID, entry)
 	if swept > 0 {
 		// Worth an INFO, not a debug: in steady state this never fires, because
 		// the webhook got there first. When it does fire, events were being lost
@@ -920,7 +999,7 @@ func (r *Reconciler) sweepIssues(ctx context.Context, p glab.Project) (int, erro
 		r.log().Info("issue sweep dispatched issues the webhook path never handled",
 			"project", p.PathWithNamespace, "count", swept, "open_issues", len(issues))
 	}
-	return swept, nil
+	return swept, dispatched, nil
 }
 
 // hasLabelPrefix reports whether any label sits in the broker's namespace.

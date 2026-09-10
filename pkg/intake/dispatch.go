@@ -351,17 +351,22 @@ func (d *Dispatch) stale(e Entry) bool {
 //
 // It never sends an attempt to meter (DecideRequest has no such field) and never
 // evaluates quiet hours (they arrive as a `defer` it simply handles).
-func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) {
+//
+// It reports whether it actually fired an order -- true only on the path that
+// reaches d.Obs.Dispatched below -- not merely whether it was called. The issue
+// sweep (reconcile.go, IssueSweeper) needs that to tell an attempt from a real
+// dispatch.
+func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) bool {
 	if ev.Kind == ghook.KindMergeRequest {
 		d.KickReconcile()
-		return
+		return false
 	}
 
 	entry, ok := d.Cache.Get(ev.Project.ID)
 	if !ok {
 		d.Obs.DispatchDropped("unknown_project")
 		d.KickReconcile()
-		return
+		return false
 	}
 
 	if d.stale(entry) {
@@ -372,13 +377,13 @@ func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) {
 		d.Log.Warn("cache entry stale beyond the staleness window; firing nothing",
 			"project", entry.Project.PathWithNamespace,
 			"last_reconcile", entry.LastReconcile, "window", d.stalenessWindow())
-		return
+		return false
 	}
 
 	dec := Decide(entry, ev, d.BotUsername)
 	if !dec.Dispatch {
 		d.Obs.DispatchDropped(dec.Reason)
-		return
+		return false
 	}
 
 	project := entry.Project.PathWithNamespace
@@ -403,7 +408,7 @@ func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) {
 		// the next reconcile/delivery retries.
 		d.Obs.DispatchDropped("decide_error")
 		d.Log.Error("meter /decide failed; firing nothing", "err", err, "bead", dec.BeadAnchor)
-		return
+		return false
 	}
 
 	if MayFire(resp.Decision) { // "run"
@@ -411,7 +416,7 @@ func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) {
 		if err != nil {
 			d.Obs.DispatchDropped("metadata_encode_error")
 			d.Log.Error("could not marshal meter metadata; firing nothing", "err", err, "bead", dec.BeadAnchor)
-			return
+			return false
 		}
 		o := OrderRequest{
 			Trigger:       dec.Trigger,
@@ -433,15 +438,15 @@ func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) {
 		if err := attributionSafeOrder(o); err != nil {
 			d.Obs.DispatchDropped("attribution_unsafe")
 			d.Log.Error("refusing an attribution-unsafe order", "err", err, "bead", dec.BeadAnchor)
-			return
+			return false
 		}
 		if err := d.Dispatcher.FireOrder(ctx, o); err != nil {
 			d.Obs.DispatchDropped("fire_error")
 			d.Log.Error("FireOrder failed", "err", err, "bead", dec.BeadAnchor)
-			return
+			return false
 		}
 		d.Obs.Dispatched(dec.Trigger)
-		return
+		return true
 	}
 
 	switch resp.Decision {
@@ -466,6 +471,7 @@ func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) {
 		d.Obs.DispatchDropped("decide_unknown")
 		d.Log.Error("meter returned an unknown decision; firing nothing", "decision", resp.Decision)
 	}
+	return false
 }
 
 // MayFire is the Gate-1 verdict->action rule, and it lives here so Plan 04's

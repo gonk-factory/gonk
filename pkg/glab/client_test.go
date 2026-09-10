@@ -3,6 +3,7 @@ package glab
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -135,6 +136,78 @@ func TestNoFallbackWhenNoPreviousSlot(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("calls = %d, want 1 (no previous slot means no retry)", calls)
+	}
+}
+
+// A 403 is a permissions answer, not a "which credential is this" one: the
+// previous PAT slot cannot fix it, so falling back to it would just spend a
+// second round trip confirming the same refusal. Item 2 of T-38 (R-27):
+// fallback fires on 401 ONLY.
+func TestNoFallbackOnForbidden(t *testing.T) {
+	var seen []string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("PRIVATE-TOKEN"))
+		http.Error(w, `{"message":"403 Forbidden"}`, http.StatusForbidden)
+	}))
+	c.SetPreviousToken("old")
+	var fallbacks int
+	c.AuthFallback = func() { fallbacks++ }
+
+	_, err := c.CurrentUser(context.Background())
+	if !IsForbidden(err) {
+		t.Fatalf("err = %v, want a 403 APIError", err)
+	}
+	if len(seen) != 1 || seen[0] != "s3cret" {
+		t.Fatalf("tokens presented = %v, want [s3cret] only: a 403 must never trigger the previous-slot retry", seen)
+	}
+	if fallbacks != 0 {
+		t.Fatalf("AuthFallback fired %d times, want 0 on a 403", fallbacks)
+	}
+}
+
+// Every POST this client sends CREATES something (an issue, a note, a branch,
+// a commit, an MR, a hook). A 5xx does not say whether GitLab applied the
+// write before failing to answer, so retrying it blind risks a duplicate a
+// human can see -- most visibly a second bot comment from CreateIssueNote,
+// which is exactly what E3 forbids. Item 3 of T-38 (R-28): a 5xx on a POST
+// must not be retried.
+func TestPOSTNotRetriedOn5xx(t *testing.T) {
+	var calls int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	_, err := c.CreateIssueNote(context.Background(), 1, 2, "a bot comment")
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1: a POST must not be retried on 5xx (retrying risks a duplicate comment)", calls)
+	}
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Status != http.StatusBadGateway {
+		t.Fatalf("err = %v, want a 502 APIError", err)
+	}
+}
+
+// GET is idempotent: a 5xx there is safe to retry, and must still be retried
+// after the POST fix above -- this pins the boundary so the POST fix cannot
+// widen into "nothing retries on 5xx anymore."
+func TestGETStillRetriedOn5xx(t *testing.T) {
+	var calls int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 2 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"id":7,"username":"gonk"}`)
+	}))
+	if _, err := c.CurrentUser(context.Background()); err != nil {
+		t.Fatalf("CurrentUser = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2: a GET must still be retried on 5xx", calls)
 	}
 }
 
