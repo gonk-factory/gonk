@@ -305,13 +305,43 @@ func TestCheckPortsFreeNamesEveryOccupiedPort(t *testing.T) {
 	}
 }
 
+// This test has an inherent TOCTOU: it binds an ephemeral port, closes it,
+// then asserts THAT SAME port number is free. Between the Close and the
+// assertion, anything else on the box -- including, on this box, another
+// worktree's concurrent `go test` binary -- can be handed that exact port by
+// the kernel. That is a race on a shared resource (the box's ephemeral port
+// space), not a defect in CheckPortsFree, so on a busy-verdict we retry with
+// a fresh port instead of failing on a single unlucky sample.
+//
+// The retry must not swallow a genuine CheckPortsFree defect. So before
+// retrying, it checks whether the port is ACTUALLY free right now by binding
+// it directly: if that bind succeeds, CheckPortsFree was wrong about a port
+// that is, in fact, free -- a real bug -- and the test fails immediately with
+// no retry. Only a CONFIRMED occupation (our own bind also fails) is treated
+// as "something else won the race," and only that case retries.
 func TestCheckPortsFreePassesForAFreePort(t *testing.T) {
-	ln := mustListen(t)
-	p := portOf(t, ln)
-	_ = ln.Close() // now free
-	if err := harness.CheckPortsFree(p); err != nil {
-		t.Fatalf("CheckPortsFree(%d) = %v, want nil", p, err)
+	const maxAttempts = 5
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		ln := mustListen(t)
+		p := portOf(t, ln)
+		_ = ln.Close() // now free -- until something else claims it
+
+		err := harness.CheckPortsFree(p)
+		if err == nil {
+			return // CheckPortsFree correctly reported the free port free
+		}
+
+		// CheckPortsFree says p is busy. Confirm that RIGHT NOW, ourselves.
+		confirm, bindErr := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p)))
+		if bindErr == nil {
+			// We just bound the port that CheckPortsFree reported busy: it is
+			// free. CheckPortsFree is wrong, not racing -- do not retry.
+			_ = confirm.Close()
+			t.Fatalf("CheckPortsFree(%d) = %v, but the port is free (confirmed by binding it ourselves): CheckPortsFree is broken, not racing", p, err)
+		}
+		t.Logf("attempt %d/%d: port %d was taken by another process between Close and CheckPortsFree (confirmed still occupied: %v); retrying with a fresh port", attempt, maxAttempts, p, bindErr)
 	}
+	t.Fatalf("CheckPortsFree kept reporting a freshly-freed port busy across %d attempts, and each time the port really was occupied when re-checked directly -- that is extreme ephemeral-port contention on this box, not evidence CheckPortsFree is broken", maxAttempts)
 }
 
 // ---------------------------------------------------------------- RequireInfra (T-14)
