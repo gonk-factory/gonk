@@ -32,18 +32,22 @@ import (
 // exists purely so the Postgres store never marshals a raw
 // gonkcfg.EffectiveBudget with its Inf/MaxInt64 sentinels.
 type wireEffective struct {
-	Enabled        bool                        `json:"enabled"`
-	DisabledReason string                      `json:"disabled_reason"`
-	Actions        gonkcfg.Actions             `json:"actions"`
-	Ladder         []string                    `json:"ladder"`
-	Continuity     string                      `json:"continuity"`
-	Triage         gonkcfg.EffectiveTriage     `json:"triage"`
-	Provenance     gonkcfg.EffectiveProvenance `json:"provenance"`
-	Budget         budget.Budget               `json:"budget"`
+	Enabled        bool            `json:"enabled"`
+	DisabledReason string          `json:"disabled_reason"`
+	Actions        gonkcfg.Actions `json:"actions"`
+	// Schedule is nil exactly when Effective.Schedule is nil (no layer set
+	// schedule.quiet_hours/timezone) -- it round-trips as JSON null in that
+	// case, same as every other optional field here.
+	Schedule   *gonkcfg.Schedule           `json:"schedule,omitempty"`
+	Ladder     []string                    `json:"ladder"`
+	Continuity string                      `json:"continuity"`
+	Triage     gonkcfg.EffectiveTriage     `json:"triage"`
+	Provenance gonkcfg.EffectiveProvenance `json:"provenance"`
+	Budget     budget.Budget               `json:"budget"`
 }
 
 func toWireEffective(e gonkcfg.Effective) wireEffective {
-	return wireEffective{
+	w := wireEffective{
 		Enabled:        e.Enabled,
 		DisabledReason: e.DisabledReason,
 		Actions:        e.Actions,
@@ -53,10 +57,15 @@ func toWireEffective(e gonkcfg.Effective) wireEffective {
 		Provenance:     e.Provenance,
 		Budget:         budget.FromEffective(e.Budget),
 	}
+	if e.Schedule != nil {
+		sc := *e.Schedule
+		w.Schedule = &sc
+	}
+	return w
 }
 
 func (w wireEffective) toEffective() gonkcfg.Effective {
-	return gonkcfg.Effective{
+	e := gonkcfg.Effective{
 		Enabled:        w.Enabled,
 		DisabledReason: w.DisabledReason,
 		Actions:        w.Actions,
@@ -70,6 +79,11 @@ func (w wireEffective) toEffective() gonkcfg.Effective {
 			PerTaskTokens:  gonkcfg.TokenQuantity(w.Budget.PerTaskTokens),
 		},
 	}
+	if w.Schedule != nil {
+		sc := *w.Schedule
+		e.Schedule = &sc
+	}
+	return e
 }
 
 // marshalEffective encodes e via wireEffective, so a +Inf/MaxInt64 "unlimited"

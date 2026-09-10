@@ -154,8 +154,8 @@ func (m *Memory) ReserveIfFits(_ context.Context, project string, ceiling budget
 	// false under a $0 ceiling -- must not gate it, or the onboarding default
 	// (monthly_cost_usd: 0, ladder: [qwen-local]) bricks every project. The
 	// TOKEN legs are NOT skipped: local rungs are bounded by the token ceilings.
-	if (r.CostUSD > 0 && !rem.FitsCost(r.CostUSD)) || !rem.FitsMonthTokens(r.Tokens) || !rem.FitsTaskTokens(r.Tokens) {
-		return ReserveResult{}, nil // a lost race is a DEFER, not an error
+	if miss := missingLeg(rem, r); miss != "" {
+		return ReserveResult{Miss: miss}, nil // a lost race is a DEFER, not an error
 	}
 	m.reservations[r.ID] = r
 	return ReserveResult{Reservation: r, Fits: true}, nil

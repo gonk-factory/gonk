@@ -78,6 +78,52 @@ func TestMarshalEffectiveFiniteBudgetRoundTrips(t *testing.T) {
 	}
 }
 
+// TestMarshalEffectiveScheduleRoundTrips is R-23: Effective.Schedule (the
+// resolved schedule.quiet_hours/timezone STRINGS, as distinct from
+// Registration.QuietHours -- the already-parsed rung.QuietHours the policy
+// engine reads) must survive marshalEffective/unmarshalEffective. An earlier
+// wireEffective had no Schedule field at all, so it silently dropped it: a
+// live meter enforced quiet hours correctly (from the separately-persisted
+// parsed form) while GET /v1/projects/{p} reported `schedule: null` after
+// every restart -- a real config, invisibly hidden from every operator who
+// asked to see it.
+func TestMarshalEffectiveScheduleRoundTrips(t *testing.T) {
+	sc := gonkcfg.Schedule{QuietHours: "22:00-07:00", Timezone: "America/New_York"}
+	e := gonkcfg.Effective{Enabled: true, Ladder: []string{"qwen-local"}, Schedule: &sc}
+	raw, err := marshalEffective(e)
+	if err != nil {
+		t.Fatalf("marshalEffective: %v", err)
+	}
+	got, err := unmarshalEffective(raw)
+	if err != nil {
+		t.Fatalf("unmarshalEffective: %v", err)
+	}
+	if got.Schedule == nil {
+		t.Fatal("Schedule did not round-trip: got nil, want a schedule")
+	}
+	if *got.Schedule != sc {
+		t.Fatalf("Schedule did not round-trip: got %+v, want %+v", *got.Schedule, sc)
+	}
+}
+
+// A nil Schedule (no layer ever set schedule.quiet_hours/timezone) must stay
+// nil, not turn into a zero-value Schedule{} -- which would read back as
+// "quiet_hours: \"\", timezone: \"\"" rather than "no schedule configured".
+func TestMarshalEffectiveNilScheduleRoundTrips(t *testing.T) {
+	e := gonkcfg.Effective{Enabled: true, Ladder: []string{"qwen-local"}}
+	raw, err := marshalEffective(e)
+	if err != nil {
+		t.Fatalf("marshalEffective: %v", err)
+	}
+	got, err := unmarshalEffective(raw)
+	if err != nil {
+		t.Fatalf("unmarshalEffective: %v", err)
+	}
+	if got.Schedule != nil {
+		t.Fatalf("Schedule = %+v, want nil", got.Schedule)
+	}
+}
+
 // marshalEffective must fail closed on a NaN/-Inf cost ceiling (a corrupted
 // or unvalidated operator Policy -- see ADR-002 "Known gap") rather than
 // silently persisting garbage that would corrupt every budget check against
