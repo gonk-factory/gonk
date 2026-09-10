@@ -71,6 +71,18 @@ with ImagePullBackOff. Earlier bumps had passed the identical check only because
 those tags happened to exist. Use `hack/require_image_tags.py` before any tag
 bump; it asserts the returned object's `name` equals the tag asked for.
 
+**A red gate is never acceptable. Not once, not temporarily, not "known".**
+There is no such thing as a tolerated failing check. A red gate must be fixed --
+by fixing the cause, not by tuning the threshold until it passes, not by
+skipping the test, and not by moving it to a different job where it can be red
+more quietly. Every one of those converts a signal into noise, and the whole
+point of a gate is that red MEANS something. This has already cost this project
+twice: `test/component` and `test/images` were both broken for weeks and nobody
+noticed, because nothing that was watching them was believed. If a check cannot
+be made to pass honestly, then either the check is asserting the wrong thing
+(fix the assertion, and say why) or the code is wrong (fix the code). Those are
+the only two outcomes.
+
 **Verification means observing the thing, not the proxy for it.** A green test
 run is not evidence a feature works in the deployment; a deployed image is not
 evidence the code path executes; a code path executing is not evidence it changed

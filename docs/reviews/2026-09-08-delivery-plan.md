@@ -110,6 +110,12 @@ in the gonk repository, in your own git worktree and branch. Rules:
    output, a file diff. "It should work" is not evidence.
 4. Tests assert an expected VALUE, never that a response merely parsed or a
    file merely exists. If you write a check, first make it fail on purpose.
+4b. A RED GATE IS NEVER ACCEPTABLE -- not once, not temporarily, not "known".
+   Do not tune a threshold until it passes, do not skip the test, and do not
+   move it to another job where it can be red more quietly. Fix the cause, or
+   fix the assertion and say why. Those are the only two outcomes. A gate that
+   is allowed to stay red stops meaning anything, which is exactly how
+   test/component and test/images stayed broken for weeks unnoticed.
 5. Before pushing run `make gate` (fmt, vet, test, lint). If `make lint`
    fails because the host golangci-lint version mismatches, run
    `go vet ./... && go test ./... -count=1` and say so in the report.
