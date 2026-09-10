@@ -182,6 +182,99 @@ func TestSweepBrokerAppliesValidBatch(t *testing.T) {
 	}
 }
 
+// TestSweepBrokerAppliesLargeTranscriptBatch is T-07 (R-10): the triage prompt
+// now tells the model to list directories and read code before answering, so a
+// real transcript -- every turn, tool call and tool result, concatenated --
+// routinely clears the generic 64 KiB API cap that GetSessionTranscript used to
+// share with every other supervisor route. Before the dedicated transcript cap,
+// this exact shape (a real, valid batch sitting past 64 KiB of exploration
+// output) made GetSessionTranscript error, which the broker cannot distinguish
+// from "nothing to judge yet" -- the bead falls to the ladder with a completed
+// session's work unread and the sweep loops infra-failed forever (the Goal this
+// task closes).
+//
+// It also pins WHICH fence wins when the sentinel appears twice: an agent can
+// echo the "GONK_BATCH_START ... GONK_BATCH_END" example straight out of its
+// own injected prompt while narrating what it is about to do, well before the
+// real, final batch. extractBatch takes the LAST start (see the "takes last
+// start" case in TestExtractBatch below); this test proves that holds all the
+// way through the transcript-cap change, at full broker scope, not just in
+// extractBatch's own table test -- the mid-transcript echo's body
+// ("EXAMPLE - ignore me") must never reach GitLab.
+func TestSweepBrokerAppliesLargeTranscriptBatch(t *testing.T) {
+	gl := glabtest.New(t)
+	gl.Me = glab.User{ID: 1, Username: "gonk"}
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	gl.AddIssue(p.ID, 3, "opened")
+
+	// Padding that stands in for an agent listing directories and reading code
+	// -- exactly what the triage prompt now asks for -- large enough alone to
+	// clear the old 64 KiB generic cap several times over.
+	pad := strings.Repeat("$ ls -la pkg/gcapi && cat pkg/gcapi/client.go\n... 200 lines of source ...\n", 4500)
+	if len(pad) <= 64*1024 {
+		t.Fatalf("test setup: padding is only %d bytes, want > 64 KiB", len(pad))
+	}
+
+	decoyFence := "Here is an example of the format I will use:\n" +
+		"GONK_BATCH_START\n" +
+		`{"effects":[{"kind":"comment","body":"EXAMPLE - ignore me"}]}` +
+		"\nGONK_BATCH_END\n" +
+		"Now let me actually look at the issue.\n"
+	realFence := "GONK_BATCH_START\n" +
+		`{"effects":[{"kind":"comment","body":"Looks like a Safari-only CSS bug."},{"kind":"label","add":["gonk::bug"]}]}` +
+		"\nGONK_BATCH_END\n"
+	transcript := "thinking...\n" + decoyFence + pad + realFence
+	if len(transcript) <= 300*1024 {
+		t.Fatalf("test setup: transcript is only %d bytes, want > 300 KiB", len(transcript))
+	}
+
+	gc := gcapitest.New(t)
+	gc.FinishSession("gonk.triage.p42.i3.a1", transcript)
+	applier := &recordingApplier{}
+
+	store := beadstore.NewMemory()
+	rec := brokerRunningRecord(p.ID)
+	_ = store.Put(context.Background(), rec)
+	fm := &fakeOutcomeMeter{outcomeNext: "done"}
+
+	code := runSweep(context.Background(), sweepDeps{
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), GL: gl.Client(), Apply: applier,
+		Store: store, BotUsername: "gonk", PackDir: repoPackDir,
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+
+	// The REAL (tail) batch was applied, not the decoy echoed mid-transcript.
+	if len(applier.notes) != 1 {
+		t.Fatalf("notes = %+v, want exactly one comment", applier.notes)
+	}
+	n := applier.notes[0]
+	if strings.Contains(n.Body, "EXAMPLE - ignore me") {
+		t.Fatalf("applied the MID-TRANSCRIPT decoy fence, not the tail one: %s", n.Body)
+	}
+	if !strings.Contains(n.Body, "Safari-only CSS bug") {
+		t.Fatalf("comment body missing the real text:\n%s", n.Body)
+	}
+	if len(applier.labels) != 2 || applier.labels[0].Label != "gonk::bug" || applier.labels[1].Label != "gonk::verdict-reply-only" {
+		t.Fatalf("labels = %+v, want gonk::bug, gonk::verdict-reply-only", applier.labels)
+	}
+
+	// The apply is the artifact => success => done, no re-sling -- exactly the
+	// "classifies complete" outcome the Goal says a >64 KiB transcript broke.
+	reqs := fm.requests()
+	if len(reqs) != 1 || reqs[0].Outcome != meterapi.OutcomeSuccess {
+		t.Fatalf("outcome = %+v, want one success", reqs)
+	}
+	got, _, _ := store.Get(context.Background(), rec.BeadAnchor)
+	if got.State != beadstore.StateDone {
+		t.Fatalf("state = %q, want done (a valid batch past 64 KiB must not loop infra-failed)", got.State)
+	}
+	if len(gc.Poured) != 0 {
+		t.Fatal("a successful triage must not re-sling")
+	}
+}
+
 // An OUT-OF-SHAPE batch (two comments; triage allows exactly one) must apply
 // NOTHING and fall to the ladder. This is the shape-gate's mutation guard:
 // delete the effects.Validate call in applyBrokerBatch and the broker would
