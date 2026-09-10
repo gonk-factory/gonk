@@ -99,7 +99,12 @@ in the gonk repository, in your own git worktree and branch. Rules:
 2. Touch only files the task's "Change" section names or clearly implies.
    "Do not" lists are hard limits. If the task cannot be completed without
    going outside its scope, STOP, write what you found and why, and report;
-   do not widen the task.
+   do not widen the task. The same applies when the task is WRONG as written:
+   if it names a function, file, route, test or command that does not exist,
+   STOP and report the phantom. Do NOT silently substitute the nearest real
+   thing. (Four phantoms have already shipped this way: T-06's
+   CreateDiscussionNote, T-07's L1 transcript route, T-13's Verify regex
+   matching no test, T-14's -run exclusion that cannot express exclusion.)
 3. Exit criteria are the contract. Each one must be backed by evidence you
    can point at: a test name that fails before and passes after, a command
    output, a file diff. "It should work" is not evidence.
@@ -116,7 +121,17 @@ in the gonk repository, in your own git worktree and branch. Rules:
    vendor/. CI has no module proxy.
 8. Commit messages: `<type>(<scope>): <summary>` then a body explaining
    why. No model identifiers anywhere in commits, code or docs.
-9. Report format (paste at the end of your final message):
+9. A criterion phrased "CI run shows ..." is satisfied ONLY by a run URL in
+   the report. You cannot observe CI from a worktree; mark it BLOCKED-ON-CI
+   and say what must happen to close it. Never grade it PASS from a local run.
+10. A task that adds a required Secret, changes a chart default, or changes
+   anything Flux applies MUST state the gitops-side prerequisite in its
+   report and in the chart README. The orchestrator checks the gitops repo
+   before merging. (T-26 added a fail-closed guard whose default named a
+   Secret the cluster did not have; the chart would have rendered, the
+   StatefulSet would have rolled, and the new pod would have hung on
+   FailedMount with the beads store down. No test in this repo could see it.)
+11. Report format (paste at the end of your final message):
    TASK: T-nn
    STATUS: done | partial | blocked
    EXIT CRITERIA: one line per criterion: PASS/FAIL + evidence location
@@ -141,6 +156,12 @@ any FAIL or PARTIAL criterion is not done.
 
 Merge only tasks graded all-PASS. Return PARTIAL/FAIL tasks to a subagent
 with the verifier's findings appended to the brief.
+
+**The orchestrator pastes the verifier's per-criterion grades into the bead's
+close note.** A bare `Closed` is not a record: it cannot be distinguished
+later from "asserted". Every task closed in waves 1-3 has `close_reason:
+Closed`, which is why a reviewer could not tell that T-15 was closed while the
+CI job it added had never once been green.
 
 ### 2.5 Model hints
 
@@ -403,8 +424,12 @@ above 64 KiB.
 
 **Exit criteria.**
 1. 300 KiB transcript test classifies `complete`.
-2. `test/integration` synthetic session uses a > 64 KiB transcript and
-   passes.
+2. The sweep classifies a transcript above the cap as a TERMINAL
+   `infra-failed`, not a retry loop (test). AMENDED 2026-09-10: the original
+   criterion asked for the L1 synthetic session to carry a >64 KiB
+   transcript, but `test/integration` has no session or transcript route at
+   all -- it drives intake and the meter only. The criterion named a path
+   that does not exist.
 3. A transcript above 4 MiB still errors with a named error.
 
 **Verify.** `go test ./pkg/gcapi/... ./cmd/gonk-gate/ ./test/integration/ -count=1`
@@ -592,6 +617,13 @@ called once and the cache entry removed.
 
 **Exit criteria.**
 1. New test passes; existing reconcile tests pass.
+2. ADDED 2026-09-10: a second reconcile pass after a successful
+   deregistration issues NO meter call (test). As merged, every archived
+   project is deregistered on EVERY pass forever -- a meter DELETE, a Secret
+   delete, a DB delete and a `MeterPush("ok")` each time, and `Errors++` per
+   project per pass whenever the meter is down. Tombstone in the cache after
+   a successful deregister, or GET the registration first and skip when
+   absent.
 
 **Verify.** `go test ./pkg/intake/... -count=1`
 
@@ -618,6 +650,14 @@ existing session. Test: two dispatches 1 s apart against `gcapitest` → one
 **Exit criteria.**
 1. The two-dispatch test asserts exactly one session create.
 2. Existing idempotency tests pass.
+3. ADDED 2026-09-10: a failed re-dispatch of a parked or running bead leaves
+   the record in its PRIOR state (test), and `runSweep` reclaims
+   `pending-prompt` records older than the delivery window (test, both
+   directions). As first merged the deferred release re-wrote the record as
+   `pending-prompt` with only `SessionID` cleared, so any failed dispatch --
+   not merely a hard crash -- stranded it in a state neither sweep pass
+   lists, and a failed re-dispatch DOWNGRADED a reclaimable `StateParked`
+   bead into an unreclaimable one.
 
 **Verify.** `go test ./cmd/gonk-gate/ -run 'Idempot|Dedupe' -count=1 -v`
 
@@ -842,6 +882,11 @@ delete Dolt-related values and docs from T-26.
 **Exit criteria.**
 1. No test references `gonkSessionAlias`, `pending-prompt`, or Dolt.
 2. `make gate` green.
+3. ADDED 2026-09-10: the `-skip '^TestEveryBuildTagRunsInCI$'` exclusion is
+   removed from BOTH the Makefile and ci.yml, once `images`, `live` and the
+   modifier-tag rule (`gonk-0bvc` -- `testclock` is a modifier, not a suite,
+   so it can never have its own job) are covered. That skip is a standing
+   exception and must not outlive the tasks that justified it.
 
 ---
 
@@ -1136,6 +1181,15 @@ the beads database; controller connects as that user; `DOLT_ROOT_HOST`
 
 **Exit criteria.** `TestDoltIsNotRootOpen` passes; chart version bumped and
 sealed; goldens regenerated.
+
+**NOTE ADDED 2026-09-10 -- the chart cannot close R-48 on an EXISTING volume.**
+The pinned Dolt entrypoint creates users only `IF NOT EXISTS` and never alters
+them, so the passwordless `root@'%'` already on the PVC survives the upgrade;
+only a fresh volume gets the new users. The live server needs a one-time
+`DROP USER 'root'@'%'` and a root password set by hand, recorded in the
+handoff with the `SHOW GRANTS` output. For the same reason, rotating
+`gc-password` is a NO-OP until someone runs `ALTER USER` by hand. Both gaps
+close for real at T-56, which deletes Dolt.
 
 ---
 

@@ -802,9 +802,21 @@ Then: **C4** (`gonk-gf3`, `sweep.go`) reads via `SessionID`→`GetSession`, `eff
   - **LiteLLM admin key rotated 2026-09-09** (`eso/gonk/broker#litellm_admin_key`). The owner
     assesses the `sk-` value that was in git history as pre-dating it.
   - **History rewritten 2026-09-09** (`gonk-9scx`): `git filter-repo` scrubbed both gitleaks
-    findings from all 446 commits. A fresh clone from origin scans clean under the pinned
-    gitleaks 8.30.1. Everything from 2026-07-19 onward has a NEW SHA, and tag `v0.1.0` was
-    re-pointed -- **anyone holding an older clone must re-clone; a `git pull` will not reconcile.**
+    findings from all 446 commits. Everything from 2026-07-19 onward has a NEW SHA, and tag
+    `v0.1.0` was re-pointed -- **anyone holding an older clone must re-clone; a `git pull`
+    will not reconcile.**
+  - **CORRECTION, 2026-09-10.** The original wording here claimed "a fresh clone scans clean"
+    without qualifying it. That was true of the GitLab **origin only**. The tag was force-pushed
+    to origin and NOT to the GitHub mirror, so `refs/tags/v0.1.0` on GitHub still pointed at
+    `76df825` -- the PRE-rewrite lineage -- and `actions/checkout` fetches tags, so the leaked
+    `sk-` blob stayed reachable there by a named ref and the `secrets` workflow was never green.
+    Found by an independent review. The corrected tag has now been force-pushed to GitHub
+    (`v0.1.0` -> `1d8891b` -> commit `6dc576c`); a fresh clone OF GITHUB scans clean (445
+    commits, no leaks) and commit `078683a` is absent from it entirely.
+    **Lesson worth keeping: a history rewrite is not done when `main` is pushed. Every ref that
+    can pin the old lineage -- tags, other branches, and on GitHub the refs its own automation
+    recreates -- has to be enumerated and checked, on EVERY remote, by scanning a fresh clone of
+    each one rather than of whichever remote is convenient.**
     Pre-rewrite backup bundle: `/mnt/c/Users/steve/Code/gonk-pre-rewrite-20260909-085200.bundle`
     (verified complete). Note the scrub does NOT un-publish: GitHub can keep unreachable objects
     fetchable by direct SHA URL, which is why the key was rotated rather than merely hidden.
