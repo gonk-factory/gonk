@@ -17,15 +17,15 @@ type Memory struct {
 
 func NewMemory() *Memory { return &Memory{recs: map[string]Record{}} }
 
-// Put upserts on r.BeadAnchor and stamps UpdatedAt. This is the whole of the
-// idempotency contract: firing the same order twice must land on the same
-// record, not create a second one (a second bead is a second session is
-// duplicate spend).
+// Put upserts on r.BeadAnchor and stamps UpdatedAt (stampWriteTime -- the same
+// rule BdCLI.Put applies, so the two stores cannot drift apart on it). The
+// upsert is the whole of the idempotency contract: firing the same order twice
+// must land on the same record, not create a second one (a second bead is a
+// second session is duplicate spend).
 func (m *Memory) Put(_ context.Context, r Record) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	r.UpdatedAt = time.Now().UTC()
-	m.recs[r.BeadAnchor] = r
+	m.recs[r.BeadAnchor] = stampWriteTime(r, time.Now().UTC())
 	return nil
 }
 

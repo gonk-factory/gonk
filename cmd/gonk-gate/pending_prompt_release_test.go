@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/BurntSushi/toml"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
 	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi/gcapitest"
@@ -214,8 +217,8 @@ func TestSweepLeavesAPendingPromptRecordInsideTheDeliveryWindowAlone(t *testing.
 func TestSweepLeavesAPendingPromptRecordWithNoWriteTimeAlone(t *testing.T) {
 	alias := brokerSessionAlias("triage", 42, 3, 1)
 	rec := pendingPromptRecord(alias)
-	// beadstore.Memory stamps UpdatedAt on Put, so the zero-time case has to be
-	// staged through a store that does not.
+	// Every beadstore implementation stamps UpdatedAt on Put (stampWriteTime),
+	// so the zero-time case has to be staged through a store that does not.
 	store := &noStampStore{recs: map[string]beadstore.Record{rec.BeadAnchor: rec}}
 
 	gc := gcapitest.New(t)
@@ -239,8 +242,10 @@ func TestSweepLeavesAPendingPromptRecordWithNoWriteTimeAlone(t *testing.T) {
 }
 
 // noStampStore is beadstore.Memory's semantics minus the UpdatedAt stamp, so a
-// test can stage a record whose write time is genuinely unknown (which is what
-// beadstore.BdCLI would produce for a caller that never set one).
+// test can stage a record whose write time is genuinely unknown -- a record
+// written by a pre-stamp gonk, or read back from a bd bead whose gonk-state
+// comment predates the field. No current Store implementation behaves this
+// way; that is the point of pkg/beadstore/storetest.
 type noStampStore struct{ recs map[string]beadstore.Record }
 
 func (s *noStampStore) Put(_ context.Context, r beadstore.Record) error {
@@ -270,15 +275,61 @@ func (s *noStampStore) List(_ context.Context, st beadstore.State) ([]beadstore.
 // if the reclaim promotes the record to StateRunning well before the reaper
 // would consider closing its session.
 func TestPendingPromptGraceLandsInsideTheReaperGrace(t *testing.T) {
-	if pendingPromptGrace < defaultSubmitDeadline {
-		t.Fatalf("pendingPromptGrace %v is shorter than defaultSubmitDeadline %v: the sweep "+
-			"would reclaim reservations out from under healthy dispatches",
-			pendingPromptGrace, defaultSubmitDeadline)
+	// ASSERT THE MARGIN THE COMMENT CLAIMS, not a bare `<`. sweep.go says the
+	// reclaim promotes a reservation into the claimed set "with 5 minutes to
+	// spare"; under `<` alone a pendingPromptGrace of 599s would pass while
+	// leaving one second of it, which is not a margin, it is a coincidence.
+	//
+	// There used to be a second check here, that pendingPromptGrace is not
+	// shorter than defaultSubmitDeadline. It was deleted rather than kept:
+	// pendingPromptGrace is DEFINED as defaultSubmitDeadline plus a positive
+	// constant, so no edit to either value could ever make that comparison
+	// false. It was a constant-expression tautology wearing an assertion's
+	// clothes, and a check that cannot fail is worse than no check -- it reads
+	// as coverage. The real version of that claim is the order-timeout test
+	// below, which compares this constant against a value declared in another
+	// file entirely.
+	const wantMargin = 5 * time.Minute
+	if margin := reapGrace - pendingPromptGrace; margin < wantMargin {
+		t.Fatalf("reapGrace %v leaves only %v over pendingPromptGrace %v, want at least %v.\n"+
+			"A pending-prompt session is unclaimed until the sweep promotes it, so the reaper "+
+			"can close the session the sweep is about to settle.",
+			reapGrace, margin, pendingPromptGrace, wantMargin)
 	}
-	if pendingPromptGrace >= reapGrace {
-		t.Fatalf("pendingPromptGrace %v must be comfortably under reapGrace %v, or a "+
-			"pending-prompt session can be reaped before the sweep ever claims it",
-			pendingPromptGrace, reapGrace)
+}
+
+// The OTHER claim pendingPromptGrace's comment makes, and the one that can
+// actually go stale: that the grace covers gonk-dispatch's own order timeout,
+// so "Gas City kills the process at that point, so a reservation older than
+// this provably has no live dispatch behind it". That timeout is declared in
+// pack/orders/gonk-dispatch.toml, which nothing in this package reads and
+// nothing else compares against. Raise it there without raising the grace and
+// the sweep starts reclaiming reservations out from under dispatches that are
+// still running -- racing the very dispatch it is meant to be cleaning up
+// after.
+func TestPendingPromptGraceCoversTheDispatchOrdersTimeout(t *testing.T) {
+	var doc struct {
+		Order struct {
+			Timeout string `toml:"timeout"`
+		} `toml:"order"`
+	}
+	path := filepath.Join(repoPackDir, "orders", "gonk-dispatch.toml")
+	if _, err := toml.DecodeFile(path, &doc); err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if doc.Order.Timeout == "" {
+		t.Fatalf("%s declares no [order] timeout; pendingPromptGrace's whole justification "+
+			"is that Gas City kills the dispatch at one", path)
+	}
+	timeout, err := time.ParseDuration(doc.Order.Timeout)
+	if err != nil {
+		t.Fatalf("%s timeout = %q: %v", path, doc.Order.Timeout, err)
+	}
+	if pendingPromptGrace < timeout {
+		t.Fatalf("pendingPromptGrace %v is under gonk-dispatch's order timeout %v (%s).\n"+
+			"A reservation younger than that timeout may still have a live dispatch behind it, "+
+			"so reclaiming it races that dispatch for the same alias.",
+			pendingPromptGrace, timeout, path)
 	}
 }
 
@@ -310,5 +361,95 @@ func TestReclaimedPendingPromptSessionSurvivesTheSameTicksReaper(t *testing.T) {
 	if live := gc.LiveSessions(); len(live) != 1 || live[0] != alias {
 		t.Fatalf("the reaper closed the session the same tick reclaimed: live = %v, Closed = %v",
 			live, gc.Closed)
+	}
+}
+
+// THE RELEASE-PATH SEMANTICS, end to end. runBrokerDispatch's deferred release
+// restores the record as it stood before its reservation write. When that
+// prior record is ITSELF a stranded pending-prompt reservation, the restore
+// must not reset its reclaim clock: the sweep ages that record by its write
+// time, and a restore that restamped it would push the reclaim out by another
+// full grace window on every failed dispatch -- indefinitely, for a
+// reservation whose entire problem is that nobody is coming back for it. The
+// store is what guarantees this (stampWriteTime, pkg/beadstore/store.go); this
+// test is the guarantee seen from the gate, with the sweep that depends on it
+// actually running.
+func TestAFailedDispatchDoesNotDeferReclaimOfAStrandedReservationItRestores(t *testing.T) {
+	store := beadstore.NewMemory()
+	gc := gcapitest.New(t)
+
+	// A reservation for attempt 1 that has already outlived its window: its
+	// dispatch was killed and never released it. The guard in runBrokerDispatch
+	// lets a dispatch for a DIFFERENT attempt past it, so this record is still
+	// in the store to be restored when that dispatch fails.
+	stranded := pendingPromptRecord(brokerSessionAlias("triage", 42, 3, 1))
+	reservedAt := time.Now().Add(-(pendingPromptGrace + time.Minute)).UTC()
+	stranded.UpdatedAt = reservedAt
+	if err := store.Put(context.Background(), stranded); err != nil {
+		t.Fatalf("seed put: %v", err)
+	}
+	if seeded, _, _ := store.Get(context.Background(), stranded.BeadAnchor); !seeded.UpdatedAt.Equal(reservedAt) {
+		t.Fatalf("seed UpdatedAt = %v, want %v -- the store restamped a pending-prompt record "+
+			"on write, so this test cannot stage a stranded one at all", seeded.UpdatedAt, reservedAt)
+	}
+
+	if code := runDispatch(context.Background(), failingDispatchDeps(t, store, gc, 2)); code != 1 {
+		t.Fatalf("dispatch exit = %d, want 1 (it must fail: that is the whole scenario)", code)
+	}
+
+	got, ok, err := store.Get(context.Background(), stranded.BeadAnchor)
+	if err != nil || !ok {
+		t.Fatalf("get after failed dispatch: ok=%v err=%v", ok, err)
+	}
+	if !got.UpdatedAt.Equal(reservedAt) {
+		t.Fatalf("UpdatedAt = %v after the release, want the reservation's own %v.\n"+
+			"Restoring the prior record restamped it, which resets the sweep's reclaim clock "+
+			"on a reservation that was already stranded.", got.UpdatedAt, reservedAt)
+	}
+
+	// And the consequence, asserted rather than inferred: the very next sweep
+	// still reclaims it.
+	if code := runSweep(context.Background(), sweepDeps{
+		GC: gc.Client("gonk-city"), Store: store,
+	}); code != 0 {
+		t.Fatalf("sweep exit = %d, want 0", code)
+	}
+	after, _, _ := store.Get(context.Background(), stranded.BeadAnchor)
+	if after.State != beadstore.StateRunning {
+		t.Fatalf("state after the sweep = %q, want %q: a failed dispatch deferred the reclaim "+
+			"of a reservation that was already past its window", after.State, beadstore.StateRunning)
+	}
+}
+
+// The reclaim's own write, which is the identical pattern one function away
+// from the one that shipped unstamped. Promoting out of pending-prompt is a
+// real change to the record, so its write time must move -- and no line in
+// reclaimPendingPrompt sets it, deliberately: the store does.
+func TestReclaimingAPendingPromptRecordRestampsItsWriteTime(t *testing.T) {
+	store := beadstore.NewMemory()
+	alias := brokerSessionAlias("triage", 42, 3, 1)
+	rec := pendingPromptRecord(alias)
+	reservedAt := time.Now().Add(-(pendingPromptGrace + time.Minute)).UTC()
+	rec.UpdatedAt = reservedAt
+	if err := store.Put(context.Background(), rec); err != nil {
+		t.Fatalf("seed put: %v", err)
+	}
+
+	gc := gcapitest.New(t)
+	if code := runSweep(context.Background(), sweepDeps{
+		GC: gc.Client("gonk-city"), Store: store,
+	}); code != 0 {
+		t.Fatalf("sweep exit = %d, want 0", code)
+	}
+
+	got, _, _ := store.Get(context.Background(), rec.BeadAnchor)
+	if got.State != beadstore.StateRunning {
+		t.Fatalf("state = %q, want %q", got.State, beadstore.StateRunning)
+	}
+	if !got.UpdatedAt.After(reservedAt) {
+		t.Fatalf("UpdatedAt = %v after the reclaim, want a fresh stamp (the reservation was "+
+			"written at %v). A record that keeps a stale write time through a state change "+
+			"is how the pending-prompt reclaim came to age records by a field nobody set.",
+			got.UpdatedAt, reservedAt)
 	}
 }

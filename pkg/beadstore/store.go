@@ -98,8 +98,48 @@ type Record struct {
 }
 
 type Store interface {
-	// Put upserts on BeadAnchor.
+	// Put upserts on BeadAnchor and STAMPS UpdatedAt -- see stampWriteTime for
+	// the exact rule and why it belongs to the interface rather than to each
+	// caller. Callers do not set UpdatedAt; the store owns it.
 	Put(ctx context.Context, r Record) error
 	Get(ctx context.Context, beadAnchor string) (Record, bool, error)
 	List(ctx context.Context, state State) ([]Record, error)
+}
+
+// stampWriteTime is THE UpdatedAt RULE, and it lives here -- at the Store
+// interface, not at each call site -- because the alternative was tried and
+// failed. Only Memory.Put used to stamp; BdCLI.Put marshalled the record
+// verbatim. That made UpdatedAt a per-caller convention: whichever call site
+// remembered to set it got a working timestamp, and against the real store
+// every one that forgot wrote a zero time. gonk-sweep's pending-prompt
+// reclaim ages records by exactly this field, so a forgotten stamp does not
+// fail a test -- it makes the sweep silently inert in production while every
+// Memory-backed test stays green. Both Put implementations call this, so a
+// stamp cannot be forgotten by a future call site, and a third implementation
+// inherits the check through storetest's conformance suite.
+//
+// THE ONE EXCEPTION, and it is load-bearing: a record written back in
+// StatePendingPrompt that ALREADY carries a write time keeps it. A
+// reservation's age is measured from when it was RESERVED, and re-writing the
+// same reservation is not re-reserving it.
+//
+// Without the exception, runBrokerDispatch's release path defeats the sweep it
+// depends on. That path restores the record as it stood BEFORE the reservation
+// write (see broker_inject.go); if what it restores is itself a stranded
+// pending-prompt record, an unconditional stamp would reset that record's
+// reclaim clock on every failed dispatch -- deferring the reclaim by a full
+// grace window each time, for a record whose whole problem is that nobody is
+// coming back for it. The reservation write itself is unaffected: it is built
+// from a record runDispatch rebuilds fresh from the webhook args, so its
+// UpdatedAt is zero and gets stamped here.
+//
+// Every other write restamps, including the reclaim's own promotion out of
+// StatePendingPrompt into StateRunning: that write DOES change the record, so
+// its write time moves.
+func stampWriteTime(r Record, now time.Time) Record {
+	if r.State == StatePendingPrompt && !r.UpdatedAt.IsZero() {
+		return r
+	}
+	r.UpdatedAt = now
+	return r
 }

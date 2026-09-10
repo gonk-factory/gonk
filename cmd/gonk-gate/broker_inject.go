@@ -736,6 +736,12 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 	// first dispatch, or a store read that failed -- the honest restore is
 	// `base` with no session id, which is the same "nothing has been
 	// dispatched for this bead yet" the guard above would have seen.
+	//
+	// Restoring `prior` puts back its UpdatedAt as well, and that matters when
+	// `prior` is ITSELF a stranded pending-prompt record: beadstore's Put keeps
+	// an existing pending-prompt write time rather than restamping it, so this
+	// restore cannot push the sweep's reclaim of that reservation out by
+	// another grace window. See stampWriteTime in pkg/beadstore/store.go.
 	release := base
 	release.SessionID = ""
 	if priorFound {
@@ -747,11 +753,16 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 	pending.SessionID = alias
 	pending.Rung, pending.Model, pending.ReservationID = dec.Rung, dec.Model, dec.ReservationID
 	pending.ReservationExpiresAt = dec.ReservationExpiresAt
-	// Stamp the reservation's own age. runSweep reclaims a pending-prompt
-	// record by how long it has sat here, and only beadstore.Memory stamps
-	// UpdatedAt for its callers -- BdCLI marshals the record verbatim, so a
-	// record written through it would carry a zero time and never age out.
-	pending.UpdatedAt = time.Now().UTC()
+	// NOTHING STAMPS UpdatedAt HERE, DELIBERATELY. runSweep reclaims a
+	// pending-prompt record by how long it has sat here, so this record's write
+	// time is load-bearing -- and it used to be set on this line, by this
+	// caller, because only beadstore.Memory stamped it and BdCLI marshalled the
+	// record verbatim. A convention every future call site has to remember is
+	// not a guarantee: deleting that line broke nothing that any test could
+	// see. The stamp now belongs to Store.Put itself, both implementations,
+	// pinned by pkg/beadstore/storetest for each of them. `pending` is a copy
+	// of `base`, which runDispatch rebuilds fresh from the webhook args, so its
+	// UpdatedAt is zero and the store stamps it.
 	if err := d.Store.Put(ctx, pending); err != nil {
 		// Same bias as the read above: an unreadable/unwritable store must not
 		// block a legitimate dispatch, only weaken this particular guard for it.

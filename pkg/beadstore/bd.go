@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // BdCLI shells the MIT `bd` binary against the shared Dolt bead store (spec
@@ -138,7 +139,14 @@ func (b *BdCLI) removeGonkStateLabels(ctx context.Context, id string) error {
 
 // Put upserts on r.BeadAnchor: find-or-create the bd bead, then overwrite its
 // gonk-state comment and its gonk::<state> label.
+//
+// It stamps UpdatedAt first (stampWriteTime -- the same rule Memory.Put
+// applies). It did not use to: it marshalled the caller's record verbatim,
+// which meant every call site that forgot to set UpdatedAt wrote a zero time
+// to the REAL store while the Memory-backed tests, which did stamp, stayed
+// green. gonk-sweep's pending-prompt reclaim ages records by that field.
 func (b *BdCLI) Put(ctx context.Context, r Record) error {
+	r = stampWriteTime(r, time.Now().UTC())
 	id, ok, err := b.findBeadID(ctx, r.BeadAnchor)
 	if err != nil {
 		return err

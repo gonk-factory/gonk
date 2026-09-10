@@ -154,7 +154,11 @@ func runSweep(ctx context.Context, d sweepDeps) int {
 // so a reservation older than this provably has no live dispatch behind it.
 //
 // It must also stay COMFORTABLY UNDER reapGrace (reap.go, 10 minutes), and
-// TestPendingPromptGraceLandsInsideTheReaperGrace enforces that. The reaper
+// TestPendingPromptGraceLandsInsideTheReaperGrace enforces that -- as a
+// five-minute margin, which is what "comfortably" is worth here, not a bare
+// `<` that 599s would satisfy. TestPendingPromptGraceCoversTheDispatchOrders-
+// Timeout enforces the other claim in this comment, that the grace is at least
+// the order timeout pack/orders/gonk-dispatch.toml actually declares. The reaper
 // treats only StateRunning records as claiming a session, so a pending-prompt
 // alias is unclaimed for as long as it sits in that state; reclaiming it at
 // 300s promotes it to StateRunning -- and therefore into the claimed set --
@@ -198,6 +202,11 @@ func reclaimPendingPrompt(ctx context.Context, d sweepDeps, rec beadstore.Record
 		return // a dispatch may still be inside its delivery window
 	}
 	rec.State = beadstore.StateRunning
+	// The Put restamps UpdatedAt: leaving StatePendingPrompt is a real change,
+	// and beadstore's write-time rule only preserves the age of a record still
+	// sitting in that state (stampWriteTime, pkg/beadstore/store.go). This
+	// function does not stamp it itself -- the store owns the field, so no call
+	// site has to remember to.
 	if err := d.Store.Put(ctx, rec); err != nil {
 		d.Log.Error("sweep: could not reclaim a stranded pending-prompt reservation",
 			"bead", rec.BeadAnchor, "session", rec.SessionID, "err", err)
