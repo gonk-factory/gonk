@@ -73,7 +73,32 @@ func testdataDir(t *testing.T) string {
 // resolve normally while opencode and curl are the deterministic stand-ins.
 func fakePATH(t *testing.T) string {
 	t.Helper()
+	requireRealJQ(t)
 	return fakebinDir(t) + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+// requireRealJQ enforces the half of fakePATH's contract that is easiest to
+// lose: jq is NOT faked, it is expected to be the real thing on the runner.
+//
+// entrypoint.sh uses it for work a stand-in cannot honestly do -- parsing
+// the fetched prompt document (`jq -r '.prompt // empty'`) and BUILDING the
+// webhook JSON with correct escaping (`jq -n --arg ...`, which exists
+// exactly because concatenation gets embedded quotes wrong). Without jq the
+// script dies mid-run with `jq: not found` and exit 127, which surfaces as
+// an unrelated-looking assertion failure about missing output. That is what
+// the GitLab `test` job did (job 22185): golang:1.26 ships no jq, so this
+// package was red there while green on GitHub, whose runners have it.
+//
+// Deliberately a hard t.Fatal, not a RequireInfra skip: a skip would hide
+// exactly the divergence this check exists to make loud.
+func requireRealJQ(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Fatalf("jq is not on PATH (%v). images/agent/entrypoint.sh parses the prompt document and "+
+			"renders the webhook payload with it, so these tests are meaningless without the REAL jq -- "+
+			"and a fake one that diverged from it would be worse. Install jq (Debian/Ubuntu: "+
+			"apt-get install -y jq; Alpine: apk add jq).", err)
+	}
 }
 
 // runEntrypoint runs entrypoint.sh under `sh -eu` (matching the script's own

@@ -282,9 +282,13 @@ fmt:
 # VET_BUILD_TAGS: every custom //go:build tag under cmd/ pkg/ internal/ test/
 # that the default (untagged) `go vet ./...` never compiles, so it never
 # type-checks the component/integration/images/live/chart/testclock suites
-# either (T-14). Keep in sync with .golangci.yml's run.build-tags and
-# internal/buildgate's TestRepoBuildTagsFindsTheKnownSixMatchesTheTaskList,
-# which pins this same set against a real scan of the tree.
+# either (T-14). Keep in sync with .golangci.yml's run.build-tags, with the
+# `go vet (every custom build tag)` step in .github/workflows/ci.yml and
+# .gitlab-ci.yml, and with internal/buildgate's
+# TestRepoBuildTagsAndKindsMatchTheKnownSix, which pins this same set -- and
+# each tag's KIND -- against a real scan of the tree. For `testclock` the
+# tagged vet is not just a nicety: it guards no _test.go file, so a vet is
+# the only coverage it can honestly have (gonk-0bvc).
 VET_BUILD_TAGS := component integration images live chart testclock
 
 vet:
@@ -294,24 +298,16 @@ vet:
 	  $(GO) vet -tags $$t ./... || exit 1; \
 	done
 
-# TestEveryBuildTagRunsInCI (internal/buildgate) is DELIBERATELY red: T-14
-# added it to assert every //go:build tag under cmd/pkg/internal/test
-# appears in a `go test … -tags <tag>` line in .github/workflows/ci.yml. T-15
-# landed the `component` and `integration` jobs, and T-16 landed the `images`
-# job, so those three tags are covered now; today live/testclock still are
-# not (only chart/component/integration/images do). This package runs in the
-# ordinary gate on purpose (see nolatest_test.go's package doc), so without
-# the SAME -skip ci.yml's own `go test` step carries, this one
-# intentionally-red test would fail `make gate` for every contributor on
-# every branch -- worse than the gap it exists to surface. The finding is
-# not hidden: run `go test ./internal/buildgate/ -count=1 -v` directly (no
-# -skip) to see it.
-# TODO(2026-09-08, T-17): narrow this exclusion when the `live` CI job
-# lands. `testclock` has no covering task in the delivery plan (tracked
-# separately as gonk-0bvc) and stays excluded here until something adds
-# one -- T-17 alone cannot drop this -skip.
+# NO -skip. This target used to exclude TestEveryBuildTagRunsInCI
+# (internal/buildgate), which T-14 added deliberately red while the `live`
+# and `testclock` tags had no CI coverage -- and .gitlab-ci.yml, which runs a
+# bare `go test ./...`, was red for hours because nobody added the same
+# exclusion there. That is what a tolerated red gate costs. Both tags are
+# covered now (`live` by .github/workflows/live.yml, `testclock` by the
+# tagged `go vet` this Makefile and ci.yml both run), so the test passes for
+# real and every runner -- local, Hub and Lab -- runs the identical command.
 test:
-	$(GO) test ./... -race -count=1 -skip '^TestEveryBuildTagRunsInCI$$'
+	$(GO) test ./... -race -count=1
 
 # lint runs the SAME golangci-lint the CI job runs, pinned to the same tag.
 #

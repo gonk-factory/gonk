@@ -1,0 +1,135 @@
+# T-17: the `live` drift suite, on a schedule.
+#
+# WHAT test/live IS. Every other tier in this repo compares a fixture to a
+# fixture. test/live compares the RUNNING DEPLOYMENT to itself: the rung
+# catalog in the cluster's ConfigMap against the prices the LiteLLM proxy is
+# actually serving, and the budget ceiling on every gonk- virtual key. Both
+# of the bugs it encodes (gonk-1zm, gonk-8gb) survived for months with every
+# hermetic test green, because no hermetic test can see them.
+#
+# WHY IT IS ITS OWN WORKFLOW rather than a job in ci.yml: it is the only
+# thing here that is scheduled rather than per-push, and it is the only thing
+# that needs credentials to a private deployment. ci.yml is the hermetic
+# half of the gate by design ("a red badge that means our homelab was down
+# tells a reader nothing") and this must not be able to redden it.
+#
+# WHY IT IS GATED ON SECRETS, and what that honestly buys today. orac.local
+# is a private LAN; a GitHub runner cannot reach it unless somebody wires up
+# a tunnel and stores the three secrets below. Until they do, the credential
+# gate means this workflow runs its unconditional compile check and reports,
+# in plain words, that the drift checks did not run. That is deliberately
+# NOT dressed up as a pass of the drift checks -- read the summary line.
+#
+# When the secrets ARE present the job sets CI=true, so test/harness's
+# RequireInfra FATALS on a missing endpoint instead of skipping it: a
+# scheduled run that cannot reach the proxy is a real failure, not "nothing
+# to test". And it invokes the suite through hack/require_nonzero_go_tests.sh
+# so a run that matches zero tests fails rather than printing "ok".
+name: live
+
+on:
+  schedule:
+    # 07:20 UTC nightly. Off the hour: GitHub queues scheduled workflows
+    # heavily on the hour and drops them under load.
+    - cron: "20 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Do NOT cancel in progress: unlike ci.yml there is no "superseded by a
+  # newer commit" here -- each scheduled run is a measurement of the
+  # deployment at a point in time, and a cancelled one measures nothing.
+  group: live-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOFLAGS: -mod=vendor
+  GOPROXY: "off"
+
+jobs:
+  live:
+    name: deployed pricing + key-budget drift
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+
+      # UNCONDITIONAL, and the reason this job is never vacuous. `go vet
+      # ./...` compiles no `live`-tagged file at all, so without this a
+      # rename in pkg/opercfg or test/harness could break test/live and
+      # nothing would notice until the night somebody finally wired up the
+      # secrets. This also satisfies nothing on its own -- the suite still
+      # owes a real `go test` line below (internal/buildgate).
+      - name: the live suite still compiles
+        run: go vet -tags live ./test/live/...
+
+      # `secrets` is not available in a job-level `if:`, so the gate is a
+      # step that publishes an output. Values are read into env rather than
+      # interpolated into the script body, so a secret can never be parsed
+      # as shell.
+      - name: are the live endpoint credentials configured?
+        id: creds
+        env:
+          LIVE_URL: ${{ secrets.GONK_LIVE_LITELLM_URL }}
+          LIVE_KEY: ${{ secrets.GONK_LIVE_LITELLM_KEY }}
+          LIVE_KUBECONFIG: ${{ secrets.GONK_LIVE_KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          # All THREE are required, not just the two LiteLLM ones:
+          # test/live's deployedCatalog shells out to kubectl for the
+          # operator-config ConfigMap and RequireInfra FATALS under CI=true
+          # if that fails. Running with two of three would guarantee a red
+          # nightly for a missing credential, which is not a finding.
+          if [ -n "${LIVE_URL}" ] && [ -n "${LIVE_KEY}" ] && [ -n "${LIVE_KUBECONFIG}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: go test -tags live (deployed drift checks)
+        if: steps.creds.outputs.present == 'true'
+        env:
+          # RequireInfra's contract: CI=true turns a missing endpoint from a
+          # skip into a t.Fatal. This job exists to provide the endpoints, so
+          # a missing one is a job setup failure, not nothing-to-test.
+          CI: "true"
+          GONK_LIVE_LITELLM_URL: ${{ secrets.GONK_LIVE_LITELLM_URL }}
+          GONK_LIVE_LITELLM_KEY: ${{ secrets.GONK_LIVE_LITELLM_KEY }}
+          GONK_LIVE_NAMESPACE: ${{ vars.GONK_LIVE_NAMESPACE }}
+          LIVE_KUBECONFIG: ${{ secrets.GONK_LIVE_KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          # Fail here, legibly, rather than as an opaque RequireInfra fatal
+          # three frames down inside deployedCatalog.
+          kubectl version --client
+          printf '%s' "${LIVE_KUBECONFIG}" | base64 -d > "${RUNNER_TEMP}/kubeconfig"
+          chmod 0600 "${RUNNER_TEMP}/kubeconfig"
+          export KUBECONFIG="${RUNNER_TEMP}/kubeconfig"
+          hack/require_nonzero_go_tests.sh -tags live ./test/live/... -count=1
+
+      - name: report that the drift checks did NOT run
+        if: steps.creds.outputs.present != 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo "## live drift checks: NOT RUN"
+            echo
+            echo "The \`live\` suite compiles (checked above) but nothing was measured."
+            echo "This is not a pass of the drift checks."
+            echo
+            echo "To turn it on, set all three repository secrets:"
+            echo "- \`GONK_LIVE_LITELLM_URL\` - the running proxy's base URL"
+            echo "- \`GONK_LIVE_LITELLM_KEY\` - an admin key for it"
+            echo "- \`GONK_LIVE_KUBECONFIG\` - base64 of a kubeconfig that can read"
+            echo "  the \`gonk-operator-config\` ConfigMap"
+            echo
+            echo "orac.local is a private LAN, so a GitHub runner needs a tunnel to it"
+            echo "before these can be anything but empty."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "live drift checks did not run: GONK_LIVE_LITELLM_URL / _KEY / _KUBECONFIG are not all set" >&2
