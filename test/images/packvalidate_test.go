@@ -84,7 +84,8 @@ func runInController(t *testing.T, mounts []string, entrypoint string, args ...s
 	}
 	full = append(full, "--entrypoint", entrypoint, image)
 	full = append(full, args...)
-	cmd := exec.Command("podman", full...)
+	bin := containerBin(t)
+	cmd := exec.Command(bin, full...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -93,7 +94,7 @@ func runInController(t *testing.T, mounts []string, entrypoint string, args ...s
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
 		} else {
-			t.Fatalf("podman run %v: %v\nstderr:\n%s", full, err, stderr.String())
+			t.Fatalf("%s run %v: %v\nstderr:\n%s", bin, full, err, stderr.String())
 		}
 	}
 	// Both streams matter for these tests (gc's diagnostics land on stdout
@@ -173,7 +174,8 @@ func runOrderList(t *testing.T, cityHostDir string) (stdout string, code int) {
 	full = append(full, orderListEnv...)
 	full = append(full, "-v", cityHostDir+":"+mountPoint)
 	full = append(full, image, "gc", "order", "list", "--json", "--city", mountPoint)
-	cmd := exec.Command("podman", full...)
+	bin := containerBin(t)
+	cmd := exec.Command(bin, full...)
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
@@ -182,7 +184,7 @@ func runOrderList(t *testing.T, cityHostDir string) (stdout string, code int) {
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
 		} else {
-			t.Fatalf("podman run %v: %v\nstderr:\n%s", full, err, errBuf.String())
+			t.Fatalf("%s run %v: %v\nstderr:\n%s", bin, full, err, errBuf.String())
 		}
 	}
 	return out.String() + "\n" + errBuf.String(), code

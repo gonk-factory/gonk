@@ -22,7 +22,7 @@ func controllerImage(t *testing.T) (image string, pins map[string]string) {
 	}
 	tag := gonkTag(t, root, pins["GONK_VERSION"])
 	image = registry + "/gonk-controller:" + tag
-	present := exec.Command("podman", "image", "exists", image).Run() == nil
+	present := exec.Command(containerBin(t), "image", "inspect", image).Run() == nil
 	harness.RequireInfra(t, "image "+image+" (run `make controller-image` first)", present)
 	return image, pins
 }

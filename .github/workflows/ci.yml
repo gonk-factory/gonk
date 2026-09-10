@@ -57,16 +57,16 @@ jobs:
       # -race matches the local gate. It is slower and it is the point: the
       # dispatch path, the reconciler and the meter all run concurrently.
       #
-      # TODO(2026-09-08, T-16/T-17): -skip excludes
-      # TestEveryBuildTagRunsInCI (internal/buildgate), which T-14 added
-      # DELIBERATELY red -- it asserts every //go:build tag under
-      # cmd/pkg/internal/test appears in a `go test … -tags <tag>` line
-      # somewhere in this file. T-15 landed the `component` and
-      # `integration` jobs below, so those two tags are covered now; today
-      # `images`, `live` and `testclock` still are not. T-16/T-17 land the
-      # jobs that cover `images` and `live`; narrow or remove this
-      # exclusion as each one does, and leave `testclock` named here until
-      # something covers it too. Run
+      # TODO(2026-09-08, T-17): -skip excludes TestEveryBuildTagRunsInCI
+      # (internal/buildgate), which T-14 added DELIBERATELY red -- it
+      # asserts every //go:build tag under cmd/pkg/internal/test appears in
+      # a `go test … -tags <tag>` line somewhere in this file. T-15 landed
+      # the `component` and `integration` jobs below, and T-16 landed the
+      # `images` job, so those three tags are covered now; today `live` and
+      # `testclock` still are not. T-17 lands the job that covers `live`;
+      # narrow this exclusion then, but leave `testclock` named here --
+      # it has no covering task in the delivery plan (tracked separately as
+      # gonk-0bvc), so T-17 alone cannot drop this -skip. Run
       # `go test ./internal/buildgate/ -count=1 -v` directly (no -skip) to
       # see the live, unexcluded result.
       - name: go test -race
@@ -206,6 +206,65 @@ jobs:
       # TestReserveIfFitsRace and TestReserveIsIdempotentAcrossReplicas.
       - name: go test -tags integration (postgres store)
         run: hack/require_nonzero_go_tests.sh -tags integration ./internal/meter/store/... -race -count=1
+
+  images:
+    name: images (build fresh + container smoke tests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+
+      # GitHub's ubuntu-24.04 runner ships a genuine Docker daemon -- unlike
+      # this repo's dev box, whose `docker` is a podman shim under WSL with a
+      # broken CNI bridge (docs/environment.md). test/images' own
+      # containerBin() helper (test/images/agent_smoke_test.go) resolves to
+      # whichever of podman/docker harness.DetectRuntime() finds on PATH, so
+      # it picks up this real daemon automatically; this step just fails
+      # fast and legibly if it is somehow not running, matching the
+      # `component` job's own preflight above.
+      - name: docker is available
+        run: docker version
+
+      # `make images` (no `push` target) builds every image test/images
+      # exercises: agent, controller (kept until T-56 deletes the Gas City
+      # surface -- see docs/reviews/2026-09-08-delivery-plan.md's T-56),
+      # intake, meter, and the meter's e2e-only testclock variant. The
+      # testclock image is NOT optional here even though T-16's own task
+      # text names only agent/intake/meter(/controller): if it is absent,
+      # test/images/servers_smoke_test.go's TestTestclockMeterImageHasTheSeam
+      # calls harness.RequireInfra with the image missing, which FATALs
+      # (not skips) under CI=true -- GitHub Actions sets CI=true for every
+      # job by default, so skipping this image here would just trade "CI
+      # never ran this test" for "CI's images job is always red", not fix
+      # the gap.
+      #
+      # PODMAN=docker overrides the Makefile's own `PODMAN := podman`
+      # default -- GNU make's command-line variable assignments win over a
+      # plain `:=` in the Makefile itself, so this is the SAME recipe a
+      # developer runs locally (`make images`), pointed at the real daemon
+      # this runner has instead of the dev box's podman.
+      - name: build images (agent, controller, intake, meter, meter-testclock; no push)
+        run: make images PODMAN=docker TARGETARCH=amd64
+
+      # `-tags images`: the container-level assertions that have never run
+      # in CI before this job (gonk-ak0) -- the opencode provider allowlist
+      # (TestAgentImageOpencodeResolvesOnlyTheGonkProvider), non-root
+      # (TestAgentImageRunsAsNonRoot / TestControllerImageRunsAsNonRoot /
+      # TestIntakeImageRunsAsNonRoot / TestMeterImageRunsAsNonRoot), the
+      # version pins baked into each image, the real Gas City pack loader
+      # (test/images/packvalidate_test.go, `gc lint`/`gc order list` against
+      # the actual baked pack), the attribution overlay (OD-7), and the
+      # meter testclock guard. Uses the SAME zero-test-count guard T-15
+      # added for `component`/`integration` (hack/require_nonzero_go_tests.sh)
+      # -- a `-run` typo or an empty package here would otherwise print "ok"
+      # and exit 0 having tested nothing, which is exactly the silent-skip
+      # failure this job exists to close.
+      - name: go test -tags images (test/images)
+        run: hack/require_nonzero_go_tests.sh -tags images ./test/images/... -race -count=1
 
   build:
     name: build every binary

@@ -2,8 +2,10 @@
 
 // Package images holds container-build smoke tests (build tag `images`) --
 // house rule: "if an app runs in a container, test it in a container." These
-// tests shell out to `podman` (this box's docker; docs/environment.md) and
-// need `make images` to have built the image first.
+// tests shell out to a real container runtime (this dev box's `podman`;
+// docker/setup-buildx-action's genuine Docker daemon in CI --
+// docs/environment.md, containerBin below) and need the images already
+// built (`make images` locally; the `images` CI job builds them fresh).
 //
 // Run: go test ./test/images/ -tags images -run Agent -v
 package images
@@ -17,11 +19,48 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/atags"
 	"gitlab.orac.local/agentic/gonk-project/test/harness"
 )
+
+// containerBin resolves the container runtime binary ONCE per process and
+// reuses it for every test in this package: harness.DetectRuntime() shells
+// out to probe for podman/docker, and running that probe once instead of
+// once per test/subtest keeps the suite from re-forking it dozens of times.
+//
+// This is the "abstract the runtime" half of T-16 (gonk-ak0): this box's
+// podman is what docs/environment.md calls "this box's docker" (a broken CNI
+// bridge means every call here also needs --network=host, T-15's
+// harness.Runtime.HostNetwork), but a GitHub Actions runner ships a genuine
+// Docker daemon and no podman binary at all. harness.DetectRuntime() (T-15,
+// test/component's TestMain) already resolves exactly this difference --
+// reusing it here means test/images needs no runtime-specific branch of its
+// own; `podman image inspect`/`docker image inspect`, `create`, `cp`, `run`
+// and `inspect --format` are the same subcommands and flags on both.
+var (
+	containerBinOnce sync.Once
+	containerBinPath string
+	containerBinErr  error
+)
+
+func containerBin(t *testing.T) string {
+	t.Helper()
+	containerBinOnce.Do(func() {
+		rt, err := harness.DetectRuntime()
+		if err != nil {
+			containerBinErr = err
+			return
+		}
+		containerBinPath = rt.Bin
+	})
+	if containerBinErr != nil {
+		t.Fatalf("no container runtime found (tried podman, docker): %v", containerBinErr)
+	}
+	return containerBinPath
+}
 
 // repoRoot walks up from this file's own directory (test/images/) to the
 // module root -- stable regardless of the caller's working directory.
@@ -88,23 +127,29 @@ func agentImage(t *testing.T) (image string, pins map[string]string) {
 	tag := gonkTag(t, root, pins["GONK_VERSION"])
 	image = registry + "/gonk-agent:" + tag
 	// Confirm the image actually exists locally before running anything
-	// against it -- a clearer failure than "podman run" 125-ing on every
-	// subtest individually.
-	present := exec.Command("podman", "image", "exists", image).Run() == nil
+	// against it -- a clearer failure than the runtime's own `run` 125-ing
+	// on every subtest individually. `image inspect` (not podman's own
+	// `image exists` convenience command, which docker has no equivalent
+	// of) exits nonzero on both runtimes when the image is absent.
+	bin := containerBin(t)
+	present := exec.Command(bin, "image", "inspect", image).Run() == nil
 	harness.RequireInfra(t, "image "+image+" (run `make images` first)", present)
 	return image, pins
 }
 
 // runIn execs the given binary as the container's ENTRYPOINT override and
-// returns the CONTAINER's stdout (never podman's own stderr -- podman prints
-// noisy CNI-validation warnings on this box that would otherwise corrupt an
-// exact-match or JSON assertion on the container's real output) and the exit
-// code. --rm: this is a smoke test, not a fixture; --network=host: the CNI
-// bridge is broken on this box (docs/environment.md).
+// returns the CONTAINER's stdout (never the runtime's own stderr -- podman
+// prints noisy CNI-validation warnings on this box that would otherwise
+// corrupt an exact-match or JSON assertion on the container's real output)
+// and the exit code. --rm: this is a smoke test, not a fixture;
+// --network=host: the CNI bridge is broken on this box (docs/environment.md)
+// and, per harness.Runtime's own doc comment, load-bearing on a genuine
+// Docker daemon too for the container-backed harness suites.
 func runIn(t *testing.T, image, entrypoint string, args ...string) (string, int) {
 	t.Helper()
+	bin := containerBin(t)
 	full := append([]string{"run", "--rm", "--network=host", "--entrypoint", entrypoint, image}, args...)
-	cmd := exec.Command("podman", full...)
+	cmd := exec.Command(bin, full...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -114,7 +159,7 @@ func runIn(t *testing.T, image, entrypoint string, args ...string) (string, int)
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
 		} else {
-			t.Fatalf("podman run %v: %v\nstderr:\n%s", full, err, stderr.String())
+			t.Fatalf("%s run %v: %v\nstderr:\n%s", bin, full, err, stderr.String())
 		}
 	}
 	if stdout.Len() == 0 && stderr.Len() > 0 {
@@ -342,8 +387,42 @@ func TestAgentImageGonkGateTrailersSplicesACommitMessage(t *testing.T) {
 	image, _ := agentImage(t)
 
 	msgDir := t.TempDir()
+	// t.TempDir() defaults to 0700, owned by the host user (root on this
+	// dev box) -- but the container reads and WRITES this bind mount as
+	// uid 65532 (USER 65532:65532, images/Dockerfile.agent), which is
+	// neither the owner nor in the owning group of anything created here.
+	// Two separate permission bits are needed, and this test was missing
+	// BOTH the first time it was actually run against a real image (T-16 --
+	// this suite never ran anywhere before, so nobody noticed):
+	//   - the DIRECTORY needs "other" execute to be traversable at all --
+	//     without it, `gonk-gate trailers` can't even open the file
+	//     ("permission denied" reading it).
+	//   - the FILE itself needs "other" write, or the splice can read the
+	//     original message fine but fails ("permission denied") writing
+	//     the updated one back.
+	// Either failure is swallowed by gonk-gate's own "never fail a commit"
+	// contract (runTrailers logs and returns 0 regardless), so the test
+	// read back the UNCHANGED message and reported "trailers missing" with
+	// no hint that the real cause was a permission mismatch, not a code
+	// bug. Mirrors copyPackToTemp's identical fix in packvalidate_test.go,
+	// which got the directory half of this right the first time (and goes
+	// further, at 0o777 on its copied files too, since gc also needs to
+	// read them as uid 65532).
+	if err := os.Chmod(msgDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
 	msgPath := filepath.Join(msgDir, "COMMIT_EDITMSG")
-	if err := os.WriteFile(msgPath, []byte("feat: something\n"), 0o644); err != nil {
+	if err := os.WriteFile(msgPath, []byte("feat: something\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	// os.WriteFile's mode argument is masked by this process's umask at
+	// creation time (0022 on this box, which strips exactly the "other
+	// write" bit trailers needs to overwrite the file as uid 65532) -- a
+	// SEPARATE os.Chmod bypasses the umask the same way `chmod` always has.
+	// Confirmed by hand: without this, WriteFile(..., 0o666) here silently
+	// produces 0644, and the container fails the same "permission denied"
+	// write with no other symptom.
+	if err := os.Chmod(msgPath, 0o666); err != nil {
 		t.Fatal(err)
 	}
 
@@ -357,7 +436,7 @@ func TestAgentImageGonkGateTrailersSplicesACommitMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("podman", "run", "--rm", "--network=host",
+	cmd := exec.Command(containerBin(t), "run", "--rm", "--network=host",
 		"-e", "GC_WEBHOOK_ARG_MODEL=some-model",
 		"-e", "GC_WEBHOOK_ARG_METADATA_JSON="+string(metadataJSON),
 		"-e", "GONK_METER_URL=",
@@ -376,9 +455,16 @@ func TestAgentImageGonkGateTrailersSplicesACommitMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// gonk-gate trailers never returns non-zero for its own internal
+	// failures (runTrailers' documented contract: log and move on), so
+	// cmd.Run() above succeeding is not evidence anything actually
+	// happened -- include stderr here too, where the real reason (a
+	// permission error, an unreachable meter, a bad metadata blob) is
+	// logged, or a genuine regression here again reads as a bare
+	// "missing" with no clue why.
 	if !strings.Contains(string(got), "Gonk-Bead: gk-1a2b") {
 		t.Fatalf("trailers missing from the commit message after running the SHIPPED "+
-			"gonk-gate binary inside the agent image:\n%s", got)
+			"gonk-gate binary inside the agent image:\n%s\nstderr:\n%s", got, stderr.String())
 	}
 }
 
@@ -417,7 +503,17 @@ for i in $(seq 1 50); do
 done
 cat /etc/gonk/overlay/opencode.json
 `
-	cmd := exec.Command("podman", "run", "--rm", "--network=host",
+	cmd := exec.Command(containerBin(t), "run", "--rm", "--network=host",
+		// GC_ALIAS: entrypoint.sh's own Step 0 refuses to start at all
+		// without a non-empty session alias ("no alias: GC_ALIAS is unset
+		// or empty -- refusing to start without a session identity") --
+		// added after this test was written, and this suite never ran
+		// anywhere to notice the gap (REAL FINDING, T-16: without this the
+		// container exits before ever reaching the overlay render, and
+		// stdout -- the file this test's json.Unmarshal below needs -- is
+		// simply empty). Any non-empty value satisfies the check; only its
+		// length is used (for the logged prefix), never its content.
+		"-e", "GC_ALIAS=testaliastestaliastestalias",
 		"-e", "GC_WEBHOOK_ARG_MODEL=qwen-local",
 		"-e", "GC_WEBHOOK_ARG_METADATA_JSON="+string(metadataJSON),
 		"-e", "GONK_LITELLM_URL=http://litellm.litellm.svc.cluster.local:4000",
@@ -427,15 +523,29 @@ cat /etc/gonk/overlay/opencode.json
 		image, "-c", script,
 	)
 	// stdout and stderr kept SEPARATE (not `2>&1`): podman prints noisy
-	// CNI-validation warnings on this box, and this test needs stdout to be
-	// exactly the rendered file, nothing else, for json.Unmarshal below.
+	// CNI-validation warnings on this box. stdout is NOT exactly the
+	// rendered file, though -- entrypoint.sh's own log() function ALSO
+	// writes every status line to /proc/1/fd/1 "NOT JUST THIS PROCESS'S
+	// STDERR" (its own comment, gonk-dot: a detached tmux session has no
+	// other way to reach `kubectl logs`), and PID 1 in THIS container is
+	// the `sh -c script` running `cat` -- so those lines land on this
+	// script's own stdout ahead of the JSON regardless of the `>
+	// /tmp/entrypoint.log` redirect on the backgrounded entrypoint
+	// process. REAL FINDING (T-16, first real run of this suite): find the
+	// JSON object rather than assume `cat`'s output is the whole stream,
+	// the same way packvalidate_test.go's decodeFirstJSONObject already
+	// has to for gc's combined stdout+stderr.
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("render overlay in container: %v\nstderr:\n%s\nstdout:\n%s", err, stderr.String(), stdout.String())
 	}
-	buf := stdout
+	stdoutRaw := stdout.String()
+	i := strings.IndexByte(stdoutRaw, '{')
+	if i < 0 {
+		t.Fatalf("no JSON object found in container stdout:\n%s", stdoutRaw)
+	}
 
 	var cfg struct {
 		Provider map[string]struct {
@@ -446,12 +556,12 @@ cat /etc/gonk/overlay/opencode.json
 			} `json:"options"`
 		} `json:"provider"`
 	}
-	if err := json.Unmarshal(buf.Bytes(), &cfg); err != nil {
-		t.Fatalf("rendered opencode.json is not valid JSON: %v\n--- raw ---\n%s", err, buf.String())
+	if err := json.Unmarshal([]byte(stdoutRaw[i:]), &cfg); err != nil {
+		t.Fatalf("rendered opencode.json is not valid JSON: %v\n--- raw ---\n%s", err, stdoutRaw)
 	}
 	gonk, ok := cfg.Provider["gonk"]
 	if !ok {
-		t.Fatalf("rendered config has no provider.gonk:\n%s", buf.String())
+		t.Fatalf("rendered config has no provider.gonk:\n%s", stdoutRaw)
 	}
 	if gonk.Options.BaseURL != "http://litellm.litellm.svc.cluster.local:4000/v1" {
 		t.Errorf("provider.gonk.options.baseURL = %q", gonk.Options.BaseURL)
@@ -462,7 +572,7 @@ cat /etc/gonk/overlay/opencode.json
 	}
 	header, ok := gonk.Options.Headers["x-litellm-spend-logs-metadata"]
 	if !ok {
-		t.Fatalf("provider.gonk.options.headers has no x-litellm-spend-logs-metadata key:\n%s", buf.String())
+		t.Fatalf("provider.gonk.options.headers has no x-litellm-spend-logs-metadata key:\n%s", stdoutRaw)
 	}
 
 	// THE assertion: round-trip the header value through the REAL contract

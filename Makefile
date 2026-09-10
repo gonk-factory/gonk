@@ -297,16 +297,19 @@ vet:
 # TestEveryBuildTagRunsInCI (internal/buildgate) is DELIBERATELY red: T-14
 # added it to assert every //go:build tag under cmd/pkg/internal/test
 # appears in a `go test … -tags <tag>` line in .github/workflows/ci.yml. T-15
-# landed the `component` and `integration` jobs, so those two tags are
-# covered now; today images/live/testclock still are not (only
-# chart/component/integration do). This package runs in the ordinary gate on
-# purpose (see nolatest_test.go's package doc), so without the SAME -skip
-# ci.yml's own `go test` step carries, this one intentionally-red test would
-# fail `make gate` for every contributor on every branch -- worse than the
-# gap it exists to surface. The finding is not hidden: run
-# `go test ./internal/buildgate/ -count=1 -v` directly (no -skip) to see it.
-# TODO(2026-09-08, T-16/T-17): narrow or remove this exclusion as each task
-# lands the CI job it covers.
+# landed the `component` and `integration` jobs, and T-16 landed the `images`
+# job, so those three tags are covered now; today live/testclock still are
+# not (only chart/component/integration/images do). This package runs in the
+# ordinary gate on purpose (see nolatest_test.go's package doc), so without
+# the SAME -skip ci.yml's own `go test` step carries, this one
+# intentionally-red test would fail `make gate` for every contributor on
+# every branch -- worse than the gap it exists to surface. The finding is
+# not hidden: run `go test ./internal/buildgate/ -count=1 -v` directly (no
+# -skip) to see it.
+# TODO(2026-09-08, T-17): narrow this exclusion when the `live` CI job
+# lands. `testclock` has no covering task in the delivery plan (tracked
+# separately as gonk-0bvc) and stays excluded here until something adds
+# one -- T-17 alone cannot drop this -skip.
 test:
 	$(GO) test ./... -race -count=1 -skip '^TestEveryBuildTagRunsInCI$$'
 
