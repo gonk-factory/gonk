@@ -57,16 +57,16 @@ jobs:
       # -race matches the local gate. It is slower and it is the point: the
       # dispatch path, the reconciler and the meter all run concurrently.
       #
-      # TODO(2026-09-08, T-15/T-16/T-17): -skip excludes
+      # TODO(2026-09-08, T-16/T-17): -skip excludes
       # TestEveryBuildTagRunsInCI (internal/buildgate), which T-14 added
       # DELIBERATELY red -- it asserts every //go:build tag under
       # cmd/pkg/internal/test appears in a `go test … -tags <tag>` line
-      # somewhere in this file, and today `component`, `integration`,
-      # `images`, `live` and `testclock` do not (only `chart`, via the job
-      # below, does). T-15/T-16/T-17 land the jobs that cover the first
-      # three; narrow or remove this exclusion as each one does, and leave
-      # `testclock` (and `live`, until T-17 lands) named here until
-      # something covers those too. Run
+      # somewhere in this file. T-15 landed the `component` and
+      # `integration` jobs below, so those two tags are covered now; today
+      # `images`, `live` and `testclock` still are not. T-16/T-17 land the
+      # jobs that cover `images` and `live`; narrow or remove this
+      # exclusion as each one does, and leave `testclock` named here until
+      # something covers it too. Run
       # `go test ./internal/buildgate/ -count=1 -v` directly (no -skip) to
       # see the live, unexcluded result.
       - name: go test -race
@@ -125,6 +125,87 @@ jobs:
       # chart/gonk/tests/crd-schemas, NOT -ignore-missing-schemas.
       - name: chart gate
         run: go test -tags chart ./internal/charttest/... -count=1
+
+  component:
+    name: component (real meter binary + real LiteLLM + real Postgres)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+
+      # test/component's TestMain manages its own Postgres and LiteLLM
+      # containers directly (test/harness: StartPostgres, StartLiteLLM) --
+      # it does not read a DSN or URL from the environment, so there is
+      # nothing for a `services:` block to plug into. All it needs is a
+      # working container runtime on PATH; GitHub's ubuntu-24.04 runner
+      # image ships Docker preinstalled and running. Fail here, clearly,
+      # rather than let a missing daemon surface as an opaque harness
+      # timeout three steps later.
+      - name: docker is available
+        run: docker version
+
+      # `-tags component` is the L2 suite (test/component/main_test.go):
+      # the real cmd/gonk-meter binary against a real LiteLLM
+      # (ghcr.io/berriai/litellm-database, pinned in main_test.go) and a real
+      # Postgres ledger, both booted by the test itself. This is the hard
+      # door, the meter-SIGKILL race and the rest of R-40's "proven only by
+      # hand" gap.
+      #
+      # internal/meter/litellm's OWN `component`-tagged suite
+      # (live_component_test.go) is deliberately NOT run here: unlike
+      # test/component it does not start its own LiteLLM, it reads
+      # GONK_LITELLM_URL / GONK_LITELLM_MASTER_KEY and (per
+      # test/harness.RequireInfra's CI=true contract) FATALs, not skips, if
+      # they are unset -- so wiring it in would mean standing up a second,
+      # independently-configured live LiteLLM (with its own "glm" model
+      # pointed at a reachable upstream) purely for this job, which is
+      # materially more than a CI-wiring change and isn't needed for either
+      # of T-15's exit criteria (neither names a test from that package).
+      # Tracked as follow-up work; go test -tags component still covers it
+      # everywhere else `-race` already does.
+      - name: go test -tags component (test/component)
+        run: hack/require_nonzero_go_tests.sh -tags component ./test/component/... -race -count=1
+
+  integration:
+    name: integration (Postgres reservation store)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: gonk
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # internal/meter/store/postgres_test.go reads this (falling back to
+      # the same DSN if unset); set it explicitly so the job does not
+      # depend on that default staying in sync with the service above.
+      GONK_POSTGRES_DSN: postgres://postgres:gonk@127.0.0.1:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+
+      # `-tags integration` runs the SAME conformance suite Memory satisfies
+      # against a REAL Postgres (RECONCILIATION-06 D2: Postgres is the only
+      # accepted ledger backend), plus the reservation-race suite --
+      # TestReserveIfFitsRace and TestReserveIsIdempotentAcrossReplicas.
+      - name: go test -tags integration (postgres store)
+        run: hack/require_nonzero_go_tests.sh -tags integration ./internal/meter/store/... -race -count=1
 
   build:
     name: build every binary

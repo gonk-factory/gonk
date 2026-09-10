@@ -50,6 +50,16 @@ version: 1
 instance:
   enabled: true
   ladder: [qwen-local, glm, sonnet]
+# This suite predates and is not about the cloud-allowance gate (Stream B,
+# pkg/rung/decide.go's ReasonCloudNotAllowed): it climbs into cloud rungs
+# (glm, sonnet) throughout (the hard-door and reservation-race tests among
+# them), so cloud is allowed here, matching test/integration/main_test.go's
+# baseOperatorYAML and internal/meter/service/service_test.go's
+# testOperatorYAML -- both patched into this same opt-in the day the gate
+# landed (5e15fe7); this file was not, because nothing ran it in CI to
+# notice. The gate's own behavior is covered in pkg/rung/decide_test.go.
+cloud_allowance:
+  enabled: true
 rungs:
   - { name: qwen-local, kind: local, model: stub-qwen,   est_cost_usd: 0,    est_tokens: "50K",  synthetic_usd_per_1m_tokens: 0.25 }
   - { name: glm,        kind: cloud, model: stub-glm,     est_cost_usd: 0.40, est_tokens: "200K" }
