@@ -8,16 +8,21 @@
 //   - internal/config/webhook.go    -- the 5-scheme verify registry
 //   - internal/orders/order.go      -- Order/OrderParam field shapes and the
 //     formula-xor-exec / no-pool-on-exec rules
-//   - internal/graphv2/invocation.go -- the v2 reserved variable names
 //   - docs/reference/specs/pack-spec.md   -- agent directory layout
-//   - docs/reference/specs/formula-spec-v2.md -- [[steps]], [steps.check],
-//     and the formula_compiler >=2.0.0 declaration [steps.check] requires
 //
 // This is not a substitute for Task 6's real-loader-in-a-container check --
 // it is the fast gate that catches the mistakes we already know we can
-// make: an unknown pack.toml key, a formula var name the v2 compiler
-// reserves, an exec order with a pool, a missing agent directory, a check
-// script that does not exist on disk.
+// make: an unknown pack.toml key, an exec order with a pool, a missing
+// agent directory, an exec script that does not exist on disk.
+//
+// ADR-007 §3 deleted gonk's whole formula layer (formulas/, [steps.check],
+// and the control-dispatcher agent that routed their workflow-control
+// beads), so this pack currently declares no formula order at all. The
+// formula-xor-exec/no-pool-on-exec rule above still applies to any order
+// this pack ships (including the two plain exec orders it has now); the
+// formulas v2 reserved-var and [steps.check]/formula_compiler rules this
+// package used to also enforce had nothing left to check once formulas/
+// was deleted, and were deleted with it.
 package packtest
 
 import (
@@ -241,10 +246,14 @@ func TestOrderParamsHaveOnlyKnownFields(t *testing.T) {
 	}
 }
 
-// The exec target of every exec order, and the check.path of every
-// [steps.check], must exist on disk and be a file (not a directory). A pack
-// file referencing a script that does not exist is a silent no-op at
-// dispatch time in production, on the money path.
+// The exec target of every exec order must exist on disk and be a file (not
+// a directory). A pack file referencing a script that does not exist is a
+// silent no-op at dispatch time in production, on the money path.
+//
+// This used to also walk formulas/*.toml's [steps.check].check.path: ADR-007
+// §3 deleted the whole formula layer -- formulas, [steps.check], and the
+// `gonk-gate check` subcommand that was its body -- so there is no longer a
+// formulas/ directory, and no check.path left to validate.
 func TestExecAndCheckScriptsExistOnDisk(t *testing.T) {
 	root := packRoot(t)
 	for _, path := range globTOML(t, filepath.Join(root, "orders")) {
@@ -257,32 +266,6 @@ func TestExecAndCheckScriptsExistOnDisk(t *testing.T) {
 		full := filepath.Join(root, exec)
 		if fi, err := os.Stat(full); err != nil || fi.IsDir() {
 			t.Errorf("%s: exec = %q does not exist on disk at %s", path, exec, full)
-		}
-	}
-	for _, path := range globTOML(t, filepath.Join(root, "formulas")) {
-		cfg := decodeTOMLFile(t, path)
-		for _, step := range asMapSlice(cfg["steps"]) {
-			check, ok := step["check"].(map[string]any)
-			if !ok {
-				continue
-			}
-			inner, ok := check["check"].(map[string]any)
-			if !ok {
-				t.Errorf("%s: [steps.check] has no nested [steps.check.check] table (mode/path/timeout)", path)
-				continue
-			}
-			if mode, _ := inner["mode"].(string); mode != "exec" {
-				t.Errorf("%s: [steps.check.check].mode = %q, want \"exec\" (the only supported checker)", path, mode)
-			}
-			p, _ := inner["path"].(string)
-			if p == "" {
-				t.Errorf("%s: [steps.check.check] has no path", path)
-				continue
-			}
-			full := filepath.Join(root, p)
-			if fi, err := os.Stat(full); err != nil || fi.IsDir() {
-				t.Errorf("%s: check.path = %q does not exist on disk at %s", path, p, full)
-			}
 		}
 	}
 }
@@ -316,20 +299,6 @@ func TestDoctorChecksHaveRunnableScripts(t *testing.T) {
 	}
 }
 
-// deterministicAgents are the agents that are NOT model agents: no provider, no
-// prompt, no comment, no tokens. They are exempt from the prompt.template.md and
-// bead-marker rules below, which encode "an agent is a thing that talks to a
-// model and posts a marked comment" -- true for triage/scaffold/mention, false
-// for Gas City's control lane.
-//
-// control-dispatcher is the deterministic compiler-v2 workflow control worker
-// (prompt_mode = "none", start_command runs `gc convoy control --serve`). Giving
-// it a prompt template would be inventing a prompt for something that never
-// receives one.
-var deterministicAgents = map[string]bool{
-	"control-dispatcher": true,
-}
-
 // EVERY MODEL AGENT MUST BE ABLE TO START ON THIS IMAGE.
 //
 // This is the test that was missing, and its absence cost a live debugging
@@ -346,9 +315,12 @@ var deterministicAgents = map[string]bool{
 // because they check the pack's CONTENT and this is about whether an agent can
 // RUN.
 //
-// The deterministic agents are exempt by the same rule the chart's
-// bootstrap-city uses when it injects LiteLLM config: they run no model, so
-// they need no harness and must not be given a credential.
+// There used to be a deterministicAgents exemption here for control-dispatcher,
+// Gas City's compiler-v2 workflow-control worker -- needed only because
+// graph-v2 formulas ([steps.check]) routed their workflow-control beads
+// through it. ADR-007 §3 deleted the whole formula layer, control-dispatcher
+// with it (pack/agents/control-dispatcher/), so every agent this pack ships
+// now is a model agent and none is exempt.
 func TestEveryModelAgentCanActuallyStart(t *testing.T) {
 	agentsDir := filepath.Join(packRoot(t), "agents")
 	entries, err := os.ReadDir(agentsDir)
@@ -370,7 +342,7 @@ func TestEveryModelAgentCanActuallyStart(t *testing.T) {
 	}
 
 	for _, e := range entries {
-		if !e.IsDir() || deterministicAgents[e.Name()] {
+		if !e.IsDir() {
 			continue
 		}
 		name := e.Name()
@@ -392,10 +364,17 @@ func TestEveryModelAgentCanActuallyStart(t *testing.T) {
 	}
 }
 
-// The DIRECTORY NAME is the agent name. Both files exist for every agent
-// this pack ships, and a stray `name` field inside agent.toml is IGNORED by
-// the loader -- which means someone will one day set it, believe it, and be
+// The DIRECTORY NAME is the agent name. agent.toml exists for every agent
+// this pack ships, and a stray `name` field inside it is IGNORED by the
+// loader -- which means someone will one day set it, believe it, and be
 // wrong.
+//
+// This used to also require a prompt.template.md alongside agent.toml.
+// ADR-007 §3 deleted every one: the broker path
+// (cmd/gonk-gate/broker_inject.go's renderTriagePrompt/renderScaffoldPrompt)
+// renders each agent's prompt in Go, splicing in controller-fetched
+// issue/repo context that a static template file could never hold, so no
+// agent this pack ships carries one any more.
 func TestEveryAgentDirHasBothFilesAndNoNameField(t *testing.T) {
 	agentsDir := filepath.Join(packRoot(t), "agents")
 	entries, err := os.ReadDir(agentsDir)
@@ -410,9 +389,6 @@ func TestEveryAgentDirHasBothFilesAndNoNameField(t *testing.T) {
 		found++
 		name := e.Name()
 		dir := filepath.Join(agentsDir, name)
-		if _, err := os.Stat(filepath.Join(dir, "prompt.template.md")); err != nil && !deterministicAgents[name] {
-			t.Errorf("agents/%s has no prompt.template.md", name)
-		}
 		agentTOML := filepath.Join(dir, "agent.toml")
 		if _, err := os.Stat(agentTOML); err != nil {
 			t.Errorf("agents/%s has no agent.toml", name)
@@ -429,155 +405,46 @@ func TestEveryAgentDirHasBothFilesAndNoNameField(t *testing.T) {
 	}
 }
 
-// Every formula order's pool names a real agent directory. Gas City routes a
-// pool's ready work to ANY agent whose work query matches that pool label
-// (docs/tutorials/06-beads.md, "How agents find work") -- an unknown pool
-// name means the work is produced but never claimed by anyone.
-func TestFormulaOrdersRouteToRealAgents(t *testing.T) {
-	agentNames := map[string]bool{}
-	entries, err := os.ReadDir(filepath.Join(packRoot(t), "agents"))
-	if err != nil {
-		t.Fatalf("reading agents/: %v", err)
+// Every trigger in cmd/gonk-gate's agentForTrigger map (broker_inject.go)
+// names a real agent directory under agents/. That map is unexported
+// (package main), so this is a hand-kept literal copy -- cmd/gonk-gate's own
+// tests (TestDispatchCreatesTriageSessionOnRun et al.) pin the same names
+// from the other side. A typo here is a session-create 404 at dispatch time,
+// in production, on the money path.
+//
+// There used to be a THIRD entry, orderForTrigger, mapping trigger to a
+// formula-order name (gonk-triage/gonk-scaffold/gonk-mention). ADR-007 §3
+// deleted it along with the rest of the formula layer: a ported trigger no
+// longer pours an order at all, it goes straight through agentForTrigger to
+// a broker session.
+//
+// mention-reply is DELIBERATELY ABSENT from agentForTrigger, and so from the
+// table below too. It used to pour a formula (gonk-mention) that provably
+// could not deliver its prompt (upstream Gas City drops caller vars,
+// gonk-6gs / #4668) -- ADR-007 §3 chose to fail it loudly instead of leaving
+// it to idle, and it is not yet ported onto the broker either, so
+// runDispatch refuses it outright
+// (cmd/gonk-gate: TestDispatchRefusesMentionReplyUntilItIsPortedToTheBroker).
+// T-24 ports it for real; add it here when it does.
+func TestEveryTriggerRoutesToARealAgent(t *testing.T) {
+	triggerAgent := map[string]string{
+		"issue-triage": "triage",
+		"scaffold":     "scaffold",
 	}
-	for _, e := range entries {
-		if e.IsDir() {
-			agentNames[e.Name()] = true
-		}
-	}
-	for _, path := range globTOML(t, filepath.Join(packRoot(t), "orders")) {
-		cfg := decodeTOMLFile(t, path)
-		order, _ := cfg["order"].(map[string]any)
-		if _, hasFormula := order["formula"]; !hasFormula {
-			continue
-		}
-		pool, _ := order["pool"].(string)
-		if pool == "" {
-			continue // flagged separately by TestOrdersAreFormulaXorExecAndExecOrdersHaveNoPool
-		}
-		if !agentNames[pool] {
-			t.Errorf("%s: pool %q names no agent directory under agents/", path, pool)
-		}
-	}
-}
-
-// Every order named in cmd/gonk-gate's orderForTrigger map exists as an order
-// file that declares a formula. That map is unexported (package main), so
-// this is a hand-kept literal copy -- cmd/gonk-gate's own tests
-// (TestDispatchPoursOnRun et al.) pin the same three names from the other
-// side. A typo here is a 404 at dispatch time, in production, on the money
-// path.
-func TestEveryTriggerOrderExists(t *testing.T) {
-	triggerOrder := map[string]string{
-		"issue-triage":  "gonk-triage",
-		"scaffold":      "gonk-scaffold",
-		"mention-reply": "gonk-mention",
-	}
-	for trigger, order := range triggerOrder {
-		path := filepath.Join(packRoot(t), "orders", order+".toml")
-		cfg, err := os.ReadFile(path)
-		if err != nil {
-			t.Errorf("trigger %q maps to order %q, but %s does not exist: %v", trigger, order, path, err)
-			continue
-		}
-		parsed := decodeTOMLString(t, string(cfg))
-		if o, _ := parsed["order"].(map[string]any); o == nil || o["formula"] == nil {
-			t.Errorf("%s exists but declares no formula", path)
-		}
-	}
-}
-
-// formulas v2 forbids declaring vars named convoy_id, bead_id, or the
-// deprecated issue alias (internal/graphv2/invocation.go: "vars.<name>:
-// formulas v2 reserved variable cannot be declared"). More importantly, any
-// CALLER-supplied vars map (i.e. what a formula order is fired with) that
-// contains one of these keys is rejected outright, regardless of whether the
-// formula declares it -- see cmd/gonk-gate/dispatch_test.go's
-// TestDispatchNeverSendsAReservedFormulaVarName for the other half of this
-// contract.
-func TestFormulaVarsNeverDeclareAReservedFormulasV2Name(t *testing.T) {
-	reserved := map[string]bool{"convoy_id": true, "bead_id": true, "issue": true}
-	for _, path := range globTOML(t, filepath.Join(packRoot(t), "formulas")) {
-		cfg := decodeTOMLFile(t, path)
-		vars, _ := cfg["vars"].(map[string]any)
-		for name := range vars {
-			if reserved[name] {
-				t.Errorf("%s declares reserved var %q -- formulas v2 forbids declaring "+
-					"convoy_id/bead_id/issue", path, name)
-			}
-		}
-	}
-}
-
-// [steps.check] is graph-only (formula-spec-v2.md section 5): "a formula
-// that uses them without [the v2 declaration] must fail to compile." Every
-// formula using [steps.check] here must declare
-// [requires] formula_compiler = ">=2.0.0" (or the equivalent legacy
-// contract = "graph.v2" alias).
-func TestFormulasUsingCheckDeclareGraphV2(t *testing.T) {
-	for _, path := range globTOML(t, filepath.Join(packRoot(t), "formulas")) {
-		cfg := decodeTOMLFile(t, path)
-		usesCheck := false
-		for _, step := range asMapSlice(cfg["steps"]) {
-			if _, ok := step["check"]; ok {
-				usesCheck = true
-			}
-		}
-		if !usesCheck {
-			continue
-		}
-		requires, _ := cfg["requires"].(map[string]any)
-		_, hasCompilerReq := requires["formula_compiler"]
-		hasContract := cfg["contract"] == "graph.v2"
-		if !hasCompilerReq && !hasContract {
-			t.Errorf("%s uses [steps.check] (graph-only) without [requires] "+
-				"formula_compiler = \">=2.0.0\" -- it must fail to compile under the real loader", path)
-		}
-	}
-}
-
-// *** THE MARKER IS LOAD-BEARING. *** gonk-gate check and gonk-gate sweep
-// grep for it. If a prompt or formula-step rewrite drops it, the gate goes
-// blind: every successful session classifies as gate-failed, every project
-// climbs its ladder to the most expensive rung, and the bill arrives before
-// the bug report. The instruction lives in two layers by design (see
-// agents/*/prompt.template.md's own comment: the agent prompt is a static,
-// per-session role description; the actual bead_id is only known at the
-// per-dispatch formula-step level) -- so this checks BOTH.
-func TestEveryAgentAndFormulaStepEmitsTheBeadMarker(t *testing.T) {
-	const marker = "<!-- gonk:bead:"
 	agentsDir := filepath.Join(packRoot(t), "agents")
-	entries, err := os.ReadDir(agentsDir)
-	if err != nil {
-		t.Fatalf("reading agents/: %v", err)
+	for trigger, agent := range triggerAgent {
+		t.Run(trigger, func(t *testing.T) {
+			dir := filepath.Join(agentsDir, agent)
+			if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+				t.Errorf("trigger %q maps to agent %q, but agents/%s does not exist", trigger, agent, agent)
+			}
+		})
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		p := filepath.Join(agentsDir, e.Name(), "prompt.template.md")
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue // flagged separately by TestEveryAgentDirHasBothFilesAndNoNameField
-		}
-		if !strings.Contains(string(data), marker) {
-			t.Errorf("%s does not instruct the agent about the bead marker", p)
-		}
-	}
-	formulaPaths := globTOML(t, filepath.Join(packRoot(t), "formulas"))
-	if len(formulaPaths) == 0 {
-		t.Fatal("no formulas defined")
-	}
-	for _, path := range formulaPaths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("reading %s: %v", path, err)
-		}
-		if !strings.Contains(string(data), marker) {
-			t.Errorf("%s: no step description carries the bead marker instruction -- without "+
-				"it the deterministic gate cannot tell success from failure, and every project "+
-				"escalates to its most expensive rung", path)
-		}
-	}
+	t.Run("mention-reply", func(t *testing.T) {
+		t.Skip("mention-reply is not yet on agentForTrigger -- T-24 ports it onto the broker; " +
+			"until then runDispatch refuses it (see cmd/gonk-gate's " +
+			"TestDispatchRefusesMentionReplyUntilItIsPortedToTheBroker)")
+	})
 }
 
 // AD-1: THE PACK NAMES NO MODEL. Rungs map to models in the OPERATOR's

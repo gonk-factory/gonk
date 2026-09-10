@@ -28,7 +28,7 @@ min_active_sessions = 0
 #
 # The escape hatch does NOT inherit the builtin opencode provider's settings, so
 # the two that matter are set explicitly here:
-#   - prompt_mode/prompt_flag: deliver the rendered formula step as
+#   - prompt_mode/prompt_flag: deliver the rendered prompt as
 #     `--prompt "<text>"`, appended after the command -> entrypoint forwards it
 #     to opencode ("exec opencode \"$@\"").
 #   - env OPENCODE_PERMISSION: auto-approve tool use, or a non-interactive
