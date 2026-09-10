@@ -57,9 +57,16 @@
     "provenance": {
       "type": "object",
       "additionalProperties": false,
+      "description": "Accepted for backward compatibility with existing .gonk.yml files. Not implemented in v1: nothing reads these keys, and no onboarding or documentation surface promises the behaviour they describe (gonk-92jq).",
       "properties": {
-        "commit_trailers": { "type": "boolean" },
-        "include_usage": { "type": "boolean" }
+        "commit_trailers": {
+          "type": "boolean",
+          "description": "Accepted and validated, but ignored. The commit-trailer writer was removed before v1 shipped (gonk-92jq); setting this key has no effect."
+        },
+        "include_usage": {
+          "type": "boolean",
+          "description": "Accepted and validated, but ignored. Depends on commit_trailers, which is unimplemented in v1; setting this key has no effect."
+        }
       }
     }
   },

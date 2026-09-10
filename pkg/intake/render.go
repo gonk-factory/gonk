@@ -67,11 +67,6 @@ continuity: resume
 triage:
   label_prefix: "gonk::"
   respond_to_mentions: true
-
-# Bot-authored commits carry git trailers naming what generated them.
-provenance:
-  commit_trailers: true
-  include_usage: false     # true also records token/cost in commit trailers
 `))
 
 // RenderDefaultConfig renders the committed .gonk.yml, filling `ladder:` from the
@@ -164,8 +159,6 @@ values committed here, so the two cannot disagree.
 | ` + "`continuity`" + ` | ` + "`resume`" + ` | An interrupted session resumes rather than starting over. |
 | ` + "`triage.label_prefix`" + ` | ` + "`gonk::`" + ` | Every label gonk creates starts with this, so its labels are always distinguishable from yours. |
 | ` + "`triage.respond_to_mentions`" + ` | ` + "`true`" + ` | Mentioning ` + "`@{{.BotUsername}}`" + ` in an issue comment gets a reply in that thread. |
-| ` + "`provenance.commit_trailers`" + ` | ` + "`true`" + ` | Commits gonk authors carry a trailer naming what generated them. |
-| ` + "`provenance.include_usage`" + ` | ` + "`false`" + ` | Token counts and cost are NOT written into commit trailers. Set to ` + "`true`" + ` to publish them in git history. |
 | ` + "`schedule.quiet_hours`" + ` | unset | Optional. Set (with ` + "`schedule.timezone`" + `) to hold gonk's work outside a window, e.g. ` + "`\"22:00-07:00\"`" + `. |
 | ` + "`schedule.timezone`" + ` | unset | IANA zone name for ` + "`quiet_hours`" + `, e.g. ` + "`America/New_York`" + `. |
 | ` + "`version`" + ` | ` + "`1`" + ` | Config schema version. |

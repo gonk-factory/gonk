@@ -37,6 +37,10 @@ type EffectiveTriage struct {
 	RespondToMentions bool
 }
 
+// EffectiveProvenance resolves ProvenancePolicy's inheritance so a resolved
+// value is available to whatever reads Effective (e.g. the meter API's
+// project response), but it is UNIMPLEMENTED in v1: nothing writes commit
+// trailers from it. See ProvenancePolicy's doc comment (gonk-92jq).
 type EffectiveProvenance struct {
 	CommitTrailers bool
 	IncludeUsage   bool

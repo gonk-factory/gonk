@@ -45,6 +45,15 @@ type TriagePolicy struct {
 	RespondToMentions *bool   `yaml:"respond_to_mentions"`
 }
 
+// ProvenancePolicy is accepted and validated for backward compatibility with
+// existing .gonk.yml files, but UNIMPLEMENTED: nothing in gonk reads these
+// fields. The commit-trailer writer was removed before v1 shipped (the
+// install guard it depended on could never fire, since pkg/rig hands a pod a
+// GitLab archive tarball rather than a git clone, so RIG_DIR/.git never
+// exists), and no onboarding or documentation surface may promise the
+// behaviour these fields describe (gonk-92jq). Keep this comment and the
+// matching "description" in gonk-config.v1.schema.json in sync with reality
+// if a reader is ever wired back up.
 type ProvenancePolicy struct {
 	CommitTrailers *bool `yaml:"commit_trailers"`
 	IncludeUsage   *bool `yaml:"include_usage"`

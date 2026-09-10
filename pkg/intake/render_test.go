@@ -105,6 +105,15 @@ func TestMRBodyDocumentsEveryConfigKey(t *testing.T) {
 		if top == "version" {
 			continue // schema plumbing, not a user-facing knob
 		}
+		if top == "provenance" {
+			// commit_trailers/include_usage are accepted-but-ignored for
+			// backward compatibility (gonk-92jq): the commit-trailer writer
+			// was removed before v1 shipped, and onboarding must not promise
+			// behaviour that key no longer has. Deliberately excluded from
+			// "explain every configurable key" rather than documented as if
+			// live -- see ProvenancePolicy's doc comment in pkg/gonkcfg.
+			continue
+		}
 		if !strings.Contains(body, top) {
 			t.Errorf("MR body never mentions config key %q (spec 5.3: explain every configurable key)", top)
 		}
@@ -113,6 +122,25 @@ func TestMRBodyDocumentsEveryConfigKey(t *testing.T) {
 				t.Errorf("MR body never mentions config key %q.%q", top, k)
 			}
 		}
+	}
+}
+
+// The commit-trailer feature was removed before v1 shipped (gonk-92jq): the
+// install guard it depended on could never fire in a pod, since pkg/rig
+// hands a pod a GitLab archive tarball rather than a git clone. The
+// onboarding MR used to promise the feature anyway. Assert the word is gone
+// outright, not just the two specific sentences that used to carry it, so a
+// future edit cannot quietly reintroduce the promise under different
+// wording. (Confirmed meaningful: the pre-fix testdata/onboarding-mr.golden.md
+// contains "trailer" six times, so this assertion fails against that
+// content.)
+func TestOnboardingMRDoesNotPromiseTrailers(t *testing.T) {
+	body, err := RenderOnboardingMR(OnboardingContext{Project: "group/repo", BotUsername: "gonk", Version: "v0", Ladder: []string{"qwen-local"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(body), "trailer") {
+		t.Fatalf("onboarding MR body mentions trailers, but gonk does not write commit trailers in v1 (gonk-92jq):\n%s", body)
 	}
 }
 
