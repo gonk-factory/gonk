@@ -28,7 +28,7 @@ func intakeImage(t *testing.T) (image string, pins map[string]string) {
 	}
 	tag := gonkTag(t, root, pins["GONK_VERSION"])
 	image = registry + "/gonk-intake:" + tag
-	present := exec.Command("podman", "image", "exists", image).Run() == nil
+	present := exec.Command(containerBin(t), "image", "inspect", image).Run() == nil
 	harness.RequireInfra(t, "image "+image+" (run `make intake-image` first)", present)
 	return image, pins
 }
@@ -45,7 +45,7 @@ func meterImage(t *testing.T) (image string, pins map[string]string) {
 	}
 	tag := gonkTag(t, root, pins["GONK_VERSION"])
 	image = registry + "/gonk-meter:" + tag
-	present := exec.Command("podman", "image", "exists", image).Run() == nil
+	present := exec.Command(containerBin(t), "image", "inspect", image).Run() == nil
 	harness.RequireInfra(t, "image "+image+" (run `make meter-image` first)", present)
 	return image, pins
 }
@@ -63,7 +63,7 @@ func meterTestclockImage(t *testing.T) (image string, pins map[string]string) {
 	}
 	tag := gonkTag(t, root, pins["GONK_VERSION"]) + "-testclock"
 	image = registry + "/gonk-meter:" + tag
-	present := exec.Command("podman", "image", "exists", image).Run() == nil
+	present := exec.Command(containerBin(t), "image", "inspect", image).Run() == nil
 	harness.RequireInfra(t, "image "+image+" (run `make meter-testclock-image` first)", present)
 	return image, pins
 }
@@ -74,24 +74,25 @@ func meterTestclockImage(t *testing.T) (image string, pins map[string]string) {
 // from the image layers; `podman cp` reads a path out of it directly.
 func extractFromImage(t *testing.T, image, pathInImage string) []byte {
 	t.Helper()
+	bin := containerBin(t)
 	var createOut bytes.Buffer
-	create := exec.Command("podman", "create", "--network=host", image)
+	create := exec.Command(bin, "create", "--network=host", image)
 	create.Stdout = &createOut
 	var createErr bytes.Buffer
 	create.Stderr = &createErr
 	if err := create.Run(); err != nil {
-		t.Fatalf("podman create %s: %v\nstderr:\n%s", image, err, createErr.String())
+		t.Fatalf("%s create %s: %v\nstderr:\n%s", bin, image, err, createErr.String())
 	}
 	cid := strings.TrimSpace(createOut.String())
-	t.Cleanup(func() { _ = exec.Command("podman", "rm", "-f", cid).Run() })
+	t.Cleanup(func() { _ = exec.Command(bin, "rm", "-f", cid).Run() })
 
 	dir := t.TempDir()
 	dst := dir + "/extracted"
 	var cpErr bytes.Buffer
-	cp := exec.Command("podman", "cp", cid+":"+pathInImage, dst)
+	cp := exec.Command(bin, "cp", cid+":"+pathInImage, dst)
 	cp.Stderr = &cpErr
 	if err := cp.Run(); err != nil {
-		t.Fatalf("podman cp %s:%s: %v\nstderr:\n%s", cid, pathInImage, err, cpErr.String())
+		t.Fatalf("%s cp %s:%s: %v\nstderr:\n%s", bin, cid, pathInImage, err, cpErr.String())
 	}
 	b, err := os.ReadFile(dst)
 	if err != nil {
@@ -191,12 +192,13 @@ func TestTestclockMeterImageHasTheSeam(t *testing.T) {
 // out to.
 func imageUser(t *testing.T, image string) string {
 	t.Helper()
+	bin := containerBin(t)
 	var out, errBuf bytes.Buffer
-	cmd := exec.Command("podman", "inspect", image, "--format", "{{.Config.User}}")
+	cmd := exec.Command(bin, "inspect", image, "--format", "{{.Config.User}}")
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("podman inspect %s: %v\nstderr:\n%s", image, err, errBuf.String())
+		t.Fatalf("%s inspect %s: %v\nstderr:\n%s", bin, image, err, errBuf.String())
 	}
 	return strings.TrimSpace(out.String())
 }
