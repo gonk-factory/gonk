@@ -15,11 +15,56 @@ package gcapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 )
+
+// transcriptMaxResponseBytes is GetSessionTranscript's OWN cap, distinct from
+// the generic maxResponseBytes (64 KiB) every other route is held to.
+//
+// A triage transcript is not a small supervisor control-plane reply: the
+// triage prompt now tells the model to list directories and read code before
+// answering, and a real session's transcript -- every turn, tool call and
+// tool result, concatenated -- routinely clears 64 KiB. Judging that session
+// against the generic cap does not fail closed in any useful sense: it turns
+// a real, complete batch into a transport error, the sweep re-slings the bead
+// onto a pricier rung, and the agent's finished work goes unread (R-10).
+//
+// 4 MiB is generous headroom over an observed real transcript without being
+// unbounded -- GetSessionTranscript still refuses to read an arbitrarily
+// large body into memory whole; IsTranscriptTooLarge names the refusal.
+//
+// Buffering, not streaming: like every other gcapi read, readCapped reads the
+// whole body into one []byte before returning (io.ReadAll over a LimitReader),
+// and json.Unmarshal then copies every turn's text again into the decoded
+// SessionTranscript. The broker's own read of it (broker_apply.go) calls
+// Text() TWICE -- once for isUnreadableTranscript, once for extractBatch --
+// and Text() rebuilds a fresh joined copy of the whole transcript each time
+// (strings.Join over every turn) rather than caching it. So a single sweep's
+// judgment of one session can transiently hold up to FOUR near-cap-sized
+// copies of the same text live at once (the raw HTTP body, the decoded turn
+// strings, and two independent Text() joins) -- worst case on the order of
+// 16 MiB for one session at the 4 MiB cap, not the ~4 MiB the cap number
+// alone suggests. gonk-gate's sweep judges sessions one at a time (no
+// per-tick fan-out today), so this is a per-sweep-tick peak, not something
+// that multiplies across sessions within one process -- but it is a real
+// number an operator sizing the sweep pod should know, and it is not changed
+// by this task (T-55's Jobs move replaces the transcript source with pod
+// logs; that is the point to reconsider streaming, not here).
+const transcriptMaxResponseBytes = 4 << 20 // 4 MiB
+
+// IsTranscriptTooLarge reports whether err is GetSessionTranscript refusing a
+// transcript that exceeded transcriptMaxResponseBytes -- a NAMED refusal
+// (errors.Is against the shared size-cap sentinel), not merely "some error
+// came back", so a caller can tell "this session produced too much text to
+// read" apart from a network or decode failure and react accordingly (retry
+// makes no sense here; the transcript will not get smaller).
+func IsTranscriptTooLarge(err error) bool {
+	return errors.Is(err, errResponseTooLarge)
+}
 
 // TranscriptTurn is one entry of a conversation-format transcript. Field tags
 // match gascity's outputTurn exactly.
@@ -78,7 +123,7 @@ func (c *Client) GetSessionTranscript(ctx context.Context, idOrAlias string) (*S
 	}
 	path := fmt.Sprintf("/v0/city/%s/session/%s/transcript",
 		url.PathEscape(c.City), url.PathEscape(idOrAlias))
-	body, err := c.doRequest(ctx, http.MethodGet, path, "tail=0", nil)
+	body, err := c.doRequestCapped(ctx, http.MethodGet, path, "tail=0", nil, transcriptMaxResponseBytes)
 	if err != nil {
 		return nil, err
 	}

@@ -234,6 +234,16 @@ var errEmptyCity = errors.New("gascity: city name is empty (set GONK_CITY -- the
 // would be a category error). rawQuery is the already-encoded query string
 // (without '?'); it is part of both the request URL and the grant digest.
 func (c *Client) doRequest(ctx context.Context, method, path, rawQuery string, payload []byte) ([]byte, error) {
+	return c.doRequestCapped(ctx, method, path, rawQuery, payload, maxResponseBytes)
+}
+
+// doRequestCapped is doRequest with the response-body cap as a parameter,
+// rather than the hardcoded maxResponseBytes -- so ONE call site (currently:
+// GetSessionTranscript) can read against a larger, dedicated limit without
+// widening the cap every other route is held to. Everything else about the
+// transport path (bounded retry, error mapping, per-attempt write grant) is
+// unchanged and shared.
+func (c *Client) doRequestCapped(ctx context.Context, method, path, rawQuery string, payload []byte, limit int64) ([]byte, error) {
 	fullURL := c.BaseURL + path
 	if rawQuery != "" {
 		fullURL += "?" + rawQuery
@@ -273,7 +283,7 @@ func (c *Client) doRequest(ctx context.Context, method, path, rawQuery string, p
 		if err != nil {
 			lastErr = fmt.Errorf("gascity: %s %s: %w", method, path, err)
 		} else {
-			body, rerr := readCapped(resp.Body, maxResponseBytes)
+			body, rerr := readCapped(resp.Body, limit)
 			_ = resp.Body.Close()
 			switch {
 			case rerr != nil:
@@ -297,6 +307,12 @@ func (c *Client) doRequest(ctx context.Context, method, path, rawQuery string, p
 	}
 }
 
+// errResponseTooLarge is wrapped into every "response too large" error
+// readCapped produces, so a caller can distinguish "the body exceeded its cap"
+// from any other transport failure with errors.Is rather than a string match.
+// IsTranscriptTooLarge (transcript.go) is built on it.
+var errResponseTooLarge = errors.New("gascity: response too large")
+
 // readCapped reads at most limit bytes and errors if the body is longer,
 // rather than silently truncating (a truncated response could parse as a
 // *different, valid* document). Same semantics as pkg/glab's helper of the
@@ -307,7 +323,7 @@ func readCapped(r io.Reader, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("response too large (> %d bytes)", limit)
+		return nil, fmt.Errorf("%w (> %d bytes)", errResponseTooLarge, limit)
 	}
 	return b, nil
 }
