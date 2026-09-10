@@ -64,6 +64,28 @@ func (m *MeterClient) Register(ctx context.Context, req meterapi.ProjectRequest)
 	return nil, fmt.Errorf("meter: PUT %s: unexpected status %d", req.Project, code)
 }
 
+// Get answers whether meter currently has PROJECT registered, WITHOUT
+// mutating anything -- unlike Deregister's DELETE, it touches neither the
+// Secret nor the DB row behind a registration. reconcileProject's
+// archived-project branch uses it to decide whether a DELETE is even needed,
+// rather than repeating an idempotent-but-not-free one every pass.
+//
+// found is false only on a clean 404 ("project not registered"); any other
+// non-2xx status is a real error, same as Register and Deregister.
+func (m *MeterClient) Get(ctx context.Context, project string) (*meterapi.ProjectResponse, bool, error) {
+	var out meterapi.ProjectResponse
+	code, err := m.do(ctx, http.MethodGet, meterapi.ProjectPath(project), nil, &out)
+	switch {
+	case err != nil:
+		return nil, false, err
+	case code == http.StatusNotFound:
+		return nil, false, nil
+	case code == http.StatusOK:
+		return &out, true, nil
+	}
+	return nil, false, fmt.Errorf("meter: GET %s: unexpected status %d", project, code)
+}
+
 // Deregister de-onboards a project: meter disables it and deletes the virtual
 // key. Idempotent -- deleting an unknown project is a 204, not a 404.
 func (m *MeterClient) Deregister(ctx context.Context, project string) error {

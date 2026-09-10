@@ -23,7 +23,18 @@ type fakeMeter struct {
 	srv     *httptest.Server
 	puts    []meterapi.ProjectRequest
 	deletes []string
-	fail    bool // 500 on everything
+	// gets records every GET /v1/projects/{project} this fake served (the
+	// same EscapedPath convention as deletes). Tests use it to assert that a
+	// tombstoned, already-deregistered archived project causes NO further
+	// meter traffic -- not even a read-only GET.
+	gets []string
+	// notRegistered makes GET answer 404 ("project not registered"), the way
+	// the real meter would for a project it genuinely has no record of --
+	// e.g. one a DIFFERENT, now-gone intake replica already deregistered.
+	// Defaults false (GET reports the project found), matching this fake's
+	// existing default-success posture for PUT and DELETE.
+	notRegistered bool
+	fail          bool // 500 on everything
 	// failFirst models THE BOOT RACE: meter is not listening yet when intake
 	// comes up, so the first N registration attempts fail outright. Observed
 	// live twice on 2026-07-31 and again on the 2026-08-04 deploy
@@ -62,6 +73,27 @@ func newFakeMeter(t *testing.T) *fakeMeter {
 			// .Path, which would hide the very escaping this test verifies.
 			m.deletes = append(m.deletes, r.URL.EscapedPath())
 			w.WriteHeader(204)
+			return
+		}
+		if r.Method == http.MethodGet {
+			m.gets = append(m.gets, r.URL.EscapedPath())
+			if m.notRegistered {
+				http.Error(w, `{"error":"project not registered"}`, http.StatusNotFound)
+				return
+			}
+			resp := meterapi.ProjectResponse{
+				Rig: "fake", State: m.state, ConfigHash: "sha256:fake",
+				Effective: &meterapi.Effective{
+					Enabled: true,
+					Actions: meterapi.Actions{Triage: true},
+					Ladder:  []string{"qwen-local"},
+					Triage:  meterapi.Triage{LabelPrefix: "gonk::", RespondToMentions: true},
+				},
+				KeyRef: meterapi.KeyRef{SecretName: "gonk-key-x", SecretKey: "LITELLM_API_KEY"},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(resp)
 			return
 		}
 		var req meterapi.ProjectRequest
@@ -421,6 +453,80 @@ func TestReconcileDeregistersArchivedProjectOnColdCache(t *testing.T) {
 	}
 	if _, ok := r.Cache.Get(p.ID); ok {
 		t.Fatal("an already-archived project must never enter the cache")
+	}
+}
+
+// T-12 made the archived branch deregister UNCONDITIONALLY (off `p`, not a
+// cache hit) to close the cold-cache hole above. Left there, "unconditional"
+// means every subsequent pass over the SAME archived project repeats the
+// meter DELETE forever -- a meter call, an Obs.MeterPush("ok"), and (per
+// meter's own handler) a Secret delete and a DB delete behind it, none of it
+// visible because Deregister is idempotent. Once a deregistration has
+// actually succeeded, a later pass over the same still-archived project must
+// not touch meter again AT ALL.
+func TestReconcileSkipsMeterCallOnSecondArchivedPass(t *testing.T) {
+	gl := glabtest.New(t)
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	p.PutFile(".gonk.yml", []byte("version: 1\nenabled: true\nladder: [qwen-local]\n"))
+	m := newFakeMeter(t)
+	r := newReconciler(t, gl, m)
+
+	// Pass 1: register while active.
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pass 2: the project archives. This is the FIRST archived pass, so it
+	// must still deregister.
+	gl.SetArchived(p.ID, true)
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.deletes) != 1 {
+		t.Fatalf("pass 2 (first archived pass): deletes = %d, want 1", len(m.deletes))
+	}
+	getsAfterPass2, deletesAfterPass2 := len(m.gets), len(m.deletes)
+
+	// Pass 3: same archived project, already successfully deregistered in
+	// pass 2. This must issue NO meter call -- neither a GET nor a DELETE --
+	// or the reconciler is still repeating an idempotent-but-not-free call
+	// every pass forever, which is the defect this test exists to catch.
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.gets) != getsAfterPass2 || len(m.deletes) != deletesAfterPass2 {
+		t.Fatalf("pass 3 touched meter for an already-deregistered archived project: gets %d->%d, deletes %d->%d",
+			getsAfterPass2, len(m.gets), deletesAfterPass2, len(m.deletes))
+	}
+}
+
+// A restart (or reschedule, rollout, fresh replica) empties the reconciler's
+// in-memory tombstone the same way it empties the rest of the cache (cache.go
+// is derived-only). Simulated here with a brand-new Reconciler (fresh Cache)
+// against a meter that already has NO record of the project -- standing in
+// for "a previous intake replica deregistered this project before this one
+// ever started". The cold reconciler must ask meter (GET) rather than assume
+// either answer, and since meter says gone, it must NOT re-issue a DELETE.
+func TestReconcileArchivedProjectAfterRestartSkipsWhenMeterAlreadyDeregistered(t *testing.T) {
+	gl := glabtest.New(t)
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	p.PutFile(".gonk.yml", []byte("version: 1\nenabled: true\nladder: [qwen-local]\n"))
+	gl.SetArchived(p.ID, true)
+	m := newFakeMeter(t)
+	m.notRegistered = true       // meter has no record of this project
+	r := newReconciler(t, gl, m) // fresh Reconciler: cold tombstone, as after a restart
+
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.deletes) != 0 {
+		t.Fatalf("meter already had no registration for the project; must not issue a DELETE: %v", m.deletes)
+	}
+	if len(m.gets) != 1 {
+		t.Fatalf("a cold tombstone must ask meter once via GET before deciding: got %d gets", len(m.gets))
+	}
+	if !r.Cache.WasDeregistered(p.ID) {
+		t.Fatal("a confirmed-absent archived project must be tombstoned so later passes in THIS process skip the meter call")
 	}
 }
 
