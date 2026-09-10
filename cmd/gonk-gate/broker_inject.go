@@ -629,7 +629,7 @@ func capBody(s string, max int) string {
 // the bead) but records the SESSION ALIAS as the correlation key sweep follows.
 //
 // Exit codes match runDispatch's contract: 0 acted, 1 infra, 2 misconfig.
-func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec meterapi.DecideResponse, base beadstore.Record) int {
+func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec meterapi.DecideResponse, base beadstore.Record) (code int) {
 	a := d.Args
 	// The meter's attribution metadata NOW REACHES THE POD (gonk-m6t). It used
 	// to be marshalled only to be logged, because the marker line it rode was
@@ -678,6 +678,62 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 	}
 
 	alias := brokerSessionAlias(agent, a.ProjectID, a.IssueIID, dec.Attempt)
+
+	// RESERVE THE ALIAS NOW, before anything below that takes real wall-clock
+	// time: the issue/repo fetch, the checkout grant, PutPrompt, the create
+	// itself, and the up-to-240s wait for the pod to fetch its prompt. gonk-u6p's
+	// duplicate landed 4m29s inside exactly that window, well before this
+	// function ever reached its final Store.Put -- so a guard that only fires
+	// AFTER this function returns cannot see a re-dispatch that lands during it.
+	// Writing a placeholder record now, with SessionID already set to this
+	// alias, means the SAME guard above (Get + SessionID/Attempt match) catches
+	// a re-dispatch landing ANYWHERE in the window, not only after it.
+	//
+	// pending-prompt is a bd label for a human to read
+	// (`gonk::pending-prompt`, pkg/beadstore/bd.go's Put), not a metric label
+	// anything parses, and nothing in this tree switches exhaustively on
+	// beadstore.State -- sweep.go, reap.go and bd.go all List or compare
+	// specific values, never all of them.
+	//
+	// INTERIM STOP-GAP (T-55/T-58 replace it with a deterministic Job name and
+	// a 409 at the API server). Because it is interim, the release below is
+	// load-bearing: gonk-sweep Lists only StateRunning and StateParked
+	// (runSweep, sweep.go), so a record left sitting in StatePendingPrompt is
+	// invisible to it and would never be reclaimed on its own. Every return
+	// path below that does NOT reach the final StateRunning write clears
+	// SessionID again so a genuine retry -- this dispatch failing outright, not
+	// racing a concurrent one -- is not permanently mistaken for "already
+	// dispatched". A dispatch that crashes between the two writes (the process
+	// killed outright, so no defer runs) is the one case this cannot cover: the
+	// record wedges in pending-prompt until T-58 removes the state. That is the
+	// accepted shape of this stop-gap, not a silently discovered one.
+	pending := base
+	pending.State = beadstore.StatePendingPrompt
+	pending.SessionID = alias
+	pending.Rung, pending.Model, pending.ReservationID = dec.Rung, dec.Model, dec.ReservationID
+	pending.ReservationExpiresAt = dec.ReservationExpiresAt
+	if err := d.Store.Put(ctx, pending); err != nil {
+		// Same bias as the read above: an unreadable/unwritable store must not
+		// block a legitimate dispatch, only weaken this particular guard for it.
+		d.Log.Error("could not reserve the pending-prompt record before creating a session; "+
+			"proceeding, but a duplicate session for this attempt cannot be ruled out",
+			"err", err, "bead", a.BeadAnchor, "alias", alias)
+	}
+	defer func() {
+		if code == 0 {
+			// Either the happy path below overwrote this record with
+			// StateRunning, or a later reservation matched by another
+			// in-flight caller. Nothing to release.
+			return
+		}
+		released := pending
+		released.SessionID = ""
+		if err := d.Store.Put(ctx, released); err != nil {
+			d.Log.Error("could not release the pending-prompt reservation after a failed dispatch; "+
+				"a retry may wrongly see this attempt as already dispatched",
+				"err", err, "bead", a.BeadAnchor, "alias", alias)
+		}
+	}()
 
 	// The prompt is per-agent. Scaffold is project-scoped and reads the repo
 	// from its own rig, so it needs no issue fetched for it -- and asking the
