@@ -112,7 +112,7 @@ func TestPromptFetchRetriesTransportFailureThenSucceeds(t *testing.T) {
 		"GONK_PROMPT_WAIT_SECS=10",
 		"GONK_MODEL=test-model",
 		"GONK_LITELLM_URL=http://litellm.invalid",
-		"GONK_LITELLM_KEY=fake-static-key",
+		"GC_WEBHOOK_ARG_LITELLM_KEY=fake-session-key",
 		"GONK_OPENCODE_OVERLAY="+filepath.Join(dir, "opencode.json"),
 		"FAKE_CURL_FAIL_COUNT=1",
 		"FAKE_CURL_FAIL_EXIT=7",

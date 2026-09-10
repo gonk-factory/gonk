@@ -1,15 +1,23 @@
-// Command gonk-gate is Gate 2, the sweeper, and (Task 8) the commit-trailer
-// generator -- one static binary with no model call in it anywhere. It ships
-// in both the controller image (Task 6, where its `dispatch`/`sweep`
-// subcommands back the two exec orders) and the agent image (Task 5, where
-// only `trailers` runs).
+// Command gonk-gate is Gate 2 and the sweeper -- one static binary with no
+// model call in it anywhere. It ships in the controller image (Task 6, where
+// its `dispatch`/`sweep` subcommands back the two exec orders); the agent
+// image no longer bundles it (the `trailers` subcommand it used to carry was
+// deleted -- see below).
 //
 // Subcommands:
 //
 //	gonk-gate dispatch   GATE 2. Re-decides via meter, runs/parks/denies.
 //	gonk-gate sweep      Classify finished sessions, report outcomes, re-sling.
-//	gonk-gate trailers   The prepare-commit-msg hook's body (Task 8): renders
-//	                     and splices the commit-provenance trailer block.
+//
+// There used to be a `trailers` subcommand (Task 8): the prepare-commit-msg
+// hook's body, rendering and splicing a commit-provenance trailer block. It
+// was never reachable in practice -- the agent pod's checkout is a GitLab
+// repository-archive tarball (pkg/rig, ArchiveFetcher.RepoArchive), which
+// carries no `.git/`, so entrypoint.sh's `if [ -d "${RIG_DIR}/.git" ]` guard
+// around installing the hook never once took the true branch in a real pod,
+// and with no hook installed `gonk-gate trailers` was never invoked either.
+// Deleted along with images/agent/prepare-commit-msg and the entrypoint
+// install step (spec §6.1's trailer paragraph is now marked "not in v1").
 //
 // There used to be a fourth subcommand, `check` -- the body of a formula's
 // [steps.check], a re-run verification loop that asked "is the marker on the
@@ -67,7 +75,7 @@ func main() {
 		log.Warn("log sink degraded", "detail", logSinkNote)
 	}
 	if len(os.Args) < 2 {
-		log.Error("usage: gonk-gate dispatch|sweep|trailers")
+		log.Error("usage: gonk-gate dispatch|sweep")
 		os.Exit(2)
 	}
 
@@ -78,31 +86,6 @@ func main() {
 	if os.Args[1] == "--version" || os.Args[1] == "-version" {
 		fmt.Println(version)
 		os.Exit(0)
-	}
-
-	// trailers is answered BEFORE loadGateConfig, deliberately -- unlike every
-	// other subcommand it is invoked directly by a git hook inside the agent
-	// pod (not as a Gas City exec order), and it needs neither GONK_CITY nor
-	// GONK_SUPERVISOR_URL (it never calls gcapi). Task 8's own contract, named
-	// three separate times in the spec that added it: a trailer lookup must
-	// NEVER fail a commit. Routing it through loadGateConfig's hard
-	// requirements would mean a plain `git commit` in a pod that has not yet
-	// been given GONK_CITY exits 2 and (absent the hook's own `|| true`)
-	// blocks the commit -- exactly the failure mode this subcommand exists to
-	// rule out. It still WANTS a meter URL/token (to look up the project's
-	// provenance policy and, if asked, its session cost), so it builds its
-	// own minimal meter client straight from env, best-effort.
-	if os.Args[1] == "trailers" {
-		meterTok, _ := readSecretFile(os.Getenv("GONK_METER_TOKEN_FILE")) // "" is fine -- a 401 degrades to the shipped default
-		os.Exit(runTrailers(context.Background(), trailersDeps{
-			Meter:   newMeterAPI(os.Getenv("GONK_METER_URL"), meterTok),
-			Log:     log,
-			Version: version,
-		}, trailersArgs{
-			CommitMsgFile: trailersCommitMsgFile(os.Args[2:]),
-			Model:         envArg("model"),
-			MetadataJSON:  envArg("metadata_json"),
-		}))
 	}
 
 	cfg, err := loadGateConfig()

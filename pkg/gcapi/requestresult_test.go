@@ -8,28 +8,12 @@ import (
 	"time"
 )
 
-// These tests pin the contract that gonk-u1p.7 was lost in: the submit 202 is
+// These tests pin the contract that gonk-u1p.7 was lost in: an async 202 is
 // an ACKNOWLEDGEMENT, not a receipt, and the only statement of what actually
 // happened is a terminal event on the city log keyed by request id.
-
-// Without the correlation handle there is no way to ask what happened, so it
-// must survive decoding rather than being discarded as it was before.
-func TestSubmitSessionReturnsTheCorrelationHandle(t *testing.T) {
-	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusAccepted)
-		_, _ = fmt.Fprint(w, `{"status":"accepted","request_id":"req-abc","event_cursor":"41"}`)
-	}))
-	ack, err := c.SubmitSession(context.Background(), "alias", "m", SubmitIntentDefault)
-	if err != nil {
-		t.Fatalf("SubmitSession = %v", err)
-	}
-	if ack.RequestID != "req-abc" {
-		t.Errorf("request_id = %q, want req-abc", ack.RequestID)
-	}
-	if ack.EventCursor != "41" {
-		t.Errorf("event_cursor = %q, want 41", ack.EventCursor)
-	}
-}
+// AwaitRequestOutcome is what CreateSession's caller uses to learn the real
+// outcome (cmd/gonk-gate/broker_inject.go); these tests exercise it directly
+// against synthetic events rather than through any particular async call.
 
 func eventsHandler(t *testing.T, byType map[string]string) http.Handler {
 	t.Helper()

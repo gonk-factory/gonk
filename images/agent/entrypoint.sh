@@ -1,13 +1,9 @@
 #!/bin/sh
 # gonk-agent-entrypoint: the agent pod's ENTRYPOINT (images/Dockerfile.agent).
 #
-# Does exactly three things, in order (Plan 04, Task 5, Step 3):
+# Does exactly two things, in order (Plan 04, Task 5, Step 3):
 #
-#   1. Installs the prepare-commit-msg hook into the rig clone's .git/hooks/
-#      (Task 8's hook is not cloned with the repo, so the session installs it
-#      itself, every time -- if Gas City's session provider ever wipes
-#      .git/hooks on pod recreation, this line is what re-installs it).
-#   2. Renders overlay/opencode.json from THIS session's environment: the
+#   1. Renders overlay/opencode.json from THIS session's environment: the
 #      LiteLLM base URL, the model gonk-meter chose (never a literal, never
 #      chosen here), the virtual key (a FILE MOUNT, never an env value -- env
 #      leaks into `ps`, /proc/<pid>/environ, crash dumps, and every child
@@ -16,7 +12,16 @@
 #      stamped VERBATIM from gonk-meter's own DecideResponse.Metadata
 #      (docs/environment.md, "VERIFIED: the attribution chain works"; Plan 04
 #      OD-7).
-#   3. execs opencode.
+#   2. execs opencode.
+#
+# There used to be a third step here, installing a prepare-commit-msg hook
+# (Task 8) into the rig clone's .git/hooks/ for commit-provenance trailers.
+# Deleted: the checkout this entrypoint fetches is a GitLab repository-archive
+# tarball (pkg/rig, ArchiveFetcher.RepoArchive), never a git clone, so
+# RIG_DIR/.git never existed in a real pod -- the hook install always took the
+# "skip" branch, and with no hook installed, gonk-gate's own `trailers`
+# subcommand was never invoked either. Both are gone now (spec §6.1's trailer
+# paragraph is marked "not in v1").
 #
 # *** OPENCODE-VERSION-SENSITIVE, FLAGGED FOR PLAN 06 ***
 # The mechanism (provider.<id>.options.headers, the @ai-sdk/openai-compatible
@@ -93,10 +98,8 @@ fi
 
 log "expecting: checkout=$([ -n "${GONK_RIG_BASE_URL:-}" ] && echo yes || echo no) prompt=$([ -n "${GONK_PROMPT_URL:-}" ] && echo yes || echo no)"
 
-# ---- Step 1: install the commit-provenance hook -----------------------------
 # GONK_RIG_DIR defaults to the WORKDIR opencode is launched in (the rig
-# clone). A missing .git (no clone yet, or a non-git rig) is not fatal here --
-# scaffold-only sessions and dry runs still need to start.
+# clone).
 RIG_DIR="${GONK_RIG_DIR:-$PWD}"
 
 # ---- Step 0: fetch this session's CHECKOUT, if one was granted --------------
@@ -174,15 +177,6 @@ gonk_fetch_checkout() {
 }
 gonk_fetch_checkout
 
-if [ -d "${RIG_DIR}/.git" ]; then
-	mkdir -p "${RIG_DIR}/.git/hooks"
-	cp /usr/local/share/gonk/prepare-commit-msg "${RIG_DIR}/.git/hooks/prepare-commit-msg"
-	chmod +x "${RIG_DIR}/.git/hooks/prepare-commit-msg"
-	log "installed prepare-commit-msg into ${RIG_DIR}/.git/hooks"
-else
-	log "no .git at ${RIG_DIR}; skipping prepare-commit-msg install"
-fi
-
 # ---- Step 2: render overlay/opencode.json -----------------------------------
 # Every one of these is REQUIRED. There is no default rung, no default model,
 # and no ambient virtual key -- an agent pod with any of these unset is a pod
@@ -203,21 +197,16 @@ fi
 # gonk-mzd) and setting GC_WEBHOOK_ARG_MODEL/GC_WEBHOOK_ARG_METADATA_JSON
 # directly from the fetched row's model/metadata fields once it lands.
 #
-# This USED TO be two marker lines a formula step stamped at the top of the
-# rendered prompt --
-#
-#     <!-- gonk:model:<model> -->
-#     <!-- gonk:meta:<metadata json> -->
-#
-# -- parsed out of our own --prompt argument by marker_value() below. ADR-007
-# §3 deleted the whole formula layer that stamped them (including
-# pack/formulas/gonk-triage.toml), and no live path hands this entrypoint a
-# --prompt argument any more (broker sessions carry no launch-time Message at
-# all -- see cmd/gonk-gate/dispatch_test.go's
-# TestDispatchCreatesTriageSessionOnRun). marker_value() and its precedence
-# chain below are dead code now, left in place as a harmless, no-op fallback
-# rather than ripped out here -- that cleanup is outside a formula-layer
-# deletion's scope.
+# This USED TO be two HTML-comment marker lines a formula step stamped at the
+# top of the rendered prompt -- one naming the model, one carrying the
+# metadata JSON -- parsed out of our own --prompt argument by a
+# marker_value() helper that used to live below. ADR-007 §3 deleted the whole
+# formula layer that stamped them (including pack/formulas/gonk-triage.toml),
+# and no live path hands this entrypoint a --prompt argument any more (broker
+# sessions carry no launch-time Message at all -- see
+# cmd/gonk-gate/dispatch_test.go's TestDispatchCreatesTriageSessionOnRun).
+# marker_value() and the marker branch of the model/metadata precedence chain
+# below have since been deleted along with it.
 #
 # argv is `--prompt <text>` (agent.toml prompt_mode=flag/prompt_flag=--prompt).
 GONK_PROMPT=""
@@ -327,63 +316,41 @@ if [ -z "${GONK_PROMPT}" ] && [ -n "${GONK_PROMPT_URL:-}" ] && [ -n "${GC_ALIAS:
 	unset _purl _pfile _deadline _code _pmodel _pmeta
 fi
 
-marker_value() {
-	# ALWAYS FINDS NOTHING since ADR-007 §3 (see the comment above Step 2).
-	# GONK_PROMPT is not necessarily empty here -- Step 1.5's fetch populates
-	# it with the broker's rendered prompt text for a real dispatched session
-	# -- but no live path stamps a "<!-- gonk:model:...-->" / "<!--
-	# gonk:meta:...-->" line into that text any more (the broker's own tests
-	# assert its rendered prompts never carry them). So this greps real
-	# content for a pattern nothing produces, rather than searching empty
-	# input; either way the result is always empty. Left in place as a
-	# harmless fallback rather than removed as part of a formula-layer
-	# deletion.
-	#
-	# $1 = marker name. Prints the value, or nothing. `head -1` because only the
-	# first occurrence is ours; a hostile issue body cannot forge an earlier one
-	# (a formula step used to put these at the very top of the step it
-	# rendered).
-	printf '%s\n' "${GONK_PROMPT}" \
-		| sed -n "s/^<!-- gonk:$1:\(.*\) -->[[:space:]]*$/\1/p" \
-		| head -1
-}
-
 # THE SESSION IS RESIDENT, SO NONE OF THIS MAY BE FATAL AT STARTUP.
 # Gas City's k8s provider launches the pod as a POOL session:
 #     tmux new-session -d -s main "gonk-agent-entrypoint" && sleep infinity
 # with NO prompt appended -- the prompt is delivered later, into the running
-# tmux, when a bead is assigned. So at startup there are no markers, and an
-# entrypoint that exits on a missing model takes the tmux session with it: the
-# server dies, the reconciler sees runtime-missing, and the pod is reaped and
-# respawned in a ~60s loop. (Observed exactly that.)
+# tmux, when a bead is assigned. So at startup there is often no session-arg
+# model yet, and an entrypoint that exits on a missing model takes the tmux
+# session with it: the server dies, the reconciler sees runtime-missing, and
+# the pod is reaped and respawned in a ~60s loop. (Observed exactly that.)
 #
-# Precedence, most specific first: prompt marker (per-session, when we were
-# handed a prompt) > GC_WEBHOOK_ARG_* (any non-gascity caller that sets it) >
-# GONK_MODEL, the STATIC per-install default the chart injects from the
-# operator's default rung. Static is the honest v1 answer: this deployment has
-# one local rung, and per-session model selection is what the v2 broker adds.
+# Precedence, most specific first: GC_WEBHOOK_ARG_MODEL (per-session -- set by
+# Step 1.5's prompt fetch above, or by any non-gascity caller) > GONK_MODEL,
+# the STATIC per-install default the chart injects from the operator's
+# default rung. Static is the honest v1 answer: this deployment has one local
+# rung, and per-session model selection is what the v2 broker adds.
 # WHICH SOURCE WON IS THE INTERESTING PART, not just the value: a session running
 # the static per-install default rather than the meter's rung decision is a
 # different situation, and it used to be indistinguishable in the log.
-_model_before="${GC_WEBHOOK_ARG_MODEL:-}"
-: "${GC_WEBHOOK_ARG_MODEL:=$(marker_value model)}"
-: "${GC_WEBHOOK_ARG_METADATA_JSON:=$(marker_value meta)}"
-if [ -n "${_model_before}" ]; then
+if [ -n "${GC_WEBHOOK_ARG_MODEL:-}" ]; then
 	GONK_MODEL_SOURCE="session-arg"
-elif [ -n "${GC_WEBHOOK_ARG_MODEL}" ]; then
-	GONK_MODEL_SOURCE="prompt-marker"
 fi
 : "${GC_WEBHOOK_ARG_MODEL:=${GONK_MODEL:-}}"
+# Always defined from here on (possibly empty), same as GC_WEBHOOK_ARG_MODEL
+# above -- the jq render below and the metadata-bytes log line both reference
+# it unguarded under `set -u`.
+: "${GC_WEBHOOK_ARG_METADATA_JSON:=}"
 if [ -z "${GONK_MODEL_SOURCE:-}" ] && [ -n "${GC_WEBHOOK_ARG_MODEL}" ]; then
 	GONK_MODEL_SOURCE="static-install-default"
 	log "WARNING: model came from the static per-install default, NOT the meter's rung decision"
 fi
-if [ -n "${GC_WEBHOOK_ARG_METADATA_JSON}" ]; then
+if [ -n "${GC_WEBHOOK_ARG_METADATA_JSON:-}" ]; then
 	log "attribution metadata present (${#GC_WEBHOOK_ARG_METADATA_JSON} bytes)"
 fi
 
 if [ -z "${GC_WEBHOOK_ARG_MODEL}" ]; then
-	log "no model: no <!-- gonk:model:... --> prompt marker, no GC_WEBHOOK_ARG_MODEL, no GONK_MODEL."
+	log "no model: no GC_WEBHOOK_ARG_MODEL, no GONK_MODEL."
 	log "this is gonk-meter's rung decision and there is no built-in default -- refusing to start."
 	log "session end: refused (no model)"
 	exit 1
@@ -394,8 +361,8 @@ fi
 # here would trade all attribution for no session at all. The header is simply
 # omitted when empty, and that is LOUD in the log so a silent loss of the
 # attribution seam (OD-7) cannot pass for normal.
-if [ -z "${GC_WEBHOOK_ARG_METADATA_JSON}" ]; then
-	log "WARNING: no attribution metadata (no <!-- gonk:meta:... --> marker, no GC_WEBHOOK_ARG_METADATA_JSON)"
+if [ -z "${GC_WEBHOOK_ARG_METADATA_JSON:-}" ]; then
+	log "WARNING: no attribution metadata (no GC_WEBHOOK_ARG_METADATA_JSON)"
 	log "WARNING: spend rows for this session will NOT carry per-bead attribution"
 fi
 
@@ -415,33 +382,24 @@ fi
 if [ -z "${GONK_LITELLM_KEY_FILE:-}" ]; then
 	# Materialize the virtual key into a private file so opencode's {file:...}
 	# apiKey syntax can read it without the key ever appearing in the rendered
-	# config. GONK_LITELLM_KEY is STATIC pod env (per-install, not per-session):
-	# it is the one channel Gas City leaves open, since resolved.Env comes from
-	# city/agent config. GC_WEBHOOK_ARG_LITELLM_KEY is accepted as a fallback for
-	# any non-gascity caller that does set it.
-	# PER-SESSION KEY WINS OVER THE STATIC ONE (gonk-8gb). GONK_LITELLM_KEY is a
-	# PER-INSTALL channel written into agent.toml at bootstrap; the project's own
-	# virtual key can only arrive per-session, because a project key is
-	# per-project and agent.toml is not. Preferring the static value meant every
-	# session used the install-wide key -- which was the proxy ADMIN key -- and
-	# the per-project budget the meter had provisioned was never consulted.
+	# config. GC_WEBHOOK_ARG_LITELLM_KEY is the per-session, per-project key
+	# delivered with the prompt row (gonk-8gb): dispatch resolves the
+	# project's virtual key and fails closed if it cannot, so this being
+	# present means the meter vouched for it.
 	#
-	# The order matters more than it looks: dispatch now resolves the project key
-	# and fails closed if it cannot, so GC_WEBHOOK_ARG_LITELLM_KEY being present
-	# means the meter vouched for it. The static value is the fallback for a
-	# non-gascity caller that sets no per-session key at all.
-	# The per-session key (delivered in the prompt row) wins. The static
-	# per-install value remains only as a fallback for a caller that supplies no
-	# prompt row at all, and it announces itself as unmetered when used --
-	# because a per-install key cannot be a per-project budget (gonk-8gb).
-	_key="${GC_WEBHOOK_ARG_LITELLM_KEY:-${GONK_LITELLM_KEY:-}}"
-	if [ -n "${GC_WEBHOOK_ARG_LITELLM_KEY:-}" ]; then
+	# THERE IS NO OTHER SOURCE. This used to fall back to a STATIC per-install
+	# key env var (the one channel Gas City leaves open, since resolved.Env
+	# comes from city/agent config) -- but that static value was the LiteLLM
+	# proxy ADMIN key, so preferring it meant every session authenticated as
+	# the admin and the per-project budget the meter had provisioned was
+	# never consulted. Now that dispatch always resolves and fails closed on
+	# the project key, the static fallback had no live caller left and is
+	# deleted rather than kept as a silent downgrade path.
+	_key="${GC_WEBHOOK_ARG_LITELLM_KEY:-}"
+	if [ -n "${_key}" ]; then
 		log "using this session's per-project LiteLLM key"
-	elif [ -n "${GONK_LITELLM_KEY:-}" ]; then
-		log "WARNING: no per-session LiteLLM key; falling back to the static per-install key, which is NOT metered per project (gonk-8gb)"
-	fi
-	if [ -z "${_key}" ]; then
-		log "no LiteLLM key: set GONK_LITELLM_KEY_FILE, GONK_LITELLM_KEY, or GC_WEBHOOK_ARG_LITELLM_KEY -- refusing to start unauthenticated"
+	else
+		log "no LiteLLM key: set GONK_LITELLM_KEY_FILE or GC_WEBHOOK_ARG_LITELLM_KEY -- refusing to start unauthenticated"
 		log "session end: refused (no LiteLLM key)"
 		exit 1
 	fi
