@@ -99,8 +99,46 @@ lint:
 test:
   stage: test
   image: golang:1.26
+  before_script:
+    # REAL jq, not a stand-in. test/entrypoint runs images/agent/entrypoint.sh
+    # as a real process, and that script uses jq for two things it cannot fake
+    # its way through: parsing the fetched prompt document
+    # (`jq -r '.prompt // empty'`, `.model`, `.metadata`, `.litellm_key`) and
+    # BUILDING the webhook JSON with correct escaping (`jq -n --arg ...`,
+    # which exists precisely because string concatenation gets embedded quotes
+    # wrong). golang:1.26 is Debian-based and ships no jq, so
+    # TestPromptFetchRetriesTransportFailureThenSucceeds died with
+    # `entrypoint.sh: 278: jq: not found`, exit 127 (job 22185) -- while
+    # passing on GitHub, whose runners ship jq.
+    #
+    # A fake jq on the test's fakebin PATH was the alternative and is the
+    # wrong call: it would have to reimplement jq's filter language and its
+    # escaping, and a fake that diverges from real jq makes the test go green
+    # on behaviour production does not have -- worse than the red it replaces.
+    # test/entrypoint/fakepath_harness_test.go's fakePATH is explicit that jq,
+    # like mkdir/tar/sed, is meant to resolve to the real system tool; only
+    # opencode and curl are faked. Installing it also keeps Lab and Hub
+    # testing the same thing, which is the drift that caused this.
+    - apt-get update -qq && apt-get install -y --no-install-recommends jq
+    - jq --version
   script:
     - go vet ./...
+    # Every custom //go:build tag, type-checked -- the same list the Makefile's
+    # VET_BUILD_TAGS and ci.yml's `go vet (every custom build tag)` step carry.
+    # An untagged `go vet ./...` compiles none of these files. It is the ONLY
+    # honest coverage `testclock` can have: it guards no _test.go file, it
+    # swaps the meter's clock for e2e (gonk-0bvc).
+    - for t in chart component images integration live testclock; do
+        echo "go vet -tags $t ./...";
+        go vet -tags "$t" ./... || exit 1;
+      done
+    # NO -skip, deliberately, and none may ever be added here. This bare
+    # command is what made TestEveryBuildTagRunsInCI's T-14 exclusion visible:
+    # the skip went into the Makefile and into ci.yml but not here, so this
+    # pipeline was red for hours while Hub was green. The fix was to make the
+    # test pass and drop the skip from all three, not to add a fourth copy of
+    # it (delivery plan rule 4b: a red gate is never acceptable, and neither
+    # is a green one that stopped asking).
     - go test ./... -race -count=1
 
 # -----------------------------------------------------------------------------

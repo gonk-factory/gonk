@@ -54,23 +54,39 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # Every custom //go:build tag, type-checked. An untagged `go vet ./...`
+      # does not compile a single tagged file, so without this the tagged
+      # builds are checked by nothing until somebody runs `make vet` locally.
+      # It matters most for `testclock`, which guards no _test.go file at all
+      # (it swaps the meter's clock for e2e) -- a tagged vet is the ONLY
+      # coverage a modifier tag like that can honestly have, and
+      # internal/buildgate's TestEveryBuildTagRunsInCI requires exactly this
+      # line for it (gonk-0bvc).
+      #
+      # Written out one tag per line, not as a shell loop, so each tag is
+      # greppable as a real `go vet … -tags <tag>` command. Keep in sync with
+      # the Makefile's VET_BUILD_TAGS.
+      - name: go vet (every custom build tag)
+        run: |
+          set -euo pipefail
+          go vet -tags chart ./...
+          go vet -tags component ./...
+          go vet -tags images ./...
+          go vet -tags integration ./...
+          go vet -tags live ./...
+          go vet -tags testclock ./...
+
       # -race matches the local gate. It is slower and it is the point: the
       # dispatch path, the reconciler and the meter all run concurrently.
       #
-      # TODO(2026-09-08, T-17): -skip excludes TestEveryBuildTagRunsInCI
-      # (internal/buildgate), which T-14 added DELIBERATELY red -- it
-      # asserts every //go:build tag under cmd/pkg/internal/test appears in
-      # a `go test … -tags <tag>` line somewhere in this file. T-15 landed
-      # the `component` and `integration` jobs below, and T-16 landed the
-      # `images` job, so those three tags are covered now; today `live` and
-      # `testclock` still are not. T-17 lands the job that covers `live`;
-      # narrow this exclusion then, but leave `testclock` named here --
-      # it has no covering task in the delivery plan (tracked separately as
-      # gonk-0bvc), so T-17 alone cannot drop this -skip. Run
-      # `go test ./internal/buildgate/ -count=1 -v` directly (no -skip) to
-      # see the live, unexcluded result.
+      # NO -skip. This step used to exclude TestEveryBuildTagRunsInCI, which
+      # T-14 added deliberately red while `live` and `testclock` had no CI
+      # coverage. Both are covered now -- `live` by the nightly live.yml,
+      # `testclock` by the tagged vet above -- so the exclusion is gone. A
+      # red gate is never acceptable, and neither is a gate that is green
+      # only because it stopped asking (delivery plan rule 4b).
       - name: go test -race
-        run: go test ./... -race -count=1 -skip '^TestEveryBuildTagRunsInCI$'
+        run: go test ./... -race -count=1
 
       - name: golangci-lint
         # v7 or later: v6 refuses golangci-lint v2 outright ("golangci-lint v2 is
