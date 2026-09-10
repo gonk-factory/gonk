@@ -9,27 +9,22 @@
 # Build: see `make images` (Makefile). Every ARG below is read from
 # images/versions.env; there is no default and no `latest` anywhere.
 
+# GO_VERSION and GONK_TAG ARE NO LONGER INTERPOLATED BY THIS IMAGE (gonk-5ka1).
+# Both existed for the Go build stage that compiled gonk-gate -- GO_VERSION chose
+# its golang base, GONK_TAG was stamped into the binary via -ldflags -X -- and
+# that stage is gone (see the removal note below). Nothing else here reads
+# either.
+#
+# They stay DECLARED, and that is load-bearing, not tidiness: the Makefile passes
+# --build-arg GO_VERSION/--build-arg GONK_TAG to every image target from the
+# shared images/versions.env, and a build arg the Dockerfile never NAMES makes
+# the builder warn ("one or more build args were not consumed") on every single
+# agent build. Declaring it accepts the arg silently. DEBIAN_BASE has always sat
+# here on exactly the same footing -- the FROM lines below pin the base image by
+# literal digest and never interpolate it.
 ARG GO_VERSION
-ARG DEBIAN_BASE
-
-# ---- build gonk-gate (static; the agent needs `trailers`/`check`) -----------
-FROM golang:${GO_VERSION} AS gate
-WORKDIR /src
 ARG GONK_TAG
-# vendor/ is committed (docs/environment.md: CI cannot reach proxy.golang.org)
-# -- this build is fully offline, -mod=vendor, no `go mod download` anywhere.
-COPY go.mod go.sum ./
-COPY vendor/ vendor/
-COPY cmd/ cmd/
-COPY internal/ internal/
-COPY pkg/ pkg/
-# NOTE: cmd/gonk-gate does not yet declare `var version string` or handle
-# `--version` (confirmed against cmd/gonk-gate/main.go, 2026-07-16) -- the -X
-# below is a harmless no-op linker directive until that lands. Flagged for
-# whichever task adds it (Task 5's own smoke-test wishlist and Task 6's
-# controller smoke test both want `gonk-gate --version`; see PLAN.md).
-RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags="-s -w -X main.version=${GONK_TAG}" \
-    -o /out/gonk-gate ./cmd/gonk-gate
+ARG DEBIAN_BASE
 
 # ---- fetch opencode (pinned; checksum-verified) ------------------------------
 # A separate stage so `curl`/`tar` never ship in the runtime image, and so a
@@ -93,6 +88,31 @@ RUN set -eu; \
 # If a future agent genuinely needs repository write access, it arrives as an
 # effect the BROKER applies, not as a credentialed CLI in the pod.
 
+# AND NO gonk-gate EITHER (gonk-5ka1). This image used to carry its own Go build
+# stage compiling cmd/gonk-gate and COPY it to /usr/local/bin/gonk-gate. Two
+# subcommands justified that, and both have since been deleted:
+#   check     removed with the formula layer (ADR-007).
+#   trailers  removed once it was proven unreachable HERE: the pod's working copy
+#             arrives as a GitLab repository-archive tarball from gonk-intake
+#             (pkg/rig), not as a git clone, so RIG_DIR/.git never exists, the
+#             prepare-commit-msg install guard always took its "skip" branch, and
+#             the hook that would have invoked `trailers` never once installed in
+#             a real pod. See the note at the top of images/agent/entrypoint.sh.
+#
+# With both gone NOTHING in this pod invokes it. entrypoint.sh is the only script
+# the image installs and every gonk-gate string in it is a comment citing
+# controller-side source; the pack that really does `exec gonk-gate dispatch`
+# (pack/scripts/gonk-dispatch.sh, gonk-sweep.sh) is COPYed into the CONTROLLER
+# image, never this one -- which is where gonk-gate still belongs and still runs.
+#
+# The ~46 MB is not the argument. gonk-gate holds the broker logic, the meter
+# client and the effect-apply path, and this is the one pod that deliberately
+# runs untrusted model output while being denied forge credentials and cloud
+# keys. Shipping the component that DOES hold those powers into it, even inert,
+# hands a ready-made tool to anything that achieves execution here and cuts
+# against the boundary the agent NetworkPolicy and the per-project key work are
+# establishing. Pinned by test/images' TestAgentImageShipsNoGonkGate.
+
 # ---- runtime -----------------------------------------------------------------
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 
@@ -117,7 +137,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fetch /fetch/opencode      /usr/local/bin/opencode
-COPY --from=gate  /out/gonk-gate       /usr/local/bin/gonk-gate
 COPY images/agent/entrypoint.sh        /usr/local/bin/gonk-agent-entrypoint
 RUN chmod +x /usr/local/bin/gonk-agent-entrypoint
 

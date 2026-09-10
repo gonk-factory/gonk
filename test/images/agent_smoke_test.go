@@ -341,44 +341,62 @@ func TestAgentImageOpencodeResolvesOnlyTheGonkProvider(t *testing.T) {
 	}
 }
 
-// gonk-gate ships in the agent image (images/Dockerfile.agent's `gate` build
-// stage; originally AD-3). It used to earn its place there via two
-// subcommands, `check` and `trailers` -- both are gone now (ADR-007 §3
-// deleted `check`; `trailers` was deleted once it was confirmed dead: the
-// checkout entrypoint.sh fetches is a GitLab repository-archive tarball with
-// no `.git/`, so the prepare-commit-msg hook that would have invoked
-// `trailers` never actually installed in a real pod). Nothing in the agent
-// pod invokes gonk-gate any more; whether the image should still bundle it
-// is flagged, not decided, here. This test just proves the shipped binary is
-// present, executable, and honours its documented exit-code contract
-// (main.go's own doc comment: 2 = misconfiguration, never retried).
-func TestAgentImageGonkGateBinaryPresent(t *testing.T) {
+// gonk-5ka1. gonk-gate is NOT in this image, and -- exactly like glab and bd
+// above -- its absence is a property worth pinning rather than a detail that
+// happens to be true today.
+//
+// It used to ship here (images/Dockerfile.agent's `gate` build stage,
+// originally AD-3) to serve two subcommands, and both are gone: ADR-007 deleted
+// `check` with the formula layer, and `trailers` was deleted once it was shown
+// dead -- the checkout entrypoint.sh fetches is a GitLab repository-archive
+// tarball with no `.git/` (pkg/rig), so the prepare-commit-msg hook that would
+// have invoked it never installed in a real pod and the install guard always
+// took its "skip" branch. Nothing in the pod calls gonk-gate: the image ships
+// exactly one script, images/agent/entrypoint.sh, whose every gonk-gate mention
+// is a comment citing controller-side source, and the pack that does `exec
+// gonk-gate dispatch` (pack/scripts/) is COPYed into the CONTROLLER image only.
+//
+// Size was never the argument -- the trust boundary is. gonk-gate carries the
+// broker logic, the meter client and the effect-apply path, and this is the one
+// pod that deliberately runs untrusted model output with no forge credential
+// and no cloud key of its own. A dormant copy of the component that DOES hold
+// those powers is a ready-made tool for anything that achieves execution here,
+// and it cuts directly against what the agent NetworkPolicy and the per-project
+// key work are trying to establish.
+//
+// If this test starts failing because someone added it back, the question to
+// answer first is not "how big is it" but "what in this pod is supposed to call
+// broker code" -- the answer is meant to be nothing: the broker runs
+// controller-side and applies effects on the agent's behalf.
+func TestAgentImageShipsNoGonkGate(t *testing.T) {
 	image, _ := agentImage(t)
-	out, code := runIn(t, image, "/usr/local/bin/gonk-gate")
-	if code != 2 {
-		t.Fatalf("gonk-gate with no args: exit %d, want 2 (its own documented usage-error contract):\n%s", code, out)
-	}
+
+	t.Run("not on PATH", func(t *testing.T) {
+		out, code := runIn(t, image, "/bin/sh", "-c", "command -v gonk-gate || echo ABSENT")
+		if !strings.Contains(out, "ABSENT") {
+			t.Fatalf("gonk-gate is on PATH in the agent image at %q -- nothing in this pod "+
+				"invokes it, and it carries the broker/meter/effect-apply code the pod is "+
+				"deliberately denied (gonk-5ka1). exit=%d", strings.TrimSpace(out), code)
+		}
+	})
+
+	// The PATH check alone would pass if the binary were merely moved, so
+	// pin the exact path the removed COPY used as well.
+	t.Run("not at /usr/local/bin/gonk-gate", func(t *testing.T) {
+		out, code := runIn(t, image, "/bin/sh", "-c", "test -e /usr/local/bin/gonk-gate && echo PRESENT || echo ABSENT")
+		if !strings.Contains(out, "ABSENT") {
+			t.Fatalf("/usr/local/bin/gonk-gate still exists in the agent image -- the `gate` "+
+				"build stage and its COPY are supposed to be gone (gonk-5ka1). exit=%d out=%q", code, strings.TrimSpace(out))
+		}
+	})
 }
 
-// TestAgentImageGonkGateVersionMatchesTag closes half the gap this task
-// originally flagged and skipped ("gonk-gate has no --version flag ... yet"):
-// `--version` landed (cmd/gonk-gate/main.go), stamped at build time via
-// `-ldflags -X main.version=$(GONK_TAG)` (images/Dockerfile.agent's `gate`
-// build stage), the same mechanism Task 6's controller smoke test proved.
-func TestAgentImageGonkGateVersionMatchesTag(t *testing.T) {
-	image, _ := agentImage(t)
-	root := repoRoot(t)
-	pins := versionPins(t, root)
-	tag := gonkTag(t, root, pins["GONK_VERSION"])
-
-	out, code := runIn(t, image, "/usr/local/bin/gonk-gate", "--version")
-	if code != 0 {
-		t.Fatalf("gonk-gate --version exited %d:\n%s", code, out)
-	}
-	if got := strings.TrimSpace(out); got != tag {
-		t.Fatalf("gonk-gate --version = %q, want %q (GONK_TAG)", got, tag)
-	}
-}
+// NOTE: there is deliberately no TestAgentImageGonkGateVersionMatchesTag any
+// more. It asserted that `gonk-gate --version` in THIS image printed GONK_TAG,
+// which cannot mean anything once the binary is gone, and an absence test for
+// it would only restate the one above. The `-ldflags -X main.version=$(GONK_TAG)`
+// stamping mechanism itself is still covered, in the image that still ships the
+// binary and still runs it: test/images/controller_smoke_test.go.
 
 // *** THE ATTRIBUTION SEAM (OD-7), THE POINT OF THIS WHOLE IMAGE. ***
 //
