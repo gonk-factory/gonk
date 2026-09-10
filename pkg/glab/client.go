@@ -25,9 +25,15 @@ type Client struct {
 	BaseURL string // e.g. https://gitlab.orac.local  (PRIVATE CA -- see below)
 	token   string
 	// prevToken is rotation slot 2 (AD-4b). The PAT is a credential we PRESENT,
-	// not one we verify, so the second slot is a FALLBACK: on a 401/403 with the
+	// not one we verify, so the second slot is a FALLBACK: on a 401 with the
 	// current token we retry the request ONCE with this one, loudly. Empty means
 	// no fallback, which is the normal steady state.
+	//
+	// 401 ONLY, deliberately not 403. 401 is "this token is not recognised",
+	// which is exactly what mid-rotation looks like. 403 is "this token is
+	// recognised but not allowed" -- a permissions problem the previous slot
+	// cannot fix, so retrying with it would just spend a second round trip
+	// confirming the same no.
 	prevToken string
 	HTTP      *http.Client
 	// AdminToken, when non-empty, is used ONLY for webhook management
@@ -113,8 +119,11 @@ type request struct {
 	usedPrev bool  // AD-4b: this attempt is the one-shot retry on rotation slot 2
 }
 
-// do sends one request with retries on 429 and 5xx. It returns the raw body and
-// the response headers (pagination lives in X-Next-Page).
+// do sends one request with retries on 429 and 5xx, EXCEPT a 5xx on a POST:
+// every POST this client sends creates something, so a 5xx there is surfaced
+// immediately rather than retried blind (see the StatusCode >= 500 case
+// below). It returns the raw body and the response headers (pagination lives
+// in X-Next-Page).
 func (c *Client) do(ctx context.Context, rq request) ([]byte, http.Header, error) {
 	limit := rq.maxBytes
 	if limit == 0 {
@@ -165,9 +174,22 @@ func (c *Client) do(ctx context.Context, rq request) ([]byte, http.Header, error
 				return nil, nil, fmt.Errorf("gitlab: %s %s: %w", rq.method, rq.path, rerr)
 			case resp.StatusCode >= 200 && resp.StatusCode < 300:
 				return body, resp.Header, nil
-			case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+			case resp.StatusCode == http.StatusTooManyRequests:
 				lastErr = &APIError{Status: resp.StatusCode, Method: rq.method, Path: rq.path, Body: truncate(body)}
-			case (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) &&
+			case resp.StatusCode >= 500:
+				apiErr := &APIError{Status: resp.StatusCode, Method: rq.method, Path: rq.path, Body: truncate(body)}
+				if rq.method == http.MethodPost {
+					// POST is not idempotent here: every POST this client sends
+					// CREATES something (an issue, a note/comment, a branch, a
+					// commit, an MR, a hook), and a 5xx does not tell us whether
+					// GitLab applied it before failing to answer. Retrying blind
+					// risks a duplicate a human can see -- most visibly a second
+					// bot comment from CreateIssueNote, which is exactly the
+					// failure mode E3 forbids. Surface the error instead.
+					return nil, nil, apiErr
+				}
+				lastErr = apiErr
+			case resp.StatusCode == http.StatusUnauthorized &&
 				c.prevToken != "" && !rq.usedPrev && !rq.admin:
 				// AD-4b: rotation slot 2. Slot 1 was rejected -- we are mid-rotation
 				// and the pod still holds the old value, or holds the new one before

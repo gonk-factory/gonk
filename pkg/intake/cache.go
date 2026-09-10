@@ -28,6 +28,18 @@ type Entry struct {
 	// the real idempotency guarantee is the deterministic bead anchor, which the
 	// Gas City controller must honour (see "Cross-plan contracts").
 	ScaffoldFiredAt time.Time
+	// TriageDispatchedAt is ScaffoldFiredAt's counterpart for the issue sweep
+	// (sweepIssues): issue IID -> when the sweep last handed it to Dispatch and
+	// got back a real fire. It exists for the same reason ScaffoldFiredAt does --
+	// the sweep's OTHER guard, the broker's `gonk::` label, is best-effort and
+	// asynchronous (IssueLabelPrefix's doc calls this out explicitly): the label
+	// can take a reconcile pass or two to land, and every pass in between would
+	// otherwise re-fire a triage order for the same issue. Best-effort only,
+	// like ScaffoldFiredAt: the real idempotency guarantee is still the
+	// deterministic bead anchor at Gate 1, so a duplicate handed to Dispatch
+	// rejoins the existing reservation rather than double-spending -- this only
+	// stops the noise of asking.
+	TriageDispatchedAt map[int64]time.Time
 	// Blocked marks an entry whose project is on the blocklist. The reconciler
 	// normally prevents such an entry existing at all; this carries the fact to
 	// Decide so the dispatch layer refuses independently rather than trusting

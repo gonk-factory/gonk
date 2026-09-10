@@ -348,7 +348,11 @@ func newService(ctx context.Context, cfg Config, log *slog.Logger) (*service, er
 		log.Info("blocklist active", "projects", blocked.Entries())
 	}
 
-	rec := &intake.Reconciler{
+	// NewReconciler, not a bare literal: it refuses a zero BotUserID, the same
+	// fail-closed rule ghook.NewHandler already applies below. me.ID came off
+	// CurrentUser above and should never be zero, but "should never be" is
+	// exactly the assumption a constructor exists to stop trusting.
+	rec, err := intake.NewReconciler(&intake.Reconciler{
 		GL: gl, Meter: meter, Cache: cache, Obs: metrics, Log: log,
 		Onboarder: &intake.GitLabOnboarder{GL: gl, BotUserID: me.ID, BotUsername: cfg.BotUsername, Version: cfg.Version, InstanceLadder: cfg.InstanceLadder, Obs: metrics},
 		Dispatch:  dp,
@@ -368,6 +372,9 @@ func newService(ctx context.Context, cfg Config, log *slog.Logger) (*service, er
 		TokenGen: cfg.WebhookTokenGen, SSLVerify: cfg.HookSSLVerify,
 		// NOTE: no Instance policy and no GroupPolicy. Intake does not hold
 		// operator config and does not resolve -- gonk-meter does (Conflict A).
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build reconciler: %w", err)
 	}
 	dp.KickReconcile = rec.Kick // coalesced out-of-band pass
 

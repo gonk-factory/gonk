@@ -491,3 +491,57 @@ func TestReconcileContinuesPastOneProjectError(t *testing.T) {
 		t.Fatal("the healthy project must still have been reconciled")
 	}
 }
+
+// Summary.Dispatched must count every order actually FIRED in a pass, not just
+// the scaffold path: reconcileProject only ever incremented it for
+// out.scaffoldFired, so a triage order the issue sweep fired never reached it.
+// An operator watching `?wait=true` during an incident where the webhook was
+// down and the sweep was the only thing dispatching would have seen Dispatched
+// == 0 and concluded nothing was firing, when it was -- exactly the invisible
+// failure T-38's item 5 exists to close.
+func TestReconcileSummaryCountsIssueSweepDispatches(t *testing.T) {
+	gl := glabtest.New(t)
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	p.PutFile(".gonk.yml", []byte("version: 1\nenabled: true\nactions: {triage: true}\nladder: [qwen-local]\n"))
+	p.PutFile(".agent/context.md", []byte("hi"))
+	gl.AddIssue(p.ID, 1, "opened") // no gonk:: label: not yet triaged
+	m := newFakeMeter(t)
+	r := newReconciler(t, gl, m)
+	sw := &countingSweeper{fire: true} // simulate Gate 1 actually firing the order
+	r.Issues = sw
+
+	sum, err := r.ReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileOnce = %v", err)
+	}
+	if sum.IssuesSwept != 1 {
+		t.Fatalf("IssuesSwept = %d, want 1 (the attempt)", sum.IssuesSwept)
+	}
+	if sum.Dispatched != 1 {
+		t.Fatalf("Dispatched = %d, want 1: the sweep's fired order must be counted, same as scaffold's", sum.Dispatched)
+	}
+}
+
+// A zero BotUserID makes the issue-sweep loop guard
+// (`r.BotUserID != 0 && is.Author.ID == r.BotUserID`) silently no-op instead
+// of disabling itself loudly: an issue authored by user id 0 would never
+// occur, so the guard just never fires and gonk can react to its own swept
+// issues. NewReconciler is the sanctioned constructor and must refuse to
+// build one, mirroring ghook.NewHandler's refusal of the same field.
+func TestNewReconcilerRefusesZeroBotUserID(t *testing.T) {
+	for _, id := range []int64{0, -1} {
+		if _, err := NewReconciler(&Reconciler{BotUserID: id}); err == nil {
+			t.Errorf("NewReconciler(BotUserID: %d) = nil error, want a refusal", id)
+		}
+	}
+}
+
+func TestNewReconcilerAcceptsAPositiveBotUserID(t *testing.T) {
+	r, err := NewReconciler(&Reconciler{BotUserID: 7})
+	if err != nil {
+		t.Fatalf("NewReconciler(BotUserID: 7) = %v, want no error", err)
+	}
+	if r.BotUserID != 7 {
+		t.Fatalf("BotUserID = %d, want 7", r.BotUserID)
+	}
+}

@@ -46,10 +46,20 @@ func (g *sweepGL) ListMergeRequests(context.Context, int64, glab.MRListOptions) 
 }
 func (g *sweepGL) ListMembers(context.Context, int64) ([]glab.Member, error) { panic("not used") }
 
-// countingSweeper records every event the sweep hands to Dispatch.
-type countingSweeper struct{ got []*ghook.Event }
+// countingSweeper records every event the sweep hands to Dispatch. fire
+// controls what Handle reports back -- whether Gate 1 would have actually
+// fired an order for it, as opposed to merely being handed the attempt.
+// Defaults to false, which is what every pre-existing test in this file
+// exercises: they assert on swept (attempts), not on dispatched (real fires).
+type countingSweeper struct {
+	got  []*ghook.Event
+	fire bool
+}
 
-func (c *countingSweeper) Handle(_ context.Context, ev *ghook.Event) { c.got = append(c.got, ev) }
+func (c *countingSweeper) Handle(_ context.Context, ev *ghook.Event) bool {
+	c.got = append(c.got, ev)
+	return c.fire
+}
 
 func sweepReconciler(gl GitLab, s IssueSweeper) (*Reconciler, glab.Project) {
 	e := validEntry()
@@ -69,7 +79,7 @@ func TestSweepPicksUpAnUntriagedIssueThenLeavesItAlone(t *testing.T) {
 	sw := &countingSweeper{}
 	r, p := sweepReconciler(gl, sw)
 
-	n, err := r.sweepIssues(context.Background(), p)
+	n, _, err := r.sweepIssues(context.Background(), p)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -79,12 +89,50 @@ func TestSweepPicksUpAnUntriagedIssueThenLeavesItAlone(t *testing.T) {
 
 	// The broker labels what it triaged. The next pass must not re-fire.
 	gl.issues[0].Labels = []string{"gonk::verdict-reply-only"}
-	n, err = r.sweepIssues(context.Background(), p)
+	n, _, err = r.sweepIssues(context.Background(), p)
 	if err != nil {
 		t.Fatalf("second sweep: %v", err)
 	}
 	if n != 0 {
 		t.Errorf("swept %d on the second pass; a labelled issue is already triaged", n)
+	}
+	if len(sw.got) != 1 {
+		t.Errorf("dispatched %d times across two passes, want exactly 1", len(sw.got))
+	}
+}
+
+// The label the broker applies (the guard in the test above) is BEST-EFFORT
+// and asynchronous: applying it takes a real triage session, which spans
+// reconcile passes, not one API round trip that lands before the next sweep
+// runs. This test never adds a label at all -- it is the window BEFORE the
+// label exists -- and proves the sweep still does not re-fire, because it now
+// remembers its own dispatch (Entry.TriageDispatchedAt) for
+// TriageSweepSuppressWindow, mirroring ScaffoldFiredAt. Before that memory
+// existed, a second pass in this exact situation re-dispatched the same issue.
+func TestSweepRemembersADispatchForTheSuppressWindowWithNoLabel(t *testing.T) {
+	gl := &sweepGL{issues: []glab.Issue{
+		{IID: 65, Title: "lost one", Description: "body", Author: glab.User{ID: 9}},
+	}}
+	sw := &countingSweeper{fire: true} // simulate Gate 1 actually firing the order
+	r, p := sweepReconciler(gl, sw)
+
+	n, dispatched, err := r.sweepIssues(context.Background(), p)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 || dispatched != 1 || len(sw.got) != 1 {
+		t.Fatalf("swept %d, dispatched %d, handed %d events; want 1, 1 and 1", n, dispatched, len(sw.got))
+	}
+
+	// No label added -- the broker has not gotten there yet. Sweep again inside
+	// the suppress window: without the remembered-dispatch guard, this issue
+	// still carries no `gonk::` label and would be handed to Dispatch again.
+	n, dispatched, err = r.sweepIssues(context.Background(), p)
+	if err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if n != 0 || dispatched != 0 {
+		t.Errorf("second sweep: swept %d, dispatched %d, want 0 and 0 -- the remembered dispatch must suppress it even with no label", n, dispatched)
 	}
 	if len(sw.got) != 1 {
 		t.Errorf("dispatched %d times across two passes, want exactly 1", len(sw.got))
@@ -100,7 +148,7 @@ func TestSweepSynthesizesAFaithfulIssueEvent(t *testing.T) {
 	sw := &countingSweeper{}
 	r, p := sweepReconciler(gl, sw)
 
-	if _, err := r.sweepIssues(context.Background(), p); err != nil {
+	if _, _, err := r.sweepIssues(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	if len(sw.got) != 1 {
@@ -142,7 +190,7 @@ func TestSweepNeverTriagesAnIssueTheBotOpened(t *testing.T) {
 	sw := &countingSweeper{}
 	r, p := sweepReconciler(gl, sw)
 
-	n, err := r.sweepIssues(context.Background(), p)
+	n, _, err := r.sweepIssues(context.Background(), p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +208,7 @@ func TestSweepIsSkippedEntirelyWhenItCouldNotDispatch(t *testing.T) {
 	t.Run("no sweeper wired", func(t *testing.T) {
 		gl := &sweepGL{}
 		r, p := sweepReconciler(gl, nil)
-		if n, err := r.sweepIssues(context.Background(), p); n != 0 || err != nil {
+		if n, _, err := r.sweepIssues(context.Background(), p); n != 0 || err != nil {
 			t.Fatalf("n=%d err=%v, want 0/nil", n, err)
 		}
 		if gl.calls != 0 {
@@ -177,7 +225,7 @@ func TestSweepIsSkippedEntirelyWhenItCouldNotDispatch(t *testing.T) {
 		c.Put(e.Project.ID, e)
 		r := &Reconciler{GL: gl, Cache: c, Issues: sw, BotUserID: 7}
 
-		n, err := r.sweepIssues(context.Background(), e.Project)
+		n, _, err := r.sweepIssues(context.Background(), e.Project)
 		if n != 0 || err != nil {
 			t.Fatalf("n=%d err=%v, want 0/nil", n, err)
 		}
@@ -192,7 +240,7 @@ func TestSweepIsSkippedEntirelyWhenItCouldNotDispatch(t *testing.T) {
 	t.Run("project not cached", func(t *testing.T) {
 		gl := &sweepGL{}
 		r := &Reconciler{GL: gl, Cache: NewCache(), Issues: &countingSweeper{}, BotUserID: 7}
-		if n, err := r.sweepIssues(context.Background(), glab.Project{ID: 999}); n != 0 || err != nil {
+		if n, _, err := r.sweepIssues(context.Background(), glab.Project{ID: 999}); n != 0 || err != nil {
 			t.Fatalf("n=%d err=%v, want 0/nil", n, err)
 		}
 		if gl.calls != 0 {
@@ -208,7 +256,7 @@ func TestSweepReportsAListingFailure(t *testing.T) {
 	sw := &countingSweeper{}
 	r, p := sweepReconciler(gl, sw)
 
-	n, err := r.sweepIssues(context.Background(), p)
+	n, _, err := r.sweepIssues(context.Background(), p)
 	if err == nil {
 		t.Fatal("a failed listing was swallowed")
 	}
@@ -250,7 +298,7 @@ func TestSweepCapsHowMuchOnePassCanSpend(t *testing.T) {
 	sw := &countingSweeper{}
 	r, p := sweepReconciler(gl, sw)
 
-	n, err := r.sweepIssues(context.Background(), p)
+	n, _, err := r.sweepIssues(context.Background(), p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +313,7 @@ func TestSweepCapsHowMuchOnePassCanSpend(t *testing.T) {
 	// can raise it.
 	r.IssueSweepLimit = 2
 	sw.got = nil
-	if n, _ := r.sweepIssues(context.Background(), p); n != 2 {
+	if n, _, _ := r.sweepIssues(context.Background(), p); n != 2 {
 		t.Errorf("swept %d with IssueSweepLimit=2, want 2", n)
 	}
 }
@@ -330,7 +378,7 @@ func TestSweepIgnoresIssuesOlderThanTheRecencyBound(t *testing.T) {
 	sw := &countingSweeper{}
 	r, p := sweepReconciler(gl, sw)
 
-	n, err := r.sweepIssues(context.Background(), p)
+	n, _, err := r.sweepIssues(context.Background(), p)
 	if err != nil {
 		t.Fatal(err)
 	}
