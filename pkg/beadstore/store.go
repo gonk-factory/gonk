@@ -34,6 +34,22 @@ const (
 	StateNeedsHuman State = "needs-human"
 	// StateDone: the gate passed.
 	StateDone State = "done"
+	// StatePendingPrompt: the v2 broker has RESERVED a session alias for this
+	// bead+attempt but has not yet confirmed the session running (gonk-6n8,
+	// T-13). It exists to close the ≤240s gap between minting the alias and
+	// the broker's final StateRunning write, during which a re-dispatch for
+	// the same attempt used to see no record at all and mint a second session
+	// under the same alias -- see cmd/gonk-gate/broker_inject.go's
+	// runBrokerDispatch for the full history (gonk-u6p).
+	//
+	// INTERIM ONLY. gonk-sweep does not List this state (it Lists StateRunning
+	// and StateParked only, see cmd/gonk-gate/sweep.go's runSweep), so a
+	// record that never leaves this state is never reclaimed by the sweeper --
+	// runBrokerDispatch is responsible for releasing its own reservation
+	// (clearing SessionID) on every path that does not reach StateRunning.
+	// T-55/T-58 replace this whole mechanism with a deterministic Job name and
+	// a 409 at the API server; T-58 deletes this state once that lands.
+	StatePendingPrompt State = "pending-prompt"
 )
 
 // Record is one work item. BeadAnchor is the IDEMPOTENCY KEY (Plan 02): firing

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
 	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi/gcapitest"
@@ -125,5 +126,81 @@ func TestARealReSlingOnTheNextAttemptStillGetsItsOwnSession(t *testing.T) {
 	// re-sling legible in logs next to the prior attempt.
 	if !strings.Contains(a, ".a1.") || !strings.Contains(b, ".a2.") {
 		t.Fatalf("aliases do not carry their attempt: %q, %q", a, b)
+	}
+}
+
+// gonk-6n8 / T-13. TestASecondDispatchForTheSameAttemptCreatesNoSecondSession
+// above proves the guard once the first dispatch has already returned and
+// written its `running` record. That is not the shape gonk-u6p measured:
+// go-93gk and go-s4ug were 4m29s apart, well inside one dispatch's own
+// ≤240s submit window -- the SECOND dispatch landed while the FIRST was
+// still creating its session and waiting on the pod, long before either had
+// reached that final write.
+//
+// This proves the guard closes THAT gap: a re-dispatch that arrives while
+// the first is still in flight must see the reservation (State
+// pending-prompt, SessionID already set) and back off, not race it to a
+// second CreateSession.
+func TestASecondDispatchDuringTheDeliveryWindowCreatesNoSecondSession(t *testing.T) {
+	gc := gcapitest.New(t)
+	store := beadstore.NewMemory()
+	forge := stubForge{iss: &glab.Issue{IID: 3, Title: "t", State: "opened"}}
+
+	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
+		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
+	}}
+	// The pod has not fetched its prompt yet, so the first dispatch is still
+	// polling awaitPromptFetched -- well past the point where it minted the
+	// alias and wrote its pending-prompt reservation -- when the second
+	// dispatch fires below.
+	fm.neverFetched = true
+	meter := meterClient(fm.server(t))
+
+	deps := dispatchDeps{
+		// The session's project key rides the prompt row, and dispatch fails
+		// closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
+		Meter: meter, GC: gc.Client("gonk-city"), Store: store,
+		Forge: forge, Args: baseDispatchArgs(),
+		// Slow enough that the second dispatch, fired 1s in, lands well before
+		// the first gives up on delivery; fast enough the test does not crawl.
+		SubmitAttempts: 6,
+		SubmitBackoff:  func(int) time.Duration { return 500 * time.Millisecond },
+	}
+
+	firstCode := make(chan int, 1)
+	go func() { firstCode <- runDispatch(context.Background(), deps) }()
+
+	time.Sleep(1 * time.Second)
+
+	// The re-dispatch. Same bead, same attempt, fired WHILE the first
+	// dispatch above is still mid-flight.
+	if code := runDispatch(context.Background(), deps); code != 0 {
+		t.Fatalf("second dispatch (mid-window) exit = %d, want 0 (a duplicate is a no-op, not a failure)", code)
+	}
+
+	// Exactly one session create must have happened by now: the second
+	// dispatch's own request record, not merely its return value, is the
+	// proof -- a code of 0 alone would not rule out a second POST that this
+	// test simply did not wait long enough to see land.
+	if n := len(gc.Created); n != 1 {
+		t.Fatalf("second dispatch returned 0 but %d sessions POSTed, want exactly 1: %+v", n, gc.Created)
+	}
+
+	// Let the first dispatch's pod "fetch" its prompt so it finishes cleanly
+	// rather than exhausting its attempts and tearing the session back down,
+	// which would leave nothing here to assert on.
+	fm.mu.Lock()
+	fm.neverFetched = false
+	fm.mu.Unlock()
+
+	if got := <-firstCode; got != 0 {
+		t.Fatalf("first dispatch exit = %d, want 0", got)
+	}
+
+	if n := len(gc.Created); n != 1 {
+		t.Fatalf("after the first dispatch finished, %d sessions had been POSTed, want exactly 1: %+v",
+			n, gc.Created)
 	}
 }
