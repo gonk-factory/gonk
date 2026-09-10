@@ -34,7 +34,14 @@ type fakeMeter struct {
 	// Defaults false (GET reports the project found), matching this fake's
 	// existing default-success posture for PUT and DELETE.
 	notRegistered bool
-	fail          bool // 500 on everything
+	// bare404 makes GET answer a 404 with NO meter error body at all --
+	// standing in for a 404 that meter's own handler never wrote: a BaseURL
+	// with a wrong path prefix, an ingress or proxy in front of meter, a
+	// route that stopped matching. Deliberately distinct from
+	// notRegistered, which is meter's OWN 404 and carries its
+	// {"error":"project not registered"} body.
+	bare404 bool
+	fail    bool // 500 on everything
 	// failFirst models THE BOOT RACE: meter is not listening yet when intake
 	// comes up, so the first N registration attempts fail outright. Observed
 	// live twice on 2026-07-31 and again on the 2026-08-04 deploy
@@ -45,10 +52,18 @@ type fakeMeter struct {
 	// serving -- which is what modelling a mid-life meter outage requires. It is
 	// atomic because the handler runs on httptest's goroutine and the plain
 	// bools here are not guarded.
-	failNow  atomic.Bool
-	invalid  bool // 422: the project's yaml will not load
-	state    meterapi.State
-	authSeen string
+	failNow atomic.Bool
+	// failDeleteNow fails ONLY the DELETE, leaving GET healthy. `failNow`
+	// cannot express that: it 500s everything, and the archived branch's GET
+	// runs first, so a test using it never reaches the DELETE at all. This
+	// knob is what exercises "meter says the project IS registered, and the
+	// deregister then fails" -- the case that decides whether a tombstone
+	// gets set for something this process did not actually delete. Atomic
+	// for the same reason failNow is.
+	failDeleteNow atomic.Bool
+	invalid       bool // 422: the project's yaml will not load
+	state         meterapi.State
+	authSeen      string
 }
 
 func newFakeMeter(t *testing.T) *fakeMeter {
@@ -69,6 +84,10 @@ func newFakeMeter(t *testing.T) *fakeMeter {
 			return
 		}
 		if r.Method == http.MethodDelete {
+			if m.failDeleteNow.Load() {
+				http.Error(w, `{"error":"nope"}`, 500)
+				return
+			}
 			// EscapedPath, not Path: net/url decodes %2F back to a literal "/" in
 			// .Path, which would hide the very escaping this test verifies.
 			m.deletes = append(m.deletes, r.URL.EscapedPath())
@@ -77,6 +96,12 @@ func newFakeMeter(t *testing.T) *fakeMeter {
 		}
 		if r.Method == http.MethodGet {
 			m.gets = append(m.gets, r.URL.EscapedPath())
+			if m.bare404 {
+				// No body at all -- nothing meter's writeError would ever
+				// produce, which is the whole point.
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			if m.notRegistered {
 				http.Error(w, `{"error":"project not registered"}`, http.StatusNotFound)
 				return
@@ -507,7 +532,17 @@ func TestReconcileSkipsMeterCallOnSecondArchivedPass(t *testing.T) {
 // for "a previous intake replica deregistered this project before this one
 // ever started". The cold reconciler must ask meter (GET) rather than assume
 // either answer, and since meter says gone, it must NOT re-issue a DELETE.
-func TestReconcileArchivedProjectAfterRestartSkipsWhenMeterAlreadyDeregistered(t *testing.T) {
+//
+// What it must ALSO not do is tombstone. The tombstone records what THIS
+// process DELETED, never what it merely observed: a negative GET means
+// "nothing to do this pass", not "never ask again". Tombstoning an
+// observation is how a 404 nobody looked at closely turns into a permanent,
+// silent "already gone" for the life of the process -- and meter's state can
+// move under us regardless (a re-registration, a restored backup, an
+// operator's manual write). Re-asking costs one read-only GET per pass: no
+// LiteLLM call, no Secret delete, no DB write. So the second pass here asks
+// again rather than short-circuiting on a tombstone it never earned.
+func TestReconcileArchivedProjectAlreadyGoneFromMeterKeepsCheckingEveryPass(t *testing.T) {
 	gl := glabtest.New(t)
 	p := gl.AddProject("group/repo", glab.AccessMaintainer)
 	p.PutFile(".gonk.yml", []byte("version: 1\nenabled: true\nladder: [qwen-local]\n"))
@@ -525,20 +560,147 @@ func TestReconcileArchivedProjectAfterRestartSkipsWhenMeterAlreadyDeregistered(t
 	if len(m.gets) != 1 {
 		t.Fatalf("a cold tombstone must ask meter once via GET before deciding: got %d gets", len(m.gets))
 	}
-	if !r.Cache.WasDeregistered(p.ID) {
-		t.Fatal("a confirmed-absent archived project must be tombstoned so later passes in THIS process skip the meter call")
+	if r.Cache.WasDeregistered(p.ID) {
+		t.Fatal("a negative GET must NOT tombstone: only a DELETE this process actually issued may do that")
+	}
+	if _, ok := r.Cache.Get(p.ID); ok {
+		t.Fatal("an already-archived project must never enter the cache")
+	}
+
+	// Second pass: the check repeats, because nothing was ever deleted here
+	// and therefore nothing was tombstoned.
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.gets) != 2 {
+		t.Fatalf("gets = %d, want 2: an untombstoned archived project must be re-checked every pass", len(m.gets))
+	}
+	if len(m.deletes) != 0 {
+		t.Fatalf("re-checking must stay read-only while meter reports the project gone: %v", m.deletes)
 	}
 }
 
-// When the deregister DELETE itself fails, reconcileProject keeps the cache
-// entry so the next pass retries (mirroring the vanished-membership sweep's
-// own failure handling) instead of forgetting a still-live key. The cost:
-// the retained entry keeps its pre-archival StateValid classification, so it
-// stays Dispatchable() until a later pass's retry succeeds. Pinned here as
-// the intended behaviour, not left as an unverified side effect: it is the
-// same trade the sweep already makes (never forget a live key), and the
-// window closes on the very next successful reconcile pass.
-func TestReconcileArchivedProjectStaysDispatchableUntilDeregisterRetrySucceeds(t *testing.T) {
+// A 404 is not automatically "already deregistered". Meter's own 404 carries
+// meter's {"error":"project not registered"} body (internal/meter/service's
+// writeError); a BARE 404 is what an intermediary returns when the request
+// never reached meter's handler at all -- a BaseURL with a wrong path prefix,
+// an ingress or proxy in front of meter, a route that stopped matching.
+//
+// Decided on the status code alone, that misconfiguration reads as "nothing
+// to deregister" and the pass reports success while the archived project's
+// LiteLLM key stays live. Before the tombstone existed the same misroute made
+// the DELETE fail loudly every pass; converting it into a silent success is
+// the wrong direction for the one component whose job is making sure a
+// credential does not outlive its project. So it must stay LOUD: an error,
+// counted in the summary, no tombstone, retried next pass.
+func TestReconcileArchivedProjectTreatsBare404AsErrorNotAsAlreadyGone(t *testing.T) {
+	gl := glabtest.New(t)
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	p.PutFile(".gonk.yml", []byte("version: 1\nenabled: true\nladder: [qwen-local]\n"))
+	gl.SetArchived(p.ID, true)
+	m := newFakeMeter(t)
+	m.bare404 = true // a 404 meter's own handler did not write
+	r := newReconciler(t, gl, m)
+
+	sum, err := r.ReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatalf("a per-project meter failure must not abort the pass: %v", err)
+	}
+	if sum.Errors != 1 {
+		t.Fatalf("sum.Errors = %d, want 1: a bare 404 is an unanswered question, not a successful pass (%+v)", sum.Errors, sum)
+	}
+	if r.Cache.WasDeregistered(p.ID) {
+		t.Fatal("a bare 404 must never tombstone the project: nothing was confirmed and nothing was deleted")
+	}
+	if len(m.deletes) != 0 {
+		t.Fatalf("a bare 404 must not be followed by a DELETE: %v", m.deletes)
+	}
+
+	// Retried, not silently accepted.
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if len(m.gets) != 2 {
+		t.Fatalf("gets = %d, want 2: a bare 404 must be re-asked next pass", len(m.gets))
+	}
+}
+
+// The load-bearing negative case for the tombstone: meter reports the project
+// IS still registered, and the deregister DELETE then fails. Nothing was
+// deleted, so nothing may be tombstoned -- a tombstone here would skip the
+// meter call for the remaining lifetime of the process and leave a live
+// LiteLLM key behind an archived project, which is precisely the failure the
+// archived branch exists to prevent. The tombstone must stay COLD, and the
+// next pass must retry the DELETE and only then tombstone.
+func TestReconcileArchivedProjectFailedDeleteLeavesTombstoneCold(t *testing.T) {
+	gl := glabtest.New(t)
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	p.PutFile(".gonk.yml", []byte("version: 1\nenabled: true\nladder: [qwen-local]\n"))
+	m := newFakeMeter(t)
+	r := newReconciler(t, gl, m)
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// GET stays healthy (meter still has the registration); only the DELETE
+	// fails. That is the ordering that matters: the check succeeds and says
+	// "still registered", so the reconciler DOES attempt the deregistration
+	// and DOES fail at it.
+	gl.SetArchived(p.ID, true)
+	m.failDeleteNow.Store(true)
+	sum, err := r.ReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatalf("a per-project deregister failure must not abort the pass: %v", err)
+	}
+	if sum.Errors != 1 {
+		t.Fatalf("sum.Errors = %d, want 1 (the failed deregister)", sum.Errors)
+	}
+	if len(m.gets) == 0 {
+		t.Fatal("setup: the registration check must have run and reported the project still registered")
+	}
+	if len(m.deletes) != 0 {
+		t.Fatalf("setup: the DELETE was supposed to fail, so none should have been recorded: %v", m.deletes)
+	}
+	if r.Cache.WasDeregistered(p.ID) {
+		t.Fatal("a FAILED deregister must leave the tombstone cold: nothing was deleted, so the next pass must retry")
+	}
+	if _, ok := r.Cache.Get(p.ID); !ok {
+		t.Fatal("a failed deregister must keep the cache entry so the next pass retries")
+	}
+
+	// Meter recovers: the retry runs, succeeds, and only NOW tombstones.
+	m.failDeleteNow.Store(false)
+	if _, err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.deletes) != 1 {
+		t.Fatalf("deletes = %d, want 1 once the retry succeeds", len(m.deletes))
+	}
+	if !r.Cache.WasDeregistered(p.ID) {
+		t.Fatal("a SUCCESSFUL deregister must tombstone, so later passes stop calling meter for this project")
+	}
+	if _, ok := r.Cache.Get(p.ID); ok {
+		t.Fatal("archived project must leave the cache once deregister succeeds")
+	}
+}
+
+// An archived project whose meter is UNREACHABLE must fail closed. The meter
+// here is down for everything, so what fails is the read-only registration
+// check (MeterClient.Get), which runs BEFORE any DELETE -- the DELETE is
+// never attempted at all in the failing pass, and the tombstone is never set,
+// because a process that could not reach meter has confirmed nothing and
+// deleted nothing. (The sibling case -- the check succeeds and the DELETE
+// itself fails -- is TestReconcileArchivedProjectFailedDeleteLeavesTombstoneCold.)
+//
+// Unable to conclude anything, reconcileProject keeps the cache entry so the
+// next pass retries, mirroring the vanished-membership sweep's own failure
+// handling instead of forgetting a still-live key. The cost: the retained
+// entry keeps its pre-archival StateValid classification, so it stays
+// Dispatchable() until a later pass's retry succeeds. Pinned here as the
+// intended behaviour, not left as an unverified side effect: it is the same
+// trade the sweep already makes (never forget a live key), and the window
+// closes on the very next successful reconcile pass.
+func TestReconcileArchivedProjectStaysDispatchableWhileMeterIsUnreachable(t *testing.T) {
 	gl := glabtest.New(t)
 	p := gl.AddProject("group/repo", glab.AccessMaintainer)
 	p.PutFile(".gonk.yml", []byte("version: 1\nenabled: true\nladder: [qwen-local]\n"))
@@ -556,6 +718,10 @@ func TestReconcileArchivedProjectStaysDispatchableUntilDeregisterRetrySucceeds(t
 	}
 	if sum.Errors != 1 {
 		t.Fatalf("sum.Errors = %d, want 1 (the failed deregister)", sum.Errors)
+	}
+
+	if r.Cache.WasDeregistered(p.ID) {
+		t.Fatal("an unreachable meter must leave the tombstone cold: nothing was confirmed and nothing was deleted")
 	}
 
 	e, ok := r.Cache.Get(p.ID)

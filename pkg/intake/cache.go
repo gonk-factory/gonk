@@ -67,12 +67,23 @@ type Cache struct {
 	mu sync.RWMutex
 	m  map[int64]Entry
 	// deregistered tombstones a project ID once reconcileProject's
-	// archived-project branch has CONFIRMED, this process lifetime, that
-	// meter holds no registration for it -- either this process DELETEd it,
-	// or a MeterClient.Get found it already absent. Later passes consult it
-	// to skip the meter call entirely for an archived project already known
-	// gone, rather than repeating an idempotent-but-not-free DELETE every
-	// pass forever.
+	// archived-project branch has ITSELF successfully DELETEd meter's
+	// registration for it, this process lifetime. Later passes consult it to
+	// skip the meter call entirely for an archived project this process
+	// already tore down, rather than repeating an idempotent-but-not-free
+	// DELETE every pass forever.
+	//
+	// Set ONLY on a DELETE WE ISSUED -- never on the mere OBSERVATION that
+	// meter holds no registration. That distinction is the safety property.
+	// A negative answer means "nothing to do this pass", not "never ask
+	// again": meter's state can move under us, and a bare 404 can be written
+	// by an ingress, a proxy or a wrong BaseURL path prefix rather than by
+	// meter at all (MeterClient.Get rejects that shape for this reason).
+	// Tombstoning an observation would turn such a misconfiguration into a
+	// permanent, silent "already gone" -- no retry, no error, no log, and the
+	// archived project's LiteLLM key still live. Tombstoning only what we
+	// deleted keeps the continuous enforcement T-12's unconditional DELETE
+	// had, at a cost of one read-only GET per pass per already-gone project.
 	//
 	// Deliberately NOT a field on Entry: an archived-and-deregistered
 	// project has no classification, must never be Dispatchable, and must
@@ -86,6 +97,16 @@ type Cache struct {
 	// directly (MeterClient.Get) rather than trusting an empty tombstone; an
 	// empty tombstone must never by itself be read as "nothing to
 	// deregister", or this reintroduces the hole T-12 closed.
+	//
+	// GROWTH: an entry is cleared only by Put and Delete, and MarkDeregistered
+	// has already dropped the project from m -- so IDs() never reports it and
+	// the vanished-membership sweep, Delete's only caller, can never reach it.
+	// A tombstone therefore lives as long as the process. It is bounded by the
+	// archivals THIS PROCESS actually performed (not by every project ever
+	// archived, which is what tombstoning observations would have accumulated)
+	// at roughly twenty bytes each, so it is not a practical leak. If it ever
+	// needs one, TriageDispatchedAt's copy-forward-only-live-entries
+	// discipline is the local precedent.
 	deregistered map[int64]struct{}
 }
 
@@ -120,8 +141,10 @@ func (c *Cache) Delete(id int64) {
 	delete(c.deregistered, id)
 }
 
-// WasDeregistered reports whether id's archived-project meter deregistration
-// has already been confirmed this process lifetime.
+// WasDeregistered reports whether THIS PROCESS has already deregistered id
+// from meter. It is not a claim that meter holds no registration -- only that
+// we deleted one. See the deregistered field doc for why the difference
+// matters.
 func (c *Cache) WasDeregistered(id int64) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -132,6 +155,10 @@ func (c *Cache) WasDeregistered(id int64) bool {
 // MarkDeregistered tombstones id (see the deregistered field doc above) and
 // drops any Entry for it -- an archived, deregistered project has no
 // classification left to hold.
+//
+// Call it ONLY after a Deregister this process issued actually succeeded.
+// To drop an archived project's Entry WITHOUT claiming we deleted anything
+// -- the case where meter simply reports no registration -- use Delete.
 func (c *Cache) MarkDeregistered(id int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
