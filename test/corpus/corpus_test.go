@@ -6,7 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	_ "time/tzdata" // opercfg.Load resolves IANA zones; CI images carry no /usr/share/zoneinfo
+
 	"gitlab.orac.local/agentic/gonk-project/pkg/gonkcfg"
+	"gitlab.orac.local/agentic/gonk-project/pkg/opercfg"
 	"gitlab.orac.local/agentic/gonk-project/test/corpus"
 )
 
@@ -83,5 +86,57 @@ func TestHostileConfigsDoNotExhaustMemory(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	if grew := after.HeapAlloc - min(after.HeapAlloc, before.HeapAlloc); grew > 256<<20 {
 		t.Fatalf("hostile corpus grew the heap by %d MiB", grew>>20)
+	}
+}
+
+// ==================================================================
+// Operator config
+// ==================================================================
+
+// TestOperatorConfigCorpus feeds the REAL operator loader (opercfg.Load).
+//
+// An operator config is hot-reloaded into a running meter and folded onto every
+// project, so a config that validates but is wrong has instance-wide blast
+// radius -- R-20's `quiet_hours` with no `timezone` deleted every project's
+// LiteLLM virtual key on the next reload tick. Each Reject entry is one such
+// keystroke; the `valid` entry is the control that keeps the rejections honest.
+func TestOperatorConfigCorpus(t *testing.T) {
+	rejected := 0
+	accepted := 0
+	for _, c := range corpus.OperatorYML(t) {
+		t.Run(c.Name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("PANIC on operator config %s: %v\n%s", c.Name, r, debug.Stack())
+				}
+			}()
+			oc, err := opercfg.Load(c.Bytes)
+			if c.Disposition == corpus.AcceptByLoader {
+				if err != nil {
+					t.Fatalf("%s: opercfg.Load rejected a config it must accept: %v", c.Name, err)
+				}
+				if oc == nil {
+					t.Fatalf("%s: opercfg.Load returned no error and no config", c.Name)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("operator config ACCEPTED: %s -> %+v", c.Name, oc)
+			}
+			if c.WantErrContains != "" && !strings.Contains(err.Error(), c.WantErrContains) {
+				t.Fatalf("%s: rejection message %q does not contain %q", c.Name, err, c.WantErrContains)
+			}
+		})
+		if c.Disposition == corpus.Reject {
+			rejected++
+		} else {
+			accepted++
+		}
+	}
+	// Guard against a corpus that has quietly become one-sided: with no
+	// accepted entry, "reject everything" passes; with no rejected entry, the
+	// corpus asserts nothing.
+	if rejected == 0 || accepted == 0 {
+		t.Fatalf("operator corpus is one-sided: %d reject, %d accept", rejected, accepted)
 	}
 }

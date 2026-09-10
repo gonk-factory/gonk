@@ -140,16 +140,7 @@ func run(log *slog.Logger) error {
 	go runLoop(ctx, log, "reconcile-keys", cfg.ReconcileKeysInterval, svc.ReconcileKeys)
 	go runLoop(ctx, log, "refresh-gauges", cfg.RefreshGaugesInterval, svc.RefreshGauges)
 	go runLoop(ctx, log, "reresolve", cfg.ReresolveInterval, func(rctx context.Context) error {
-		// The operator config is re-read from disk on every tick (the chart
-		// mounts it as a ConfigMap; a ConfigMap update is a file change, not a
-		// restart). If it fails to validate, keep the previous config and
-		// alert -- never fall back to an unvalidated config or to no config.
-		next, err := loadOperatorConfig(cfg.OperatorConfigPath)
-		if err != nil {
-			log.Error("operator config reload failed; keeping the previous config", "err", err)
-		} else {
-			svc.SetConfig(next)
-		}
+		reloadOperatorConfig(log, svc, cfg.OperatorConfigPath)
 		return svc.Reresolve(rctx)
 	})
 
@@ -196,6 +187,31 @@ func runLoop(ctx context.Context, log *slog.Logger, name string, interval time.D
 			}
 		}
 	}
+}
+
+// reloadOperatorConfig re-reads the operator config from disk and hot-swaps it
+// into the running service. The chart mounts the config as a ConfigMap, so an
+// operator edit arrives as a FILE CHANGE, not a restart -- which is exactly why
+// this has to be careful.
+//
+// A config that fails to validate is DROPPED, loudly, and the previous one
+// stays in force. Never fall back to an unvalidated config, and never fall back
+// to no config: Reresolve runs immediately after this on the same tick, and it
+// re-resolves EVERY registered project against whatever config is in force. A
+// bad config reaching SetConfig would therefore mark every project invalid and
+// DELETE every project's LiteLLM virtual key one tick later (R-20). Keeping the
+// last good config means a typo costs an alert, not the fleet.
+//
+// It takes the logger and path as arguments (rather than closing over them) so
+// the keep-the-previous-config behaviour is directly testable -- see
+// TestRejectedReloadKeepsThePreviousConfigAndTheProjectsKey.
+func reloadOperatorConfig(log *slog.Logger, svc *service.Service, path string) {
+	next, err := loadOperatorConfig(path)
+	if err != nil {
+		log.Error("operator config reload failed; keeping the previous config", "err", err)
+		return
+	}
+	svc.SetConfig(next)
 }
 
 func loadOperatorConfig(path string) (*opercfg.OperatorConfig, error) {

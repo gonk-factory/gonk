@@ -38,6 +38,11 @@ func TestValidateRejects(t *testing.T) {
 		"not yaml":         "{{{{",
 		"float tokens":     "version: 1\nenabled: true\nbudget: { monthly_tokens: 1.5 }",
 		"duplicate rung":   "version: 1\nenabled: true\nladder: [glm, glm]",
+		// quiet_hours with no timezone: an empty zone would silently mean UTC,
+		// so rung.ParseQuietHours refuses it downstream and meter marks the
+		// project invalid AND DELETES ITS VIRTUAL KEY. Reject it here, where the
+		// project author can still see and fix it.
+		"quiet_hours without timezone": "version: 1\nenabled: true\nschedule: { quiet_hours: \"22:00-07:00\" }",
 	}
 	for name, doc := range cases {
 		if err := Validate([]byte(doc)); err == nil {
@@ -103,5 +108,30 @@ func TestLoadRejectsNonFiniteFloats(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "finite") {
 		t.Fatalf("error %q should explain the non-finite number", err)
+	}
+}
+
+// The quiet_hours/timezone dependency is ONE-DIRECTIONAL and deliberately so.
+//
+// Rejecting `quiet_hours` without `timezone` closes a brick: the resolver
+// refuses an empty zone, so the project would be marked invalid and lose its
+// key. But `timezone` on its own must keep validating -- a project that names
+// only a zone is naming the zone for a quiet-hours window an operator layer
+// supplies, which is a legitimate (if lossy) thing to write. Asserting both
+// directions here stops a future "tighten it symmetrically" edit from
+// rejecting configs that have no defect.
+func TestScheduleRequiresTimezoneOnlyWhenQuietHoursIsSet(t *testing.T) {
+	err := Validate([]byte("version: 1\nenabled: true\nschedule: { quiet_hours: \"22:00-07:00\" }\n"))
+	if err == nil {
+		t.Fatal("Validate accepted quiet_hours with no timezone; every project inheriting it would be marked invalid and lose its virtual key")
+	}
+	if !strings.Contains(err.Error(), "timezone") {
+		t.Fatalf("rejection %q must NAME the missing field so the project author can fix it", err)
+	}
+	if err := Validate([]byte("version: 1\nenabled: true\nschedule: { timezone: \"America/New_York\" }\n")); err != nil {
+		t.Fatalf("Validate rejected a timezone with no quiet_hours: %v; the dependency is one-directional", err)
+	}
+	if err := Validate([]byte("version: 1\nenabled: true\nschedule: {}\n")); err != nil {
+		t.Fatalf("Validate rejected an empty schedule block: %v", err)
 	}
 }
