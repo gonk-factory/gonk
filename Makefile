@@ -296,16 +296,17 @@ vet:
 
 # TestEveryBuildTagRunsInCI (internal/buildgate) is DELIBERATELY red: T-14
 # added it to assert every //go:build tag under cmd/pkg/internal/test
-# appears in a `go test … -tags <tag>` line in .github/workflows/ci.yml, and
-# today component/integration/images/live/testclock do not (only chart
-# does). This package runs in the ordinary gate on purpose (see
-# nolatest_test.go's package doc), so without the SAME -skip ci.yml's own
-# `go test` step carries, this one intentionally-red test would fail
-# `make gate` for every contributor on every branch -- worse than the gap it
-# exists to surface. The finding is not hidden: run
+# appears in a `go test … -tags <tag>` line in .github/workflows/ci.yml. T-15
+# landed the `component` and `integration` jobs, so those two tags are
+# covered now; today images/live/testclock still are not (only
+# chart/component/integration do). This package runs in the ordinary gate on
+# purpose (see nolatest_test.go's package doc), so without the SAME -skip
+# ci.yml's own `go test` step carries, this one intentionally-red test would
+# fail `make gate` for every contributor on every branch -- worse than the
+# gap it exists to surface. The finding is not hidden: run
 # `go test ./internal/buildgate/ -count=1 -v` directly (no -skip) to see it.
-# TODO(2026-09-08, T-15/T-16/T-17): narrow or remove this exclusion as each
-# task lands the CI job it covers.
+# TODO(2026-09-08, T-16/T-17): narrow or remove this exclusion as each task
+# lands the CI job it covers.
 test:
 	$(GO) test ./... -race -count=1 -skip '^TestEveryBuildTagRunsInCI$$'
 
