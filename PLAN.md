@@ -505,22 +505,16 @@ Update the Status column as tasks complete (house rule: progress lives here).
 
 ## Contracts published by plan 04 (Task 8)
 
-- `cmd/gonk-gate trailers` + `images/agent/prepare-commit-msg` — commit
-  provenance, installed as a `prepare-commit-msg` git hook in the rig clone
-  at session start (AD-4), never asked of the agent as prose. Two rules that
-  are both about not lying in permanent history: `commit_trailers` defaults
-  **on**, `include_usage` defaults **off** (cost in public git history is a
-  per-project choice, spec 6.1); and on `complete: false` (the usual case at
-  commit time — the session is normally still open) the trailer block writes
-  `Gonk-Usage: pending`, **never a number** (AD-5, carried from Plan 03's
-  AD-7 verbatim: a wrong cost baked into permanent git history can never be
-  corrected). A trailer lookup **never fails a commit** — every
-  meter-unreachable path degrades to the shipped default or to `pending`,
-  because losing an agent's real work over a missing metadata footer is a
-  far worse trade than the missing footer itself. `renderTrailers` refuses
-  the whole block (rather than sanitizing) if any value carries an embedded
-  `\r`/`\n`, and `appendTrailerBlock` is idempotent against
-  `prepare-commit-msg` re-invocation on `commit --amend`.
+**STRUCK.** `cmd/gonk-gate trailers` and `images/agent/prepare-commit-msg`
+(the commit-provenance hook this section documented) were deleted in
+`feat(gate): delete dead trailers/verify/SubmitSession/entrypoint fallbacks`
+once confirmed dead: the checkout `images/agent/entrypoint.sh` fetches is a
+GitLab repository-archive tarball (`pkg/rig`, `ArchiveFetcher.RepoArchive`),
+never a git clone, so the rig directory's `.git/` this hook installed into
+never existed in a real pod — the install step always took its own "skip"
+branch, and with no hook installed, `gonk-gate trailers` was never invoked
+either. Spec §6.1's trailer paragraph is marked "not in v1" for the same
+reason.
 
 ## Carried into later plans
 

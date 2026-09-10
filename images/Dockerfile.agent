@@ -96,7 +96,8 @@ RUN set -eu; \
 # ---- runtime -----------------------------------------------------------------
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 
-# git: the rig clone and the prepare-commit-msg hook (Task 8).
+# git: the rig clone (agents run `git log`/`git diff` locally against it; no
+# forge credential is ever mounted here -- see below).
 # ca-certificates: TLS trust roots for the one endpoint the agent talks to,
 # LiteLLM. Under the broker design the agent never reaches the forge, so no
 # forge CA is trusted here (that egress lives in the broker, not this pod).
@@ -118,8 +119,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=fetch /fetch/opencode      /usr/local/bin/opencode
 COPY --from=gate  /out/gonk-gate       /usr/local/bin/gonk-gate
 COPY images/agent/entrypoint.sh        /usr/local/bin/gonk-agent-entrypoint
-COPY images/agent/prepare-commit-msg   /usr/local/share/gonk/prepare-commit-msg
-RUN chmod +x /usr/local/bin/gonk-agent-entrypoint /usr/local/share/gonk/prepare-commit-msg
+RUN chmod +x /usr/local/bin/gonk-agent-entrypoint
 
 # No forge CA is trusted here. Under the broker design (spec 9/10) the agent pod
 # never reaches gitlab.orac.local -- the broker reads the issue and posts the

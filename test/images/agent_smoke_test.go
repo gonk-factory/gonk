@@ -296,10 +296,17 @@ func TestAgentImageOpencodeResolvesOnlyTheGonkProvider(t *testing.T) {
 	}
 }
 
-// gonk-gate ships in the agent image for `check`/`trailers` (AD-3). What this
-// asserts: the binary is present, executable, and honours its documented
-// exit-code contract (main.go's own doc comment: 2 = misconfiguration, never
-// retried).
+// gonk-gate ships in the agent image (images/Dockerfile.agent's `gate` build
+// stage; originally AD-3). It used to earn its place there via two
+// subcommands, `check` and `trailers` -- both are gone now (ADR-007 §3
+// deleted `check`; `trailers` was deleted once it was confirmed dead: the
+// checkout entrypoint.sh fetches is a GitLab repository-archive tarball with
+// no `.git/`, so the prepare-commit-msg hook that would have invoked
+// `trailers` never actually installed in a real pod). Nothing in the agent
+// pod invokes gonk-gate any more; whether the image should still bundle it
+// is flagged, not decided, here. This test just proves the shipped binary is
+// present, executable, and honours its documented exit-code contract
+// (main.go's own doc comment: 2 = misconfiguration, never retried).
 func TestAgentImageGonkGateBinaryPresent(t *testing.T) {
 	image, _ := agentImage(t)
 	out, code := runIn(t, image, "/usr/local/bin/gonk-gate")
@@ -325,60 +332,6 @@ func TestAgentImageGonkGateVersionMatchesTag(t *testing.T) {
 	}
 	if got := strings.TrimSpace(out); got != tag {
 		t.Fatalf("gonk-gate --version = %q, want %q (GONK_TAG)", got, tag)
-	}
-}
-
-// TestAgentImageGonkGateTrailersSplicesACommitMessage closes the other half
-// of the gap this task originally flagged and skipped: `trailers` did not
-// exist yet ("Task 8 adds trailers"). It now does
-// (cmd/gonk-gate/trailers.go), and this runs the REAL binary THIS IMAGE
-// SHIPS -- not a locally-built one -- against a commit message file on a
-// bind mount, with GONK_METER_URL deliberately empty (proving the "never
-// fail a commit" fallback to the shipped default, commit_trailers=on,
-// documented in trailers.go and exercised end-to-end against a real `git
-// commit` by cmd/gonk-gate's own TestHookAttachesTrailersToARealCommit in
-// this same package).
-func TestAgentImageGonkGateTrailersSplicesACommitMessage(t *testing.T) {
-	image, _ := agentImage(t)
-
-	msgDir := t.TempDir()
-	msgPath := filepath.Join(msgDir, "COMMIT_EDITMSG")
-	if err := os.WriteFile(msgPath, []byte("feat: something\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	tags := atags.Tags{
-		Project: "group/repo", Rig: "repo", BeadID: "gk-1a2b",
-		SessionKey: "gonk-42-issue-3", Rung: "cheap", Attempt: 2,
-		Trigger: atags.TriggerIssueTriage,
-	}
-	metadataJSON, err := json.Marshal(tags.Metadata())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := exec.Command("podman", "run", "--rm", "--network=host",
-		"-e", "GC_WEBHOOK_ARG_MODEL=some-model",
-		"-e", "GC_WEBHOOK_ARG_METADATA_JSON="+string(metadataJSON),
-		"-e", "GONK_METER_URL=",
-		"-v", msgDir+":/tmp/msg:rw",
-		"--entrypoint", "/usr/local/bin/gonk-gate",
-		image, "trailers", "--commit-msg-file", "/tmp/msg/COMMIT_EDITMSG",
-	)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("gonk-gate trailers in the agent image: %v\nstderr:\n%s", err, stderr.String())
-	}
-
-	got, err := os.ReadFile(msgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(got), "Gonk-Bead: gk-1a2b") {
-		t.Fatalf("trailers missing from the commit message after running the SHIPPED "+
-			"gonk-gate binary inside the agent image:\n%s", got)
 	}
 }
 

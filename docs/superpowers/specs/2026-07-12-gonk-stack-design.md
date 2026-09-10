@@ -294,13 +294,21 @@ metadata tags: `project`, `rig`, `bead_id`, `session_key`, `rung`, `attempt`,
 `trigger`. LiteLLM spend logs are the raw ledger (tokens + computed cost per call,
 keyed by all tags).
 
-**Commit provenance trailers (default on):** every bot-authored commit carries
-git trailers identifying the generator, e.g.
-`Generated-By: gonk/<version> (opencode <version>; <model> via litellm)`.
-With `provenance.include_usage: true` (default off — cost in public history is a
-per-project choice), trailers also carry `Gonk-Tokens:` and `Gonk-Cost-USD:`
-for the producing session, sourced from gonk-meter at commit time. Controlled by
-`provenance` in `.gonk.yml`.
+**Commit provenance trailers -- NOT IN V1.** This paragraph originally read
+"default on": every bot-authored commit would carry git trailers identifying
+the generator, e.g.
+`Generated-By: gonk/<version> (opencode <version>; <model> via litellm)`,
+and with `provenance.include_usage: true` (default off — cost in public
+history is a per-project choice) also `Gonk-Tokens:` and `Gonk-Cost-USD:` for
+the producing session, sourced from gonk-meter at commit time, controlled by
+`provenance` in `.gonk.yml`. It was built (`cmd/gonk-gate trailers`,
+`images/agent/prepare-commit-msg`) and then deleted once confirmed dead: the
+checkout the agent pod fetches is a GitLab repository-archive tarball
+(`pkg/rig`, `ArchiveFetcher.RepoArchive`), never a git clone, so the rig
+directory's `.git/` the hook installed into never existed in a real pod --
+the install step always took its own "skip" branch, and the hook was never
+once invoked. Reinstating this needs a delivery mechanism that does not
+depend on the checkout being a git working copy.
 
 ### 6.2 gonk-meter responsibilities
 
