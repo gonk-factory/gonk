@@ -210,6 +210,23 @@ jobs:
   images:
     name: images (build fresh + container smoke tests)
     runs-on: ubuntu-24.04
+    env:
+      # Pin the build step and the test step to the SAME container-runtime
+      # store. GitHub's ubuntu-24.04 runner ships BOTH podman and a genuine
+      # Docker daemon. The build step below writes images into Docker's
+      # store (`make images PODMAN=docker`); without this override,
+      # test/images' containerBin() helper (test/images/agent_smoke_test.go)
+      # calls harness.DetectRuntime(), which scans PATH podman-first and
+      # picks up whichever runtime happens to be found there -- podman on
+      # this runner. `podman image inspect` cannot see anything in Docker's
+      # store, so every image-presence check failed and RequireInfra FATALed
+      # all 24 image-dependent tests (run 34446124973, commit 949a0792) even
+      # though the build step built every image with exactly the right tag.
+      # Setting GONK_CONTAINER_RUNTIME=docker here makes DetectRuntime probe
+      # Docker specifically -- the same store the build step wrote to -- and
+      # fail loudly (not silently fall back to podman) if that ever stops
+      # being true.
+      GONK_CONTAINER_RUNTIME: docker
     steps:
       - uses: actions/checkout@v4
 
@@ -220,12 +237,9 @@ jobs:
 
       # GitHub's ubuntu-24.04 runner ships a genuine Docker daemon -- unlike
       # this repo's dev box, whose `docker` is a podman shim under WSL with a
-      # broken CNI bridge (docs/environment.md). test/images' own
-      # containerBin() helper (test/images/agent_smoke_test.go) resolves to
-      # whichever of podman/docker harness.DetectRuntime() finds on PATH, so
-      # it picks up this real daemon automatically; this step just fails
-      # fast and legibly if it is somehow not running, matching the
-      # `component` job's own preflight above.
+      # broken CNI bridge (docs/environment.md). This step just fails fast
+      # and legibly if it is somehow not running, matching the `component`
+      # job's own preflight above.
       - name: docker is available
         run: docker version
 

@@ -2,8 +2,10 @@ package harness
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 )
 
 type RuntimeKind string
@@ -12,6 +14,10 @@ const (
 	Podman RuntimeKind = "podman"
 	Docker RuntimeKind = "docker"
 )
+
+// RuntimeEnvVar, when set to "podman" or "docker", pins DetectRuntime to
+// exactly that runtime and disables its PATH scan -- see DetectRuntime.
+const RuntimeEnvVar = "GONK_CONTAINER_RUNTIME"
 
 type Runtime struct {
 	Bin  string
@@ -26,25 +32,69 @@ type Runtime struct {
 }
 
 // DetectRuntime finds a container runtime and configures it for THIS box's
-// reality. If `docker` is actually a podman shim (very common under WSL), we must
-// still treat it as podman.
+// reality.
+//
+// If RuntimeEnvVar (GONK_CONTAINER_RUNTIME) is set, it is authoritative:
+// DetectRuntime probes ONLY the named binary and returns an error if it is
+// missing or unusable -- it never silently falls back to the other runtime.
+// That silent fallback is what broke the `images` CI job (T-16/gonk-ak0):
+// the build step ran `make images PODMAN=docker`, so every image landed in
+// Docker's image store, but the test step's unguided PATH scan found
+// `podman` first (GitHub Actions runners ship both) and probed a store none
+// of those images were ever written to. Every presence check came back
+// false, and RequireInfra correctly -- but pointlessly -- FATALed the whole
+// job. Setting GONK_CONTAINER_RUNTIME=docker on a job that builds and then
+// probes images makes the probe use the SAME store the build wrote to, by
+// name, not by accident of PATH order.
+//
+// If RuntimeEnvVar is unset, behavior is unchanged from before it existed:
+// scan PATH, podman first, then docker.
 func DetectRuntime() (*Runtime, error) {
+	if override := os.Getenv(RuntimeEnvVar); override != "" {
+		return detectNamedRuntime(override)
+	}
 	for _, bin := range []string{"podman", "docker"} {
-		path, err := exec.LookPath(bin)
-		if err != nil {
-			continue
+		if rt, err := probeRuntime(bin); err == nil {
+			return rt, nil
 		}
-		out, err := exec.Command(path, "version", "--format", "{{.Client.Version}}").CombinedOutput()
-		if err != nil {
-			continue
-		}
-		kind := Docker
-		if bin == "podman" || looksLikePodman(out) {
-			kind = Podman
-		}
-		return &Runtime{Bin: path, Kind: kind, HostNetwork: hostNetworkFor(kind)}, nil
 	}
 	return nil, fmt.Errorf("harness: no container runtime found (tried podman, docker)")
+}
+
+// detectNamedRuntime probes exactly the binary RuntimeEnvVar names. It never
+// tries the other runtime: a caller that set the override wants a specific
+// store probed, and falling back to whatever else is on PATH is precisely
+// the bug this override exists to close.
+func detectNamedRuntime(bin string) (*Runtime, error) {
+	if bin != string(Podman) && bin != string(Docker) {
+		return nil, fmt.Errorf("harness: %s=%q is not a supported runtime (want %q or %q)", RuntimeEnvVar, bin, Podman, Docker)
+	}
+	rt, err := probeRuntime(bin)
+	if err != nil {
+		return nil, fmt.Errorf("harness: %s=%q but %q is not a usable container runtime (must be on PATH and answer `%s version`): %w", RuntimeEnvVar, bin, bin, bin, err)
+	}
+	return rt, nil
+}
+
+// probeRuntime resolves bin on PATH, confirms it actually runs, and
+// classifies it as Podman or Docker. It returns an error -- never a
+// different runtime -- when bin is absent or unresponsive; callers decide
+// whether that error is fatal (detectNamedRuntime) or a reason to try the
+// next candidate (DetectRuntime's PATH scan).
+func probeRuntime(bin string) (*Runtime, error) {
+	path, err := exec.LookPath(bin)
+	if err != nil {
+		return nil, err
+	}
+	out, err := exec.Command(path, "version", "--format", "{{.Client.Version}}").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("%s version: %w (%s)", bin, err, strings.TrimSpace(string(out)))
+	}
+	kind := Docker
+	if bin == string(Podman) || looksLikePodman(out) {
+		kind = Podman
+	}
+	return &Runtime{Bin: path, Kind: kind, HostNetwork: hostNetworkFor(kind)}, nil
 }
 
 // hostNetworkFor decides whether a detected runtime must run containers with
