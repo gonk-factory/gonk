@@ -650,10 +650,12 @@ networkPolicy:
   # no second line of defence, for a workload that processes attacker-written
   # issue text by construction.
   #
-  # Turning this back on restores that hole. Do it only as a temporary measure
-  # (e.g. if the unported `mention` formula path turns out to need it), and note
-  # that even when enabled the rule is now port-scoped via gitlab.ports rather
-  # than allowing every port.
+  # Turning this back on restores that hole. Do it only as a temporary measure,
+  # and note that even when enabled the rule is now port-scoped via gitlab.ports
+  # rather than allowing every port. It is NOT how `mention-reply` comes back:
+  # that trigger has had no route at all since the formula layer was deleted
+  # (gonk-gate dispatch refuses it outright), and porting it (T-24) means putting
+  # it on the broker, where the controller does the forge I/O.
   gitlabEgress:
     enabled: false
   gitlabInCluster:

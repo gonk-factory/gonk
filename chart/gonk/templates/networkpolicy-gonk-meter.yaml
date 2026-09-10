@@ -19,8 +19,9 @@ spec:
       {{- include "gonk.selectorLabels" (dict "ctx" . "component" "meter") | nindent 6 }}
   policyTypes: [Ingress, Egress]
   ingress:
-    # intake (project registration) and the agent pods (session cost, for commit
-    # trailers). Both are in this namespace.
+    # intake (project registration) and the agent pods (prompt-by-reference:
+    # GET /v1/prompt/{alias}, POST /v1/trace). Both are in this namespace.
+    # WITHOUT THE AGENT HALF NO SESSION EVER RECEIVES A PROMPT.
     - from:
         - podSelector:
             matchLabels:
@@ -31,8 +32,8 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.meter.port }}
-    # The PACK's dispatch formula (POST /v1/policy/decide) and gate step
-    # (POST /v1/policy/outcome) run inside the Gas City controller.
+    # The PACK's exec orders -- gonk-dispatch (POST /v1/policy/decide) and
+    # gonk-sweep (POST /v1/policy/outcome) -- run inside the Gas City controller.
     # WITHOUT THIS RULE, NO SESSION CAN EVER SPAWN.
     #   * bundled controller  -> in THIS namespace (component: controller)
     #   * BYO controller      -> the gascity namespaceSelector
