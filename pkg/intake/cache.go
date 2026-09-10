@@ -66,9 +66,32 @@ func (e Entry) Dispatchable() bool {
 type Cache struct {
 	mu sync.RWMutex
 	m  map[int64]Entry
+	// deregistered tombstones a project ID once reconcileProject's
+	// archived-project branch has CONFIRMED, this process lifetime, that
+	// meter holds no registration for it -- either this process DELETEd it,
+	// or a MeterClient.Get found it already absent. Later passes consult it
+	// to skip the meter call entirely for an archived project already known
+	// gone, rather than repeating an idempotent-but-not-free DELETE every
+	// pass forever.
+	//
+	// Deliberately NOT a field on Entry: an archived-and-deregistered
+	// project has no classification, must never be Dispatchable, and must
+	// never contribute a label to CountByState's metric domain (AllStates).
+	// Keeping it out of m guarantees that structurally instead of relying on
+	// every Entry consumer to remember to check a flag.
+	//
+	// DERIVED ONLY, same as m: it rebuilds empty on every restart,
+	// reschedule, rollout or fresh replica. See reconcileProject's archived
+	// branch for how the resulting cold start is handled -- it asks meter
+	// directly (MeterClient.Get) rather than trusting an empty tombstone; an
+	// empty tombstone must never by itself be read as "nothing to
+	// deregister", or this reintroduces the hole T-12 closed.
+	deregistered map[int64]struct{}
 }
 
-func NewCache() *Cache { return &Cache{m: make(map[int64]Entry)} }
+func NewCache() *Cache {
+	return &Cache{m: make(map[int64]Entry), deregistered: make(map[int64]struct{})}
+}
 
 func (c *Cache) Get(id int64) (Entry, bool) {
 	c.mu.RLock()
@@ -77,16 +100,43 @@ func (c *Cache) Get(id int64) (Entry, bool) {
 	return e, ok
 }
 
+// Put stores id's Entry. A project with a live Entry is, by definition, not a
+// confirmed-deregistered archived project (the non-archived reconcile path is
+// the only caller), so Put also clears any stale deregistered tombstone --
+// otherwise a project that unarchives, re-registers, and later archives again
+// would be skipped forever on the strength of a tombstone from its PREVIOUS
+// archival.
 func (c *Cache) Put(id int64, e Entry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.m[id] = e
+	delete(c.deregistered, id)
 }
 
 func (c *Cache) Delete(id int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.m, id)
+	delete(c.deregistered, id)
+}
+
+// WasDeregistered reports whether id's archived-project meter deregistration
+// has already been confirmed this process lifetime.
+func (c *Cache) WasDeregistered(id int64) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	_, ok := c.deregistered[id]
+	return ok
+}
+
+// MarkDeregistered tombstones id (see the deregistered field doc above) and
+// drops any Entry for it -- an archived, deregistered project has no
+// classification left to hold.
+func (c *Cache) MarkDeregistered(id int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.m, id)
+	c.deregistered[id] = struct{}{}
 }
 
 // IDs is a snapshot of every cached project ID, used to find projects that

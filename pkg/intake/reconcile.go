@@ -726,21 +726,52 @@ func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) (proj
 		// place that observes Archived, so deregistering has to happen here, or
 		// the LiteLLM key outlives the project's archival.
 		//
-		// Deregister UNCONDITIONALLY, off `p` itself, not gated on a cache hit.
-		// The cache is derived-only and rebuilds empty on every restart
-		// (cache.go): a project that is already archived when a fresh replica
-		// (or the first pass after a restart/rollout) sees it was never
-		// Cache.Put in the first place, so a cache-gated deregister would skip
-		// it forever. MeterClient.Deregister documents deleting an unknown
-		// project as a 204, not a 404, so the extra idempotent DELETE this
-		// causes on an already-deregistered project is free.
-		if err := r.Meter.Deregister(ctx, p.PathWithNamespace); err != nil {
-			r.Obs.MeterPush("error")
-			r.log().Warn("failed to deregister archived project", "project", p.PathWithNamespace, "err", err)
-			return out, err // keep cached; retry deregistration next pass
+		// The DELETE itself is unconditional in the sense that matters: it is
+		// never gated on a CACHE hit (r.Cache.Get(p.ID)), which is the mistake
+		// the previous fix made and which this one must not repeat. The cache
+		// is derived-only and rebuilds empty on every restart, reschedule,
+		// rollout or fresh replica (cache.go): a project already archived the
+		// first time such a fresh reconciler observes it was never Cache.Put,
+		// so a deregister gated on a cache HIT would skip it forever.
+		//
+		// What IS gated here is repetition, and it is gated on two things that
+		// are NOT the derived cache:
+		//
+		//  1. Cache.WasDeregistered -- an in-memory tombstone, set only after
+		//     this process itself confirms (below) that meter holds no
+		//     registration. It is exactly as derived as the rest of the cache
+		//     (empty on a cold start), so it is consulted only to SKIP a call,
+		//     never to justify one -- a false negative here just means one
+		//     extra idempotent round trip, never a missed deregistration.
+		//  2. r.Meter.Get -- a read-only GET, answered by meter's own state,
+		//     which is the one place that actually knows and which survives an
+		//     intake restart even though this cache does not. On a cold
+		//     tombstone this is what stands in for "already handled",
+		//     replacing a guess with an answer from the source of truth.
+		//
+		// Cost: MeterClient.Deregister documents deleting an unknown project as
+		// a 204, not a 404, but that DELETE is not free -- meter's own handler
+		// puts a Secret delete and a DB delete behind it. Get has neither; it
+		// only reads. So a warm tombstone costs nothing, and even a cold one
+		// (once per restart, not once per pass) costs a read, not a write.
+		if r.Cache.WasDeregistered(p.ID) {
+			return out, nil
 		}
-		r.Obs.MeterPush("ok")
-		r.Cache.Delete(p.ID)
+		_, found, err := r.Meter.Get(ctx, p.PathWithNamespace)
+		if err != nil {
+			r.Obs.MeterPush("error")
+			r.log().Warn("failed to check meter registration for archived project", "project", p.PathWithNamespace, "err", err)
+			return out, err // tombstone stays cold; retry next pass
+		}
+		if found {
+			if err := r.Meter.Deregister(ctx, p.PathWithNamespace); err != nil {
+				r.Obs.MeterPush("error")
+				r.log().Warn("failed to deregister archived project", "project", p.PathWithNamespace, "err", err)
+				return out, err // tombstone stays cold; retry deregistration next pass
+			}
+			r.Obs.MeterPush("ok")
+		}
+		r.Cache.MarkDeregistered(p.ID)
 		return out, nil
 	}
 	obs, err := r.observe(ctx, p) // GitLab: membership, .gonk.yml bytes, .agent/, decline
