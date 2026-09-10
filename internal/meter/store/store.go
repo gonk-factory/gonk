@@ -126,6 +126,45 @@ type ReserveResult struct {
 	// rather than the r passed in (an idempotent no-op insert). The service
 	// returns the same run{} either way.
 	Existing bool
+	// Miss names the budget leg the atomic re-check found insufficient when
+	// Fits is false (R-25). Set to the FIRST leg that did not fit, checked in
+	// the same order as the fits test itself: cost, then monthly tokens, then
+	// per-task tokens. Zero value ("") when Fits is true. The caller uses this
+	// to name the leg that lost in its defer reason/detail, rather than
+	// reporting every lost race as a cost-budget loss regardless of which
+	// leg actually ran out.
+	Miss ReserveMiss
+}
+
+// ReserveMiss names one budget leg ReserveIfFits' atomic re-check can find
+// insufficient. A bounded set for the same reason rung's Reason constants
+// are (pkg/rung/decide.go): it is read by both store backends and by the
+// service that turns it into an observable defer reason.
+type ReserveMiss string
+
+const (
+	MissCost          ReserveMiss = "cost"
+	MissMonthlyTokens ReserveMiss = "monthly-tokens"
+	MissTaskTokens    ReserveMiss = "task-tokens"
+)
+
+// missingLeg reports the FIRST budget leg r does not fit under rem, checked
+// cost, then monthly tokens, then per-task tokens -- the same order the
+// combined fits-check in both backends uses -- or "" if r fits every leg.
+// Shared by Memory and Postgres so the two backends can never disagree about
+// which leg lost for identical numbers (kept byte-consistent with both
+// ReserveIfFits implementations, same convention as the fits check itself).
+func missingLeg(rem budget.Remaining, r Reservation) ReserveMiss {
+	switch {
+	case r.CostUSD > 0 && !rem.FitsCost(r.CostUSD):
+		return MissCost
+	case !rem.FitsMonthTokens(r.Tokens):
+		return MissMonthlyTokens
+	case !rem.FitsTaskTokens(r.Tokens):
+		return MissTaskTokens
+	default:
+		return ""
+	}
 }
 
 // Store is gonk-meter's ledger: project registrations, ladder attempt

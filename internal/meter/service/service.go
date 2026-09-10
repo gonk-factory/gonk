@@ -685,10 +685,16 @@ func (s *Service) Decide(ctx context.Context, req meterapi.DecideRequest) (rung.
 		// We lost a race against a concurrent session. rung.Decide said yes on
 		// a snapshot that is now stale. This is a DEFER, not an error and not a
 		// deny: the budget is real, it is just spoken for right now.
+		//
+		// R-25: name the leg store.ReserveIfFits actually found short
+		// (result.Miss) rather than always blaming the cost budget -- an
+		// earlier version hardcoded ReasonMonthlyCostExhausted here even when
+		// it was the token leg that lost, which made the race unobservable.
+		reason, legLabel := reasonForLostRaceLeg(result.Miss)
 		lost := rung.Decision{
 			Kind: rung.Defer, Attempt: d.Attempt,
-			Reason:     rung.ReasonMonthlyCostExhausted,
-			Detail:     "lost a concurrent reservation race for the remaining budget",
+			Reason:     reason,
+			Detail:     fmt.Sprintf("lost a concurrent reservation race for %s", legLabel),
 			RetryAfter: now.Add(cfg.Meter.MaxSpendStaleness),
 		}
 		s.noteDecision(req.Project, req.BeadID, lost)
@@ -723,6 +729,30 @@ func (s *Service) Decide(ctx context.Context, req meterapi.DecideRequest) (rung.
 
 	s.noteDecision(req.Project, req.BeadID, d)
 	return d, DecideExtras{Metadata: tags.Metadata(), KeyRef: reg.KeyRef, Reservation: held}, nil
+}
+
+// reasonForLostRaceLeg maps the store's ReserveMiss (R-25: which budget leg
+// the atomic re-check found insufficient) onto a machine-readable rung.Reason
+// and a human-readable label for the defer Detail. The Reason reuses rung's
+// own bounded set (the same three legs rung.Decide's money gate already
+// names) rather than inventing a parallel one.
+//
+// The default case is defensive, not expected: ReserveIfFits always sets
+// Miss to one of the three named legs when Fits is false. Falling back to the
+// cost reason rather than panicking keeps a store bug from taking down
+// /decide, but never trust that invariant from outside the package it was
+// proven in -- so the label says plainly that something is unaccounted for.
+func reasonForLostRaceLeg(miss store.ReserveMiss) (reason, label string) {
+	switch miss {
+	case store.MissMonthlyTokens:
+		return rung.ReasonMonthlyTokensExhausted, "the monthly token budget"
+	case store.MissTaskTokens:
+		return rung.ReasonPerTaskTokensExhausted, "the per-task token budget"
+	case store.MissCost:
+		return rung.ReasonMonthlyCostExhausted, "the monthly cost budget"
+	default:
+		return rung.ReasonMonthlyCostExhausted, "an unspecified budget leg (store did not report which)"
+	}
 }
 
 // spendFor sums observed spend (windowed by project, lifetime by bead) and

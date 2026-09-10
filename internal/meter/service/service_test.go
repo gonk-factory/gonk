@@ -731,12 +731,21 @@ func TestDecideFailsClosedOnStoreError(t *testing.T) {
 // without staging a real budget race. This is the branch that becomes the SOLE
 // guard against an unbacked run if the in-process mutex is ever removed, so it
 // must be tested directly.
+//
+// miss is the store.ReserveMiss the fake reports (R-25: which leg lost) --
+// the zero value MissCost unless a test sets it, so every EXISTING caller of
+// notFitsStore keeps testing the cost-budget branch it was written against.
 type notFitsStore struct {
 	*store.Memory
+	miss store.ReserveMiss
 }
 
 func (n *notFitsStore) ReserveIfFits(_ context.Context, _ string, _ budget.Budget, _ budget.Spend, _ store.Reservation) (store.ReserveResult, error) {
-	return store.ReserveResult{}, nil // Fits=false, no error: a lost race
+	miss := n.miss
+	if miss == "" {
+		miss = store.MissCost
+	}
+	return store.ReserveResult{Miss: miss}, nil // Fits=false, no error: a lost race
 }
 
 // TestDecideDefersWhenReserveDoesNotFit: when rung.Decide says run but the
@@ -775,6 +784,63 @@ func TestDecideDefersWhenReserveDoesNotFit(t *testing.T) {
 	}
 	if extras.Reservation.ID != "" || len(extras.Metadata) != 0 || extras.KeyRef != (store.KeyRef{}) {
 		t.Fatalf("a lost-reserve defer leaked extras: %+v", extras)
+	}
+}
+
+// TestDecideLostRaceReasonNamesTheLegThatLost is R-25: an earlier version
+// hardcoded ReasonMonthlyCostExhausted on EVERY lost race, even when the store
+// reported a token leg was the one that came up short -- indistinguishable
+// from a real cost exhaustion in the logs and metrics. Decide must pass the
+// store's reported leg (store.ReserveResult.Miss) through to a MATCHING
+// rung.Reason, not a fixed one, and the Detail text must name the leg in
+// words too (Detail is what a human reads; Reason is what a dashboard groups
+// on -- both must be right).
+func TestDecideLostRaceReasonNamesTheLegThatLost(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		miss       store.ReserveMiss
+		wantReason string
+		wantSubstr string
+	}{
+		{"cost leg lost", store.MissCost, rung.ReasonMonthlyCostExhausted, "cost budget"},
+		{"monthly token leg lost", store.MissMonthlyTokens, rung.ReasonMonthlyTokensExhausted, "monthly token budget"},
+		{"per-task token leg lost", store.MissTaskTokens, rung.ReasonPerTaskTokensExhausted, "per-task token budget"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := store.NewMemory()
+			ns := &notFitsStore{Memory: mem, miss: tc.miss}
+			cfg, err := opercfg.Load([]byte(testOperatorYAML))
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+			admin := litellm.NewFake()
+			admin.Now = now
+			svc := New(cfg, ns, admin, admin, keysink.NewMemory(), func() time.Time { return now })
+
+			if _, status, err := svc.Register(context.Background(), meterapi.ProjectRequest{
+				Project: "group/repo", ProjectID: 1, Rig: "group-repo", GonkYML: simpleYAML("glm", 5),
+			}); err != nil || status != 200 {
+				t.Fatalf("setup register: %d %v", status, err)
+			}
+			if err := svc.SyncSpend(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			d, _, err := svc.Decide(context.Background(), decideReq("group/repo", "gk-1", "sess-1"))
+			if err != nil {
+				t.Fatalf("Decide = %v, want a defer with no error", err)
+			}
+			if d.Kind != rung.Defer {
+				t.Fatalf("decision kind = %q, want defer", d.Kind)
+			}
+			if d.Reason != tc.wantReason {
+				t.Fatalf("Reason = %q, want %q (miss=%q)", d.Reason, tc.wantReason, tc.miss)
+			}
+			if !strings.Contains(d.Detail, tc.wantSubstr) {
+				t.Fatalf("Detail = %q, want it to name %q", d.Detail, tc.wantSubstr)
+			}
+		})
 	}
 }
 

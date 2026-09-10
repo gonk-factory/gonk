@@ -227,12 +227,21 @@ func testRegistrationRoundTrip(newStore func() store.Store) func(t *testing.T) {
 		// unlimited-budget project (fail-closed, but a bug). A zero Effective
 		// (the old fixture) hid this completely; this fixture forces every
 		// backend's persistence to be +Inf-safe.
+		// Schedule (R-23): Effective.Schedule carries the resolved
+		// schedule.quiet_hours/timezone STRINGS (distinct from
+		// Registration.QuietHours, the already-PARSED rung.QuietHours used by
+		// the policy engine). A backend that persists Effective without it
+		// would answer GET /v1/projects/{p} with `schedule: null` after a
+		// restart while quiet hours kept being enforced from the separately-
+		// stored parsed form -- correct behavior, misleading observability.
+		wantSchedule := gonkcfg.Schedule{QuietHours: "22:00-07:00", Timezone: "America/New_York"}
 		reg := store.Registration{
 			Project: "group/repo", Rig: "group-repo", State: store.StateActive,
 			Raw: []byte("version: 1\n"),
 			Effective: gonkcfg.Effective{
-				Enabled: true,
-				Ladder:  []string{"qwen-local"},
+				Enabled:  true,
+				Ladder:   []string{"qwen-local"},
+				Schedule: &wantSchedule,
 				Budget: gonkcfg.EffectiveBudget{
 					MonthlyCostUSD: math.Inf(1),
 					MonthlyTokens:  gonkcfg.TokenQuantity(math.MaxInt64),
@@ -253,6 +262,16 @@ func testRegistrationRoundTrip(newStore func() store.Store) func(t *testing.T) {
 		if !math.IsInf(got.Effective.Budget.MonthlyCostUSD, 1) ||
 			got.Effective.Budget.MonthlyTokens != gonkcfg.TokenQuantity(math.MaxInt64) {
 			t.Fatalf("unlimited budget did not round-trip: %+v", got.Effective.Budget)
+		}
+		// Field equality on Schedule specifically -- not merely that the read
+		// succeeded (a nil Schedule reads back "successfully" too, and IS the
+		// R-23 bug).
+		if got.Effective.Schedule == nil {
+			t.Fatal("Effective.Schedule did not round-trip: got nil, want a schedule")
+		}
+		if *got.Effective.Schedule != wantSchedule {
+			t.Fatalf("Effective.Schedule did not round-trip: got %+v, want %+v",
+				*got.Effective.Schedule, wantSchedule)
 		}
 		if len(got.Effective.Ladder) != 1 || got.Effective.Ladder[0] != "qwen-local" {
 			t.Fatalf("ladder did not round-trip: %+v", got.Effective.Ladder)

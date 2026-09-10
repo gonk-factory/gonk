@@ -470,8 +470,8 @@ func (p *Postgres) ReserveIfFits(ctx context.Context, project string, ceiling bu
 	// holds no real dollars, so FitsCost(0) -- false under a $0 ceiling -- must
 	// not gate it, or the onboarding default (monthly_cost_usd: 0, ladder:
 	// [qwen-local]) bricks every project. The TOKEN legs are NOT skipped.
-	if (r.CostUSD > 0 && !rem.FitsCost(r.CostUSD)) || !rem.FitsMonthTokens(r.Tokens) || !rem.FitsTaskTokens(r.Tokens) {
-		return ReserveResult{}, nil // lost race: rolled back by the deferred Rollback
+	if miss := missingLeg(rem, r); miss != "" {
+		return ReserveResult{Miss: miss}, nil // lost race: rolled back by the deferred Rollback
 	}
 
 	tag, err := tx.Exec(ctx, `
