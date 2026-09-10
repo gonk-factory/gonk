@@ -820,6 +820,19 @@ Then: **C4** (`gonk-gf3`, `sweep.go`) reads via `SessionID`→`GetSession`, `eff
     Pre-rewrite backup bundle: `/mnt/c/Users/steve/Code/gonk-pre-rewrite-20260909-085200.bundle`
     (verified complete). Note the scrub does NOT un-publish: GitHub can keep unreachable objects
     fetchable by direct SHA URL, which is why the key was rotated rather than merely hidden.
+- **Dolt root@'%' dropped on the live server, 2026-09-10 (`gonk-uy17`, R-48).** The
+  chart (T-26, 0.1.5) pins root to localhost and adds a `gc` user scoped to
+  `bd_gonk`, but the pinned Dolt entrypoint creates users only with
+  `CREATE USER IF NOT EXISTS` and never alters them -- so on the existing 43-day-old
+  PVC the original passwordless `root@'%'` survived, holding FULL privileges
+  `WITH GRANT OPTION` (SUPER, FILE, CREATE USER) and reachable from any pod because
+  this cluster has no policy controller (`gonk-dku`). Dropped by hand after
+  confirming the controller authenticates as `gc`, that `root@localhost` keeps a
+  password, and that in-pod `dolt sql` is a recovery path. Verified after: controller
+  ready, 0 restarts, `bd_gonk` intact at 29 tables, two clean reconcile cycles.
+  **Still open (W-07): rotating `gc-password` is a NO-OP** -- same
+  `CREATE USER IF NOT EXISTS` reason; it needs an `ALTER USER` by hand until T-56
+  deletes Dolt. A fresh volume is unaffected; this was purely the migration case.
 - **Local build → in-cluster registry push recipe** (CI image jobs are blocked by a homelab zot-mirror/Docker-Hub egress outage — infra, not our code; `lint`/`test`/`chart-lint` pass in CI): `kubectl port-forward -n gitlab svc/gitlab-registry 5000:5000`, `podman login localhost:5000 -u steve` (glab token), tag+push to `localhost:5000/agentic/gonk-project/<img>:<tag>` with `--tls-verify=false`. Ingress 499s on large layers, hence the port-forward.
 - **Upstream bug filed:** `gastownhall/gascity#4668` (formula-order dispatch drops caller vars). The broker slice **sidesteps it** (dispatch creates work directly, not via the `gonk-triage` formula), so it is not a blocker — it would only let us keep the tidier formula path if fixed.
 
