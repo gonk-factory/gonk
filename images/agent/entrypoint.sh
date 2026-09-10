@@ -238,17 +238,35 @@ if [ -z "${GONK_PROMPT}" ] && [ -n "${GONK_PROMPT_URL:-}" ] && [ -n "${GC_ALIAS:
 	_pfile="${GONK_RUNTIME_DIR:-/tmp/gonk}/prompt.json"
 	mkdir -p "$(dirname "${_pfile}")"
 
-	# Retry only 404: the pod can legitimately beat the controller's PUT. Any
-	# other status is terminal -- retrying a 410 would just re-confirm that
-	# someone already took it.
+	# Retry 404 AND transport failures: the pod can legitimately beat the
+	# controller's PUT (404), and a refused/reset/timed-out connection (curl
+	# exit != 0) is not evidence the prompt was ever consumed -- it is
+	# evidence nothing was reached at all, which is exactly the case this
+	# retry window exists for. Any REAL HTTP status other than 404 is still
+	# terminal -- retrying a 410 would just re-confirm that someone already
+	# took it.
+	#
+	# WHY THE "000"/malformed CHECK, NOT JUST A BARE nonzero-exit CHECK:
+	# `curl -sS -o f -w '%{http_code}' ... || echo 000` runs `echo 000` only
+	# when curl's own exit status is nonzero, but curl ALSO writes its -w
+	# output ("000", the sentinel it uses when no HTTP response was ever
+	# received) even on that same failure. Both land in the same command
+	# substitution, so a single refused connection captures "000" (curl's own
+	# -w) immediately followed by "000" (the `|| echo`) as ONE string:
+	# "000000" -- which matched neither "200" nor "404" and fell into the old
+	# catch-all `break`, so one refused connection exited 4 after zero
+	# retries despite a 120s window (R-07). Treat anything that is not
+	# exactly three digits (empty, "000000", ...) the same as a bare "000":
+	# a transport failure, not a real status code, so keep waiting.
 	_deadline=$(( $(date +%s) + ${GONK_PROMPT_WAIT_SECS:-120} ))
 	_code=""
 	while :; do
 		_code=$(curl -sS -o "${_pfile}" -w '%{http_code}' --max-time 20 "${_purl}" 2>/dev/null || echo 000)
 		case "${_code}" in
 			200) break ;;
-			404) : ;;   # not stored yet -- keep waiting
-			*)   break ;;
+			404) : ;;                     # not stored yet -- keep waiting
+			[1-9][0-9][0-9]) break ;;     # a REAL HTTP status (410, 5xx, ...) -- terminal
+			*) : ;;                       # "000", "000000", empty, ... -- transport failure, keep waiting
 		esac
 		[ "$(date +%s)" -ge "${_deadline}" ] && break
 		sleep 2

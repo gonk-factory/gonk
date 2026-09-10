@@ -22,6 +22,35 @@
 #   FAKE_CURL_STATUS  printed to stdout verbatim if the caller passed
 #                      -w '%{http_code}' (default: 200); this is what the
 #                      entrypoint's prompt-fetch loop reads as _code
+#
+# SEQUENTIAL FAILURES (T-03, R-07 regression coverage). The prompt-fetch
+# retry loop calls curl repeatedly within ONE test process, and a transport
+# failure is only interesting as the first of several calls (e.g. "first
+# call refuses, second returns 200"). A single set of env vars can't express
+# "this invocation differs from the next one" on its own, so when
+# FAKE_CURL_COUNTER_FILE is set this fake counts its own invocations through
+# that file (each invocation is a separate process; the count has to live
+# outside it) and, for the leading FAKE_CURL_FAIL_COUNT calls, behaves like a
+# REAL curl transport failure rather than the FAKE_CURL_EXIT/STATUS/BODY
+# trio above:
+#
+#   FAKE_CURL_COUNTER_FILE  path to a file this fake uses to count its own
+#                            invocations (required to use FAIL_COUNT at all;
+#                            create it fresh per test, e.g. under t.TempDir())
+#   FAKE_CURL_FAIL_COUNT    how many leading invocations fail (default 0,
+#                            i.e. this whole block is inert and behavior is
+#                            exactly the FAKE_CURL_EXIT/STATUS/BODY trio)
+#   FAKE_CURL_FAIL_EXIT     curl's own exit code on those calls (default 7,
+#                            curl's code for "couldn't connect")
+#
+# On a failing call this prints "000" for -w -- matching REAL curl, which
+# writes that sentinel for %{http_code} even when no HTTP response was ever
+# received -- and writes no body. It does NOT append the second "000" that
+# entrypoint.sh's own `|| echo 000` contributes: that concatenation is the
+# entrypoint's shell doing `cmd1 || cmd2` in one command substitution, not
+# something this fake should simulate itself. A failing call here (exit
+# nonzero) is exactly what makes the entrypoint's `|| echo 000` fire, so the
+# "000000" concatenation shows up naturally in the caller's captured output.
 
 set -eu
 
@@ -37,6 +66,20 @@ for arg in "$@"; do
 	esac
 	prev="${arg}"
 done
+
+call_num=1
+if [ -n "${FAKE_CURL_COUNTER_FILE:-}" ]; then
+	[ -f "${FAKE_CURL_COUNTER_FILE}" ] || printf '0' >"${FAKE_CURL_COUNTER_FILE}"
+	call_num=$(($(cat "${FAKE_CURL_COUNTER_FILE}") + 1))
+	printf '%s' "${call_num}" >"${FAKE_CURL_COUNTER_FILE}"
+fi
+
+if [ "${call_num}" -le "${FAKE_CURL_FAIL_COUNT:-0}" ]; then
+	if [ "${want_status}" = "1" ]; then
+		printf '000'
+	fi
+	exit "${FAKE_CURL_FAIL_EXIT:-7}"
+fi
 
 if [ -n "${out}" ] && [ "${FAKE_CURL_EXIT:-0}" = "0" ]; then
 	printf '%s' "${FAKE_CURL_BODY:-fake curl body}" >"${out}"
