@@ -26,6 +26,9 @@ import (
 //go:embed gonkyml
 var files embed.FS
 
+//go:embed operatoryml
+var operatorFiles embed.FS
+
 // Disposition is how gonkcfg.Load must treat an input.
 type Disposition int
 
@@ -85,7 +88,12 @@ var meta = map[string]Entry{
 	"version-2":        {Disposition: Reject},
 	"unknown-key":      {Disposition: Reject},
 	"bad-quiet-hours":  {Disposition: Reject},
-	"empty":            {Disposition: Reject},
+	// quiet_hours with no timezone: rejected by the schema's dependentRequired.
+	// The message is asserted because it must NAME the missing field -- it is
+	// echoed straight back to the project author through the 422 path, and
+	// "invalid config" would not tell them what to fix.
+	"quiet-hours-no-timezone": {Disposition: Reject, WantErrContains: "'timezone' required"},
+	"empty":                   {Disposition: Reject},
 
 	// Loader-level rejections with stable, contract messages.
 	"huge-tokens":    {Disposition: Reject, WantErrContains: "overflow"},
@@ -165,4 +173,75 @@ func deepNesting(depth int) []byte {
 	sb.WriteString(strings.Repeat("}", depth))
 	sb.WriteString("\n")
 	return []byte(sb.String())
+}
+
+// ==================================================================
+// Operator config
+// ==================================================================
+
+// operatorMeta is the expected disposition of every committed file under
+// operatoryml/, keyed by base name. Here Reject/AcceptByLoader are about
+// opercfg.Load, not gonkcfg.Load.
+//
+// The threat model is DIFFERENT from gonkyml/'s and worth stating, because it
+// is the reason these entries exist at all. An operator config is not
+// attacker-controlled -- it is the operator's own ConfigMap. But it is
+// HOT-RELOADED into a running meter, and it is folded onto every project, so a
+// single typo has instance-wide blast radius: an operator `quiet_hours` with no
+// timezone made every project fail to resolve and DELETED every project's
+// LiteLLM virtual key on the next tick (R-20). The corpus's job here is not to
+// stop an attacker; it is to keep one operator keystroke from being able to
+// unregister a whole instance.
+var operatorMeta = map[string]Entry{
+	"quiet-hours-no-timezone-instance": {Disposition: Reject, WantErrContains: "timezone"},
+	"quiet-hours-no-timezone-group":    {Disposition: Reject, WantErrContains: "timezone"},
+	"group-key-trailing-slash":         {Disposition: Reject, WantErrContains: "group key"},
+
+	// The control: an operator config that must LOAD. Without it, an
+	// opercfg.Load that returned an error for every input would satisfy every
+	// Reject entry above and the corpus would prove nothing.
+	"valid": {Disposition: AcceptByLoader, DownstreamRejector: "none: this is a valid operator config and must load"},
+}
+
+// OperatorYML returns the operator-config corpus: every committed file under
+// operatoryml/ paired with its expected disposition. Same contract as GonkYML
+// -- an unclassified file is a hole and fails the test, as does a metadata
+// entry naming a file that is gone.
+func OperatorYML(tb testing.TB) []Entry {
+	tb.Helper()
+	dirents, err := operatorFiles.ReadDir("operatoryml")
+	if err != nil {
+		tb.Fatalf("corpus: read operatoryml/: %v", err)
+	}
+	seen := make(map[string]bool, len(dirents))
+	var out []Entry
+	for _, de := range dirents {
+		if de.IsDir() {
+			continue
+		}
+		name := strings.TrimSuffix(de.Name(), path.Ext(de.Name()))
+		m, ok := operatorMeta[name]
+		if !ok {
+			tb.Fatalf("corpus: file %q has no metadata entry; every operator-config input must be classified", de.Name())
+		}
+		b, err := operatorFiles.ReadFile(path.Join("operatoryml", de.Name()))
+		if err != nil {
+			tb.Fatalf("corpus: read %s: %v", de.Name(), err)
+		}
+		seen[name] = true
+		out = append(out, Entry{
+			Name:               name,
+			Bytes:              b,
+			Disposition:        m.Disposition,
+			WantErrContains:    m.WantErrContains,
+			DownstreamRejector: m.DownstreamRejector,
+		})
+	}
+	for name := range operatorMeta {
+		if !seen[name] {
+			tb.Fatalf("corpus: metadata names %q but no operatoryml/%s.yml exists", name, name)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }

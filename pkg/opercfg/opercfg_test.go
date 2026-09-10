@@ -308,3 +308,131 @@ func TestCheckLadderOrder(t *testing.T) {
 		t.Errorf("no instance ladder means no ordering constraint: %v", err)
 	}
 }
+
+// ==================================================================
+// schedule.quiet_hours without schedule.timezone (R-20)
+// ==================================================================
+
+// The operator config folds THREE layers onto a project: instance defaults,
+// group overrides, and the project's own .gonk.yml. `quiet_hours` with no
+// `timezone` bricks every project that inherits it -- rung.ParseQuietHours
+// refuses an empty zone, Service.resolveProject routes the refusal into
+// invalid(), and invalid() DELETES the project's LiteLLM virtual key. So the
+// rejection has to fire at EVERY layer the operator can write, not just at
+// `instance`: a check that only guarded the instance would leave the identical
+// brick one `groups:` key away.
+//
+// (The third layer, the project's .gonk.yml, is guarded by the gonk-config
+// schema's dependentRequired -- see pkg/gonkcfg's
+// TestScheduleRequiresTimezoneOnlyWhenQuietHoursIsSet.)
+func TestLoadRejectsQuietHoursWithoutTimezoneAtEveryLayer(t *testing.T) {
+	layers := map[string]string{
+		"instance": "version: 1\n" +
+			"rungs: [{name: a, kind: local, model: m, est_tokens: \"200K\", synthetic_usd_per_1m_tokens: 0.2}]\n" +
+			"instance: { ladder: [a], schedule: { quiet_hours: \"22:00-07:00\" } }\n",
+		"group": base("groups: { agentic: { schedule: { quiet_hours: \"22:00-07:00\" } } }\n"),
+		"nested group": base("groups: { agentic: {}, agentic/experiments: " +
+			"{ schedule: { quiet_hours: \"22:00-07:00\" } } }\n"),
+	}
+	for name, doc := range layers {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load([]byte(doc))
+			if err == nil {
+				t.Fatalf("Load ACCEPTED quiet_hours with no timezone at the %s layer; "+
+					"one hot-reload tick would then delete every project's virtual key", name)
+			}
+			// Exit criterion: the error must NAME the field that is missing.
+			// "rejected somehow" is not an operator-actionable message.
+			if !strings.Contains(err.Error(), "timezone") {
+				t.Fatalf("%s layer: rejection %q does not name `timezone`", name, err)
+			}
+			if !strings.Contains(err.Error(), "quiet_hours") {
+				t.Fatalf("%s layer: rejection %q does not name `quiet_hours`", name, err)
+			}
+		})
+	}
+}
+
+// The dependency is one-directional, at the operator layers too: a timezone
+// with no quiet_hours is not a defect, and a schedule that carries both is the
+// normal case. Without these two, "reject everything with a schedule" would
+// pass the test above.
+func TestLoadAcceptsScheduleThatIsWellFormed(t *testing.T) {
+	cases := map[string]string{
+		"both set":      base("groups: { agentic: { schedule: { quiet_hours: \"22:00-07:00\", timezone: \"America/New_York\" } } }\n"),
+		"timezone only": base("groups: { agentic: { schedule: { timezone: \"America/New_York\" } } }\n"),
+	}
+	for name, doc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load([]byte(doc)); err != nil {
+				t.Fatalf("Load rejected a well-formed schedule (%s): %v", name, err)
+			}
+		})
+	}
+}
+
+// ==================================================================
+// Group keys that name no project (R-24)
+// ==================================================================
+
+// GroupFor matches a group exactly, or as a prefix on a SEGMENT boundary
+// (project == g, or strings.HasPrefix(project, g+"/")). A key ending in "/"
+// satisfies neither: "agentic/" is not a project path, and the prefix test
+// becomes "agentic//". So the override loads clean and applies to NOTHING --
+// an operator who tightens a budget there gets silence instead of enforcement.
+func TestLoadRejectsGroupKeysThatCanNeverMatch(t *testing.T) {
+	cases := map[string]string{
+		"trailing slash":       base("groups: { 'agentic/': { budget: { monthly_cost_usd: 10 } } }\n"),
+		"bare trailing slash":  base("groups: { 'g/': { enabled: false } }\n"),
+		"empty middle segment": base("groups: { 'a//b': { enabled: false } }\n"),
+	}
+	for name, doc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load([]byte(doc))
+			if err == nil {
+				t.Fatalf("Load ACCEPTED group key case %q; the override would silently apply to no project", name)
+			}
+			if !strings.Contains(err.Error(), "group key") {
+				t.Fatalf("%s: rejection %q does not say which group key is at fault", name, err)
+			}
+		})
+	}
+}
+
+// ...and the ordinary keys keep working. GroupFor's own tests cover matching;
+// this one exists so the rejection above cannot be satisfied by refusing every
+// group key with a slash in it -- "agentic/experiments" is the shape the chart
+// documents and must stay valid.
+func TestLoadAcceptsOrdinaryGroupKeys(t *testing.T) {
+	oc, err := Load([]byte(base("groups: { agentic: { budget: { monthly_cost_usd: 50 } }, agentic/experiments: { enabled: false } }\n")))
+	if err != nil {
+		t.Fatalf("Load rejected ordinary group keys: %v", err)
+	}
+	if _, ok := oc.Groups["agentic/experiments"]; !ok {
+		t.Fatalf("nested group key did not survive Load: %+v", oc.Groups)
+	}
+}
+
+// A group whose key is rejected must be rejected DETERMINISTICALLY: map
+// iteration order would otherwise make a multi-fault config report a different
+// key on each run, which is miserable to debug from a CrashLoopBackOff.
+func TestGroupRejectionIsDeterministic(t *testing.T) {
+	doc := base("groups: { 'zzz/': { enabled: false }, 'aaa/': { enabled: false } }\n")
+	first := ""
+	for i := 0; i < 20; i++ {
+		_, err := Load([]byte(doc))
+		if err == nil {
+			t.Fatal("Load accepted two unmatched group keys")
+		}
+		if i == 0 {
+			first = err.Error()
+			continue
+		}
+		if err.Error() != first {
+			t.Fatalf("run %d reported %q, run 0 reported %q; the error must not depend on map order", i, err, first)
+		}
+	}
+	if !strings.Contains(first, "aaa/") {
+		t.Fatalf("expected the sorted-first key to be reported, got %q", first)
+	}
+}

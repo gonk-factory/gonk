@@ -44,6 +44,61 @@ isn't representable — a non-nil `*Schedule` is treated as a whole unit, and
 the nil check on `*Schedule` itself is the only "layer is silent" signal at
 that level.
 
+## `schedule` is replaced as a unit, so `quiet_hours` needs its `timezone`
+
+The consequence of that last paragraph is not academic. `Resolve` and
+`opercfg.foldPolicy` both take the most specific non-nil `*Schedule` **whole**;
+there is no per-field fold, so a layer that sets `quiet_hours` does not inherit
+a coarser layer's `timezone`, and a layer that sets only `timezone` erases a
+coarser layer's `quiet_hours`.
+
+Downstream, `rung.ParseQuietHours` **refuses** an empty timezone -- an empty
+zone would silently mean UTC, and a quiet-hours window that is silently in the
+wrong zone is worse than none. `Service.resolveProject` routes that refusal
+into `invalid()`, which marks the project invalid **and deletes its LiteLLM
+virtual key**. So a schedule carrying `quiet_hours` with no `timezone` is not a
+cosmetic defect: it is a delayed-action unregistration of every project that
+inherits it, fired on the next hot-reload tick.
+
+Two guards, one per side of the layering:
+
+- **Project layer.** `gonk-config.v1` declares
+  `"dependentRequired": { "quiet_hours": ["timezone"] }` on `schedule`. A
+  `.gonk.yml` that sets a window without a zone is rejected by `gonkcfg.Load`,
+  so the project author sees the message on their own MR instead of a
+  mysterious 422 later. This is a **tightening**: a config that validated
+  before now does not. `timezone` alone stays valid -- the dependency is
+  one-directional on purpose, since naming a zone for a window an operator
+  layer supplies is a legitimate (if lossy) thing to write.
+- **Operator layers.** `opercfg.Load` applies the same rule to `instance` and
+  to **every** `groups` entry, in `checkPolicy`. It has to be every layer: the
+  fold means a `quiet_hours` with no zone under `groups:` bricks every project
+  in that group exactly as an `instance:` one bricks the whole fleet. This is
+  Go-level rather than schema-level so the message can name the offending
+  layer; the operator schema and its checksum pin are unchanged.
+
+**The merge semantics themselves are deliberately NOT changed.** A per-field
+schedule fold would make `timezone`-only and `quiet_hours`-only layers compose,
+but it would also make `*Schedule`'s nil check stop meaning "this layer is
+silent", which is the one signal the whole sub-policy has. The representational
+limit stands and is now guarded at both ends instead of papered over: a project
+that wants an operator's quiet-hours window in its own zone must restate the
+window.
+
+## A group key must be able to name a project
+
+`GroupFor` matches a group key exactly (`project == g`) or as a prefix on a
+**segment boundary** (`strings.HasPrefix(project, g+"/")`). A key with a
+trailing slash satisfies neither -- `"agentic/"` is not a project path, and the
+prefix test degrades to `"agentic//"`, which no project path contains. An
+interior empty segment (`"a//b"`) is the same defect.
+
+Such a key used to load clean and then apply to nothing, so an operator who
+tightened a ceiling on `agentic/` got silence rather than enforcement: a budget
+escape wearing the costume of a config. `opercfg.Load` now rejects it, and
+iterates group keys in sorted order so a config with several faults always
+reports the same one.
+
 ## Untrusted input
 
 `.gonk.yml` is project-authored content: any project in the instance can put

@@ -348,7 +348,19 @@ func Load(raw []byte) (*OperatorConfig, error) {
 	if err := oc.checkPolicy("instance", rc.Instance); err != nil {
 		return nil, err
 	}
-	for g, p := range rc.Groups {
+	// Sorted, so a config with several bad groups always reports the SAME one.
+	// Map iteration order would make the error a coin flip, and an operator
+	// re-running the same failing config deserves the same message.
+	groupKeys := make([]string, 0, len(rc.Groups))
+	for g := range rc.Groups {
+		groupKeys = append(groupKeys, g)
+	}
+	sort.Strings(groupKeys)
+	for _, g := range groupKeys {
+		p := rc.Groups[g]
+		if err := checkGroupKey(g); err != nil {
+			return nil, err
+		}
 		if err := oc.checkPolicy("group "+g, p); err != nil {
 			return nil, err
 		}
@@ -366,17 +378,59 @@ func Load(raw []byte) (*OperatorConfig, error) {
 }
 
 // checkPolicy enforces what the JSON Schema cannot: cross-references into the
-// rung catalog, and timezone validity.
+// rung catalog, that a quiet-hours window carries the timezone it needs, and
+// timezone validity. It runs on EVERY operator layer -- the instance defaults
+// and each group override -- because Resolve folds all of them, so a check that
+// fired only on `instance` would leave the same brick reachable via `groups`.
 func (oc *OperatorConfig) checkPolicy(who string, p gonkcfg.Policy) error {
 	for _, r := range p.Ladder {
 		if _, ok := oc.Catalog[r]; !ok {
 			return fmt.Errorf("operator config: %s ladder names rung %q, which is not in the rung catalog", who, r)
 		}
 	}
-	if p.Schedule != nil && p.Schedule.Timezone != "" {
-		if _, err := time.LoadLocation(p.Schedule.Timezone); err != nil {
-			return fmt.Errorf("operator config: %s schedule.timezone %q: %w", who, p.Schedule.Timezone, err)
+	if p.Schedule != nil {
+		// quiet_hours WITHOUT a timezone is the operator config's most
+		// destructive typo. gonkcfg.Resolve carries the winning layer's
+		// *Schedule through to EVERY project that does not set its own (a
+		// non-nil *Schedule is replaced as a unit -- ADR-002, "Schedule is the
+		// one sub-policy where per-field silence isn't representable"), and
+		// rung.ParseQuietHours refuses an empty timezone because an empty one
+		// would silently mean UTC. Service.resolveProject routes that refusal
+		// into invalid(), which DELETES the project's LiteLLM virtual key. So
+		// one ConfigMap edit plus one hot-reload tick deletes every key on the
+		// instance and 422s every project. Refuse the config instead: a meter
+		// that will not start is recoverable, a fleet of deleted keys is not.
+		if p.Schedule.QuietHours != "" && p.Schedule.Timezone == "" {
+			return fmt.Errorf("operator config: %s schedule.quiet_hours %q needs schedule.timezone (an IANA zone name like \"America/New_York\"); an empty timezone would silently mean UTC, so the resolver refuses it and every project inheriting this schedule would be marked invalid and lose its virtual key", who, p.Schedule.QuietHours)
 		}
+		if p.Schedule.Timezone != "" {
+			if _, err := time.LoadLocation(p.Schedule.Timezone); err != nil {
+				return fmt.Errorf("operator config: %s schedule.timezone %q: %w", who, p.Schedule.Timezone, err)
+			}
+		}
+	}
+	return nil
+}
+
+// checkGroupKey rejects a group key that can never name a project.
+//
+// GroupFor matches a group either exactly (project == g) or on a SEGMENT
+// boundary (strings.HasPrefix(project, g+"/")). A key with a trailing slash
+// satisfies neither: "agentic/" is not a project path, and the prefix test
+// becomes "agentic//", which no project path contains. The schema's
+// propertyNames pattern permits the key, so today it loads clean and then
+// applies to nothing -- an operator who tightens a budget on "agentic/" gets
+// silence, not enforcement, and the ceiling they think they set is not there.
+// An empty interior segment ("a//b") is the same defect for the same reason.
+//
+// This fails CLOSED on purpose: a group override that silently applies to no
+// project is a budget escape wearing the costume of a config.
+func checkGroupKey(g string) error {
+	if strings.HasSuffix(g, "/") {
+		return fmt.Errorf("operator config: group key %q has a trailing %q; group keys are matched exactly or as a path prefix on a segment boundary, so a trailing slash names NO project and the override silently applies to nothing (write %q)", g, "/", strings.TrimRight(g, "/"))
+	}
+	if strings.Contains(g, "//") {
+		return fmt.Errorf("operator config: group key %q has an empty path segment (%q); no project path contains one, so the override silently applies to nothing", g, "//")
 	}
 	return nil
 }
