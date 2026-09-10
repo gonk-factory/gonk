@@ -242,6 +242,19 @@ measured — to be the cause of the July observations, which were never re-run.
 
 ## P3-3, answered
 
+> **SUPERSEDED 2026-09-10 by an n=20 measurement.** The figures immediately
+> below were taken at **n=2**, because the test had been cut to two samples
+> under the false premise that each one cost minutes. At twenty samples the
+> steady state is **min=845ms median=5.916s p95=6.142s max=6.213s** — about six
+> seconds, an order of magnitude above what two samples showed, and consistent
+> with the queue-monitor backoff this spike predicted but never observed.
+> Nothing is wrong (it is 48x inside `max_spend_staleness`), but the number was
+> off by 10x for as long as it came from two samples. That is the second time in
+> this document a confident figure came from too little data; the first was the
+> conclusion this file was written to correct.
+
+
+
 With the fix, against the same rig and the same preceding load:
 
 Full package, all 17 tests, single run (`full2.log`):

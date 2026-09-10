@@ -140,10 +140,24 @@ door immediately: a deleted key's token is refused **401** on the very next call
 > separation of measured from inferred below — the first version of this note
 > overclaimed in the same confident direction as the conclusion it corrects.**
 >
-> **MEASURED, on the current rig, after fixing a defect in our own test stub:**
-> spend-log lag of **0.24s–2.1s** locally, and **2.1s and 4.4s** in the green CI
-> run (34460331012). A single probe pair had `/spend/logs/v2` about **17ms**
-> behind Postgres — that is **n=1**, not a characteristic.
+> **MEASURED, on the current rig, after fixing a defect in our own test stub.**
+> The numbers below are from **n=20**, and they replace two earlier figures that
+> were quoted from n=2 and n=1 and were wrong by an order of magnitude:
+>
+> | statistic | n=20 |
+> |---|---|
+> | min | 845ms |
+> | median | 5.916s |
+> | p95 | 6.142s |
+> | max | 6.213s |
+>
+> The steady state is about **six seconds**, not the "0.24s–2.1s" a two-sample
+> run suggested — consistent with LiteLLM's queue-monitor backoff on a quiet
+> proxy, which this document predicted below and never observed. That is 48x
+> inside `max_spend_staleness`, so nothing here is wrong; the point is that the
+> figure this spike exists to record was off by 10x for as long as it was being
+> taken from two samples. The single "17ms API behind Postgres" probe pair was
+> **n=1** and is not a characteristic.
 >
 > **PROVEN:** the cause of the 2026-09-10 component-job failure was ours, not
 > LiteLLM's. `test/stubmodel` rewound its completion-id counter on `Reset()` and
