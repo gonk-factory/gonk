@@ -70,8 +70,22 @@ func (m *MeterClient) Register(ctx context.Context, req meterapi.ProjectRequest)
 // archived-project branch uses it to decide whether a DELETE is even needed,
 // rather than repeating an idempotent-but-not-free one every pass.
 //
-// found is false only on a clean 404 ("project not registered"); any other
-// non-2xx status is a real error, same as Register and Deregister.
+// found is false only on a 404 METER ITSELF WROTE -- one carrying meter's own
+// error body ({"error":"project not registered"}, from the service's
+// writeError). A BARE 404, with no such body, is an ERROR here, not a
+// "not registered": it is what something that is NOT meter returns when the
+// request never reached meter's handler at all -- a BaseURL with a wrong path
+// prefix, an ingress or proxy in front of meter, a route that stopped
+// matching. Deciding on the status code alone would read that whole class of
+// misconfiguration as "already gone", which is the single most dangerous
+// wrong answer this call can give: its one caller uses it to decide whether
+// an archived project's LiteLLM key still needs deleting, so a false "gone"
+// silently ends the pass with the key still live. Failing loudly instead
+// keeps that a retried, logged, counted error -- which is what it was before
+// this check existed at all.
+//
+// Any other non-2xx status is a real error too, same as Register and
+// Deregister.
 func (m *MeterClient) Get(ctx context.Context, project string) (*meterapi.ProjectResponse, bool, error) {
 	var out meterapi.ProjectResponse
 	code, err := m.do(ctx, http.MethodGet, meterapi.ProjectPath(project), nil, &out)
@@ -79,6 +93,12 @@ func (m *MeterClient) Get(ctx context.Context, project string) (*meterapi.Projec
 	case err != nil:
 		return nil, false, err
 	case code == http.StatusNotFound:
+		// out.Error is populated from the body by do(); it stays empty when
+		// the body is absent, is not JSON, or is JSON some intermediary made
+		// up. Only meter sets it.
+		if out.Error == "" {
+			return nil, false, fmt.Errorf("meter: GET %s: 404 without a meter error body: the request may not have reached meter", project)
+		}
 		return nil, false, nil
 	case code == http.StatusOK:
 		return &out, true, nil

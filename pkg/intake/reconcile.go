@@ -737,23 +737,38 @@ func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) (proj
 		// What IS gated here is repetition, and it is gated on two things that
 		// are NOT the derived cache:
 		//
-		//  1. Cache.WasDeregistered -- an in-memory tombstone, set only after
-		//     this process itself confirms (below) that meter holds no
-		//     registration. It is exactly as derived as the rest of the cache
-		//     (empty on a cold start), so it is consulted only to SKIP a call,
-		//     never to justify one -- a false negative here just means one
-		//     extra idempotent round trip, never a missed deregistration.
+		//  1. Cache.WasDeregistered -- an in-memory tombstone, set ONLY after
+		//     this process ITSELF successfully DELETEd the registration
+		//     (below). It records what we DID, never what we merely OBSERVED.
+		//     It is exactly as derived as the rest of the cache (empty on a
+		//     cold start), so it is consulted only to SKIP a call, never to
+		//     justify one -- a false negative here just means one extra
+		//     read-only round trip, never a missed deregistration.
 		//  2. r.Meter.Get -- a read-only GET, answered by meter's own state,
 		//     which is the one place that actually knows and which survives an
 		//     intake restart even though this cache does not. On a cold
 		//     tombstone this is what stands in for "already handled",
 		//     replacing a guess with an answer from the source of truth.
 		//
+		// A NEGATIVE GET IS NOT A TOMBSTONE. "Meter holds no registration
+		// right now" means there is nothing to delete THIS PASS. It does not
+		// mean never ask again. Meter's state can move under us, and a 404
+		// need not even come from meter -- MeterClient.Get rejects a 404 with
+		// no meter error body precisely because an ingress, a proxy or a
+		// wrong BaseURL path prefix produces exactly that. Recording an
+		// observation as though it were an action is how one misrouted
+		// request turns into a permanent, silent "already gone" for the life
+		// of the process: no retry, no error, no log, and the archived
+		// project's LiteLLM key still live. So this branch keeps asking until
+		// it has actually torn something down.
+		//
 		// Cost: MeterClient.Deregister documents deleting an unknown project as
 		// a 204, not a 404, but that DELETE is not free -- meter's own handler
 		// puts a Secret delete and a DB delete behind it. Get has neither; it
-		// only reads. So a warm tombstone costs nothing, and even a cold one
-		// (once per restart, not once per pass) costs a read, not a write.
+		// only reads. So a warm tombstone costs nothing, and a project meter
+		// already reports gone costs one READ per pass -- no LiteLLM call, no
+		// Secret delete, no DB write. That is the deliberate price of the
+		// continuous enforcement T-12's unconditional DELETE had.
 		if r.Cache.WasDeregistered(p.ID) {
 			return out, nil
 		}
@@ -761,16 +776,21 @@ func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) (proj
 		if err != nil {
 			r.Obs.MeterPush("error")
 			r.log().Warn("failed to check meter registration for archived project", "project", p.PathWithNamespace, "err", err)
-			return out, err // tombstone stays cold; retry next pass
+			return out, err // nothing confirmed, nothing deleted; retry next pass
 		}
-		if found {
-			if err := r.Meter.Deregister(ctx, p.PathWithNamespace); err != nil {
-				r.Obs.MeterPush("error")
-				r.log().Warn("failed to deregister archived project", "project", p.PathWithNamespace, "err", err)
-				return out, err // tombstone stays cold; retry deregistration next pass
-			}
-			r.Obs.MeterPush("ok")
+		if !found {
+			// Nothing to deregister this pass. Drop any Entry -- an archived
+			// project has no classification left and must never be
+			// Dispatchable -- but leave the tombstone COLD, per above.
+			r.Cache.Delete(p.ID)
+			return out, nil
 		}
+		if err := r.Meter.Deregister(ctx, p.PathWithNamespace); err != nil {
+			r.Obs.MeterPush("error")
+			r.log().Warn("failed to deregister archived project", "project", p.PathWithNamespace, "err", err)
+			return out, err // tombstone stays cold; retry deregistration next pass
+		}
+		r.Obs.MeterPush("ok")
 		r.Cache.MarkDeregistered(p.ID)
 		return out, nil
 	}
