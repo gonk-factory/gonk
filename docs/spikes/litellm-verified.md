@@ -110,7 +110,7 @@ decode the nested `/key/info` shape.
 |---|---|---|
 | P3-1 | Do the real admin adapters work? | **NO — see Bug A/B.** `/key/generate`, `/key/update` (raise+lower `max_budget`), `/key/delete` DO work; `updateByAlias` and the spend poller do NOT. |
 | P3-2 | Is `budget_duration: "1mo"` a calendar month? | **YES — a UTC calendar month.** Key created 2026-07-19 → `budget_reset_at: 2026-08-01T00:00:00+00:00`. Not rolling-30-days. Soft door (meter, UTC calendar month, Decision 6) and hard door agree. |
-| P3-3 | Real spend-log lag vs `max_spend_staleness` (5m)? | **Could not be pinned down — and cannot be, through the real code path, until Bug A is fixed.** See below; treat as a live risk. |
+| P3-3 | Real spend-log lag vs `max_spend_staleness` (5m)? | **ANSWERED 2026-09-10: 0.24s–2.1s, DB and API within ~17ms of each other.** The "large and unreliable" reading below was OUR bug, not LiteLLM's — see the correction under that heading and `docs/spikes/2026-09-10-spend-log-lag.md`. |
 | P3-4 | Do synthetic prices agree (catalog ↔ LiteLLM)? | **YES.** `/model/info` returns `input_cost_per_token`: qwen-local `2.5e-07` (= $0.25/1M), glm `2e-06`, sonnet `6e-06` — exactly the configured/catalog prices. |
 | P3-5 | Does the hard door close? | **YES — the crux result. See below.** |
 | P3-6 | Does a dedicated admin key suffice, or are we forced onto the master key? | **A dedicated proxy-admin key SUFFICES.** A plain generated key gets 401 on `/key/generate` and `/spend/logs/v2` (200 on `/model/info` only). A key issued to a `POST /user/new {"user_role":"proxy_admin"}` user performs every admin call (generate/delete/spend-logs). **Meter must be given a proxy-admin-role key, not just any key — and then the master key is NOT required.** |
@@ -135,6 +135,20 @@ money cannot escape even with meter out of the loop. `/key/delete` also closes t
 door immediately: a deleted key's token is refused **401** on the very next call.
 
 ### P3-3 — spend-log lag could not be measured (and why it matters)
+
+> **CORRECTED 2026-09-10 (gonk-ij2e). The conclusion below is WRONG and is kept
+> only so the mistake is legible.** The detailed-log write lag is **not** "large
+> and unreliable": it is **0.24s–2.1s**, and `/spend/logs/v2` trails Postgres by
+> about **17ms**. The rows that "frequently produced no visible row within 100s"
+> were never written, because `test/stubmodel` rewound its completion-id counter
+> on `Reset()` and reissued `chatcmpl-stub-0001`; `LiteLLM_SpendLogs` has
+> `request_id` as its PRIMARY KEY and LiteLLM inserts with
+> `create_many(..., skip_duplicates=True)` — `ON CONFLICT DO NOTHING` — so the
+> duplicate was discarded in silence. The guess below that this was an artifact
+> of "restarting a single-node proxy mid-flight" is also wrong: a restart against
+> the same DB is just another way to rewind the counter into ids the table
+> already held. Full method, timings and fix:
+> **`docs/spikes/2026-09-10-spend-log-lag.md`**.
 
 LiteLLM has **two** spend surfaces and they behave very differently:
 

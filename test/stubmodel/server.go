@@ -23,8 +23,11 @@ const maxBody = 4 << 20
 type Server struct {
 	mu     sync.Mutex
 	script []Step
-	seq    int
-	log    Log
+	// completionSeq numbers the `id` of every scripted completion and is
+	// MONOTONIC FOR THE LIFE OF THE SERVER. Reset and SetScript deliberately
+	// leave it alone -- see the comment on Reset.
+	completionSeq int
+	log           Log
 }
 
 func New() *Server { return &Server{} }
@@ -34,14 +37,33 @@ func (s *Server) SetScript(steps []Step) {
 	defer s.mu.Unlock()
 	s.script = make([]Step, len(steps))
 	copy(s.script, steps)
-	s.seq = 0
+	// completionSeq is NOT rewound here -- see Reset.
 }
 
 func (s *Server) Log() *Log { return &s.log }
 
+// Reset clears the script and the call log so the next test starts from a
+// clean sheet. It deliberately does NOT rewind completionSeq.
+//
+// A COMPLETION ID IS AN IDENTITY, NOT A COUNTER. Rewinding it makes the stub
+// hand out `chatcmpl-stub-0001` again, and a real downstream keys on that id:
+// LiteLLM's `LiteLLM_SpendLogs` has request_id as its PRIMARY KEY and its
+// batch writer inserts with `create_many(..., skip_duplicates=True)`, i.e.
+// ON CONFLICT DO NOTHING. A reused id therefore does not error and does not
+// retry -- the whole spend row is DISCARDED IN SILENCE, forever.
+//
+// That is the entire cause of gonk-ij2e: because newWorld calls Reset at the
+// top of every component test, every test's first completion reused the id
+// the hard-door test had already burned, so TestMeasureLiteLLMSpendLogLag's
+// row was never written at all. Run alone the lag was 1-2s; run after the
+// other tests it timed out at 100s, 3m, and (measured) 20m -- indistinguishable
+// from "LiteLLM's batch writer is unreliable", which is what it was mistaken
+// for. See docs/spikes/2026-09-10-spend-log-lag.md.
+//
+// Real providers never reuse a completion id. Neither may the stub.
 func (s *Server) Reset() {
 	s.mu.Lock()
-	s.script, s.seq = nil, 0
+	s.script = nil
 	s.mu.Unlock()
 	s.log.reset()
 }
@@ -133,8 +155,8 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, step.RawBody)
 	default:
 		s.mu.Lock()
-		s.seq++
-		id := fmt.Sprintf("chatcmpl-stub-%04d", s.seq)
+		s.completionSeq++
+		id := fmt.Sprintf("chatcmpl-stub-%04d", s.completionSeq)
 		s.mu.Unlock()
 
 		s.log.add(Call{At: time.Now(), Model: req.Model, Metadata: req.Metadata,
