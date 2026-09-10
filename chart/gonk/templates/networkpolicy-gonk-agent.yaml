@@ -92,16 +92,23 @@ spec:
     # It mattered because "the agent never talks to GitLab" (images/agent/
     # entrypoint.sh) was enforced by ONE thing: the absence of a credential.
     # With this rule in place, anything that put a usable token in the pod got
-    # full forge reach with no second line of defence -- and pack/formulas/
-    # gonk-triage.toml still ships a bot_token into the pod as a v1 compromise.
-    # The agent also runs attacker-influenceable text by construction (issue
-    # titles and bodies), which gonk-e9m already showed reaching a shell.
+    # full forge reach with no second line of defence -- and the v1 formula pour
+    # did exactly that, handing every session a bot_token. That pour is gone
+    # (ADR-007 deleted the formula layer and the order vars map with it), so no
+    # forge credential reaches an agent pod today. This rule is the second line
+    # of defence that keeps "the agent never talks to GitLab" true even if one
+    # ever does again. The agent also runs attacker-influenceable text by
+    # construction (issue titles and bodies), which gonk-e9m already showed
+    # reaching a shell.
     #
-    # KNOWN CONSEQUENCE: `mention` is not yet ported to the broker (Phase 6). If
-    # its v1 formula path expects the pod to reach GitLab, it breaks here rather
-    # than failing quietly on credentials -- which is the better failure. Set
-    # networkPolicy.gitlabEgress.enabled=true to restore the old behaviour while
-    # that is sorted; doing so re-opens exactly the hole described above.
+    # `mention-reply` is still not ported to the broker, and since the formula
+    # layer was deleted it does not run at all: it is absent from agentForTrigger
+    # (cmd/gonk-gate/broker_inject.go), so runDispatch refuses the trigger
+    # outright rather than pouring a session. Nothing is broken by this rule
+    # today, and turning the egress back on would not revive mention -- porting
+    # it (T-24) means putting it on the broker, where the CONTROLLER does the
+    # forge I/O. networkPolicy.gitlabEgress.enabled=true restores the old
+    # behaviour and re-opens exactly the hole described above.
     {{- if .Values.networkPolicy.gitlabEgress.enabled }}
     {{- if .Values.networkPolicy.gitlabInCluster.enabled }}
     - to:
@@ -131,8 +138,12 @@ spec:
         {{- end }}
     {{- end }}
     {{- end }}
-    # gonk-meter: the agent reads its own session cost for the commit trailers
-    # (GET /v1/cost/session/{key}).
+    # gonk-meter: prompt-by-reference (gonk-mzd). THE POD RECEIVES NO WORK
+    # WITHOUT THIS RULE -- images/agent/entrypoint.sh fetches its own prompt at
+    # GET /v1/prompt/{GC_ALIAS} (the alias is the capability; no token rides
+    # this call) and posts trajectory evidence back at POST /v1/trace. This rule
+    # predates that: it was opened so the agent could read its own session cost
+    # for the commit trailers, and those were deleted with the trailers hook.
     - to:
         - podSelector:
             matchLabels:

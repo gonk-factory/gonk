@@ -242,8 +242,13 @@ gonk-dolt.{{ .Release.Namespace }}.svc
   This is the STATIC per-install model a resident agent session renders its
   opencode overlay with at startup. It exists because Gas City launches agent
   pods as POOL sessions with no prompt attached, so there is no per-session model
-  at the moment the harness needs one to write its config. A prompt marker still
-  overrides it per session once a bead is assigned (pack/formulas/gonk-triage.toml).
+  at the moment the harness needs one to write its config. Once a bead IS
+  assigned the per-session model overrides it: the pod fetches its own prompt at
+  gonk-meter's GET /v1/prompt/{alias} (gonk.promptBaseURL below), and the
+  `model` field of that response becomes GC_WEBHOOK_ARG_MODEL, which beats
+  GONK_MODEL in images/agent/entrypoint.sh. The older HTML prompt-marker channel
+  is gone: ADR-007 deleted every path that could stamp a marker into a prompt,
+  and the entrypoint's parser for it went with them.
 
   THE PACK STILL NAMES NO MODEL. This reads the OPERATOR's catalog
   (operatorConfig.rungs, the same values gonk-meter serves from), so the model

@@ -127,18 +127,29 @@ spec:
     # It mattered because "the agent never talks to GitLab" (images/agent/
     # entrypoint.sh) was enforced by ONE thing: the absence of a credential.
     # With this rule in place, anything that put a usable token in the pod got
-    # full forge reach with no second line of defence -- and pack/formulas/
-    # gonk-triage.toml still ships a bot_token into the pod as a v1 compromise.
-    # The agent also runs attacker-influenceable text by construction (issue
-    # titles and bodies), which gonk-e9m already showed reaching a shell.
+    # full forge reach with no second line of defence -- and the v1 formula pour
+    # did exactly that, handing every session a bot_token. That pour is gone
+    # (ADR-007 deleted the formula layer and the order vars map with it), so no
+    # forge credential reaches an agent pod today. This rule is the second line
+    # of defence that keeps "the agent never talks to GitLab" true even if one
+    # ever does again. The agent also runs attacker-influenceable text by
+    # construction (issue titles and bodies), which gonk-e9m already showed
+    # reaching a shell.
     #
-    # KNOWN CONSEQUENCE: `mention` is not yet ported to the broker (Phase 6). If
-    # its v1 formula path expects the pod to reach GitLab, it breaks here rather
-    # than failing quietly on credentials -- which is the better failure. Set
-    # networkPolicy.gitlabEgress.enabled=true to restore the old behaviour while
-    # that is sorted; doing so re-opens exactly the hole described above.
-    # gonk-meter: the agent reads its own session cost for the commit trailers
-    # (GET /v1/cost/session/{key}).
+    # `mention-reply` is still not ported to the broker, and since the formula
+    # layer was deleted it does not run at all: it is absent from agentForTrigger
+    # (cmd/gonk-gate/broker_inject.go), so runDispatch refuses the trigger
+    # outright rather than pouring a session. Nothing is broken by this rule
+    # today, and turning the egress back on would not revive mention -- porting
+    # it (T-24) means putting it on the broker, where the CONTROLLER does the
+    # forge I/O. networkPolicy.gitlabEgress.enabled=true restores the old
+    # behaviour and re-opens exactly the hole described above.
+    # gonk-meter: prompt-by-reference (gonk-mzd). THE POD RECEIVES NO WORK
+    # WITHOUT THIS RULE -- images/agent/entrypoint.sh fetches its own prompt at
+    # GET /v1/prompt/{GC_ALIAS} (the alias is the capability; no token rides
+    # this call) and posts trajectory evidence back at POST /v1/trace. This rule
+    # predates that: it was opened so the agent could read its own session cost
+    # for the commit trailers, and those were deleted with the trailers hook.
     - to:
         - podSelector:
             matchLabels:
@@ -312,8 +323,9 @@ spec:
       app.kubernetes.io/component: meter
   policyTypes: [Ingress, Egress]
   ingress:
-    # intake (project registration) and the agent pods (session cost, for commit
-    # trailers). Both are in this namespace.
+    # intake (project registration) and the agent pods (prompt-by-reference:
+    # GET /v1/prompt/{alias}, POST /v1/trace). Both are in this namespace.
+    # WITHOUT THE AGENT HALF NO SESSION EVER RECEIVES A PROMPT.
     - from:
         - podSelector:
             matchLabels:
@@ -326,8 +338,8 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-    # The PACK's dispatch formula (POST /v1/policy/decide) and gate step
-    # (POST /v1/policy/outcome) run inside the Gas City controller.
+    # The PACK's exec orders -- gonk-dispatch (POST /v1/policy/decide) and
+    # gonk-sweep (POST /v1/policy/outcome) -- run inside the Gas City controller.
     # WITHOUT THIS RULE, NO SESSION CAN EVER SPAWN.
     #   * bundled controller  -> in THIS namespace (component: controller)
     #   * BYO controller      -> the gascity namespaceSelector
@@ -1432,7 +1444,9 @@ spec:
               #
               # These are STATIC per-install values, which is exactly why this works;
               # the per-session values (model, attribution metadata) cannot come this
-              # way and ride the prompt instead (see pack/formulas/gonk-triage.toml).
+              # way and ride the prompt instead: the pod fetches it from gonk-meter
+              # at GET /v1/prompt/{GC_ALIAS} and reads `model` and `metadata` out of
+              # that response (gonk-mzd; GONK_PROMPT_URL is injected just below).
               #
               # gonk-0y6 / v2 broker: the agent pod holds NO forge credentials. It
               # makes no glab/git calls -- the controller-side broker fetches issue
@@ -1454,11 +1468,26 @@ spec:
               for agent_dir in /city/agents/*/; do
                 agent_toml="${agent_dir}agent.toml"
                 [ -f "$agent_toml" ] || continue
-                # NEVER give the control-dispatcher a credential. It is the
-                # providerless deterministic control lane -- it runs `gc`, never a
-                # model, and handing it the LiteLLM key would put it in a pod that
-                # has no use for it.
-                case "$agent_dir" in */control-dispatcher/) continue ;; esac
+                # THIS LOOP CREATES [env] WHERE AN AGENT DELIBERATELY HAD NONE --
+                # the next line adds the table when it is missing. So omitting
+                # [env] from an agent.toml protects nothing, and the ONLY way to
+                # keep a value out of one particular agent is an explicit
+                # exclusion right here.
+                #
+                # There used to be one, skipping */control-dispatcher/: the
+                # providerless deterministic control lane, which runs gc and never
+                # calls a model, so a credential in its pod had no use and real
+                # blast radius. Both halves of that reason are now gone, so the
+                # exclusion went too. The agent no longer exists (ADR-007 deleted
+                # pack/agents/control-dispatcher/ with the graph-v2 formulas whose
+                # workflow-control beads it routed) and nothing can recreate it
+                # here: the bootstrap above runs gc init --preserve-existing
+                # against gonk's own pack.toml, so Gas City's core pack -- the
+                # only other source of that agent -- is never pulled in. And this
+                # block no longer injects a credential at all: the LiteLLM key
+                # stopped being written here under gonk-8gb, leaving four
+                # non-secret per-install values. IF A CREDENTIAL IS EVER ADDED
+                # BACK to the awk program below, read this paragraph again first.
                 grep -q '^\[env\]' "$agent_toml" || printf '\n[env]\n' >> "$agent_toml"
                 # GONK_RIG_BASE_URL is the per-INSTALL half of the checkout URL
                 # (pkg/rig, gonk-msz). It is static, which is exactly why it can
@@ -1629,12 +1658,15 @@ spec:
             # gonk-intake.
             - name: GONK_CITY
               value: gonk
-            # WHERE THE IN-POD gonk-gate POSTS ITS POUR. gonk-dispatch runs inside
-            # THIS pod and calls POST /v0/city/gonk/order/gonk-triage/run on the
-            # city [api] -- so it needs the supervisor URL exactly like gonk-intake
-            # does. Without it gcapi builds a URL with no scheme or host and the
-            # pour dies on `unsupported protocol scheme ""` -- AFTER meter has
-            # already decided, so the budget decision is spent and nothing pours.
+            # WHERE THE IN-POD gonk-gate REACHES THE CITY. gonk-dispatch runs
+            # inside THIS pod and, since ADR-007 deleted the formula layer, creates
+            # the agent session directly rather than pouring an order: POST
+            # /v0/city/gonk/sessions (pkg/gcapi/session.go, called from
+            # broker_inject.go) on the city [api] -- so it needs the supervisor URL
+            # exactly like gonk-intake does. Without it gcapi builds a URL with no
+            # scheme or host and the call dies on `unsupported protocol scheme ""`
+            # -- AFTER meter has already decided, so the budget decision is spent
+            # and no session is ever created.
             # Same helper as intake's (the bundled controller Service on 9443), so
             # the two can never disagree about where the city is.
             - name: GONK_SUPERVISOR_URL
@@ -1676,11 +1708,17 @@ spec:
               value: gc-agent
             - name: GC_K8S_PREBAKED
               value: "true"
-            # v1-minimal session-config delivery (gonk-aql). The in-controller
-            # gonk-gate `dispatch` reads these and forwards them to the agent
-            # session as order vars (GC_WEBHOOK_ARG_{LITELLM_URL,LITELLM_KEY,
-            # BOT_TOKEN}), because Gas City mounts no gonk secrets into session
-            # pods and controller env does not flow to sessions.
+            # Session-config delivery (gonk-aql). The in-controller gonk-gate
+            # `dispatch` reads these because Gas City mounts no gonk secrets into
+            # session pods and controller env does not flow to sessions.
+            #
+            # Delivery is NO LONGER the v1 order-vars map -- ADR-007 deleted it
+            # along with the formula pour that carried it. What reaches the pod now
+            # is the prompt envelope the pod fetches for itself (GET
+            # /v1/prompt/{alias} on gonk-meter), which carries the per-project
+            # LiteLLM key. The bot token is not in it at all: under the broker the
+            # controller does every forge call and the pod holds no forge creds
+            # (gonk-0y6).
             #
             # EVERY SECRET HERE IS A *PATH*, NOT A VALUE, AND THE ENV NAME CARRIES
             # NO SECRET MARKER. Gas City's internal/execenv.IsSensitiveKey flags any
@@ -1694,9 +1732,12 @@ spec:
             # BEARER_FILE -- and gonk-gate reads the file at the path. Renaming any
             # of them to *_TOKEN* silently breaks dispatch again.
             #
-            # The KEY MATERIAL still ends up in an order var (litellm_key/bot_token)
-            # on the way to the session pod: a DELIBERATE v1 compromise the v2 broker
-            # removes by keeping all creds out of the pod entirely.
+            # The v1 compromise this paragraph used to describe -- key material
+            # riding an order var as litellm_key/bot_token -- is gone. No bot token
+            # is sent at all, and the LiteLLM key the pod receives is the PROJECT's
+            # budgeted virtual key, which dispatch resolves from the Secret the
+            # meter keysinks (cmd/gonk-gate/keyread.go, gonk-8gb) and puts in the
+            # prompt envelope. The ADMIN key mounted below never leaves this pod.
             # Where gonk-gate REGISTERS a per-session checkout, and the same base
             # the agent pod fetches it from (pkg/rig, gonk-msz). Marker-free by
             # the rule above -- it is a Service address, not a credential, and
@@ -1724,10 +1765,10 @@ spec:
             # call gonk-meter /v1/policy/decide -- they need the meter URL and a
             # bearer-token FILE, exactly like gonk-intake. Without these,
             # `gc: order exec gonk-dispatch failed ... GONK_METER_TOKEN_FILE unset`
-            # and NO formula is ever poured (no session spawns). GONK_METER_BEARER_
-            # FILE is the marker-free alias gonk-gate falls back to (see above);
-            # GONK_METER_TOKEN_FILE is kept for the non-exec callers that do inherit
-            # it and for parity with gonk-intake.
+            # and NO broker session is ever created (nothing spawns).
+            # GONK_METER_BEARER_FILE is the marker-free alias gonk-gate falls back
+            # to (see above); GONK_METER_TOKEN_FILE is kept for the non-exec callers
+            # that do inherit it and for parity with gonk-intake.
             # The bead store gonk-gate records park/run/needs-human state in.
             # WITHOUT IT gonk-gate falls back to an IN-MEMORY store that does not
             # survive a single invocation -- its own warning says "fine for a
