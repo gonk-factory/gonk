@@ -271,3 +271,49 @@ func TestToolCallsAndUsageAreProseIndependent(t *testing.T) {
 		t.Fatalf("tool_calls/usage depend on prose:\n%s\n%s", got[0], got[1])
 	}
 }
+
+// A COMPLETION ID IS AN IDENTITY, NOT A COUNTER. The stub shares one Server
+// across every test in a package (test/component's shStub), and each test opens
+// with Reset + SetScript. If either rewound the id counter, the stub would hand
+// out chatcmpl-stub-0001 again -- and LiteLLM, whose LiteLLM_SpendLogs table has
+// request_id as its PRIMARY KEY and whose batch writer inserts with
+// create_many(..., skip_duplicates=True), would DISCARD the second call's spend
+// row in silence: no error, no retry, no row, ever.
+//
+// That is gonk-ij2e. TestMeasureLiteLLMSpendLogLag looked like "LiteLLM's
+// background spend-log writer is unreliable under load" (1-2s alone, timing out
+// at 100s / 3m / a measured 20m after the other tests had run) when the truth
+// was that its row was never written, because the id had already been claimed.
+// See docs/spikes/2026-09-10-spend-log-lag.md.
+//
+// This test fails against the pre-fix stub: every id there was chatcmpl-stub-0001.
+func TestCompletionIDsAreNeverReusedAcrossResetOrSetScript(t *testing.T) {
+	s, base := newStub(t)
+	script := []stubmodel.Step{{Response: stubmodel.Response{Content: "ok"},
+		Usage: stubmodel.Usage{PromptTokens: 10, CompletionTokens: 2}, Repeat: stubmodel.Forever}}
+
+	seen := map[string]int{}
+	// Three "tests", each opening the way newWorld does: Reset, then SetScript.
+	for round := range 3 {
+		s.Reset()
+		s.SetScript(script)
+		for call := range 2 {
+			_, out := chat(t, base, "stub-qwen", nil)
+			id, _ := out["id"].(string)
+			if id == "" {
+				t.Fatalf("round %d call %d: response carried no id: %+v", round, call, out)
+			}
+			if prev, dup := seen[id]; dup {
+				t.Fatalf("completion id %q reused: first issued in round %d, again in round %d. "+
+					"LiteLLM's spend-log writer inserts ON CONFLICT DO NOTHING against a request_id "+
+					"PRIMARY KEY, so the second call's spend row is silently discarded and the meter "+
+					"under-counts forever. Reset/SetScript must not rewind the id counter.",
+					id, prev, round)
+			}
+			seen[id] = round
+		}
+	}
+	if len(seen) != 6 {
+		t.Fatalf("saw %d distinct ids across 6 calls, want 6: %v", len(seen), seen)
+	}
+}
