@@ -1,16 +1,22 @@
-// Command gonk-gate is Gate 2, the sweeper, the `[steps.check]` verifier, and
-// (Task 8) the commit-trailer generator -- one static binary with no model
-// call in it anywhere. It ships in both the controller image (Task 6, where
-// its `dispatch`/`sweep` subcommands back the two exec orders) and the agent
-// image (Task 5, where only `trailers`/`check` run).
+// Command gonk-gate is Gate 2, the sweeper, and (Task 8) the commit-trailer
+// generator -- one static binary with no model call in it anywhere. It ships
+// in both the controller image (Task 6, where its `dispatch`/`sweep`
+// subcommands back the two exec orders) and the agent image (Task 5, where
+// only `trailers` runs).
 //
 // Subcommands:
 //
-//	gonk-gate dispatch   GATE 2. Re-decides via meter, pours/parks/denies.
+//	gonk-gate dispatch   GATE 2. Re-decides via meter, runs/parks/denies.
 //	gonk-gate sweep      Classify finished sessions, report outcomes, re-sling.
-//	gonk-gate check      [steps.check]'s body: is the marker on the artifact?
 //	gonk-gate trailers   The prepare-commit-msg hook's body (Task 8): renders
 //	                     and splices the commit-provenance trailer block.
+//
+// There used to be a fourth subcommand, `check` -- the body of a formula's
+// [steps.check], a re-run verification loop that asked "is the marker on the
+// artifact yet?". ADR-007 §3 deleted the whole formula layer it belonged to
+// (formulas, [steps.check], and the pack's control-dispatcher agent that
+// routed their workflow-control beads); the same marker check that used to
+// run in that loop now runs once, inline, from gonk-sweep (artifact.go).
 //
 // The exit-code contract (part of the pack's contract, not an implementation
 // detail -- the orders' shell wrappers depend on it):
@@ -21,7 +27,6 @@
 //	   failure) -- the order retries per Gas City's own policy
 //	2  misconfiguration (GONK_CITY unset, no meter token file, etc) -- never
 //	   retry, a human must fix it
-//	3  check ONLY: the artifact is not there yet -- keep polling
 package main
 
 import (
@@ -62,7 +67,7 @@ func main() {
 		log.Warn("log sink degraded", "detail", logSinkNote)
 	}
 	if len(os.Args) < 2 {
-		log.Error("usage: gonk-gate dispatch|sweep|check")
+		log.Error("usage: gonk-gate dispatch|sweep|trailers")
 		os.Exit(2)
 	}
 
@@ -148,17 +153,6 @@ func main() {
 			// on real sessions (gonk-hsb).
 			EnforceTrajectory: os.Getenv("GONK_ENFORCE_TRAJECTORY") == "1",
 		})
-	case "check":
-		code = runCheck(ctx, checkDeps{
-			GL: cfg.gl(), Log: log,
-			Args: checkArgs{
-				ProjectID:   envArgInt64("project_id"),
-				IssueIID:    envArgInt64("issue_iid"),
-				BeadID:      envArg("bead_id"),
-				Trigger:     envArg("trigger"),
-				BotUsername: cfg.BotUsername,
-			},
-		})
 	default:
 		log.Error("unknown subcommand", "arg", os.Args[1])
 		code = 2
@@ -228,8 +222,8 @@ func loadGateConfig() (gateConfig, error) {
 		// dispatch/sweep (both exec orders) and cfg.gl() would get an empty path
 		// -> glab.New with no token -> every broker forge write 401s. The
 		// controller also exports the SAME bot-token path under the marker-free
-		// name GONK_BOT_FILE (used by the v1 formula var); reuse it as the
-		// fallback so the broker's own bot-PAT access survives the strip.
+		// name GONK_BOT_FILE; reuse it as the fallback so the broker's own
+		// bot-PAT access survives the strip.
 		GitLabTokenFile: firstNonEmpty(os.Getenv("GONK_GITLAB_TOKEN_FILE"), os.Getenv("GONK_BOT_FILE")),
 		BotUsername:     os.Getenv("GONK_BOT_USERNAME"),
 		BdBin:           os.Getenv("GONK_BD_BIN"),
@@ -320,16 +314,6 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
-}
-
-// readFileEnvValue reads the file whose path is in env var `pathEnv` and returns
-// its trimmed contents, or "" if the env is unset or the file cannot be read.
-// Used to carry a secret VALUE (litellm key, bot token) into an exec order past
-// Gas City's IsSensitiveKey env strip: the PATH env has a non-secret name, and
-// the secret only ever lives in the file, never in the exec's environment.
-func readFileEnvValue(pathEnv string) string {
-	s, _ := readSecretFile(os.Getenv(pathEnv))
-	return s
 }
 
 // readSecretFile reads a mounted secret, trimming exactly one trailing

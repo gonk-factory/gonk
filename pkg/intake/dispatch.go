@@ -486,8 +486,9 @@ func MayFire(decision string) bool {
 // FireScaffold is called by the reconciler for a project with no `.agent/` that
 // has opted into the metered scaffold (spec 5.3; MayScaffold owns that rule). It
 // is dormant under the default config, which sets `actions.scaffold: false`. It runs
-// the SAME Gate-1 path as Handle -- scaffold is an agent formula (`gonk-scaffold`,
-// Plan 04), so it needs a rung and a reservation exactly like triage does -- but
+// the SAME Gate-1 path as Handle -- scaffold is a broker agent (Gate 2 creates its
+// session directly; see cmd/gonk-gate/broker_inject.go's agentForTrigger), so it
+// needs a rung and a reservation exactly like triage does -- but
 // the work item is the PROJECT, not an issue, so its BeadAnchor/SessionKey are
 // project-scoped. As in Handle, bead_id is that BeadAnchor and no attempt is sent.
 //

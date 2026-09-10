@@ -254,12 +254,17 @@ func TestGasCityLoaderRejectsAnUnknownKey(t *testing.T) {
 	}
 }
 
-// TestGasCityLoaderLoadsAllFiveGonkOrders is the positive control for the
-// two tests below: proves order_dispatch.go's real scan path (not `gc lint`,
-// which does not exercise it -- see the package doc) accepts every order
-// this pack ships, with none silently dropped, BEFORE the negative-control
-// tests show what dropping one looks like.
-func TestGasCityLoaderLoadsAllFiveGonkOrders(t *testing.T) {
+// TestGasCityLoaderLoadsBothGonkOrders is the positive control for the test
+// below: proves order_dispatch.go's real scan path (not `gc lint`, which
+// does not exercise it -- see the package doc) accepts every order this pack
+// ships, with none silently dropped, BEFORE the negative-control test shows
+// what dropping one looks like.
+//
+// ADR-007 §3 deleted gonk's formula layer -- formulas, [steps.check], and
+// the three formula orders (gonk-triage/gonk-scaffold/gonk-mention) that
+// used to pour them. The reduced pack ships exactly two orders now, both
+// exec: gonk-dispatch (Gate 2) and gonk-sweep (the classifier).
+func TestGasCityLoaderLoadsBothGonkOrders(t *testing.T) {
 	dir := copyPackToTemp(t)
 	writeScratchCity(t, dir)
 
@@ -268,7 +273,7 @@ func TestGasCityLoaderLoadsAllFiveGonkOrders(t *testing.T) {
 		t.Fatalf("gc order list --json exited %d (want 0):\n%s", code, out)
 	}
 	parsed := parseOrderList(t, out)
-	want := []string{"gonk-dispatch", "gonk-sweep", "gonk-triage", "gonk-scaffold", "gonk-mention"}
+	want := []string{"gonk-dispatch", "gonk-sweep"}
 	got := orderNames(parsed)
 	for _, name := range want {
 		if !got[name] {
@@ -280,7 +285,7 @@ func TestGasCityLoaderLoadsAllFiveGonkOrders(t *testing.T) {
 	}
 }
 
-// Same control for the two mistakes the format actively invites -- run
+// The negative control for the one mistake the format actively invites -- run
 // through the REAL order-discovery scan, not `gc lint` (confirmed by hand
 // not to exercise this path at all: an order declaring both `formula` and
 // `exec` passes `gc lint` with zero diagnostics).
@@ -290,31 +295,6 @@ func TestGasCityLoaderLoadsAllFiveGonkOrders(t *testing.T) {
 // that one order from the set -- the command still exits 0. So this test
 // asserts the real, verified behavior: the order is ABSENT from the loaded
 // set, and the violation is named on the combined output.
-func TestLoaderDropsAnOrderWithBothFormulaAndExec(t *testing.T) {
-	dir := copyPackToTemp(t)
-	writeScratchCity(t, dir)
-	replaceInFile(t, filepath.Join(dir, "orders", "gonk-triage.toml"),
-		`formula = "gonk-triage"               # XOR `+"`exec`"+`. NEVER BOTH.`,
-		`formula = "gonk-triage"               # XOR `+"`exec`"+`. NEVER BOTH.`+"\n"+`exec = "scripts/gonk-check.sh"`)
-
-	out, code := runOrderList(t, dir)
-	if code != 0 {
-		t.Fatalf("gc order list --json exited %d; the real loader does not hard-fail this "+
-			"(it warns and drops the order) -- an exit-code change here means gascity's own "+
-			"behavior changed and this test's other assertions need re-checking:\n%s", code, out)
-	}
-	if !strings.Contains(out, "gonk-triage") || !strings.Contains(out, "mutually exclusive") {
-		t.Fatalf("expected the output to name order %q and \"mutually exclusive\":\n%s", "gonk-triage", out)
-	}
-	parsed := parseOrderList(t, out)
-	if orderNames(parsed)["gonk-triage"] {
-		t.Fatalf("the invalid gonk-triage order was NOT dropped from the loaded set:\n%s", out)
-	}
-	if len(parsed.Orders) != 4 {
-		t.Fatalf("got %d orders, want 4 (5 real orders minus the one dropped for formula+exec): %v", len(parsed.Orders), parsed.Orders)
-	}
-}
-
 func TestLoaderDropsAnExecOrderWithAPool(t *testing.T) {
 	dir := copyPackToTemp(t)
 	writeScratchCity(t, dir)
@@ -324,8 +304,9 @@ func TestLoaderDropsAnExecOrderWithAPool(t *testing.T) {
 
 	out, code := runOrderList(t, dir)
 	if code != 0 {
-		t.Fatalf("gc order list --json exited %d (see TestLoaderDropsAnOrderWithBothFormulaAndExec's "+
-			"comment on why 0 is the expected, verified exit code here):\n%s", code, out)
+		t.Fatalf("gc order list --json exited %d; the real loader does not hard-fail this "+
+			"(it warns and drops the order) -- an exit-code change here means gascity's own "+
+			"behavior changed and this test's other assertions need re-checking:\n%s", code, out)
 	}
 	if !strings.Contains(out, "gonk-dispatch") || !strings.Contains(out, "cannot have a pool") {
 		t.Fatalf("expected the output to name order %q and \"cannot have a pool\":\n%s", "gonk-dispatch", out)
@@ -334,8 +315,8 @@ func TestLoaderDropsAnExecOrderWithAPool(t *testing.T) {
 	if orderNames(parsed)["gonk-dispatch"] {
 		t.Fatalf("the invalid gonk-dispatch order was NOT dropped from the loaded set:\n%s", out)
 	}
-	if len(parsed.Orders) != 4 {
-		t.Fatalf("got %d orders, want 4 (5 real orders minus the one dropped for exec+pool): %v", len(parsed.Orders), parsed.Orders)
+	if len(parsed.Orders) != 1 {
+		t.Fatalf("got %d orders, want 1 (the 2 real orders minus the one dropped for exec+pool): %v", len(parsed.Orders), parsed.Orders)
 	}
 }
 

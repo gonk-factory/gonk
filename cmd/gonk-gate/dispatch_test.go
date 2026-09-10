@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -101,66 +102,69 @@ func baseDispatchArgs() dispatchArgs {
 	}
 }
 
-// The formula pour path is still live for triggers not yet ported to the v2
-// broker (scaffold, mention). This asserts it hands the formula EXACTLY what
-// meter said. (Triage is ported -- see TestDispatchCreatesTriageSessionOnRun.)
-func TestDispatchPoursOnRun(t *testing.T) {
+// ADR-007 §3 deleted the formula layer entirely: formulas, [steps.check], the
+// `check` subcommand, and the vars map runDispatch used to build for a
+// formula pour (which carried litellm_key/bot_token as plain map entries --
+// see TestDispatchSourceNeverBuildsLegacyFormulaCredentialVars below). mention
+// -reply was the one trigger still on that path (it "still pours its formula"
+// used to be the comment here); it is not on agentForTrigger either, so it is
+// now a plain unrouted trigger like any other -- refused loudly, exactly like
+// TestDispatchRefusesUnknownTrigger, rather than left to idle against a
+// pour that provably could not deliver its prompt (gonk-6gs / #4668). T-24
+// ports it onto the broker for real.
+func TestDispatchRefusesMentionReplyUntilItIsPortedToTheBroker(t *testing.T) {
 	gc := gcapitest.New(t)
-	store := beadstore.NewMemory()
 	fm := &fakeMeter{resp: meterapi.DecideResponse{
 		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "some-model-from-the-catalog",
 		Attempt: 1, ReservationID: "rsv-1",
-		Metadata: map[string]string{"gonk_project": "group/repo", "gonk_rung": "cheap"},
-		KeyRef:   meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
+		KeyRef: meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
 	}}
 
 	args := baseDispatchArgs()
-	// mention-reply is the remaining non-ported trigger: it still pours its
-	// formula. (scaffold used to be the example here and is now on the broker.)
 	args.Trigger = "mention-reply"
 	code := runDispatch(context.Background(), dispatchDeps{
-		// The agent must receive THIS project's key, not the controller's
-		// (gonk-8gb); dispatch fails closed without it.
 		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
-		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: store,
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
 		Args: args,
 	})
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0", code)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (misconfiguration -- an unrouted trigger)", code)
 	}
-
-	// It poured the TRIGGER'S formula-order, exactly once -- and created no session.
+	if fm.calls != 0 {
+		t.Fatalf("meter /decide was called %d times, want 0 -- an unrouted trigger must not even ask", fm.calls)
+	}
+	if len(gc.Poured) != 0 {
+		t.Fatalf("poured = %+v, want none -- the formula-pour path is deleted (ADR-007 §3)", gc.Poured)
+	}
 	if len(gc.Created) != 0 {
-		t.Fatalf("a non-ported trigger must not create a broker session: %+v", gc.Created)
+		t.Fatalf("created = %+v, want none -- mention is not on agentForTrigger until T-24", gc.Created)
 	}
-	if len(gc.Poured) != 1 || gc.Poured[0].Order != "gonk-mention" {
-		t.Fatalf("poured = %+v, want one gonk-mention", gc.Poured)
-	}
-	// And it handed the formula EXACTLY what meter said -- the rung, the model, the
-	// reservation, the key_ref, and atags VERBATIM. Meter mints the metadata; the
-	// pack stamps it. The pack must never construct a tag itself.
-	v := gc.Poured[0].Vars
-	if v["rung"] != "cheap" || v["model"] != "some-model-from-the-catalog" || v["reservation_id"] != "rsv-1" {
-		t.Fatalf("vars = %+v", v)
-	}
-	if v["key_secret_name"] != "gonk-key-abc" || v["key_secret_key"] != "LITELLM_API_KEY" {
-		t.Fatalf("key_ref not passed through: %+v", v)
-	}
-	var md map[string]string
-	if err := json.Unmarshal([]byte(v["metadata_json"]), &md); err != nil || md["gonk_rung"] != "cheap" {
-		t.Fatalf("metadata not stamped verbatim: %q", v["metadata_json"])
-	}
-	// The key_ref is a POINTER. If the key MATERIAL is anywhere in these vars, it is
-	// now in the event bus and in every log line that echoes an order.
-	for k, val := range v {
-		if val == "sk-secret" {
-			t.Fatalf("key material leaked into order var %q", k)
-		}
-	}
+}
 
-	rec, _, _ := store.Get(context.Background(), "gonk:42:issue:3")
-	if rec.State != beadstore.StateRunning || rec.Rung != "cheap" || rec.Attempt != 1 {
-		t.Fatalf("record = %+v", rec)
+// Exit criterion: dispatch.go must have no code path that sends litellm_key
+// or bot_token. Those were plain entries in the formula-pour's vars map (a
+// credential in an order var is a credential in the event bus and in every
+// log line that echoes an order) -- a v1-only compromise ADR-007 §3 deletes
+// along with the rest of the formula layer. The broker path this repo runs
+// exclusively now delivers the project's key over the one-shot prompt row
+// (meterapi.PromptRequest.LiteLLMKey, set in runBrokerDispatch) instead, and
+// carries no bot token at all -- the pod holds no forge creds to use one
+// with.
+//
+// There is no live vars map left in dispatch.go to assert against (that
+// absence IS the fix), so this reads dispatch.go's own source. Proven to
+// fail: temporarily re-adding either literal to dispatch.go turns this test
+// red (checked by hand while writing it, then reverted).
+func TestDispatchSourceNeverBuildsLegacyFormulaCredentialVars(t *testing.T) {
+	src, err := os.ReadFile("dispatch.go")
+	if err != nil {
+		t.Fatalf("reading dispatch.go: %v", err)
+	}
+	for _, forbidden := range []string{`"litellm_key"`, `"bot_token"`} {
+		if strings.Contains(string(src), forbidden) {
+			t.Fatalf("dispatch.go contains %s -- the formula-pour vars map (ADR-007 §3) must not "+
+				"come back; the broker path delivers the key over the prompt row instead", forbidden)
+		}
 	}
 }
 
@@ -243,53 +247,6 @@ func TestDispatchCreatesTriageSessionOnRun(t *testing.T) {
 	rec, _, _ := store.Get(context.Background(), "gonk:42:issue:3")
 	if rec.State != beadstore.StateRunning || rec.SessionID != cs.Alias || rec.Rung != "cheap" || rec.Attempt != 1 {
 		t.Fatalf("record = %+v", rec)
-	}
-}
-
-// Every pour targets a formula order (gonk-triage/gonk-scaffold/gonk-mention).
-// Gas City's graphv2.PrepareInvocation hard-rejects a caller-supplied vars map
-// that contains the key "bead_id" (or "convoy_id", or the deprecated alias
-// "issue") with "formulas v2 reserved variable ... cannot be supplied by the
-// caller" -- REGARDLESS of whether the formula itself declares that var. If
-// this map ever regains a "bead_id" key (it carries the Gas City bead id
-// under "city_bead_id" instead -- see the comment beside its construction),
-// every single dispatch fails the instant it reaches the real loader. See
-// pack/formulas/gonk-triage.toml's matching comment.
-func TestDispatchNeverSendsAReservedFormulaVarName(t *testing.T) {
-	gc := gcapitest.New(t)
-	fm := &fakeMeter{resp: meterapi.DecideResponse{
-		Decision: meterapi.DecisionRun, Rung: "cheap", Model: "some-model", Attempt: 1,
-		// Without a KeyRef there is no per-project key to give the agent, and
-		// dispatch fails closed rather than fall back to the admin key
-		// (gonk-8gb).
-		KeyRef:        meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"},
-		ReservationID: "rsv-1",
-	}}
-
-	args := baseDispatchArgs()
-	args.Trigger = "mention-reply" // guards the still-live formula pour path
-	code := runDispatch(context.Background(), dispatchDeps{
-		// The agent must receive THIS project's key, not the controller's
-		// (gonk-8gb); dispatch fails closed without it.
-		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
-		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), Store: beadstore.NewMemory(),
-		Args: args,
-	})
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0", code)
-	}
-	if len(gc.Poured) != 1 {
-		t.Fatalf("poured = %+v, want exactly one", gc.Poured)
-	}
-	v := gc.Poured[0].Vars
-	for _, reserved := range []string{"bead_id", "convoy_id", "issue"} {
-		if _, ok := v[reserved]; ok {
-			t.Fatalf("vars carried reserved formulas v2 key %q -- Gas City's real loader "+
-				"rejects this pour outright: %+v", reserved, v)
-		}
-	}
-	if v["city_bead_id"] != "gk-1a2b" {
-		t.Fatalf("city_bead_id = %q, want the Gas City bead id", v["city_bead_id"])
 	}
 }
 

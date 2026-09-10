@@ -32,17 +32,22 @@ type issueReader interface {
 // bodies are truncated with an explicit marker (§11 OQ5).
 const maxIssueBodyBytes = 8 << 10 // 8 KiB
 
-// agentForTrigger maps a trigger to the broker AGENT that handles it. A trigger
-// in this set is dispatched via the v2 broker: dispatch creates the agent
-// session DIRECTLY (POST /v0/city/{city}/sessions), correlates it by a unique
-// alias, and injects the rendered prompt as the session's initial message --
-// instead of pouring a formula order. The agent produces a proposed-effects
-// batch and posts nothing; gonk-sweep validates the batch's shape and applies
-// it under the controller's own bot PAT. The pod holds no forge creds.
+// agentForTrigger maps a trigger to the broker AGENT that handles it, and --
+// since ADR-007 §3 deleted the formula layer -- is the ONLY routing table
+// left in gonk-gate. A trigger in this set is dispatched via the v2 broker:
+// dispatch creates the agent session DIRECTLY (POST
+// /v0/city/{city}/sessions), correlates it by a unique alias, and injects
+// the rendered prompt as the session's initial message. The agent produces a
+// proposed-effects batch and posts nothing; gonk-sweep validates the batch's
+// shape and applies it under the controller's own bot PAT. The pod holds no
+// forge creds.
 //
-// Triage was the first ported trigger; scaffold followed (see below). Only
-// mention still pours its formula in runDispatch until it is ported (Phase 6).
-// An entry here takes precedence over orderForTrigger.
+// Triage was the first ported trigger; scaffold followed (see below).
+// mention-reply is DELIBERATELY ABSENT: it used to pour a formula
+// (gonk-mention) that provably could not deliver its prompt (upstream Gas
+// City drops caller vars, gonk-6gs / #4668); ADR-007 §3 deleted that pour
+// rather than port mention here too, so runDispatch now refuses the trigger
+// outright until T-24 ports it for real.
 var agentForTrigger = map[string]string{
 	"issue-triage": "triage",
 	// scaffold is ported for the same reason triage was, and it is what unblocks
@@ -222,8 +227,9 @@ whole batch.`, agent, issueIID, project, context, repo)
 // renderScaffoldPrompt builds the scaffold session's initial message.
 //
 // IT IS A DIFFERENT SHAPE OF JOB from the v1 formula prompt it replaces
-// (pack/agents/scaffold/prompt.template.md), and the difference is the whole
-// point of the port: that prompt told the agent to create a branch and open a
+// (pack/agents/scaffold/prompt.template.md -- deleted with the rest of the
+// formula layer, ADR-007 §3), and the difference is the whole point of the
+// port: that prompt told the agent to create a branch and open a
 // merge request ITSELF, which needs forge credentials the broker deliberately
 // denies it. Here the agent only PROPOSES file content; gonk-sweep commits it
 // onto gonk/scaffold and opens exactly one MR under the controller's own PAT.

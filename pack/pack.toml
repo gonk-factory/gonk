@@ -7,11 +7,13 @@
 #
 # THE LOADER REJECTS UNKNOWN TOP-LEVEL KEYS. The only tables below are ones
 # internal/config/pack.go's PackConfig struct actually decodes: pack,
-# agent_defaults. Agents/formulas/orders/doctor checks are NOT declared here --
-# they are discovered from the well-known agents/, formulas/, orders/, and
-# doctor/ directories (pack-spec.md 1.2.14, "Authoring Summary"). This pack
-# uses ONLY the new, non-legacy authoring surface: no inline [[agent]], no
-# legacy [[doctor]], no legacy [[commands]].
+# agent_defaults. Agents/orders/doctor checks are NOT declared here -- they
+# are discovered from the well-known agents/, orders/, and doctor/
+# directories (pack-spec.md 1.2.14, "Authoring Summary"). This pack uses ONLY
+# the new, non-legacy authoring surface: no inline [[agent]], no legacy
+# [[doctor]], no legacy [[commands]]. (ADR-007 §3 deleted formulas/ along
+# with the rest of the formula layer -- the loader would still discover a
+# formulas/ directory if one existed, this pack simply does not ship one.)
 
 [pack]
 name = "gonk"
@@ -54,8 +56,8 @@ description = "Issue triage, .agent/ scaffolding and mention replies on self-hos
 # ENFORCER, whose availability must not be coupled to the Gas City
 # controller's lifecycle.
 #
-# This is still pack-first: the pack carries the agents, formulas and orders;
-# the chart carries the two servers. (Owner decision, 2026-07-13.)
+# This is still pack-first: the pack carries the agents and orders; the chart
+# carries the two servers. (Owner decision, 2026-07-13.)
 # ---------------------------------------------------------------------------
 
 [agent_defaults]
@@ -82,17 +84,14 @@ wake_mode = "resume"
 # price in an open-source pack would hardcode one site's economics.
 # ---------------------------------------------------------------------------
 
-# NOTE ON POOLS (OD-2, revised from the plan's "one shared pool" assumption):
-# each of the three agents (triage/scaffold/mention) gets its OWN order-level
-# pool, named after the agent (see orders/gonk-{triage,scaffold,mention}.toml).
-# Gas City routes a pool's ready work to ANY agent whose work query matches
-# that pool label (docs/tutorials/06-beads.md, "How agents find work") --
-# agents do not additionally filter by which formula produced the bead. A
-# single shared "gonk" pool across three agents with three DIFFERENT prompts
-# would let the mention agent's session pick up a triage bead (or vice versa)
-# and run the wrong prompt against it. Per-agent pools (each a "pool of one",
-# which docs/tutorials/07-orders.md confirms is a supported target: "a single
-# agent's name works as a pool target too") avoid that misroute entirely, and
-# OD-2 itself calls the blast radius of picking wrong here "trivial ... one
-# line per order file" -- so this is a same-day correction, not a re-opened
-# decision.
+# WHY THERE IS NO NOTE ON POOLS ANY MORE
+#
+# There used to be one here (OD-2): each of the three agents got its own
+# order-level pool, named after the agent, so a formula order's work could
+# not be picked up by the wrong agent's session. ADR-007 §3 deleted the
+# formula layer that pool-routing existed to serve -- gonk-dispatch creates
+# the triage/scaffold broker session directly, by agent NAME
+# (gcapi.CreateSessionRequest.Name in cmd/gonk-gate/broker_inject.go), with
+# no order, no pool, and so no misroute to guard against. Nothing in this
+# pack declares a pool any more (see orders/gonk-dispatch.toml and
+# orders/gonk-sweep.toml's own "exec orders may not have one" comments).

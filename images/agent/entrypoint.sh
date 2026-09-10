@@ -189,23 +189,35 @@ fi
 # that would either talk to nothing or (worse) talk to LiteLLM unattributed,
 # and spec goal 4 (attribution at every granularity) does not tolerate that.
 # --- WHERE THE PER-SESSION VALUES COME FROM (read this before "fixing" it) ----
-# NOT from GC_WEBHOOK_ARG_*. That is an EXEC-ORDER env overlay
-# (internal/orderdispatch/dispatch.go at GASCITY_REF), and the thing that starts
-# this pod is a FORMULA order. A session pod's environment is resolved.Env --
-# STATIC agent/provider/city config -- plus a fixed passthrough allow-list
-# (internal/processenv/provider.go: PATH, HOME, USER, TZ, CLAUDE_*, locale) plus
-# Dolt/city path projections. No per-session value can reach it, and no GONK_*
-# env is inherited from the controller at all.
+# NOT from GC_WEBHOOK_ARG_* as inherited env. That would be an EXEC-ORDER env
+# overlay (internal/orderdispatch/dispatch.go at GASCITY_REF), and this pod is
+# not started by an order at all -- gonk-dispatch creates the broker agent
+# SESSION directly (cmd/gonk-gate/broker_inject.go's runBrokerDispatch). A
+# session pod's environment is resolved.Env -- STATIC agent/provider/city
+# config -- plus a fixed passthrough allow-list (internal/processenv/
+# provider.go: PATH, HOME, USER, TZ, CLAUDE_*, locale) plus Dolt/city path
+# projections. No per-session value can reach it that way, and no GONK_* env
+# is inherited from the controller at all.
 #
-# The ONE per-session channel is the PROMPT. pack/formulas/gonk-triage.toml
-# stamps two marker lines at the top of the rendered step:
+# THE PER-SESSION CHANNEL IS THE PROMPT, fetched by reference below (Step 1.5,
+# gonk-mzd) and setting GC_WEBHOOK_ARG_MODEL/GC_WEBHOOK_ARG_METADATA_JSON
+# directly from the fetched row's model/metadata fields once it lands.
+#
+# This USED TO be two marker lines a formula step stamped at the top of the
+# rendered prompt --
 #
 #     <!-- gonk:model:<model> -->
 #     <!-- gonk:meta:<metadata json> -->
 #
-# We parse them out of our own --prompt argument, strip them, and hand the rest
-# to opencode. Secrets are NOT in the prompt (they are static pod env, below):
-# a key in the prompt is a key in the model's context and in every transcript.
+# -- parsed out of our own --prompt argument by marker_value() below. ADR-007
+# §3 deleted the whole formula layer that stamped them (including
+# pack/formulas/gonk-triage.toml), and no live path hands this entrypoint a
+# --prompt argument any more (broker sessions carry no launch-time Message at
+# all -- see cmd/gonk-gate/dispatch_test.go's
+# TestDispatchCreatesTriageSessionOnRun). marker_value() and its precedence
+# chain below are dead code now, left in place as a harmless, no-op fallback
+# rather than ripped out here -- that cleanup is outside a formula-layer
+# deletion's scope.
 #
 # argv is `--prompt <text>` (agent.toml prompt_mode=flag/prompt_flag=--prompt).
 GONK_PROMPT=""
@@ -316,9 +328,21 @@ if [ -z "${GONK_PROMPT}" ] && [ -n "${GONK_PROMPT_URL:-}" ] && [ -n "${GC_ALIAS:
 fi
 
 marker_value() {
+	# ALWAYS FINDS NOTHING since ADR-007 §3 (see the comment above Step 2).
+	# GONK_PROMPT is not necessarily empty here -- Step 1.5's fetch populates
+	# it with the broker's rendered prompt text for a real dispatched session
+	# -- but no live path stamps a "<!-- gonk:model:...-->" / "<!--
+	# gonk:meta:...-->" line into that text any more (the broker's own tests
+	# assert its rendered prompts never carry them). So this greps real
+	# content for a pattern nothing produces, rather than searching empty
+	# input; either way the result is always empty. Left in place as a
+	# harmless fallback rather than removed as part of a formula-layer
+	# deletion.
+	#
 	# $1 = marker name. Prints the value, or nothing. `head -1` because only the
 	# first occurrence is ours; a hostile issue body cannot forge an earlier one
-	# (the formula puts these at the very top of the step it renders).
+	# (a formula step used to put these at the very top of the step it
+	# rendered).
 	printf '%s\n' "${GONK_PROMPT}" \
 		| sed -n "s/^<!-- gonk:$1:\(.*\) -->[[:space:]]*$/\1/p" \
 		| head -1

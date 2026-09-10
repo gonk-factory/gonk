@@ -22,7 +22,8 @@ import (
 type State string
 
 const (
-	// StateRunning: a formula was poured; we are waiting for the session to finish.
+	// StateRunning: a broker agent session was created; we are waiting for it
+	// to finish.
 	StateRunning State = "running"
 	// StateParked: meter said `defer` (budget exhausted, quiet hours, capacity).
 	// RetryAfter says when to ask again. THIS IS A NORMAL STATE, NOT AN ERROR.

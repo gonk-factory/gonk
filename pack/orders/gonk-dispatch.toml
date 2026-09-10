@@ -1,25 +1,29 @@
 # pack/orders/gonk-dispatch.toml
 #
-# *** THIS IS GATE 2. IT IS THE ONLY PATH IN GONK THAT POURS A FORMULA. ***
+# *** THIS IS GATE 2. IT IS THE ONLY PATH IN GONK THAT CREATES A BROKER AGENT
+# SESSION. ***
 #
-# It asks gonk-meter /v1/policy/decide immediately before pouring -- on the
-# first dispatch, on a re-sling after a gate failure, on an unpark after a
-# defer, on every single pour without exception.
+# It asks gonk-meter /v1/policy/decide immediately before dispatching -- on
+# the first dispatch, on a re-sling after a gate failure, on an unpark after
+# a defer, on every single dispatch without exception.
 #
 # WHY THIS EXISTS AT ALL: spec 6.2.3 said "the dispatch FORMULA asks meter for
 # the rung". A FORMULA CANNOT DO THAT -- per formula-spec-v2 a formula is a
-# DAG of steps handed to AGENTS, and the only code it can run is
+# DAG of steps handed to AGENTS, and the only code it could run was
 # [steps.check]. There is no HTTP verb in a formula. If the rung decision
 # lived in a formula it would be made by an LLM, which violates spec 6.3's
 # "no LLM judges" at the exact point where money is spent. So it lives HERE,
-# in an exec order, with no model in it.
+# in an exec order, with no model in it. (ADR-007 §3 later deleted the
+# formula layer entirely -- formulas, [steps.check], the whole thing -- but
+# this order's reasoning for being an exec order rather than a step in
+# something else was never about that; it is unchanged.)
 #
 # A ladder escalation is CONTROLLER-INITIATED and never passes gonk-intake. If
 # this order ever trusts the rung in its vars instead of re-deciding,
 # escalations spend UNMETERED. See
 # TestDispatchAlwaysDecidesEvenWhenVarsCarryARung in cmd/gonk-gate.
 [order]
-description = "THE BUDGET GATE. Ask gonk-meter for a rung, then pour the trigger's formula -- or park, or stop."
+description = "THE BUDGET GATE. Ask gonk-meter for a rung, then create the trigger's broker agent session -- or park, or stop."
 exec = "scripts/gonk-dispatch.sh"     # XOR `formula`. NEVER BOTH.
 trigger = "webhook"                   # fired by gonk-intake and by gonk-sweep, via
                                        # POST /v0/city/{city}/order/gonk-dispatch/run --
@@ -54,8 +58,9 @@ issue_iid = { required = false }
 # duplicate spend.
 bead_anchor = { required = true }
 # The Gas City-internal bead id, used for the comment/MR marker and the bead
-# store record. Never sent to meter (see formulas/gonk-triage.toml's comment
-# on why it is renamed to city_bead_id once it reaches a formula's vars).
+# store record. Never sent to meter -- meter keys /decide on bead_anchor
+# above, not this value (see dispatchArgs.BeadID's comment in
+# cmd/gonk-gate/dispatch.go for why the two must stay separate).
 bead_id = { required = true }
 # Stable across triage and every follow-up on the same issue.
 session_key = { required = true }
