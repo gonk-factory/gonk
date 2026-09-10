@@ -668,16 +668,23 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 	// re-dispatch, at an interval no lock would have covered. The meter is
 	// idempotent here BY DESIGN (an open, unsettled reservation returns the same
 	// attempt), so the duplicate has to be refused on this side.
-	if prior, ok, perr := d.Store.Get(ctx, a.BeadAnchor); perr != nil {
+	//
+	// The read is hoisted out of the `if` it used to live in because the record
+	// it returns is needed TWICE: once for this guard, and once for the
+	// reservation release below, which must be able to put back exactly what it
+	// found rather than a guess.
+	prior, priorFound, perr := d.Store.Get(ctx, a.BeadAnchor)
+	if perr != nil {
 		// Do NOT fail closed. An unreadable store used to mean a guaranteed
 		// duplicate; since gonk-u6p a duplicate is recoverable (the sweep
 		// classifies it infra-failed at the reservation deadline instead of
 		// retrying forever), while refusing here would drop a legitimate
 		// dispatch. Proceed, loudly.
+		priorFound = false
 		d.Log.Error("could not read the bead store before creating a session; "+
 			"proceeding, but a duplicate session for this attempt cannot be ruled out",
 			"err", perr, "bead", a.BeadAnchor)
-	} else if ok && prior.SessionID != "" && prior.Attempt == dec.Attempt {
+	} else if priorFound && prior.SessionID != "" && prior.Attempt == dec.Attempt {
 		d.Log.Warn("a session already exists for this bead and attempt; not creating a second",
 			"bead", a.BeadAnchor, "attempt", dec.Attempt, "session", prior.SessionID)
 		return 0
@@ -703,21 +710,48 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 	//
 	// INTERIM STOP-GAP (T-55/T-58 replace it with a deterministic Job name and
 	// a 409 at the API server). Because it is interim, the release below is
-	// load-bearing: gonk-sweep Lists only StateRunning and StateParked
-	// (runSweep, sweep.go), so a record left sitting in StatePendingPrompt is
-	// invisible to it and would never be reclaimed on its own. Every return
-	// path below that does NOT reach the final StateRunning write clears
-	// SessionID again so a genuine retry -- this dispatch failing outright, not
-	// racing a concurrent one -- is not permanently mistaken for "already
-	// dispatched". A dispatch that crashes between the two writes (the process
-	// killed outright, so no defer runs) is the one case this cannot cover: the
-	// record wedges in pending-prompt until T-58 removes the state. That is the
-	// accepted shape of this stop-gap, not a silently discovered one.
+	// load-bearing, and it RESTORES THE PRIOR RECORD rather than clearing the
+	// session id off the pending one.
+	//
+	// That distinction is the whole of T-19, and the earlier note here was
+	// wrong about it in two ways worth spelling out so it is not re-broken:
+	//
+	//  1. Releasing by clearing SessionID left State on StatePendingPrompt.
+	//     runSweep now Lists that state (see pendingPromptGrace in sweep.go),
+	//     but at the time it did not -- so a released record was invisible to
+	//     the sweep and never reclaimed. That happened on EVERY failed
+	//     dispatch: a prompt PUT that 500s, an unreadable project key, a
+	//     create that is refused. Not, as the old comment claimed, only on a
+	//     process killed outright between the two writes.
+	//  2. `pending` is a copy of `base`, which runDispatch builds FRESH from
+	//     the webhook args -- so it does not carry whatever state this bead was
+	//     already in. Releasing `pending` therefore OVERWROTE the prior state:
+	//     a bead that was StateParked, which the sweep does List and would have
+	//     unparked at RetryAfter, was downgraded to pending-prompt by one
+	//     failed re-dispatch and stopped being reclaimable. The reservation
+	//     meant to prevent a duplicate session was costing visibility.
+	//
+	// So capture the record as it stood BEFORE the reservation write and put
+	// exactly that back. When there was no prior record at all -- a genuine
+	// first dispatch, or a store read that failed -- the honest restore is
+	// `base` with no session id, which is the same "nothing has been
+	// dispatched for this bead yet" the guard above would have seen.
+	release := base
+	release.SessionID = ""
+	if priorFound {
+		release = prior
+	}
+
 	pending := base
 	pending.State = beadstore.StatePendingPrompt
 	pending.SessionID = alias
 	pending.Rung, pending.Model, pending.ReservationID = dec.Rung, dec.Model, dec.ReservationID
 	pending.ReservationExpiresAt = dec.ReservationExpiresAt
+	// Stamp the reservation's own age. runSweep reclaims a pending-prompt
+	// record by how long it has sat here, and only beadstore.Memory stamps
+	// UpdatedAt for its callers -- BdCLI marshals the record verbatim, so a
+	// record written through it would carry a zero time and never age out.
+	pending.UpdatedAt = time.Now().UTC()
 	if err := d.Store.Put(ctx, pending); err != nil {
 		// Same bias as the read above: an unreadable/unwritable store must not
 		// block a legitimate dispatch, only weaken this particular guard for it.
@@ -732,9 +766,7 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 			// in-flight caller. Nothing to release.
 			return
 		}
-		released := pending
-		released.SessionID = ""
-		if err := d.Store.Put(ctx, released); err != nil {
+		if err := d.Store.Put(ctx, release); err != nil {
 			d.Log.Error("could not release the pending-prompt reservation after a failed dispatch; "+
 				"a retry may wrongly see this attempt as already dispatched",
 				"err", err, "bead", a.BeadAnchor, "alias", alias)

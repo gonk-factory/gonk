@@ -119,7 +119,18 @@ func runSweep(ctx context.Context, d sweepDeps) int {
 		refire(ctx, dd, rec)
 	}
 
-	// LAST, and deliberately after both passes above. The reaper decides what to
+	// THE THIRD PASS, and the reason StatePendingPrompt is not a state the
+	// sweep can afford to ignore (T-19). See reclaimPendingPrompt.
+	pending, err := dd.Store.List(ctx, beadstore.StatePendingPrompt)
+	if err != nil {
+		dd.Log.Error("sweep: list pending-prompt beads failed", "err", err)
+		return 1
+	}
+	for _, rec := range pending {
+		reclaimPendingPrompt(ctx, dd, rec, now)
+	}
+
+	// LAST, and deliberately after all three passes above. The reaper decides what to
 	// destroy by ABSENCE -- a gonk session that no running bead claims -- so it
 	// must run only once this tick has finished making the store's picture of
 	// what is running as accurate as it is going to get.
@@ -129,6 +140,75 @@ func runSweep(ctx context.Context, d sweepDeps) int {
 	// reaper's behalf would strand real outcomes.
 	runReap(ctx, dd)
 	return 0
+}
+
+// pendingPromptGrace is how long a StatePendingPrompt reservation may sit
+// before runSweep concludes no dispatch is behind it any more.
+//
+// It is defaultSubmitDeadline (dispatch.go) -- the hard cap on the whole
+// deliver-and-confirm loop -- plus a minute for everything that runs BEFORE
+// that loop and after the reservation write: the issue or repository fetch,
+// the checkout grant, the project-key read, PutPrompt, and the create itself.
+// The sum is 300s, which is exactly gonk-dispatch's own order timeout
+// (pack/orders/gonk-dispatch.toml): Gas City kills the process at that point,
+// so a reservation older than this provably has no live dispatch behind it.
+//
+// It must also stay COMFORTABLY UNDER reapGrace (reap.go, 10 minutes), and
+// TestPendingPromptGraceLandsInsideTheReaperGrace enforces that. The reaper
+// treats only StateRunning records as claiming a session, so a pending-prompt
+// alias is unclaimed for as long as it sits in that state; reclaiming it at
+// 300s promotes it to StateRunning -- and therefore into the claimed set --
+// with 5 minutes to spare before the reaper would ever consider closing it.
+const pendingPromptGrace = defaultSubmitDeadline + time.Minute
+
+// reclaimPendingPrompt rescues a reservation whose dispatch never came back.
+//
+// runBrokerDispatch (broker_inject.go) writes a StatePendingPrompt record
+// before it creates a session, so a re-dispatch landing inside the delivery
+// window sees the reservation and backs off instead of minting a second
+// session under the same alias (gonk-u6p). Its deferred release restores the
+// prior record on every failure path -- but a dispatch that is KILLED runs no
+// defer, and then the record sits in pending-prompt forever: the meter's
+// reservation for that attempt is never settled (a slow budget leak) and the
+// work item silently stops progressing, because nothing else in this tree
+// looks at that state.
+//
+// Reclaiming means promoting the record to StateRunning with its alias and
+// reservation intact, which hands it to sweepRunning -- the code that already
+// knows how to settle exactly this: it reads the session, and past
+// ReservationExpiresAt classifies a session that is unreadable or still
+// grinding as infra-failed, reports the outcome to meter, and closes the pod.
+// A wedged agent that never received its prompt is a case sweepRunning was
+// written for; this pass is what lets it see one.
+//
+// THE BIAS IS TOWARD DOING NOTHING, like the reaper's. Promoting a record
+// whose dispatch is still working would race that dispatch, so the age cutoff
+// is generous and an unknown age is treated as too young.
+func reclaimPendingPrompt(ctx context.Context, d sweepDeps, rec beadstore.Record, now time.Time) {
+	if rec.UpdatedAt.IsZero() {
+		// Unknown age reads as TOO YOUNG, for the same reason the reaper does
+		// it with an unparseable created_at: the zero time would read as
+		// "written in year 1, therefore ancient" and reclaim a reservation
+		// written a second ago, out from under a dispatch that is mid-create.
+		d.Log.Warn("sweep: pending-prompt record has no write time; leaving it alone",
+			"bead", rec.BeadAnchor, "session", rec.SessionID)
+		return
+	}
+	if age := now.Sub(rec.UpdatedAt); age < pendingPromptGrace {
+		return // a dispatch may still be inside its delivery window
+	}
+	rec.State = beadstore.StateRunning
+	if err := d.Store.Put(ctx, rec); err != nil {
+		d.Log.Error("sweep: could not reclaim a stranded pending-prompt reservation",
+			"bead", rec.BeadAnchor, "session", rec.SessionID, "err", err)
+		return
+	}
+	// WARN, not Info: reaching here means a dispatch died without running its
+	// own release, which is a real (if recoverable) failure and should not be
+	// invisible just because the sweep handled it.
+	d.Log.Warn("sweep: reclaimed a pending-prompt reservation whose dispatch never returned",
+		"bead", rec.BeadAnchor, "session", rec.SessionID,
+		"reserved_at", rec.UpdatedAt, "age", now.Sub(rec.UpdatedAt).String())
 }
 
 // sweepRunning classifies one running bead. It is a no-op for a bead whose

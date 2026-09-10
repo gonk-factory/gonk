@@ -43,13 +43,17 @@ const (
 	// under the same alias -- see cmd/gonk-gate/broker_inject.go's
 	// runBrokerDispatch for the full history (gonk-u6p).
 	//
-	// INTERIM ONLY. gonk-sweep does not List this state (it Lists StateRunning
-	// and StateParked only, see cmd/gonk-gate/sweep.go's runSweep), so a
-	// record that never leaves this state is never reclaimed by the sweeper --
-	// runBrokerDispatch is responsible for releasing its own reservation
-	// (clearing SessionID) on every path that does not reach StateRunning.
-	// T-55/T-58 replace this whole mechanism with a deterministic Job name and
-	// a 409 at the API server; T-58 deletes this state once that lands.
+	// INTERIM ONLY, but NOT unreclaimable (T-19). Two things keep a record
+	// from wedging here: runBrokerDispatch restores the PRIOR record -- state
+	// and session id as they stood before the reservation write -- on every
+	// path that does not reach StateRunning, and gonk-sweep Lists this state
+	// and promotes anything older than pendingPromptGrace to StateRunning so
+	// the normal reservation-deadline machinery settles it (see runSweep and
+	// reclaimPendingPrompt in cmd/gonk-gate/sweep.go). The second exists
+	// because the first cannot cover a dispatch process killed outright, which
+	// runs no defer. T-55/T-58 replace this whole mechanism with a
+	// deterministic Job name and a 409 at the API server; T-58 deletes this
+	// state once that lands.
 	StatePendingPrompt State = "pending-prompt"
 )
 
