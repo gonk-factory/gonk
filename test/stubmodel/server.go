@@ -52,7 +52,7 @@ func (s *Server) Log() *Log { return &s.log }
 // ON CONFLICT DO NOTHING. A reused id therefore does not error and does not
 // retry -- the whole spend row is DISCARDED IN SILENCE, forever.
 //
-// That is the entire cause of gonk-ij2e: because newWorld calls Reset at the
+// That is the entire cause of gonk-ij2e: because test/component's newWorld calls Reset at the
 // top of every component test, every test's first completion reused the id
 // the hard-door test had already burned, so TestMeasureLiteLLMSpendLogLag's
 // row was never written at all. Run alone the lag was 1-2s; run after the

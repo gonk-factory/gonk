@@ -136,19 +136,34 @@ door immediately: a deleted key's token is refused **401** on the very next call
 
 ### P3-3 — spend-log lag could not be measured (and why it matters)
 
-> **CORRECTED 2026-09-10 (gonk-ij2e). The conclusion below is WRONG and is kept
-> only so the mistake is legible.** The detailed-log write lag is **not** "large
-> and unreliable": it is **0.24s–2.1s**, and `/spend/logs/v2` trails Postgres by
-> about **17ms**. The rows that "frequently produced no visible row within 100s"
-> were never written, because `test/stubmodel` rewound its completion-id counter
-> on `Reset()` and reissued `chatcmpl-stub-0001`; `LiteLLM_SpendLogs` has
-> `request_id` as its PRIMARY KEY and LiteLLM inserts with
-> `create_many(..., skip_duplicates=True)` — `ON CONFLICT DO NOTHING` — so the
-> duplicate was discarded in silence. The guess below that this was an artifact
-> of "restarting a single-node proxy mid-flight" is also wrong: a restart against
-> the same DB is just another way to rewind the counter into ids the table
-> already held. Full method, timings and fix:
-> **`docs/spikes/2026-09-10-spend-log-lag.md`**.
+> **REVISED 2026-09-10 (gonk-ij2e), and revised again after review. Read the
+> separation of measured from inferred below — the first version of this note
+> overclaimed in the same confident direction as the conclusion it corrects.**
+>
+> **MEASURED, on the current rig, after fixing a defect in our own test stub:**
+> spend-log lag of **0.24s–2.1s** locally, and **2.1s and 4.4s** in the green CI
+> run (34460331012). A single probe pair had `/spend/logs/v2` about **17ms**
+> behind Postgres — that is **n=1**, not a characteristic.
+>
+> **PROVEN:** the cause of the 2026-09-10 component-job failure was ours, not
+> LiteLLM's. `test/stubmodel` rewound its completion-id counter on `Reset()` and
+> reissued `chatcmpl-stub-0001`; `LiteLLM_SpendLogs` has `request_id` as its
+> PRIMARY KEY and LiteLLM inserts with `create_many(..., skip_duplicates=True)`
+> — `ON CONFLICT DO NOTHING` — so the duplicate row was discarded in silence.
+> One change turned four reproducible failures green.
+>
+> **INFERRED, NOT MEASURED:** that the July observations recorded below had the
+> same cause. Nothing from July was re-run; the rig, the load and possibly the
+> LiteLLM version differ. It is by far the most plausible explanation, and it is
+> not a measurement.
+>
+> **WITHDRAWN:** an earlier version of this note claimed the "restarting a
+> single-node proxy mid-flight" guess below was wrong because a restart is
+> "another way to rewind the counter". That does not follow — restarting the
+> LiteLLM proxy leaves the stubmodel `Server` process untouched and cannot rewind
+> its counter. The proxy-restart observation remains unexplained.
+>
+> Full method, timings and fix: **`docs/spikes/2026-09-10-spend-log-lag.md`**.
 
 LiteLLM has **two** spend surfaces and they behave very differently:
 

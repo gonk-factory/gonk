@@ -11,8 +11,9 @@ writer discards a duplicate `request_id` in silence.
 
 `test/stubmodel` numbered every scripted completion `chatcmpl-stub-%04d` from a
 counter that `Server.Reset()` and `Server.SetScript()` both rewound to zero.
-`newWorld(t)` calls `Reset` then `SetScript` at the top of **every** component
-test, so every test's first completion was issued the id
+`newWorld(t)` calls `Reset` at the top of **every** component test (individual
+tests call `SetScript` separately; either one alone was enough to rewind), so
+every test's first completion was issued the id
 `chatcmpl-stub-0001` — an id the hard-door test had already burned earlier in
 the same package run. `LiteLLM_SpendLogs` has `request_id` as its **PRIMARY
 KEY**, and LiteLLM's batch writer inserts with
@@ -225,11 +226,19 @@ detailed-log write lag was "large and unreliable" and that completions
 "frequently produced no visible row within 100s", and floats a proxy restart as
 the explanation. **That conclusion was wrong**, and it was wrong in the
 expensive direction: it attributed our own duplicate-id defect to LiteLLM's
-batching and left a P1 "config/infra risk" open against it. The spike's own
-guess — that some of the "no row" observations were "spike artifacts of
-restarting a single-node proxy mid-flight" — was also wrong; a restart against
-the same database is simply another way to rewind the stub's counter into ids
-the table already held. P3-3 is now answered: see the measured numbers below.
+batching and left a P1 "config/infra risk" open against it.
+
+**WITHDRAWN AFTER REVIEW.** An earlier version of this paragraph also dismissed
+the spike's "spike artifacts of restarting a single-node proxy mid-flight"
+guess, on the grounds that a restart is "simply another way to rewind the stub's
+counter". That does not follow: restarting the LiteLLM proxy leaves the
+stubmodel `Server` process — and therefore its counter — untouched. Only
+restarting the whole rig including the stub would rewind it, and nothing records
+that that is what happened. **The proxy-restart observation remains
+unexplained.** It is also worth being precise about the scope of what follows:
+the duplicate-id defect is PROVEN to be the cause of the 2026-09-10 failure
+(one change, four reproductions, green), and INFERRED — plausibly, but not
+measured — to be the cause of the July observations, which were never re-run.
 
 ## P3-3, answered
 
