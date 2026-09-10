@@ -1,6 +1,8 @@
 # gonk: delivery plan to the original stated goals
 
-- **Date:** 2026-09-08 (rev 2, after joint review of T-08 and T-45)
+- **Date:** 2026-09-08 (rev 2, after joint review of T-08 and T-45; rev 3
+  2026-09-10 amendments from `docs/reviews/2026-09-10-wave-1-3-verification.md`,
+  marked _Rev 3_)
 - **Input:** `docs/reviews/2026-09-08-independent-code-review.md` (finding IDs
   `R-nn`) and the master spec
   `docs/superpowers/specs/2026-07-12-gonk-stack-design.md` (§2 goals G1–G8,
@@ -99,7 +101,10 @@ in the gonk repository, in your own git worktree and branch. Rules:
 2. Touch only files the task's "Change" section names or clearly implies.
    "Do not" lists are hard limits. If the task cannot be completed without
    going outside its scope, STOP, write what you found and why, and report;
-   do not widen the task.
+   do not widen the task. The same applies when the task is WRONG as
+   written: if it names a function, file, route, test or behaviour that does
+   not exist, STOP and report the discrepancy. Do not substitute something
+   similar and carry on.
 3. Exit criteria are the contract. Each one must be backed by evidence you
    can point at: a test name that fails before and passes after, a command
    output, a file diff. "It should work" is not evidence.
@@ -123,7 +128,19 @@ in the gonk repository, in your own git worktree and branch. Rules:
    TESTS ADDED: names
    FILES CHANGED: list
    OUT OF SCOPE FOUND: anything you noticed and did not fix
+   PLAN DISCREPANCIES: anything the task named that does not exist, or a
+     criterion that could not be met as written, and what you did instead
    BRANCH: name, pushed: yes/no
+   The orchestrator pastes the EXIT CRITERIA lines, with the verifier's
+   grades from §2.4, into the bead's close note. A bead closed with a bare
+   "Closed" is not closed.
+10. A criterion phrased "a CI run shows …" is satisfied only by the run URL
+    in the report. Local green does not count for it.
+11. If you add a required Secret, change a chart default, or change anything
+    Flux will apply, state the gitops-side prerequisite (Vault property,
+    ExternalSecret, values change) in your report and in chart/gonk/README.md.
+    The orchestrator checks the gitops repo before merging; the chart tests
+    prove the render, not the cluster.
 ```
 
 ### 2.4 Verification (fresh agent, per wave)
@@ -403,8 +420,11 @@ above 64 KiB.
 
 **Exit criteria.**
 1. 300 KiB transcript test classifies `complete`.
-2. `test/integration` synthetic session uses a > 64 KiB transcript and
-   passes.
+2. The sweep classifies a transcript above the cap as terminal
+   `infra-failed` with a named reason, not a retry loop until the
+   reservation expires (test). _(Rev 3: the original criterion asked for an
+   L1 synthetic transcript; L1 has no session route, so it was
+   unimplementable as written.)_
 3. A transcript above 4 MiB still errors with a named error.
 
 **Verify.** `go test ./pkg/gcapi/... ./cmd/gonk-gate/ ./test/integration/ -count=1`
@@ -588,10 +608,16 @@ key stays live.
 
 **Change.** Deregister from meter on the pass that observes `Archived`;
 `glabtest` gains an archived project; test asserts `Meter.Deregister` was
-called once and the cache entry removed.
+called once and the cache entry removed. Remember a completed deregistration
+(a cache tombstone, or a registration `GET` before the `DELETE`) so the
+membership listing, which still returns archived projects, does not trigger
+a delete on every pass.
 
 **Exit criteria.**
 1. New test passes; existing reconcile tests pass.
+2. _(Rev 3, W-05)_ A second reconcile pass after a successful deregistration
+   issues no meter call (test asserts zero deletes on pass two), and a
+   restart between the two passes still issues at most one.
 
 **Verify.** `go test ./pkg/intake/... -count=1`
 
@@ -618,6 +644,12 @@ existing session. Test: two dispatches 1 s apart against `gcapitest` → one
 **Exit criteria.**
 1. The two-dispatch test asserts exactly one session create.
 2. Existing idempotency tests pass.
+3. _(Rev 3, W-03)_ A failed re-dispatch of a parked or running bead leaves
+   the record in its PRIOR state and session, not `pending-prompt` (test:
+   prompt PUT fails → record unchanged → next sweep re-dispatches). `runSweep`
+   lists `StatePendingPrompt` records older than the delivery window and
+   reclaims them (test). The deferred release re-Puts the record captured
+   before the reservation, not `pending` with `SessionID` cleared.
 
 **Verify.** `go test ./cmd/gonk-gate/ -run 'Idempot|Dedupe' -count=1 -v`
 
@@ -837,7 +869,11 @@ applies.
 
 **Change.** Confirm `reap.go` and the fetch-loop tests are gone with T-56;
 confirm T-13's `pending-prompt` state is replaced by the Job-name 409;
-delete Dolt-related values and docs from T-26.
+delete Dolt-related values and docs from T-26. Remove the
+`-skip '^TestEveryBuildTagRunsInCI$'` from `Makefile` and `ci.yml` once
+`images`, `live` and the modifier-tag rule (`gonk-0bvc`: a tag that only
+gates a file variant is covered when `go vet -tags` compiles it) are in
+place, so the gate is red for real again.
 
 **Exit criteria.**
 1. No test references `gonkSessionAlias`, `pending-prompt`, or Dolt.
@@ -1136,6 +1172,15 @@ the beads database; controller connects as that user; `DOLT_ROOT_HOST`
 
 **Exit criteria.** `TestDoltIsNotRootOpen` passes; chart version bumped and
 sealed; goldens regenerated.
+
+_Rev 3 note (W-04, W-07, W-10):_ the chart cannot alter users on an existing
+Dolt volume; the pinned entrypoint only runs `CREATE USER IF NOT EXISTS`. The
+live server keeps its passwordless `root@'%'` until an operator runs
+`DROP USER 'root'@'%'` and sets the root password once, and rotating
+`gc-password` needs `ALTER USER` by hand. Record both in the handoff runbook.
+Also: the `gonk-dolt` Secret must exist in the cluster BEFORE the chart
+upgrade lands (rule 11); the default value names it, so the guard does not
+protect against its absence.
 
 ---
 
