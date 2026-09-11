@@ -10,6 +10,10 @@
 # What a dry run does NOT do: publish release tags, create a GitHub Release, or
 # touch anything a consumer would resolve. The repository and its packages are
 # private, so `ci-<sha>` is visible to nobody outside it.
+#
+# A RELEASE IS IMMUTABLE. The `guard` job below runs before anything else and
+# refuses a tag that already has a published Release, because `v0.1.0` was
+# re-cut across three different commits before anything stopped it.
 name: release
 
 on:
@@ -31,8 +35,75 @@ env:
   IMAGE_PREFIX: ghcr.io/${{ github.repository }}
 
 jobs:
+  # REFUSE A TAG THAT HAS ALREADY BEEN RELEASED, before anything is built,
+  # pushed, signed or logged to a public transparency log.
+  #
+  # This exists because it already happened. `v0.1.0` fired this workflow
+  # THREE times on THREE different commits -- run #4 (c938b6ae, failed), run
+  # #5 (76df825f, succeeded and created the Release), run #6 (6dc576c9, after
+  # the 2026-09-09 history rewrite). A git tag is mutable by anyone who can
+  # force-push one; a published Release is the artefact strangers resolve, and
+  # re-cutting it silently changes what a version number means. Neither of the
+  # first two commits exists in this repository's history any more.
+  #
+  # The guard is its own job so it gates the whole run through `needs:` --
+  # putting it as a first step inside `images` would let the `chart` job build
+  # in parallel with it, and a matrix job's first step is not "early" enough to
+  # stop four parallel image builds from pushing.
+  guard:
+    name: the tag is not already released
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: refuse a tag that already has a release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${REF_TYPE}" != "tag" ]; then
+            echo "dry run (${REF_NAME} is a ${REF_TYPE}, not a tag): nothing is published, nothing to guard."
+            exit 0
+          fi
+          # ASSERT ON A FIELD, NEVER ON "the API answered". GitHub replies to a
+          # tag with no release with {"message":"Not Found"} -- well-formed
+          # JSON that any parser accepts. A check that only proves the response
+          # parsed would report every tag as already-released, or none. The one
+          # thing that means "this tag is already released" is a 200 whose
+          # tag_name IS this tag.
+          http=$(curl -sS -o /tmp/release-for-tag.json -w '%{http_code}' \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}/releases/tags/${REF_NAME}")
+          echo "GET /repos/${REPO}/releases/tags/${REF_NAME} -> HTTP ${http}"
+          case "${http}" in
+            404)
+              echo "No release exists for ${REF_NAME}. Proceeding."
+              ;;
+            200)
+              have=$(python3 -c 'import json;print(json.load(open("/tmp/release-for-tag.json")).get("tag_name",""))')
+              if [ "${have}" = "${REF_NAME}" ]; then
+                echo "::error title=Tag already released::${REF_NAME} already has a published GitHub Release. Releases are immutable here: a re-cut changes what a version number means for everyone who already resolved it. Cut a NEW version instead, or delete the existing release deliberately and by hand if it was never meant to exist."
+                exit 1
+              fi
+              echo "::error title=Unexpected release payload::HTTP 200 for ${REF_NAME} but tag_name is '${have}'. Refusing to guess."
+              cat /tmp/release-for-tag.json
+              exit 1
+              ;;
+            *)
+              echo "::error title=Cannot determine release state::HTTP ${http} asking whether ${REF_NAME} is already released. Failing closed -- an unanswerable guard is not a passed guard."
+              cat /tmp/release-for-tag.json || true
+              exit 1
+              ;;
+          esac
+
   images:
     name: ${{ matrix.image }}
+    needs: [guard]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -52,7 +123,7 @@ jobs:
           - image: gonk-meter
             dockerfile: images/Dockerfile.meter
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: resolve the tag
         id: tag
@@ -78,14 +149,14 @@ jobs:
           echo "dolt=${DOLT_VERSION:-}" >> "$GITHUB_OUTPUT"
           echo "gascity=${GASCITY_REF:-}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       # Suppress the build-record artefact. It is telemetry nobody consumes here
       # and it is the thing the release job tripped over.
       - name: quieten the docker build record
         run: echo "DOCKER_BUILD_RECORD_UPLOAD=false" >> "$GITHUB_ENV"
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -99,7 +170,7 @@ jobs:
       # than smuggled in here.
       - name: build and push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -143,7 +214,7 @@ jobs:
       # treated as such rather than assumed to work.
       - name: attest build provenance
         if: github.event.repository.visibility == 'public'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-name: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -155,7 +226,7 @@ jobs:
           echo "::notice::Provenance and SBOM ATTESTATIONS SKIPPED -- GitHub does not offer them for a private repository on this plan. The SBOM is still generated and uploaded, and the image is still signed. Attestation activates automatically when this repository becomes public, and will be exercised for the first time then."
 
       - name: generate SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
           format: spdx-json
@@ -164,7 +235,7 @@ jobs:
 
       - name: attest the SBOM
         if: github.event.repository.visibility == 'public'
-        uses: actions/attest-sbom@v2
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2.4.0
         with:
           subject-name: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -198,22 +269,74 @@ jobs:
               "${IMAGE_PREFIX}/${{ matrix.image }}@${DIGEST}"
           fi
 
-      # Vulnerability scan. It does NOT gate the build: a new CVE in a base
-      # image would otherwise make an unrelated release fail, and the honest
-      # answer is a report someone reads, not a red X nobody can act on today.
-      # It is uploaded so the result is durable rather than scrollback.
-      - name: scan for vulnerabilities
-        continue-on-error: true
-        uses: anchore/scan-action@v5
+      # Vulnerability scan, and it GATES THE RELEASE at CRITICAL.
+      #
+      # This step used to carry `fail-build: false` AND `continue-on-error:
+      # true`, with a comment arguing that a new CVE in a base image should not
+      # fail an unrelated release. That argument is how a scanner becomes a
+      # decoration: it produced a SARIF file nobody was required to read, and a
+      # green release that had never once been allowed to say no (R-45). Either
+      # a CRITICAL finding in an image we are about to publish is worth
+      # stopping for, or the scan should be deleted. It is worth stopping for.
+      #
+      # The cutoff is CRITICAL, not high: high is where base-image noise lives,
+      # and a threshold that cries wolf gets waived, which is the same failure
+      # wearing a different hat. Both switches matter -- `continue-on-error:
+      # true` would swallow the failure the action raises, so removing
+      # `fail-build: false` alone would have changed nothing.
+      #
+      # `only-fixed: true` IS LOAD-BEARING AND IT WAS MEASURED, not assumed.
+      # The plan for this change said "fail-build: true on CRITICAL" and
+      # stopped there. Shipping exactly that would have handed the project a
+      # gate that is red on its next run and cannot be made green by any
+      # action available today. Measured 2026-09-10 with grype v0.100.0
+      # against the runtime layer gonk-agent and gonk-controller actually
+      # build (debian:trixie-slim at the digest in images/versions.env, plus
+      # that image's own apt packages):
+      #
+      #   grype --fail-on critical              -> exit 2, 48 CRITICAL findings
+      #   grype --fail-on critical --only-fixed -> exit 0, 0 of them fixable
+      #
+      # Every one of those 48 is `wont-fix` or has no fix published: glibc,
+      # perl, and friends that Debian has declined to patch in trixie. Bumping
+      # the base does not help -- the current `debian:trixie-slim` carries the
+      # same set. The two distroless images (gonk-intake, gonk-meter) scan
+      # clean either way, and their Go binaries carry zero CRITICAL findings.
+      #
+      # So the assertion is narrowed, deliberately and on evidence, to the one
+      # that is actionable: A CRITICAL VULNERABILITY WITH A FIX AVAILABLE
+      # BLOCKS THE RELEASE. That is also this project's own written policy for
+      # its other pipeline -- spec 10.3 specifies trivy HIGH,CRITICAL with
+      # `--ignore-unfixed`, which is the same rule. What this does NOT do is
+      # raise the cutoff until the red goes away; an unfixable CVE stays in the
+      # SARIF report below, it just does not pretend to be an action item.
+      #
+      # The fix for a red scan is a rebuild on a patched base. It is not
+      # turning this off.
+      #
+      # NOTE ON THE SCANNER'S NAME: the delivery plan calls this "trivy". There
+      # is no trivy in this workflow and never has been -- GitHub scans with
+      # grype via anchore/scan-action (trivy is the GitLab pipeline's scanner,
+      # in a job that is `when: never`). The finding is about this step; the
+      # tool name in the plan is loose shorthand.
+      - name: scan for vulnerabilities (fails the release on a fixable CRITICAL)
+        uses: anchore/scan-action@869c549e657a088dc0441b08ce4fc0ecdac2bb65 # v5.3.0
         id: scan
         with:
           image: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
-          fail-build: false
-          severity-cutoff: high
+          fail-build: true
+          severity-cutoff: critical
+          only-fixed: true
           output-format: sarif
 
+      # `if: always()` because the scan above can now FAIL, and the run where it
+      # fails is precisely the run whose SARIF someone needs to read. The action
+      # writes the SARIF and sets its `sarif` output before it calls setFailed
+      # (verified in index.js at the pinned commit), so the output is populated
+      # on a failing scan too.
       - name: upload scan + sbom
-        uses: actions/upload-artifact@v4
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: supply-chain-${{ matrix.image }}
           path: |
@@ -223,13 +346,14 @@ jobs:
 
   chart:
     name: package the chart
+    needs: [guard]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.19.0
 
@@ -242,7 +366,7 @@ jobs:
           ls -l dist/
 
       - name: upload the chart
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: helm-chart
           path: dist/*.tgz
@@ -258,7 +382,7 @@ jobs:
     permissions:
       contents: write   # create the Release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # BY PATTERN, not "everything". docker/build-push-action also uploads its
       # own `<owner>~<repo>~<id>.dockerbuild` build records, and a bare
@@ -267,7 +391,7 @@ jobs:
       # download failed after 5 retries", with every artefact present and
       # healthy. They are build telemetry, not release material.
       - name: collect the artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: "{helm-chart,supply-chain-*}"
           path: artefacts
@@ -311,6 +435,30 @@ jobs:
           with no policy controller. The policies themselves are verified correct
           against kube-router and Calico in CI.
 
+          ## Release history: v0.1.0 does not mean one commit
+
+          Stated here rather than left for someone to discover from a digest
+          that does not match: **the `v0.1.0` tag has pointed at three
+          different commits.** This workflow ran for it three times --
+
+          | run | commit | outcome |
+          |---|---|---|
+          | #4 | `c938b6ae` (2026-09-08) | failed |
+          | #5 | `76df825f` (2026-09-08) | succeeded; created the v0.1.0 release |
+          | #6 | `6dc576c9` (2026-09-10) | failed |
+
+          -- and the tag today resolves to `6dc576c9`, which is **not** the
+          commit the published v0.1.0 artefacts were built from. The first two
+          commits no longer exist in this repository at all: history was
+          rewritten on 2026-09-09 and the tag was re-pointed onto the rewritten
+          line.
+
+          So for v0.1.0 specifically, do not infer the source from the tag.
+          Trust the digest and the signature on each artefact, which bind to
+          what was actually built. Releases are immutable from here on: this
+          workflow now refuses, before it builds anything, to run for a tag
+          that already has a release.
+
           Open security items are tracked in the repository's issue history.
           NOTES
           sed -i "s/TAG/${TAG}/g" /tmp/notes.md
@@ -318,7 +466,7 @@ jobs:
 
   summary:
     name: what was produced
-    needs: [images, chart, publish]
+    needs: [guard, images, chart, publish]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -330,6 +478,7 @@ jobs:
             echo "| what | value |"
             echo "|---|---|"
             echo "| mode | ${{ github.ref_type == 'tag' && 'RELEASE' || 'dry run (ci-<sha> tag, nothing published)' }} |"
+            echo "| tag not already released | ${{ needs.guard.result }} |"
             echo "| images | ${{ needs.images.result }} |"
             echo "| chart | ${{ needs.chart.result }} |"
             echo
