@@ -19,7 +19,23 @@ import (
 // and writes a committed cassette. Replay serves that cassette forever, offline.
 //
 // Record mode is run by a human, out of band, and NEVER inside a test. Tests
-// only ever LOAD a committed, already-scrubbed cassette (LoadCassette).
+// only ever LOAD a committed, already-scrubbed cassette (LoadCassette). See
+// `make refresh-cassette` (Makefile) for the documented, credentialed way to
+// run it.
+//
+// cassettes/triage.json (T-19, 2026-09-10): the committed fixture is HAND
+// AUTHORED, not recorded -- it was written by hand in the same commit that
+// introduced this package (8a72f5b), and its response is an OpenAI tool_call
+// naming a "gitlab_comment" function. That shape was never wired to anything:
+// no code in this repo converts a tool_call into a pkg/effects.Batch, and the
+// REAL triage prompt (cmd/gonk-gate/broker_inject.go's renderTriagePrompt)
+// explicitly forbids tool use ("Do NOT post anything yourself... you hold no
+// credentials") and instead has the agent emit its batch as PLAIN TEXT, fenced
+// GONK_BATCH_START / {json} / GONK_BATCH_END, inside its own message content.
+// A fresh recording aimed at replacing cassettes/triage.json must send THAT
+// prompt (or a faithful shape of it) and capture a `content` field containing
+// the fence -- not a tool_calls array -- or it will be exactly as unusable for
+// pkg/effects.ParseBatch as the current fixture is.
 
 // redacted is the placeholder written in place of any secret value. It must not
 // look like a real key, so a committed cassette can never carry live material.
