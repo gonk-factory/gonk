@@ -10,9 +10,13 @@
 # it has NEVER run in CI -- the golden manifests are only ever checked when
 # somebody remembers to run them locally. Here it runs on every push.
 #
-# Everything is pinned. Floating tags are banned repo-wide (`make no-latest`),
-# and an action pinned to a moving tag is the same hazard as an image pinned to
-# :latest.
+# Everything is pinned, and pinned means BY DIGEST. Floating tags are banned
+# repo-wide (`make no-latest`), and an action pinned to a moving tag is the
+# same hazard as an image pinned to :latest: `@v4` is a third party's promise
+# not to change what that tag points at, and the point of pinning is to remove
+# that promise from the trust model. Every `uses:` below is a 40-hex commit,
+# with the version it corresponded to in a trailing comment; every downloaded
+# tarball is checked against a sha256 the step ASSERTS (T-18).
 name: ci
 
 on:
@@ -42,9 +46,9 @@ jobs:
     name: vet + test + lint
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26"
           # Vendored: there is nothing to cache from a proxy, and a cache miss
@@ -93,7 +97,7 @@ jobs:
         # not supported by golangci-lint-action v6"). The linter version is
         # pinned to the same v2.12.2 the GitLab pipeline and `make lint` use, so
         # all three run the identical checks.
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7.0.1
         with:
           version: v2.12.2
           # NO `run` HERE. The action supplies it, so `args: run ./...` becomes
@@ -107,14 +111,14 @@ jobs:
     name: chart gate (golden + kubeconform)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26"
           cache: false
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.19.0
 
@@ -123,15 +127,29 @@ jobs:
           KUBECONFORM_VERSION: v0.6.7
           # Pinned by digest, not just tag: the tarball is fetched over the
           # network on a runner we do not control.
-          KUBECONFORM_SHA256: 95cb62ee5d2ee39d95d0d4c0f2d0e9d9b3aa2a99e1de1e1d1a3b03aa4b3d0b45
+          #
+          # THIS VALUE WAS WRONG UNTIL 2026-09-10, AND NOTHING NOTICED, because
+          # the step only echoed the sha it downloaded for a human to compare
+          # and never asserted anything. The old pin
+          # (95cb62ee5d2ee39d95d0d4c0f2d0e9d9b3aa2a99e1de1e1d1a3b03aa4b3d0b45)
+          # matched no artefact that has ever existed -- it shared two
+          # characters with the real digest and was otherwise invented. A pin
+          # nobody asserts against is not a weak control, it is a decoration,
+          # and it will happily be a fabrication for months.
+          #
+          # The value below is the one upstream publishes for
+          # kubeconform-linux-amd64.tar.gz in the v0.6.7 CHECKSUMS asset, and
+          # it equals the sha256sum of a real download of that URL. Both were
+          # checked. `sha256sum -c -` below ENFORCES it -- the step fails on a
+          # mismatch -- exactly as secrets.yml does for the gitleaks tarball.
+          KUBECONFORM_SHA256: 95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
         run: |
           set -euo pipefail
           url="https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
           curl -fsSL "$url" -o kubeconform.tar.gz
-          # Record what we actually got. The pin above is advisory until it is
-          # confirmed against a real download; a wrong hash that fails loudly is
-          # better than no hash, but a hash nobody verified is theatre.
-          echo "downloaded sha256: $(sha256sum kubeconform.tar.gz | cut -d' ' -f1)"
+          # Assert, do not narrate. A mismatch fails the job here, before an
+          # unverified binary is installed and asked to validate the chart.
+          echo "${KUBECONFORM_SHA256}  kubeconform.tar.gz" | sha256sum -c -
           tar xzf kubeconform.tar.gz kubeconform
           sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
           kubeconform -v
@@ -146,9 +164,9 @@ jobs:
     name: component (real meter binary + real LiteLLM + real Postgres)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26"
           cache: false
@@ -209,9 +227,9 @@ jobs:
       # depend on that default staying in sync with the service above.
       GONK_POSTGRES_DSN: postgres://postgres:gonk@127.0.0.1:5432/postgres?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26"
           cache: false
@@ -244,9 +262,9 @@ jobs:
       # being true.
       GONK_CONTAINER_RUNTIME: docker
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26"
           cache: false
@@ -300,8 +318,8 @@ jobs:
     name: build every binary
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26"
           cache: false
