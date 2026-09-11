@@ -199,15 +199,80 @@ no-latest:
 # GitLab's integrated registry, so $CI_REGISTRY_USER/$CI_REGISTRY_PASSWORD push
 # to $CI_PROJECT_PATH with no deploy token.
 #
-# TAGGING stays gonk's convention, NOT the shared template's (sha8 + `latest`):
-# $(GONK_VERSION)-<sha12>, matching images/versions.env + the Makefile so a CI
-# build and a by-hand `make push` of the same commit produce the identical tag.
+# TAGGING stays gonk's convention, NOT the shared template's (sha8 + `latest`).
+# The shape and the reasoning are in THE TAG block below; it is computed in
+# exactly one place and referenced from all three sites that need it (the
+# kaniko legs, the index jobs, the testclock index). Three copies of a tag
+# computation is how a mismatched set ships: an index published over per-arch
+# tags that were pushed under a different name.
 # `latest` is never pushed (G11 + the no-latest gate reject it on principle).
 #
 # The build-args come from images/versions.env (sourced in before_script), so CI
 # and the Makefile read the exact same pins. The testclock meter is built with
 # BUILD_TAGS=testclock to a SEPARATE `-testclock` tag and is NEVER the plain
 # meter tag (a clock a file can move must never ship as production).
+# -----------------------------------------------------------------------------
+# THE TAG. One definition, referenced three times.
+#
+#   default branch:      $GONK_VERSION-$CI_PIPELINE_IID.<sha12>  v0.1.0-2493.068658298d09
+#   any other branch:    $GONK_VERSION-<sha12>                   v0.1.0-068658298d09
+#
+# WHY THE SPLIT. Flux image automation has to answer "which of these tags is
+# the newest", and the only way it can is by RANKING them -- semver, numerical
+# or alphabetical. A git sha carries no ordering at all, so against the old
+# tags "newest" means the alphabetically-greatest hash, which is an arbitrary
+# old commit. A pipeline IID only ever goes up, so $GONK_VERSION-<iid>.<sha>
+# ranks correctly and still names the exact commit it was built from.
+#
+# CI_PIPELINE_IID, NOT CI_PIPELINE_ID. The IID counts pipelines of THIS project
+# (1, 2, 3, ...); the ID is a GitLab-instance-wide row id shared with every
+# other project on the box. Both increase, but the ID jumps by however many
+# pipelines unrelated projects happened to run in between -- an unreadable
+# number that ties gonk's image names to traffic that has nothing to do with
+# gonk. Neither number is a version; both are only ever compared.
+#
+# WHY NON-DEFAULT BRANCHES KEEP THE OLD, UNRANKABLE SHAPE. The image rules
+# below fire on ANY branch. If a feature branch published a ranked tag it would
+# carry a HIGHER number than main's most recent build -- main's images are only
+# rebuilt when main changes -- and image automation would deploy branch code to
+# the cluster. Leaving branch builds on the sha-only shape makes that
+# impossible AT THE SOURCE: an ImagePolicy whose filterTags requires the
+# `<iid>.<sha>` form cannot match a branch build, so the property does not
+# depend on a rule that somebody could later widen. Branch images stay in the
+# registry and stay pullable by hand, which is what they are for.
+#
+# THE POLICY THAT CONSUMES THIS (gitops, not in this repo):
+#   filterTags:
+#     pattern: '^v(?P<ver>\d+\.\d+\.\d+)-(?P<build>\d+)\.[0-9a-f]{12}$'
+#     extract: '$build'
+#   policy:
+#     numerical: {order: asc}
+# Anchored at both ends on purpose: that is what rejects the per-arch legs
+# ($GONK_TAG-amd64 / -arm64), the testclock meter ($GONK_TAG-testclock) and
+# every legacy v0.1.0-<sha12> tag already sitting in the registry. Ranking on
+# the extracted <iid> is numeric and total; ranking the whole tag as a semver
+# prerelease also works, but a sha12 that happens to be all digits with a
+# leading zero is not a legal semver numeric identifier, and numerical+extract
+# has no such edge.
+#
+# A PIPELINE RETRY reuses the same IID and so republishes the identical tag
+# over identical content: the per-arch legs are rewritten with the same digest
+# and the index job re-merges the index over them. That is not the gonk-9ub
+# hazard -- that one is a by-HAND single-arch `make push` replacing a
+# multi-arch index. Nothing in CI writes the unsuffixed tag except the index
+# jobs, and they always write an index.
+.gonk-tag:
+  before_script:
+    # Same pins the Makefile uses -- one source of truth (images/versions.env).
+    - &gonk_tag_script |
+      set -a; . images/versions.env; set +a
+      GONK_SHA12=$(printf %s "$CI_COMMIT_SHA" | cut -c1-12)
+      if [ -n "$CI_PIPELINE_IID" ] && [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        export GONK_TAG="${GONK_VERSION}-${CI_PIPELINE_IID}.${GONK_SHA12}"
+      else
+        export GONK_TAG="${GONK_VERSION}-${GONK_SHA12}"
+      fi
+      echo "GONK_TAG=$GONK_TAG"
 # -----------------------------------------------------------------------------
 # Arch legs. Each builds NATIVELY on a node of its own arch (see
 # homelab/ci-templates!1 for why emulation is not an option here: no binfmt
@@ -239,9 +304,10 @@ no-latest:
   # Rebuild all five, or none.
   #
   # KNOW THIS BEFORE YOU DEPLOY: a commit touching none of these paths now
-  # produces NO image, so v0.1.0-<sha12> for that commit does not exist in the
-  # registry. Deploy the tag of the most recent commit that did build. `git log`
-  # against this list tells you which one that is.
+  # produces NO image, so NO tag naming that commit exists in the registry.
+  # Deploy the tag of the most recent commit that did build. `git log` against
+  # this list tells you which one that is -- or, now that main's tags rank,
+  # let the ImagePolicy pick the highest build number, which is the same thing.
   rules: &gonk_image_rules
     - if: '$CI_COMMIT_BRANCH'
       changes:
@@ -265,9 +331,7 @@ no-latest:
   # they run on different nodes and contend for nothing.
   resource_group: gonk-images-$BUILD_ARCH
   before_script:
-    # Same pins the Makefile uses -- one source of truth (images/versions.env).
-    - set -a; . images/versions.env; set +a
-    - export GONK_TAG="${GONK_VERSION}-$(printf %s "$CI_COMMIT_SHA" | cut -c1-12)"
+    - *gonk_tag_script
     - mkdir -p /kaniko/.docker
     # Job-token auth for both the external registry name and the internal Service
     # hostname kaniko actually dials -- same JWT realm either way.
@@ -451,8 +515,7 @@ meter-testclock-image-arm64:
   # days (gonk-n50). These two must not be able to drift.
   rules: *gonk_image_rules
   before_script:
-    - set -a; . images/versions.env; set +a
-    - export GONK_TAG="${GONK_VERSION}-$(printf %s "$CI_COMMIT_SHA" | cut -c1-12)"
+    - *gonk_tag_script
     - export MULTIARCH_SOURCE_TAG="${MULTIARCH_SOURCE_TAG:-$GONK_TAG}"
     - export MULTIARCH_TAGS="${MULTIARCH_TAGS:-$GONK_TAG}"
 
@@ -486,8 +549,7 @@ meter-testclock-index:
   variables:
     IMAGE: gonk-meter
   before_script:
-    - set -a; . images/versions.env; set +a
-    - export GONK_TAG="${GONK_VERSION}-$(printf %s "$CI_COMMIT_SHA" | cut -c1-12)"
+    - *gonk_tag_script
     - export MULTIARCH_SOURCE_TAG="$GONK_TAG-testclock"
     - export MULTIARCH_TAGS="$GONK_TAG-testclock"
 
