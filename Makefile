@@ -357,3 +357,47 @@ lint:
 # dev box (broken CNI bridge) -- that IS the OD-3 finding, not a bug in this task.
 e2e-doctor:
 	$(GO) run ./test/harness/cmd/doctor
+
+# refresh-cassette runs test/stubmodel's -record mode (AD-2, cmd/gonk-stubmodel):
+# it starts gonk-stubmodel as a PROXY in front of a real upstream model API,
+# capturing every {request, response} pair it forwards into a scrubbed cassette
+# under test/stubmodel/cassettes/. It is run by a HUMAN, OUT OF BAND -- never by
+# a test or by CI, and never with a shared/production credential (docs/environment.md:
+# never commit an unencrypted secret; the credential lives only in the requests
+# YOU send it, and is redacted before the cassette is written).
+#
+# Required: GONK_STUBMODEL_UPSTREAM, the base URL of a real OpenAI-compatible
+# endpoint (e.g. https://bailey.example/v1). This target refuses to guess one --
+# there is no default and no `latest` (repo rule) -- and fails with this message
+# instead of silently recording against nothing.
+#
+# Optional: GONK_STUBMODEL_CASSETTE (default: recorded) names the cassette file
+# written to test/stubmodel/cassettes/<name>.json. Pass triage to refresh the
+# committed fixture (but see the note in test/stubmodel/record.go about what
+# request must be sent for that recording to be worth committing).
+#
+# Usage: in one terminal, `make refresh-cassette GONK_STUBMODEL_UPSTREAM=...`;
+# in another, POST the exact request you want captured to
+# http://127.0.0.1:8081/v1/chat/completions, carrying ITS OWN real credential
+# (Authorization header or api_key field -- the proxy forwards whatever you
+# send, and scrubs it back out before saving). Then Ctrl-C the first terminal:
+# SIGINT now triggers a clean shutdown-then-save (fixed here -- the previous
+# `defer rec.Save()` never ran under a human's Ctrl-C, so this path had never
+# actually produced a cassette).
+GONK_STUBMODEL_CASSETTE ?= recorded
+.PHONY: refresh-cassette
+refresh-cassette:
+	@if [ -z "$(GONK_STUBMODEL_UPSTREAM)" ]; then \
+	  echo "refresh-cassette: GONK_STUBMODEL_UPSTREAM is not set." >&2; \
+	  echo "  Set it to a real OpenAI-compatible base URL, e.g.:" >&2; \
+	  echo "    make refresh-cassette GONK_STUBMODEL_UPSTREAM=https://bailey.example/v1" >&2; \
+	  echo "  The credential itself is NEVER passed to make -- send it in the" >&2; \
+	  echo "  request you POST to the running proxy; it is scrubbed before the" >&2; \
+	  echo "  cassette is written." >&2; \
+	  exit 1; \
+	fi
+	$(GO) run ./cmd/gonk-stubmodel \
+	  -record "$(GONK_STUBMODEL_UPSTREAM)" \
+	  -cassette "$(GONK_STUBMODEL_CASSETTE)" \
+	  -cassette-dir test/stubmodel/cassettes \
+	  -addr :8081
