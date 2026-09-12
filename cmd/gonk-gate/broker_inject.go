@@ -112,6 +112,151 @@ func brokerSessionAlias(agent string, projectID, issueIID int64, attempt int) st
 	return fmt.Sprintf("gonk.%s.p%d.i%d.a%d.%s", agent, projectID, issueIID, attempt, nonce)
 }
 
+// searchIncompleteMarker is the literal token a triage comment must OPEN with
+// when the agent could not finish its search. It exists to split two outcomes
+// that today collapse into the same reply-only comment and read identically to
+// a human and to the sweep:
+//
+//	"I looked everywhere I said I looked and found nothing relevant"  -- an ANSWER
+//	"I ran out of road before I finished looking"                     -- a NON-ANSWER
+//
+// The verdict vocabulary is closed (reply-only / code-change / close, see
+// pkg/effects) and is NOT widened here: widening it would break every consumer
+// of the label vocabulary at once. The distinction is carried in the comment
+// instead, as a fixed leading token, so it is greppable by a human on the issue
+// and available to the outcome classifier when gonk-2xev teaches the sweep to
+// escalate a non-answer onto the next rung. Nothing in this package reads it
+// yet, deliberately -- the classifier is that bead's, not this one's.
+const searchIncompleteMarker = "SEARCH INCOMPLETE:"
+
+// searchIncompleteLabel is proposed by the AGENT alongside the marker, so the
+// same fact is visible on the board and not only in prose. It is deliberately
+// NOT in ReservedLabels (broker_label.go): a reserved label proposed by an agent
+// refuses the WHOLE batch, so reserving this one would turn an honest "I could
+// not finish" into a dropped run -- the exact inversion of what it is for.
+// broker_inject_test.go asserts that against ReservedLabels itself rather than
+// restating the list.
+const searchIncompleteLabel = "gonk::search-incomplete"
+
+// searchProcedure is the anti-FALSE-ABSENCE half of the triage prompt, and it is
+// spliced in ONLY when a checkout was actually granted -- there is nothing to
+// enumerate otherwise, and telling a model to list a tree that is not there is
+// the gonk-msz failure verbatim.
+//
+// WHY IT IS A PROCEDURE AND NOT ADVICE. The previous text already said "LOOK AT
+// WHAT IS ACTUALLY IN THE TREE BEFORE YOU SEARCH FOR IT", added after issue !49.
+// It did not hold. On 2026-09-12, project 75 -- a six-file repository whose
+// internal/paging/sort.go ignores the desc flag in its SortByDate case, and says
+// so in its own doc comment -- was triaged twice from the same prompt at the same
+// rung with opposite results: !71 took nine model calls and named the file, the
+// case, the comparison and the fix; !70 took six, and answered "I cannot find any
+// relevant code files in the repository". All six files were present in
+// /workspace on the !70 run, verified by exec'ing the pod before it was reaped,
+// and five tool round-trips had actually executed. The model looked, stopped, and
+// reported ABSENCE rather than UNCERTAINTY. A sentence of advice cannot stop
+// that; a precondition on the negative conclusion can, because it makes the
+// unsupported negative impossible to write without visibly omitting the evidence
+// it is required to carry.
+//
+// WHAT IT DOES NOT DO -- and this is the property to defend on every future edit.
+// Every clause here is pressure to LOOK, never pressure to FIND. A prompt that
+// leans on a small model to produce a finding will get one invented, and a
+// confident wrong bug report costs the reporter far more than a question does. So
+// the procedure is paired with an explicit statement that finding no defect is a
+// correct outcome, and the code-change verdict in the body carries a citation
+// precondition (name the file and the symbol): the checklist raises the cost of
+// giving up, and the citation raises the cost of making something up. Neither
+// works without the other. The narrative balance is part of that: the two war
+// stories in the text both end with the code having been there, so a small model
+// pattern-matching on story shape would see two examples of "the last run's
+// mistake was not finding it" and none of the opposite. The mirror-image failure
+// is therefore spelled out too, and labelled as having no incident behind it
+// yet -- inventing an anecdote to balance the tone would be the same sin the
+// paragraph is warning about.
+//
+// THE QUICK-ACTION INTERLOCK. Requiring the comment to NAME the directories it
+// searched created a new way to lose the whole run, and it had to be closed in
+// the same breath: pkg/effects.ValidateComments REFUSES an entire batch if any
+// comment line begins with a slash and a letter, because GitLab would read it as
+// a quick action (/close, /assign). The obvious way to answer "which directories
+// did you search" is a list of absolute paths, one per line -- which is exactly
+// that shape. So the procedure says to write paths without a leading slash and
+// never to start a line with one. Without that clause this change would have
+// converted the most honest possible report into a silently dropped run, which
+// is the same inversion searchIncompleteLabel is kept out of ReservedLabels to
+// avoid. broker_inject_absence_test.go proves the hazard is real by running
+// effects.ValidateComments against the shape, rather than only asserting the
+// warning exists -- so if pkg/effects ever stops refusing, the stale warning is
+// caught instead of quietly outliving its reason.
+//
+// ON LARGE REPOSITORIES. "Enumerate the tree" is NOT written as an unconditional
+// instruction, because on a monorepo it is either impossible or it spends the
+// entire context window on ls output. Step 2 is bounded and breadth-first on
+// purpose. The load-bearing requirement is not exhaustiveness but
+// ACCOUNTABILITY: a negative conclusion must state which directories were listed
+// and which terms were searched. That costs the same on six files as on sixty
+// thousand, and it degrades honestly with scale -- on a huge repository the
+// comment becomes "I searched these four directories for these terms and did not
+// find it", which is true and useful, instead of "there is no relevant code",
+// which is false.
+const searchProcedure = "SEARCH PROCEDURE. Do these IN ORDER, and do not stop early because a guess\n" +
+	"missed:\n" +
+	"  1. List the top level of your working directory. Read what is actually\n" +
+	"     there. Do not guess at languages, file extensions or layout.\n" +
+	"  2. List the subdirectories that could plausibly hold the behaviour the\n" +
+	"     issue describes. Go breadth-first; on a large repository you are not\n" +
+	"     required to enumerate every file, but you ARE required to know, and to\n" +
+	"     be able to say, which directories you looked in.\n" +
+	"  3. Search the tree for the issue's OWN words -- the identifiers, function\n" +
+	"     names, flags, error messages and nouns the reporter used, plus their\n" +
+	"     obvious variants. A search that returns nothing is evidence that your\n" +
+	"     guess was wrong. It is NOT evidence that the code is absent.\n" +
+	"  4. Open and READ the most likely file, end to end. Do not judge from a\n" +
+	"     grep hit or a file name alone.\n" +
+	"  5. Only now decide.\n\n" +
+	"YOU MAY NOT REPORT THAT THE RELEVANT CODE DOES NOT EXIST UNLESS YOU\n" +
+	"COMPLETED STEPS 1 TO 4, AND YOUR COMMENT NAMES THE DIRECTORIES YOU LISTED\n" +
+	"AND THE TERMS YOU SEARCHED FOR. A negative conclusion without that evidence\n" +
+	"is not an answer. On issue !49 a run globbed five times for the wrong\n" +
+	"languages, concluded no relevant code existed, and asked the reporter for\n" +
+	"help while the answer sat in a file it never listed. On issue !70 a run\n" +
+	"stopped after five tool calls and said \"I cannot find any relevant code\n" +
+	"files in the repository\" -- the file was there, and another run on the SAME\n" +
+	"repository found it. \"I could not find it\" is a statement about your\n" +
+	"search, not about the repository, and it must be written that way.\n\n" +
+	"IF YOU COULD NOT FINISH THE SEARCH, SAY THAT INSTEAD -- IT IS A DIFFERENT\n" +
+	"ANSWER, NOT A WORSE ONE. Running out of turns, a tool that kept failing, or\n" +
+	"a tree too large to cover are NOT the same as having looked and found\n" +
+	"nothing, and must not be reported as if they were. In that case: begin your\n" +
+	"comment with the exact text \"" + searchIncompleteMarker + "\", add the label\n" +
+	searchIncompleteLabel + ", say what you did get through and where you stopped,\n" +
+	"and do NOT state that the code does not exist. The verdict for that is\n" +
+	"reply-only -- never close, which would end a conversation you did not\n" +
+	"finish having.\n\n" +
+	"WRITE PATHS WITHOUT A LEADING SLASH, and NEVER begin a line of your comment\n" +
+	"with a slash. Write internal/paging/sort.go, not /internal/paging/sort.go.\n" +
+	"GitLab reads a line that starts with a slash and a letter as a QUICK ACTION,\n" +
+	"and gonk refuses the entire batch rather than post one -- so a tidy list of\n" +
+	"the directories you searched, one absolute path per line, would cost you the\n" +
+	"whole run and leave the reporter with nothing. Name them inline instead.\n\n" +
+	"FINDING NO DEFECT IS A CORRECT OUTCOME. This procedure is a requirement\n" +
+	"about how hard you LOOK, not about what you must CONCLUDE. Having done it,\n" +
+	"\"I read these files and this behaves as designed, and here is why\" is a\n" +
+	"complete and welcome answer, and so is an honest question. Never assert a\n" +
+	"fault you have not actually read in the code.\n\n" +
+	"THE MIRROR-IMAGE FAILURE IS WORSE, and it has no war story above only\n" +
+	"because nobody has caught one yet: a run that cannot find the code, guesses\n" +
+	"at a plausible file and function, and reports a defect that does not exist.\n" +
+	"That comment is confidently wrong, a human has to go and disprove it, and it\n" +
+	"misleads every later session that reads the issue. Searching harder is the\n" +
+	"point of the procedure above; inventing a finding is not a way to satisfy\n" +
+	"it. If you are guessing, say you are guessing.\n\n" +
+	"INVESTIGATE THE CODE BEFORE YOU ASK ANYTHING. Ask the reporter only for what\n" +
+	"the code CANNOT tell you -- their intent, their environment, exact\n" +
+	"reproduction steps, which behaviour they expected. Anything answerable by\n" +
+	"reading this repository you are expected to answer yourself, citing the\n" +
+	"files you relied on.\n"
+
 // renderTriagePrompt builds the session's initial message.
 //
 // IT CARRIES NO <!-- gonk:model / gonk:meta --> MARKER LINES, and must not.
@@ -180,25 +325,14 @@ func renderTriagePrompt(project string, issueIID int64, agentContext, issueConte
 			"first if it exists -- it is the project's own context and it overrides " +
 			"anything you would otherwise assume. You still hold no credentials, so do " +
 			"not try to reach GitLab.\n\n" +
-			"LOOK AT WHAT IS ACTUALLY IN THE TREE BEFORE YOU SEARCH FOR IT. List the " +
-			"directory first; do not guess at file extensions. On issue !49 a run " +
-			"globbed five times for the wrong languages, concluded no relevant code " +
-			"existed, and asked the reporter for help while the answer sat in a file " +
-			"it never listed.\n\n" +
-			"INVESTIGATE THE CODE BEFORE YOU ASK ANYTHING. Search for the behaviour the " +
-			"issue describes and read the code that implements it. Ask the reporter only " +
-			"for what the code CANNOT tell you -- their intent, their environment, exact " +
-			"reproduction steps, which behaviour they expected. Anything answerable by " +
-			"reading this repository you are expected to answer yourself, citing the " +
-			"files you relied on. If you searched and genuinely found nothing relevant, " +
-			"say that explicitly rather than asking a question you could have answered.\n"
+			searchProcedure
 	}
 	return fmt.Sprintf(`%sTriage GitLab issue #%d in project `+"`%s`"+`. Here is the issue, already
 fetched for you -- do NOT fetch anything yourself:
 
 %s
 %s
-Decide the labels (each prefixed `+"`gonk::`"+`), one short triage comment, and a
+Decide the labels (each prefixed `+"`gonk::`"+`), one triage comment, and a
 VERDICT saying what kind of answer this is.
 
 The comment is a brief analysis of what the issue asks for, grounded in the code
@@ -209,15 +343,22 @@ The verdict must be EXACTLY ONE of:
   "reply-only"   No code change is needed, but the reporter needs an answer --
                  a question, a clarification, or "this works as designed, and
                  here is why".
-  "code-change"  A genuine defect with an identifiable fix. Say in the comment
-                 WHICH code is wrong and WHAT should change. Do not write the
-                 fix here; that is a separate step.
+  "code-change"  A genuine defect you have SEEN in the code, with an
+                 identifiable fix. NAME THE FILE AND THE FUNCTION OR SYMBOL
+                 whose behaviour is wrong, and say what should change. If you
+                 cannot point at the code, it is NOT a code-change: choose
+                 reply-only and say what you suspect. Do not write the fix
+                 here; that is a separate step.
   "close"        Terminal. No further discussion is useful -- a duplicate, an
                  obsolete report, something already fixed, or something you
                  established is not reproducible. The comment MUST say why.
 
 Choose "close" only when you are confident, because it ENDS THE CONVERSATION.
 When you are unsure between close and reply-only, choose reply-only and ask.
+
+DO NOT MANUFACTURE A DEFECT. Concluding that there is no defect is a correct
+outcome, not a failed run, and so is asking an honest question. A wrong bug
+report costs the reporter more than a question does.
 
 Do NOT post anything yourself. Do NOT run glab, git, bd, or any external API --
 you hold no credentials and any such call will fail. Instead, emit your decision
@@ -231,10 +372,10 @@ GONK_BATCH_END
 Emit exactly one comment effect and zero or more label effects. Nothing after
 GONK_BATCH_END.
 
-The batch must be valid JSON on a SINGLE line. Keep the comment to one
-paragraph, and if you must include a line break write it as \n inside the
-string -- a real line break inside a JSON string is invalid and costs you the
-whole batch.`, agent, issueIID, project, context, repo)
+The batch must be valid JSON on a SINGLE line. Keep the comment brief -- but
+never at the cost of the evidence this prompt requires of you -- and if you
+must include a line break write it as \n inside the string: a real line break
+inside a JSON string is invalid and costs you the whole batch.`, agent, issueIID, project, context, repo)
 }
 
 // renderScaffoldPrompt builds the scaffold session's initial message.
