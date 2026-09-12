@@ -524,29 +524,56 @@ func MayFire(decision string) bool {
 // passes the Entry it just built (LastReconcile == now), so this is normally a
 // no-op guard, but it keeps the two order-firing paths symmetric.
 func (d *Dispatch) FireScaffold(ctx context.Context, e Entry) error {
+	project := e.Project.PathWithNamespace
+	anchor := fmt.Sprintf("gonk:%d:scaffold", e.Project.ID)
+	session := fmt.Sprintf("gonk-%d-scaffold", e.Project.ID)
+
+	// The same accounting rule Handle follows (gonk-pop3), for the same reason:
+	// a scaffold that quietly fires nothing is a project stuck at `pending`
+	// forever with no record of why (gonk-bgx). The record is built here and
+	// emitted from one defer, so no return path below can be silent.
+	//
+	// It is NOT driven by an inbound webhook -- the reconciler calls this -- so
+	// there is no delivery id to correlate on. The bead anchor is the join key.
+	rec := &decisionRecord{
+		Kind: "scaffold", Project: project, ProjectID: e.Project.ID,
+		State: string(e.Classification.State), Trigger: atags.TriggerScaffold,
+		SessionKey: session, Bead: anchor,
+		Decision: DecisionError, Reason: noReason,
+	}
+	defer func() { rec.emit(d.Log) }()
+
 	if d.stale(e) {
 		d.Obs.DispatchDropped("stale-config")
+		rec.ignore("stale-config")
 		return nil // fail closed; retry next reconcile pass
 	}
 
-	project := e.Project.PathWithNamespace
 	rig := RigName(project)
-	anchor := fmt.Sprintf("gonk:%d:scaffold", e.Project.ID)
-	session := fmt.Sprintf("gonk-%d-scaffold", e.Project.ID)
 
 	resp, err := d.Meter.Decide(ctx, meterapi.DecideRequest{
 		Project: project, Rig: rig, BeadID: anchor, SessionKey: session,
 		Trigger: atags.TriggerScaffold,
 	})
 	if err != nil {
+		rec.fail("decide_error", err)
 		return fmt.Errorf("scaffold decide: %w", err) // fail closed
 	}
 	if !MayFire(resp.Decision) {
 		d.Obs.DispatchDropped("scaffold_" + resp.Decision)
+		switch resp.Decision {
+		case "defer":
+			rec.deferred(resp.Reason, resp.RetryAfter)
+		case "deny":
+			rec.deny(resp.Reason)
+		default:
+			rec.fail("decide_unknown", fmt.Errorf("meter answered %q", resp.Decision))
+		}
 		return nil // defer/deny: fire nothing, retry next pass
 	}
 	md, err := json.Marshal(resp.Metadata)
 	if err != nil {
+		rec.fail("metadata_encode_error", err)
 		return fmt.Errorf("scaffold metadata: %w", err)
 	}
 	o := OrderRequest{
@@ -556,12 +583,15 @@ func (d *Dispatch) FireScaffold(ctx context.Context, e Entry) error {
 		KeyRef: resp.KeyRef, ReservationID: resp.ReservationID,
 	}
 	if err := attributionSafeOrder(o); err != nil {
+		rec.fail("attribution_unsafe", err)
 		return err
 	}
 	if err := d.Dispatcher.FireOrder(ctx, o); err != nil {
+		rec.fail("fire_error", err)
 		return err
 	}
 	d.Obs.Dispatched(atags.TriggerScaffold)
+	rec.dispatched(resp.Rung, resp.Model, resp.ReservationID)
 	return nil
 }
 

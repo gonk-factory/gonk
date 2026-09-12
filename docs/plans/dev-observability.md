@@ -234,7 +234,18 @@ nobody read.
 ## Progress
 
 - [x] Item 1 -- intake decision record (pkg/ghook/receiver.go, pkg/intake/decision_record.go, cmd/gonk-gate/dispatch.go)
-- [ ] Item 2 -- transcript metadata (always) + dev archive
-- [ ] Item 3 -- session spend record
-- [ ] Item 4 -- sweep health, escalation, `sweep-health`, readiness probe
-- [ ] `make gate` green
+- [x] Item 2 -- transcript metadata (always) + dev archive
+      (`cmd/gonk-gate/transcript_archive.go`, wired in `broker_apply.go`,
+      chart `dev.transcripts.*`)
+- [x] Item 3 -- session spend record (`logSessionSpend`, `cmd/gonk-gate/sweep.go`)
+- [x] Item 4 -- sweep health, escalation, `gonk-gate sweep-health`, controller
+      readinessProbe (`cmd/gonk-gate/sweep_health.go`, chart 0.1.9)
+- [x] Operator documentation -- `docs/observability.md`
+- [x] `make gate` green
+
+### Added beyond the plan
+
+`Dispatch.FireScaffold` gets the same decision record. It is not webhook-driven,
+so it was outside item 1's literal wording -- but it is the other order-firing
+path and it was silent on every branch, which is how a project sits at
+`pending` forever with nothing saying why (gonk-bgx).

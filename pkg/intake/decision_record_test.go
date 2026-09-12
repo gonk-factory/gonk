@@ -310,3 +310,83 @@ func TestAnUnsetDecisionRendersAsABugNotAsACleanIgnore(t *testing.T) {
 			rec["decision"], rec["reason"], DecisionError, noReason, lr.text())
 	}
 }
+
+// FireScaffold is the OTHER order-firing path, and it was silent on every
+// branch too -- which is how a project sits at `pending` forever with nothing
+// saying why (gonk-bgx). It is not webhook-driven, so it has no delivery id;
+// the bead anchor is its join key.
+func TestFireScaffoldProducesExactlyOneDecisionRecord(t *testing.T) {
+	cases := []struct {
+		name         string
+		entry        Entry
+		meter        *fakeDecide
+		dispatcher   Dispatcher
+		wantDecision string
+		wantReason   string
+	}{
+		{
+			name: "dispatched", entry: validEntry(),
+			meter:        &fakeDecide{resp: &meterapi.DecideResponse{Decision: "run", Rung: "qwen-local"}},
+			wantDecision: DecisionDispatched,
+		},
+		{
+			name: "stale entry", entry: func() Entry {
+				e := validEntry()
+				e.LastReconcile = time.Now().Add(-90 * time.Minute)
+				return e
+			}(),
+			meter:        &fakeDecide{},
+			wantDecision: DecisionIgnored, wantReason: "stale-config",
+		},
+		{
+			name: "meter deferred", entry: validEntry(),
+			meter:        &fakeDecide{resp: &meterapi.DecideResponse{Decision: "defer", Reason: "quiet_hours"}},
+			wantDecision: DecisionDeferred, wantReason: "quiet_hours",
+		},
+		{
+			name: "meter denied", entry: validEntry(),
+			meter:        &fakeDecide{resp: &meterapi.DecideResponse{Decision: "deny", Reason: "scaffold_disabled"}},
+			wantDecision: DecisionDenied, wantReason: "scaffold_disabled",
+		},
+		{
+			name: "meter unreachable", entry: validEntry(),
+			meter:        &fakeDecide{err: errors.New("connection refused")},
+			wantDecision: DecisionError, wantReason: "decide_error",
+		},
+		{
+			name: "firing the order failed", entry: validEntry(),
+			meter:        &fakeDecide{resp: &meterapi.DecideResponse{Decision: "run", Rung: "qwen-local"}},
+			dispatcher:   failingDispatcher{},
+			wantDecision: DecisionError, wantReason: "fire_error",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lr := &recordLog{}
+			var disp Dispatcher = &recordingDispatcher{}
+			if tc.dispatcher != nil {
+				disp = tc.dispatcher
+			}
+			d := dispatchWith(t, tc.entry, tc.meter, disp, lr)
+
+			_ = d.FireScaffold(context.Background(), tc.entry)
+
+			rec := lr.one(t)
+			if rec["decision"] != tc.wantDecision {
+				t.Errorf("decision = %v, want %q\n%s", rec["decision"], tc.wantDecision, lr.text())
+			}
+			if tc.wantReason != "" && rec["reason"] != tc.wantReason {
+				t.Errorf("reason = %v, want %q\n%s", rec["reason"], tc.wantReason, lr.text())
+			}
+			if rec["bead"] != "gonk:42:scaffold" {
+				t.Errorf("bead = %v, want gonk:42:scaffold (the join key)\n%s", rec["bead"], lr.text())
+			}
+			if tc.wantDecision != DecisionDispatched {
+				if r, _ := rec["reason"].(string); r == "" || r == noReason {
+					t.Errorf("a %s record carries reason %q\n%s", tc.wantDecision, r, lr.text())
+				}
+			}
+		})
+	}
+}

@@ -199,10 +199,28 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 	tr, terr := d.GC.GetSessionTranscript(ctx, rec.SessionID)
 	if terr != nil {
 		if gcapi.IsNotFound(terr) {
+			// SAY SO. This is the one branch where there is no transcript to
+			// describe, and before gonk-pop3 it produced no record at all --
+			// the session simply vanished from the logs.
+			d.Log.Warn("transcript read FAILED: no session for this alias",
+				"bead", rec.BeadAnchor, "session", rec.SessionID)
 			return false, "no session for alias " + rec.SessionID, nil
 		}
+		d.Log.Warn("transcript read FAILED: transport error; retrying next tick",
+			"bead", rec.BeadAnchor, "session", rec.SessionID, "err", terr)
 		return false, "", terr // transport error -> unknown -> retry
 	}
+
+	// THE FORENSIC POINT (gonk-pop3 item 2). This is the LAST moment the
+	// transcript exists anywhere: the reaper destroys the pod once this pass
+	// classifies the bead. Record its shape always, and archive its content
+	// when the dev switch is on. Both happen BEFORE any of the refusals below,
+	// so the hardest cases to investigate -- paginated, empty, no fence -- are
+	// the ones that leave evidence.
+	tdesc := describeTranscript(rec, tr)
+	tdesc.Archived = archiveTranscript(d.Log, d.TranscriptDir, rec, tr)
+	tdesc.log(d.Log)
+
 	if tr.Pagination != nil && tr.Pagination.HasMore {
 		// We read a fragment. Say so rather than judging on it: "no batch"
 		// derived from a partial transcript is the same silent loss in a new

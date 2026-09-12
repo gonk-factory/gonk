@@ -2279,6 +2279,13 @@ spec:
             # is /city; `bd` is on PATH in the controller image.
             - name: GONK_BEAD_REPO_DIR
               value: /city
+            # Where every gonk-sweep pass records whether the outcome path is
+            # alive. It MUST be on a writable volume the readinessProbe above
+            # can also read -- /city is the emptyDir both the exec order and the
+            # probe run inside. A probe reading a different file than the sweep
+            # writes is a probe that is always green.
+            - name: GONK_SWEEP_HEALTH_FILE
+              value: /city/gonk-sweep-health.json
             - name: GONK_METER_URL
               value: "http://gonk-meter:8080"
             - name: GONK_METER_TOKEN_FILE
@@ -2325,11 +2332,42 @@ spec:
             # timeoutSeconds defaults to 1, which is thin for a TCP accept on a
             # loaded node; a probe that times out under load reads as "dead".
             timeoutSeconds: 3
+          # READINESS IS THE DEAD-SWEEP ALARM (gonk-pop3 item 4 / gonk-p7qh).
+          #
+          # gonk-sweep could not reach its own database for DAYS, logging one
+          # ERROR every 30 seconds while the entire outcome path was dead:
+          # sessions completed, nothing was ever posted, and beads were left
+          # carrying an empty `gonk::` label that no sweep query will ever match
+          # again. Nothing anywhere said so louder than a log line nobody read.
+          #
+          # `gonk-gate sweep-health` reads the record every sweep pass writes
+          # (GONK_SWEEP_HEALTH_FILE, on the /city emptyDir) and fails when the
+          # last pass failed or when no pass has run for --max-age. An unready
+          # controller leaves this Service's endpoints, so intake's FireOrder
+          # fails and logs `fire_error` and the work is simply NOT DISPATCHED --
+          # rather than dispatched into a session whose outcome can never be
+          # written, which is how gonk-p7qh stranded beads permanently. Nothing
+          # kills the pod (livenessProbe above is untouched), the sweep keeps
+          # retrying, and readiness returns on its own once the store is back.
+          #
+          # IT ALSO DIALS THE SUPERVISOR PORT. A container gets exactly one
+          # readinessProbe, so replacing the tcpSocket probe has to keep doing
+          # what the tcpSocket probe did, or this trades one blind spot for
+          # another. --supervisor-addr is that half, in-process, no shell.
+          #
+          # A MISSING HEALTH RECORD IS READY, NOT FAILED: a fresh pod has not
+          # completed a pass yet, and failing on absence would hold a healthy
+          # controller out of its own Service until the first 30s tick.
           readinessProbe:
-            tcpSocket: {port: supervisor}
+            exec:
+              command:
+                - /usr/local/bin/gonk-gate
+                - sweep-health
+                - --supervisor-addr=127.0.0.1:9443
+                - --max-age=15m
             initialDelaySeconds: 10
             periodSeconds: 10
-            timeoutSeconds: 3
+            timeoutSeconds: 5
           resources:
             limits:
               memory: 1Gi

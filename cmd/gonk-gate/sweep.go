@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
@@ -45,6 +46,13 @@ type sweepDeps struct {
 	// effect-shape.toml from. Defaulted in withDefaults.
 	PackDir string
 
+	// TranscriptDir turns on the DEV-ONLY session transcript archive
+	// (GONK_TRANSCRIPT_DIR; see transcript_archive.go). EMPTY MEANS OFF, and
+	// that is the production default -- the archive holds untrusted model
+	// output over untrusted user input, so it has to be asked for by name. The
+	// always-on `transcript read` metadata record does not depend on it.
+	TranscriptDir string
+
 	// EnforceTrajectory turns the fifth gate from observing into rejecting
 	// (gonk-hsb). OFF by default and deliberately so: a predicate enabled on
 	// unmeasured evidence rejects honest batches, and a rejected batch on the
@@ -55,6 +63,14 @@ type sweepDeps struct {
 	// BotUsername authenticates the marker-carrying comment (a human quoting
 	// the marker must not satisfy the gate).
 	BotUsername string
+
+	// HealthFile is where every pass records whether the outcome path is alive
+	// (GONK_SWEEP_HEALTH_FILE; see sweep_health.go). It is what the controller's
+	// readiness probe reads, and it is why a sweep that cannot reach its store
+	// shows up as `0/1 READY` rather than as an ERROR line nobody reads.
+	// cmd/gonk-gate/main.go always sets it (sweepHealthFile() never returns
+	// ""); "" disables the record, which is what a unit test wants.
+	HealthFile string
 
 	// Now is the sweeper's clock. Defaults to time.Now.
 	Now func() time.Time
@@ -97,9 +113,13 @@ func (d *sweepDeps) withDefaults() sweepDeps {
 func runSweep(ctx context.Context, d sweepDeps) int {
 	dd := d.withDefaults()
 
+	// A SWEEP THAT CANNOT LIST BEADS IS NOT A DEGRADED SWEEP, IT IS A DEAD
+	// OUTCOME PATH (gonk-p7qh). Every `return 1` below records the outage and
+	// escalates; the pass that succeeds clears it. sweep_health.go argues why
+	// the signal is readiness rather than a metric or a louder log line.
 	running, err := dd.Store.List(ctx, beadstore.StateRunning)
 	if err != nil {
-		dd.Log.Error("sweep: list running beads failed", "err", err)
+		recordSweepFailure(dd.Log, dd.HealthFile, "list_running", dd.Now(), err)
 		return 1
 	}
 	for _, rec := range running {
@@ -108,7 +128,7 @@ func runSweep(ctx context.Context, d sweepDeps) int {
 
 	parked, err := dd.Store.List(ctx, beadstore.StateParked)
 	if err != nil {
-		dd.Log.Error("sweep: list parked beads failed", "err", err)
+		recordSweepFailure(dd.Log, dd.HealthFile, "list_parked", dd.Now(), err)
 		return 1
 	}
 	now := dd.Now()
@@ -123,7 +143,7 @@ func runSweep(ctx context.Context, d sweepDeps) int {
 	// sweep can afford to ignore (T-19). See reclaimPendingPrompt.
 	pending, err := dd.Store.List(ctx, beadstore.StatePendingPrompt)
 	if err != nil {
-		dd.Log.Error("sweep: list pending-prompt beads failed", "err", err)
+		recordSweepFailure(dd.Log, dd.HealthFile, "list_pending_prompt", dd.Now(), err)
 		return 1
 	}
 	for _, rec := range pending {
@@ -139,6 +159,9 @@ func runSweep(ctx context.Context, d sweepDeps) int {
 	// tick costs one pod for 30 seconds, while a sweep that aborted on the
 	// reaper's behalf would strand real outcomes.
 	runReap(ctx, dd)
+
+	// The pass completed. Clear any failure run and say so once, if it is news.
+	recordSweepSuccess(dd.Log, dd.HealthFile, dd.Now())
 	return 0
 }
 
@@ -364,6 +387,15 @@ func sweepRunning(ctx context.Context, d sweepDeps, rec beadstore.Record) {
 
 	outcome := gate.Classify(signals)
 
+	// WHAT DID THIS SESSION ACTUALLY COST, AND HOW MANY MODEL CALLS DID IT
+	// MAKE? (gonk-pop3 item 3.) Learning that one run made 6 calls and another
+	// 9 previously required port-forwarding gonk-meter and authenticating to
+	// GET /v1/cost/bead/<anchor> with a bearer token. The sweep already holds
+	// that token and already talks to the meter, so the answer is one GET away
+	// from a process whose logs `kubectl logs` reaches. Best effort, after the
+	// verdict: it changes no classification and can fail without consequence.
+	logSessionSpend(ctx, d, rec, outcome)
+
 	// Bind the outcome to the reservation METER minted at the /decide that put
 	// this record into StateRunning. An unbound outcome is a forgery vector: a
 	// caller-synthesized reservation_id could "confirm" a gate-failed on a
@@ -497,6 +529,58 @@ func gatherSpend(ctx context.Context, d sweepDeps, rec beadstore.Record) (tokens
 		case <-time.After(d.SpendPollInterval):
 		}
 	}
+}
+
+// logSessionSpend emits the one record that makes a session's model usage
+// legible without a port-forward: the call count, the prompt/completion token
+// split, the cost, and the per-rung breakdown.
+//
+// IT IS DELIBERATELY NOT A CLASSIFICATION INPUT. gatherSpend above is the one
+// that feeds gate.Classify, and it has to poll until meter's spend view has
+// caught up with the session's end, because a stale read there would
+// misclassify a genuine success as infra-failed. This one takes whatever meter
+// has RIGHT NOW and says so -- `complete` and `as_of` are on the record -- so
+// it costs one GET and can never block a sweep tick or change a verdict.
+//
+// Why here and not a log line per model turn: gonk does not own the model loop.
+// opencode runs inside the agent pod, and a per-turn line would have to come
+// out of the pod that the reaper is about to destroy -- which is the failure
+// mode this whole bead exists to fix. The turn count on the `transcript read`
+// record (transcript_archive.go) plus the call count here answer the same
+// question from processes that survive.
+func logSessionSpend(ctx context.Context, d sweepDeps, rec beadstore.Record, outcome string) {
+	if d.Meter == nil || rec.SessionKey == "" {
+		return
+	}
+	cost, err := d.Meter.CostSession(ctx, rec.SessionKey)
+	if err != nil || cost == nil {
+		d.Log.Warn("session spend: could not read the meter's cost view",
+			"bead", rec.BeadAnchor, "session_key", rec.SessionKey, "err", err)
+		return
+	}
+
+	calls := 0
+	rungs := make([]string, 0, len(cost.ByRung))
+	for _, r := range cost.ByRung {
+		calls += r.Calls
+		rungs = append(rungs, fmt.Sprintf("%s:calls=%d,tokens=%d", r.Rung, r.Calls, r.TotalTokens))
+	}
+	d.Log.Info("session spend",
+		"bead", rec.BeadAnchor, "session_key", rec.SessionKey,
+		"attempt", rec.Attempt, "rung", rec.Rung, "trigger", rec.Trigger,
+		"outcome", outcome,
+		"model_calls", calls,
+		"prompt_tokens", cost.PromptTokens,
+		"completion_tokens", cost.CompletionTokens,
+		"total_tokens", cost.TotalTokens,
+		"cost_usd", cost.CostUSD,
+		"synthetic_cost_usd", cost.SyntheticCostUSD,
+		"by_rung", strings.Join(rungs, " "),
+		// COMPLETE=false means an open reservation still exists for this scope,
+		// so these numbers may not be final. Saying so is the difference
+		// between a cost record and a misleading one.
+		"complete", cost.Complete,
+		"as_of", cost.AsOf)
 }
 
 // refire re-fires gonk-dispatch for rec.BeadAnchor -- the ONLY way a sweep
