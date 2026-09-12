@@ -166,7 +166,28 @@ const searchIncompleteLabel = "gonk::search-incomplete"
 // correct outcome, and the code-change verdict in the body carries a citation
 // precondition (name the file and the symbol): the checklist raises the cost of
 // giving up, and the citation raises the cost of making something up. Neither
-// works without the other.
+// works without the other. The narrative balance is part of that: the two war
+// stories in the text both end with the code having been there, so a small model
+// pattern-matching on story shape would see two examples of "the last run's
+// mistake was not finding it" and none of the opposite. The mirror-image failure
+// is therefore spelled out too, and labelled as having no incident behind it
+// yet -- inventing an anecdote to balance the tone would be the same sin the
+// paragraph is warning about.
+//
+// THE QUICK-ACTION INTERLOCK. Requiring the comment to NAME the directories it
+// searched created a new way to lose the whole run, and it had to be closed in
+// the same breath: pkg/effects.ValidateComments REFUSES an entire batch if any
+// comment line begins with a slash and a letter, because GitLab would read it as
+// a quick action (/close, /assign). The obvious way to answer "which directories
+// did you search" is a list of absolute paths, one per line -- which is exactly
+// that shape. So the procedure says to write paths without a leading slash and
+// never to start a line with one. Without that clause this change would have
+// converted the most honest possible report into a silently dropped run, which
+// is the same inversion searchIncompleteLabel is kept out of ReservedLabels to
+// avoid. broker_inject_absence_test.go proves the hazard is real by running
+// effects.ValidateComments against the shape, rather than only asserting the
+// warning exists -- so if pkg/effects ever stops refusing, the stale warning is
+// caught instead of quietly outliving its reason.
 //
 // ON LARGE REPOSITORIES. "Enumerate the tree" is NOT written as an unconditional
 // instruction, because on a monorepo it is either impossible or it spends the
@@ -209,12 +230,27 @@ const searchProcedure = "SEARCH PROCEDURE. Do these IN ORDER, and do not stop ea
 	"nothing, and must not be reported as if they were. In that case: begin your\n" +
 	"comment with the exact text \"" + searchIncompleteMarker + "\", add the label\n" +
 	searchIncompleteLabel + ", say what you did get through and where you stopped,\n" +
-	"and do NOT state that the code does not exist.\n\n" +
+	"and do NOT state that the code does not exist. The verdict for that is\n" +
+	"reply-only -- never close, which would end a conversation you did not\n" +
+	"finish having.\n\n" +
+	"WRITE PATHS WITHOUT A LEADING SLASH, and NEVER begin a line of your comment\n" +
+	"with a slash. Write internal/paging/sort.go, not /internal/paging/sort.go.\n" +
+	"GitLab reads a line that starts with a slash and a letter as a QUICK ACTION,\n" +
+	"and gonk refuses the entire batch rather than post one -- so a tidy list of\n" +
+	"the directories you searched, one absolute path per line, would cost you the\n" +
+	"whole run and leave the reporter with nothing. Name them inline instead.\n\n" +
 	"FINDING NO DEFECT IS A CORRECT OUTCOME. This procedure is a requirement\n" +
 	"about how hard you LOOK, not about what you must CONCLUDE. Having done it,\n" +
 	"\"I read these files and this behaves as designed, and here is why\" is a\n" +
 	"complete and welcome answer, and so is an honest question. Never assert a\n" +
 	"fault you have not actually read in the code.\n\n" +
+	"THE MIRROR-IMAGE FAILURE IS WORSE, and it has no war story above only\n" +
+	"because nobody has caught one yet: a run that cannot find the code, guesses\n" +
+	"at a plausible file and function, and reports a defect that does not exist.\n" +
+	"That comment is confidently wrong, a human has to go and disprove it, and it\n" +
+	"misleads every later session that reads the issue. Searching harder is the\n" +
+	"point of the procedure above; inventing a finding is not a way to satisfy\n" +
+	"it. If you are guessing, say you are guessing.\n\n" +
 	"INVESTIGATE THE CODE BEFORE YOU ASK ANYTHING. Ask the reporter only for what\n" +
 	"the code CANNOT tell you -- their intent, their environment, exact\n" +
 	"reproduction steps, which behaviour they expected. Anything answerable by\n" +
@@ -296,7 +332,7 @@ fetched for you -- do NOT fetch anything yourself:
 
 %s
 %s
-Decide the labels (each prefixed `+"`gonk::`"+`), one short triage comment, and a
+Decide the labels (each prefixed `+"`gonk::`"+`), one triage comment, and a
 VERDICT saying what kind of answer this is.
 
 The comment is a brief analysis of what the issue asks for, grounded in the code
@@ -337,9 +373,9 @@ Emit exactly one comment effect and zero or more label effects. Nothing after
 GONK_BATCH_END.
 
 The batch must be valid JSON on a SINGLE line. Keep the comment brief -- but
-never at the cost of the search evidence required above -- and if you must
-include a line break write it as \n inside the string: a real line break inside
-a JSON string is invalid and costs you the whole batch.`, agent, issueIID, project, context, repo)
+never at the cost of the evidence this prompt requires of you -- and if you
+must include a line break write it as \n inside the string: a real line break
+inside a JSON string is invalid and costs you the whole batch.`, agent, issueIID, project, context, repo)
 }
 
 // renderScaffoldPrompt builds the scaffold session's initial message.

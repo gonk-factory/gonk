@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"gitlab.orac.local/agentic/gonk-project/pkg/effects"
 )
 
 // THE FAILURE THESE TESTS EXIST FOR (gonk-cl4p).
@@ -48,10 +50,24 @@ func TestTriagePromptGatesTheNegativeConclusionOnAnEnumeratedSearch(t *testing.T
 		t.Error("the procedure is not stated as ordered; an unordered checklist is " +
 			"the variance the 6-vs-9-round-trip split came from")
 	}
+	// The steps must appear IN ASCENDING ORDER inside the procedure block, not
+	// merely somewhere in the prompt: ordering IS the variance fix, so a
+	// scrambled or scattered procedure must fail here. Checking Contains alone
+	// would pass an interleaved rewrite -- an independent review flagged that.
+	block := got[strings.Index(got, "SEARCH PROCEDURE"):]
+	prev := -1
 	for _, step := range []string{"  1. ", "  2. ", "  3. ", "  4. ", "  5. "} {
-		if !strings.Contains(got, step) {
+		at := strings.Index(block, step)
+		if at < 0 {
 			t.Errorf("procedure step %q missing", strings.TrimSpace(step))
+			continue
 		}
+		if at < prev {
+			t.Errorf("procedure step %q appears before the step that should precede it "+
+				"(at %d, previous at %d); an unordered checklist is not a procedure",
+				strings.TrimSpace(step), at, prev)
+		}
+		prev = at
 	}
 	// Step 1 must be an inventory of what is actually there, not a guess.
 	if !strings.Contains(got, "List the top level") {
@@ -200,7 +216,12 @@ func TestTriagePromptKeepsTheEffectShapeContract(t *testing.T) {
 			t.Error("the prompt no longer states the effect-shape cardinality")
 		}
 		// The label namespace, and the single-line JSON rule the parser needs.
-		if !strings.Contains(got, "gonk::") {
+		//
+		// Asserted on the INSTRUCTION, not on the string "gonk::": that substring
+		// also occurs in the batch template below, so a Contains check for it
+		// stays green after the instruction itself is deleted. An independent
+		// review caught exactly that tautology here.
+		if !strings.Contains(got, "each prefixed") {
 			t.Error("the label prefix instruction is gone")
 		}
 		if !strings.Contains(got, "valid JSON on a SINGLE line") {
@@ -237,5 +258,122 @@ func TestSearchIncompleteLabelIsNotReserved(t *testing.T) {
 	}
 	if got != searchIncompleteLabel {
 		t.Errorf("normaliseLabel(%q) = %q, want it unchanged", searchIncompleteLabel, got)
+	}
+}
+
+// THE INTERLOCK THAT ALMOST WENT MISSING (found by an independent review of the
+// first commit, not by its author).
+//
+// Requiring the comment to NAME the directories it searched invites the obvious
+// answer: a list of absolute paths, one per line. pkg/effects.ValidateComments
+// refuses the WHOLE batch when any comment line starts with a slash and a
+// letter, because GitLab would execute it as a quick action -- so that answer
+// would have cost the entire run and left the reporter with nothing, converting
+// the most honest possible report into a silent drop.
+//
+// This test proves the hazard is REAL rather than only that the prompt mentions
+// it: it runs the refusal path itself. If pkg/effects ever stops refusing, this
+// fails and the warning gets re-examined instead of outliving its reason.
+func TestTriagePromptWarnsAboutTheQuickActionRefusal(t *testing.T) {
+	// The hazard, demonstrated against the code that enforces it.
+	hazard := effects.Batch{Effects: []effects.Effect{{
+		Kind: effects.KindComment,
+		Body: "Searched:\n/internal/paging\n/cmd/app\nNo date-sorting code found.",
+	}}}
+	if err := effects.ValidateComments(hazard); err == nil {
+		t.Fatal("pkg/effects no longer refuses a comment line beginning with a slash; " +
+			"the prompt's leading-slash warning may now be stale -- re-check it " +
+			"rather than deleting this test")
+	}
+
+	got := checkoutPrompt()
+	if !strings.Contains(got, "WRITE PATHS WITHOUT A LEADING SLASH") {
+		t.Error("the prompt demands a list of searched directories but never warns " +
+			"that a slash-led line refuses the whole batch")
+	}
+	if !strings.Contains(got, "QUICK ACTION") {
+		t.Error("the warning does not say WHY a leading slash is fatal, so a model " +
+			"has no way to generalise it")
+	}
+	// The same batch written the way the prompt asks for must survive.
+	safe := effects.Batch{Effects: []effects.Effect{{
+		Kind: effects.KindComment,
+		Body: "Searched internal/paging and cmd/app for sort, desc and date; no date-sorting code found.",
+	}}}
+	if err := effects.ValidateComments(safe); err != nil {
+		t.Fatalf("the comment shape the prompt asks for is itself refused: %v", err)
+	}
+}
+
+// An unfinished search must not end the conversation. "close" is terminal and
+// sits in the same menu, and a model that has just admitted it could not finish
+// is exactly the one that should not be reaching for it. The first commit left
+// this unsaid; an independent review caught it.
+func TestIncompleteSearchIsRoutedToReplyOnlyAndNotClose(t *testing.T) {
+	got := checkoutPrompt()
+	i := strings.Index(got, searchIncompleteMarker)
+	if i < 0 {
+		t.Fatal("no incomplete-search instruction at all")
+	}
+	tail := got[i:]
+	if !strings.Contains(tail, "The verdict for that is\nreply-only") {
+		t.Error("the incomplete-search path names no verdict, so a model may pick " +
+			"close and end a conversation it did not finish having")
+	}
+	if !strings.Contains(tail, "never close") {
+		t.Error("nothing steers an unfinished search away from the terminal verdict")
+	}
+}
+
+// NARRATIVE BALANCE, and it is not decoration. Both war stories in the prompt
+// (!49 and !70) end with the code having been there. A small model matching on
+// story shape therefore sees two examples of "the last run's mistake was failing
+// to find it" and none of the opposite, which is find-pressure arriving by tone
+// rather than by instruction -- an independent review's finding on the first
+// commit.
+//
+// The counterweight must be stated as having NO incident behind it. Inventing an
+// anecdote to balance the tone would be the same fabrication the paragraph
+// exists to forbid.
+func TestTriagePromptNarratesTheInventedDefectFailureToo(t *testing.T) {
+	got := checkoutPrompt()
+	if !strings.Contains(got, "THE MIRROR-IMAGE FAILURE IS WORSE") {
+		t.Fatal("both war stories end with the code being found and nothing narrates " +
+			"the opposite failure; the anti-false-positive clause is an assertion " +
+			"competing with two stories")
+	}
+	if !strings.Contains(got, "no war story above only") {
+		t.Error("the counterweight does not say it has no incident behind it -- an " +
+			"invented anecdote here would be the exact fabrication it warns against")
+	}
+	if !strings.Contains(got, "If you are guessing, say you are guessing") {
+		t.Error("the prompt offers no way to report a suspicion honestly, which is " +
+			"what a model does instead when it will not report nothing")
+	}
+}
+
+// The no-checkout prompt must not reference a search it was never asked to run.
+// The first commit's brevity clause said "never at the cost of the search
+// evidence required above" on BOTH paths -- so the degraded, no-repository
+// rendering told the agent not to sacrifice evidence from a search of a tree it
+// does not have. That is a small instance of the gonk-msz failure: a model given
+// a requirement it cannot satisfy honestly satisfies it dishonestly.
+func TestNoCheckoutPromptReferencesNoSearchRequirement(t *testing.T) {
+	got := renderTriagePrompt("acme/widget", 12, "", "Title: x", "")
+	for _, forbidden := range []string{
+		"search evidence required above",
+		"directories you searched",
+		"WRITE PATHS WITHOUT A LEADING SLASH",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("the no-checkout prompt refers to %q, but it granted no working "+
+				"directory to search", forbidden)
+		}
+	}
+	// It must still carry the brevity/evidence balance in a form that is TRUE
+	// with no repository -- the citation requirement is evidence too.
+	if !strings.Contains(got, "the evidence this prompt requires of you") {
+		t.Error("the brevity clause lost its evidence qualifier entirely; a model " +
+			"optimising for \"brief\" drops the citation the code-change verdict needs")
 	}
 }

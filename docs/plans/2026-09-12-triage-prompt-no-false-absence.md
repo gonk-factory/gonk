@@ -127,11 +127,77 @@ prose:
   such and not implied otherwise.
 - Variance is the whole problem: no quality claim is made from a single run.
 
+## Independent review, and what it found (ba1f7c9 -> HEAD)
+
+A fresh agent that did not write the change graded it against this plan. It
+confirmed items 1 and the test set, and found seven things wrong. All seven are
+fixed in the follow-up commit; they are recorded here because the plan is the
+thing later sessions read, and a plan that hides its own review is worthless.
+
+1. **A NEW WAY TO LOSE THE WHOLE RUN, opened by item 1 and not closed by it.**
+   `pkg/effects.ValidateComments` refuses an ENTIRE batch when any comment line
+   begins with a slash and a letter -- GitLab would execute it as a quick action.
+   The obvious way to answer "which directories did you search" is a list of
+   absolute paths, one per line, which is exactly that shape. So the change as
+   first committed converted the most honest possible report into a silently
+   dropped run: the same inversion `searchIncompleteLabel` is kept OUT of
+   `ReservedLabels` to avoid, reintroduced two paragraphs later. Fixed with an
+   explicit leading-slash warning, and a test that runs
+   `effects.ValidateComments` against the hazardous shape so the warning cannot
+   outlive its reason.
+2. **The incomplete-search path named no verdict**, while `close` sat in the same
+   menu -- and a model that has just admitted it could not finish is precisely
+   the one that should not reach for a terminal verdict. Now routed explicitly to
+   `reply-only`, never `close`.
+3. **A dangling reference on the no-checkout path.** The brevity clause said
+   "never at the cost of the search evidence required above" on BOTH renderings,
+   so the degraded no-repository prompt demanded evidence from a search of a tree
+   it does not have -- a small instance of the gonk-msz failure this change set
+   out to respect. Reworded to "the evidence this prompt requires of you", which
+   is true on both paths, and a test now forbids any search reference in the
+   no-checkout rendering.
+4. **Three unqualified brevity instructions against one qualification**, in a
+   prompt that now asks for more comment content. One ("one short triage
+   comment") dropped.
+5. **Both war stories ended with the code having been found**, so a small model
+   matching on story shape saw two examples of "the last run's mistake was not
+   finding it" and none of the opposite -- find-pressure arriving by tone rather
+   than by instruction, against goal 4. The mirror-image failure is now narrated
+   too, and labelled as having no incident behind it: inventing an anecdote to
+   balance the tone would be the same fabrication the paragraph forbids.
+6. **Two weak assertions.** `Contains(got, "gonk::")` was tautological -- that
+   substring also occurs in the batch template, so deleting the instruction left
+   the test green; it now asserts the instruction phrase. And the step checks
+   asserted only that `1.` through `5.` appeared SOMEWHERE, which an interleaved
+   rewrite would pass, though ordering is the whole of the variance fix; they now
+   assert ascending position within the procedure block.
+7. **This Progress block had already been ticked** for "independent verification"
+   before the verification ran -- the mark-your-own-homework pattern CLAUDE.md
+   exists to stop, committed in the same change that quotes it. Rewritten below
+   to say what actually happened and when.
+
+It also confirmed, independently rather than on the author's word, that 24 of 34
+assertion substrings fail against the old prompt, and that nothing outside the
+three intended files was touched.
+
 ## Progress
 
-- [x] Plan written
-- [x] `renderTriagePrompt` rewritten
-- [x] Tests written and passing
-- [x] `make gate` green
-- [x] Independent verification against this plan by a fresh agent
+- [x] Plan written (before implementation)
+- [x] `renderTriagePrompt` rewritten -- ba1f7c9
+- [x] Tests written, and each new assertion checked to FAIL against the old
+      prompt rather than merely to pass against the new one
+- [x] `make gate` green on ba1f7c9 (`GATE_EXIT=0`, zero FAIL lines)
+- [x] Independent verification against this plan by a fresh agent -- ran AFTER
+      ba1f7c9, found the seven items above
+- [x] All seven review findings fixed, with tests, and each new test checked to
+      fail against ba1f7c9
+- [x] `make gate` green again after the fixes
 - [x] Pushed to `feat/triage-prompt-no-false-absence`
+- [ ] **NOT VALIDATED LIVE.** No run of this wording against a real model exists.
+      A live triage exercises the DEPLOYED build and this branch is not deployed,
+      so a live run from here would test the OLD prompt. `test/stubmodel` cannot
+      stand in: its replies are scripted, so it proves delivery and parsing, not
+      model behaviour. And one run would prove nothing anyway -- 6-vs-9
+      round-trips on identical input is the defect. Whoever deploys this should
+      file the same `sort.go` issue on project 75 at least five times and count
+      how many runs name the file.
