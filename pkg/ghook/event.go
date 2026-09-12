@@ -25,6 +25,20 @@ type Event struct {
 	Issue        *Issue
 	Note         *Note
 	MergeRequest *MergeRequest
+
+	// DeliveryID correlates the receiver's record with the dispatcher's, and
+	// with GitLab's own hook delivery log. It is GitLab's X-Gitlab-Event-UUID
+	// when present and DedupeKey's derived hash otherwise (see Handler), so it
+	// is always non-empty for an event that reached the sink.
+	//
+	// IT IS A CORRELATOR, NEVER A DECISION INPUT. Nothing may branch on it: it
+	// is caller-supplied on the header path, so a rule that read it would be a
+	// rule an unauthenticated caller could steer. gonk deliberately does NOT
+	// carry a W3C traceparent here -- docs/plans/dev-observability.md argues
+	// why a distributed trace cannot survive the Gas City exec-order fork the
+	// interesting hop goes through, and why the deterministic BeadAnchor is the
+	// correlator that can.
+	DeliveryID string
 }
 
 type Kind string

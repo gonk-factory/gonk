@@ -199,10 +199,34 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 	tr, terr := d.GC.GetSessionTranscript(ctx, rec.SessionID)
 	if terr != nil {
 		if gcapi.IsNotFound(terr) {
+			// SAY SO. This is the one branch where there is no transcript to
+			// describe, and before gonk-pop3 it produced no record at all --
+			// the session simply vanished from the logs.
+			d.Log.Warn("transcript read FAILED: no session for this alias",
+				"bead", rec.BeadAnchor, "session", rec.SessionID)
 			return false, "no session for alias " + rec.SessionID, nil
 		}
+		d.Log.Warn("transcript read FAILED: transport error; retrying next tick",
+			"bead", rec.BeadAnchor, "session", rec.SessionID, "err", terr)
 		return false, "", terr // transport error -> unknown -> retry
 	}
+
+	// THE FORENSIC POINT (gonk-pop3 item 2). This is the LAST moment the
+	// transcript exists anywhere: the reaper destroys the pod once this pass
+	// classifies the bead. Record its shape always, and archive its content
+	// when the dev switch is on. Both happen BEFORE any of the refusals below,
+	// so the hardest cases to investigate -- paginated, empty, no fence -- are
+	// the ones that leave evidence.
+	//
+	// text is joined ONCE and reused by all three readers below. Text()
+	// rebuilds a fresh copy of the whole transcript on every call (see
+	// pkg/gcapi/transcript.go), and a 4 MiB transcript is a real allocation;
+	// adding the record must not add a third one.
+	text := tr.Text()
+	tdesc := describeTranscript(rec, tr, text)
+	tdesc.Archived = archiveTranscript(d.Log, d.TranscriptDir, rec, tr)
+	tdesc.log(d.Log)
+
 	if tr.Pagination != nil && tr.Pagination.HasMore {
 		// We read a fragment. Say so rather than judging on it: "no batch"
 		// derived from a partial transcript is the same silent loss in a new
@@ -221,10 +245,10 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 	// same reason: an incomplete read must resolve to UNKNOWN -> retry, never to
 	// a verdict. A genuinely silent agent still produces a non-empty transcript
 	// (the harness banner alone guarantees that), so this cannot mask one.
-	if isUnreadableTranscript(tr.Text()) {
+	if isUnreadableTranscript(text) {
 		return false, "", fmt.Errorf("transcript for %q is empty; refusing to judge an unreadable session", rec.SessionID)
 	}
-	raw, ok := extractBatch(tr.Text())
+	raw, ok := extractBatch(text)
 	if !ok {
 		return false, "no GONK_BATCH_START/END fence in session transcript", nil
 	}

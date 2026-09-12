@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
@@ -161,7 +162,17 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 	// ports it onto the broker for real.
 	agent, ok := agentForTrigger[a.Trigger]
 	if !ok {
-		d.Log.Error("unknown trigger; dispatching nothing", "trigger", a.Trigger)
+		// NAME THE BEAD ANCHOR, not just the trigger (gonk-pop3). The anchor is
+		// the one string that joins this refusal to intake's `intake decision`
+		// record for the same work item -- and without it, the two halves of the
+		// 2026-09-12 !71 investigation could not be joined: intake said it
+		// dispatched a mention-reply and gonk-gate said it refused a trigger, and
+		// nothing in either line said they were about the same comment. Listing
+		// the triggers that DO route turns the line into its own diagnosis.
+		d.Log.Error("dispatching nothing: this trigger routes to no agent",
+			"trigger", a.Trigger, "bead", a.BeadAnchor, "project", a.Project,
+			"issue_iid", a.IssueIID, "session_key", a.SessionKey,
+			"routable_triggers", strings.Join(routableTriggers(), ","))
 		return 2
 	}
 	if d.GC == nil || d.GC.City == "" {

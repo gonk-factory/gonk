@@ -283,6 +283,13 @@ gascity:
     # run the controller with the same GC_CITY_WRITE_CID; intake+gate then mint
     # cid-bound grants. Leave empty for gonk.
     cid: ""
+  # How stale the gonk-sweep health record may be before the controller's
+  # readinessProbe calls the outcome path dead (gonk-pop3 / gonk-p7qh). The
+  # sweep is a cooldown exec order on a 30s interval with a 300s timeout, so one
+  # pass can legitimately take five minutes; 15m is three times that -- wide
+  # enough that a slow pass never flaps readiness, narrow enough that a real
+  # outage is visible in single-digit minutes instead of in days. A Go duration.
+  sweepHealthMaxAge: 15m
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {memory: 1Gi}
@@ -290,6 +297,39 @@ gascity:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+
+# =============================================================================
+# DEV-ONLY DIAGNOSTICS  (gonk-pop3)
+#
+# Everything here is OFF by default and everything here is explicitly a
+# development aid. The always-on observability -- the intake decision record,
+# the `transcript read` metadata record, the `session spend` record and the
+# sweep health record -- is NOT switchable and is not configured from here. That
+# split is deliberate: default-off logging that nobody turns on would not have
+# caught any of the 2026-09-12 failures, so only the expensive or
+# untrusted-content half is gated.
+# =============================================================================
+dev:
+  transcripts:
+    # Archive each finished session's FULL transcript on the controller, so it
+    # survives the agent pod the reaper destroys. Off in production: a
+    # transcript is untrusted model output over untrusted user input, it can be
+    # megabytes, and persisting it by default is a commitment nobody asked for.
+    #
+    # WHAT YOU GET WITH IT OFF: the `transcript read` record still names the
+    # turn count, byte length, content hash and whether the batch fence was
+    # present, for every classified session. That alone separates "the agent
+    # said nothing" from "we could not read what it said".
+    #
+    # WHAT YOU GET WITH IT ON: the bytes themselves, under dir below, 0600, on
+    # a DEDICATED emptyDir with sizeLimit. gonk-gate prunes to the newest 200
+    # files. It survives the agent pod (which is where the evidence was being
+    # lost) but NOT a controller restart -- a PVC would be durable storage of
+    # untrusted text with no retention policy, which is a bigger commitment
+    # than "let me see what the agent said this afternoon".
+    enabled: false
+    dir: /transcripts
+    sizeLimit: 512Mi
 
 # =============================================================================
 # COMPONENT: Dolt  (the bundled SQL server -- backs BOTH beads AND, optionally, the ledger)

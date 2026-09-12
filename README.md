@@ -6,6 +6,8 @@ and hard per-project token/cost budgets.
 
 Design spec: `docs/superpowers/specs/2026-07-12-gonk-stack-design.md`
 Plan index: `PLAN.md`
+Operating it: `docs/observability.md` — what every record says, and how to
+answer "why did nothing happen?" from `kubectl logs` alone.
 
 ## Why "gonk"?
 

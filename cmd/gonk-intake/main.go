@@ -391,6 +391,10 @@ func newService(ctx context.Context, cfg Config, log *slog.Logger) (*service, er
 	if err != nil {
 		return nil, fmt.Errorf("build webhook handler: %w", err)
 	}
+	// One record per delivery, always on (gonk-pop3). Without it a delivery
+	// that intake accepted and then dropped -- the !71 mention -- is invisible
+	// except in GitLab's own hook delivery log.
+	hook.Log = log
 
 	svc := &service{
 		GL: gl, Meter: meter, Metrics: metrics, Cache: cache,

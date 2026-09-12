@@ -225,6 +225,11 @@
         },
         "image": {
           "$ref": "#/$defs/imageOptional"
+        },
+        "sweepHealthMaxAge": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|ms|s|m|h)([0-9]+(ns|us|ms|s|m|h))*$",
+          "description": "How stale the gonk-sweep health record may be before the controller's readinessProbe calls the outcome path dead (gonk-pop3 / gonk-p7qh). A Go duration string."
         }
       }
     },
@@ -465,6 +470,38 @@
     },
     "monitoring": {
       "type": "object"
+    },
+    "dev": {
+      "type": "object",
+      "description": "Dev-only diagnostics. Everything here is off by default; the always-on observability records (intake decision, transcript read, session spend, sweep health) are not configured from here and cannot be switched off.",
+      "properties": {
+        "transcripts": {
+          "type": "object",
+          "description": "Archive each finished session's full transcript on the controller so it survives the agent pod the reaper destroys. Holds untrusted model output over untrusted user input: off in production.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "dir": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^/"
+            },
+            "sizeLimit": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "enabled",
+            "dir",
+            "sizeLimit"
+          ]
+        }
+      },
+      "required": [
+        "transcripts"
+      ]
     }
   },
   "$defs": {

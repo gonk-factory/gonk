@@ -75,7 +75,7 @@ func main() {
 		log.Warn("log sink degraded", "detail", logSinkNote)
 	}
 	if len(os.Args) < 2 {
-		log.Error("usage: gonk-gate dispatch|sweep")
+		log.Error("usage: gonk-gate dispatch|sweep|sweep-health")
 		os.Exit(2)
 	}
 
@@ -86,6 +86,17 @@ func main() {
 	if os.Args[1] == "--version" || os.Args[1] == "-version" {
 		fmt.Println(version)
 		os.Exit(0)
+	}
+
+	// sweep-health is answered before loadGateConfig for the same reason
+	// --version is, and one more: it is the controller's READINESS PROBE
+	// (gonk-pop3 item 4). A probe that exits 2 on a missing GONK_CITY would
+	// report a healthy outcome path as unready, and a probe that could be
+	// broken by unrelated configuration is not a probe, it is a second way to
+	// take the deployment down. It reads a file and optionally dials a port;
+	// it needs nothing else.
+	if os.Args[1] == "sweep-health" {
+		os.Exit(runSweepHealthCheck(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
 	cfg, err := loadGateConfig()
@@ -135,9 +146,15 @@ func main() {
 			// what it WOULD reject until its false-positive rate is measured
 			// on real sessions (gonk-hsb).
 			EnforceTrajectory: os.Getenv("GONK_ENFORCE_TRAJECTORY") == "1",
+			// DEV ONLY, and off unless named: the session transcript archive
+			// (gonk-pop3 item 2). Unset is the production default.
+			TranscriptDir: os.Getenv(transcriptDirEnv),
+			// Where this pass records whether the outcome path is alive. The
+			// controller's readiness probe reads it (gonk-pop3 item 4).
+			HealthFile: sweepHealthFile(),
 		})
 	default:
-		log.Error("unknown subcommand", "arg", os.Args[1])
+		log.Error("unknown subcommand", "arg", os.Args[1], "known", "dispatch, sweep, sweep-health, --version")
 		code = 2
 	}
 	os.Exit(code)

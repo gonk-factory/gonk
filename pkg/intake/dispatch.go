@@ -357,7 +357,15 @@ func (d *Dispatch) stale(e Entry) bool {
 // sweep (reconcile.go, IssueSweeper) needs that to tell an attempt from a real
 // dispatch.
 func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) bool {
+	// THE DECISION RECORD. Built here, emitted by the single defer below, so
+	// every return path in this function -- including ones nobody has written
+	// yet -- accounts for its event. This is mechanical, not a habit: you
+	// cannot add a `return` that is silent.
+	rec := newDecisionRecord(ev)
+	defer func() { rec.emit(d.Log) }()
+
 	if ev.Kind == ghook.KindMergeRequest {
+		rec.ignore("mr_event")
 		d.KickReconcile()
 		return false
 	}
@@ -365,24 +373,30 @@ func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) bool {
 	entry, ok := d.Cache.Get(ev.Project.ID)
 	if !ok {
 		d.Obs.DispatchDropped("unknown_project")
+		rec.ignore("unknown_project")
 		d.KickReconcile()
 		return false
 	}
+	rec.Project = entry.Project.PathWithNamespace
+	rec.State = string(entry.Classification.State)
 
 	if d.stale(entry) {
 		// Fail closed on sustained uncertainty: do not even ask meter. A blip is
 		// tolerated (LastReconcile only moves forward on success); this is the
 		// bound on how long "last known good" may be trusted.
 		d.Obs.DispatchDropped("stale-config")
-		d.Log.Warn("cache entry stale beyond the staleness window; firing nothing",
-			"project", entry.Project.PathWithNamespace,
-			"last_reconcile", entry.LastReconcile, "window", d.stalenessWindow())
+		rec.ignore("stale-config")
+		rec.with("last_reconcile", entry.LastReconcile, "staleness_window", d.stalenessWindow().String())
 		return false
 	}
 
 	dec := Decide(entry, ev, d.BotUsername)
+	rec.Trigger = dec.Trigger
+	rec.SessionKey = dec.SessionKey
+	rec.Bead = dec.BeadAnchor
 	if !dec.Dispatch {
 		d.Obs.DispatchDropped(dec.Reason)
+		rec.ignore(dec.Reason)
 		return false
 	}
 
@@ -407,6 +421,7 @@ func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) bool {
 		// FAIL CLOSED. An unreachable budget enforcer is not permission to spend;
 		// the next reconcile/delivery retries.
 		d.Obs.DispatchDropped("decide_error")
+		rec.fail("decide_error", err)
 		d.Log.Error("meter /decide failed; firing nothing", "err", err, "bead", dec.BeadAnchor)
 		return false
 	}
@@ -415,6 +430,7 @@ func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) bool {
 		md, err := json.Marshal(resp.Metadata) // meter's atags, stamped verbatim
 		if err != nil {
 			d.Obs.DispatchDropped("metadata_encode_error")
+			rec.fail("metadata_encode_error", err)
 			d.Log.Error("could not marshal meter metadata; firing nothing", "err", err, "bead", dec.BeadAnchor)
 			return false
 		}
@@ -437,15 +453,24 @@ func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) bool {
 		}
 		if err := attributionSafeOrder(o); err != nil {
 			d.Obs.DispatchDropped("attribution_unsafe")
+			rec.fail("attribution_unsafe", err)
 			d.Log.Error("refusing an attribution-unsafe order", "err", err, "bead", dec.BeadAnchor)
 			return false
 		}
 		if err := d.Dispatcher.FireOrder(ctx, o); err != nil {
 			d.Obs.DispatchDropped("fire_error")
+			rec.fail("fire_error", err)
 			d.Log.Error("FireOrder failed", "err", err, "bead", dec.BeadAnchor)
 			return false
 		}
 		d.Obs.Dispatched(dec.Trigger)
+		// THE SUCCESS PATH IS NOT SILENT EITHER. It used to be -- only a
+		// Prometheus counter moved -- so `kubectl logs` could not tell "intake
+		// dropped it" from "intake fired the order and the next hop ate it".
+		// That ambiguity is exactly what made gonk-ecn take a hook-delivery
+		// query to diagnose. The record below is what hands the investigation
+		// to the NEXT hop, by name and by bead anchor.
+		rec.dispatched(resp.Rung, resp.Model, resp.ReservationID)
 		return true
 	}
 
@@ -455,11 +480,13 @@ func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) bool {
 		// (metric + log with retry_after) and FIRE NOTHING; the pack unparks at
 		// retry_after by re-deciding at Gate 2.
 		d.Obs.DispatchDropped("decide_defer")
+		rec.deferred(resp.Reason, resp.RetryAfter)
 		d.Log.Info("meter deferred; firing nothing", "bead", dec.BeadAnchor,
 			"reason", resp.Reason, "retry_after", resp.RetryAfter)
 	case "deny":
 		// Also HTTP 200. Apply the deny label so a human sees it, and FIRE NOTHING.
 		d.Obs.DispatchDropped("decide_deny")
+		rec.deny(resp.Reason)
 		if d.Labeler != nil {
 			if err := d.Labeler.ApplyDenyLabel(ctx, entry.Project.ID, ev.Issue.IID, resp.Reason); err != nil {
 				d.Log.Error("could not apply deny label", "err", err, "bead", dec.BeadAnchor)
@@ -469,6 +496,7 @@ func (d *Dispatch) Handle(ctx context.Context, ev *ghook.Event) bool {
 	default:
 		// A decision kind this binary does not know. Fail closed.
 		d.Obs.DispatchDropped("decide_unknown")
+		rec.fail("decide_unknown", fmt.Errorf("meter answered %q", resp.Decision))
 		d.Log.Error("meter returned an unknown decision; firing nothing", "decision", resp.Decision)
 	}
 	return false
@@ -496,29 +524,56 @@ func MayFire(decision string) bool {
 // passes the Entry it just built (LastReconcile == now), so this is normally a
 // no-op guard, but it keeps the two order-firing paths symmetric.
 func (d *Dispatch) FireScaffold(ctx context.Context, e Entry) error {
+	project := e.Project.PathWithNamespace
+	anchor := fmt.Sprintf("gonk:%d:scaffold", e.Project.ID)
+	session := fmt.Sprintf("gonk-%d-scaffold", e.Project.ID)
+
+	// The same accounting rule Handle follows (gonk-pop3), for the same reason:
+	// a scaffold that quietly fires nothing is a project stuck at `pending`
+	// forever with no record of why (gonk-bgx). The record is built here and
+	// emitted from one defer, so no return path below can be silent.
+	//
+	// It is NOT driven by an inbound webhook -- the reconciler calls this -- so
+	// there is no delivery id to correlate on. The bead anchor is the join key.
+	rec := &decisionRecord{
+		Kind: "scaffold", Project: project, ProjectID: e.Project.ID,
+		State: string(e.Classification.State), Trigger: atags.TriggerScaffold,
+		SessionKey: session, Bead: anchor,
+		Decision: DecisionError, Reason: noReason,
+	}
+	defer func() { rec.emit(d.Log) }()
+
 	if d.stale(e) {
 		d.Obs.DispatchDropped("stale-config")
+		rec.ignore("stale-config")
 		return nil // fail closed; retry next reconcile pass
 	}
 
-	project := e.Project.PathWithNamespace
 	rig := RigName(project)
-	anchor := fmt.Sprintf("gonk:%d:scaffold", e.Project.ID)
-	session := fmt.Sprintf("gonk-%d-scaffold", e.Project.ID)
 
 	resp, err := d.Meter.Decide(ctx, meterapi.DecideRequest{
 		Project: project, Rig: rig, BeadID: anchor, SessionKey: session,
 		Trigger: atags.TriggerScaffold,
 	})
 	if err != nil {
+		rec.fail("decide_error", err)
 		return fmt.Errorf("scaffold decide: %w", err) // fail closed
 	}
 	if !MayFire(resp.Decision) {
 		d.Obs.DispatchDropped("scaffold_" + resp.Decision)
+		switch resp.Decision {
+		case "defer":
+			rec.deferred(resp.Reason, resp.RetryAfter)
+		case "deny":
+			rec.deny(resp.Reason)
+		default:
+			rec.fail("decide_unknown", fmt.Errorf("meter answered %q", resp.Decision))
+		}
 		return nil // defer/deny: fire nothing, retry next pass
 	}
 	md, err := json.Marshal(resp.Metadata)
 	if err != nil {
+		rec.fail("metadata_encode_error", err)
 		return fmt.Errorf("scaffold metadata: %w", err)
 	}
 	o := OrderRequest{
@@ -528,12 +583,15 @@ func (d *Dispatch) FireScaffold(ctx context.Context, e Entry) error {
 		KeyRef: resp.KeyRef, ReservationID: resp.ReservationID,
 	}
 	if err := attributionSafeOrder(o); err != nil {
+		rec.fail("attribution_unsafe", err)
 		return err
 	}
 	if err := d.Dispatcher.FireOrder(ctx, o); err != nil {
+		rec.fail("fire_error", err)
 		return err
 	}
 	d.Obs.Dispatched(atags.TriggerScaffold)
+	rec.dispatched(resp.Rung, resp.Model, resp.ReservationID)
 	return nil
 }
 
