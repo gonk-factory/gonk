@@ -1618,6 +1618,24 @@ spec:
             - |
               set -eu
               export GC_DOLT_PASSWORD="$(cat /etc/gonk/secrets/dolt-gc/gc-password)"
+              # THE SAME CREDENTIAL, UNDER bd's OWN ENV NAMES. The exec orders
+              # (gonk-dispatch, gonk-sweep) shell out to the `bd` BINARY, and bd
+              # does not read GC_DOLT_* -- it reads BEADS_DOLT_*, and its MySQL
+              # user defaults to `root` when unset (`bd dolt set --help`).
+              #
+              # This is not belt-and-braces, it is the whole credential for the
+              # outcome path. gonk ran on a PASSWORDLESS root@'%' until R-48/T-26
+              # dropped that user: the server side moved to `gc`, the bd client
+              # never did, and nothing noticed because `dolt.user: gc` in
+              # .beads/config.yaml is not a key bd honours -- its effective
+              # config is .beads/metadata.json, which carries no user at all.
+              # Every `gonk-gate sweep` then failed on "Access denied for user
+              # 'root'", 30 seconds apart, forever. The sweep is the ONLY thing
+              # that reads a finished session's transcript and posts the triage
+              # comment, so agents ran, produced output, and had it discarded by
+              # the reaper as an ORPHANED session ten minutes later.
+              export BEADS_DOLT_SERVER_USER="$GC_DOLT_USER"
+              export BEADS_DOLT_PASSWORD="$GC_DOLT_PASSWORD"
               exec gc start --foreground /city
           env:
             - name: HOME
