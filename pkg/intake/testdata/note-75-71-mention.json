@@ -1,0 +1,22 @@
+{
+  "object_kind": "note",
+  "event_type": "note",
+  "user": { "id": 9, "username": "steve", "name": "Steven Wagner" },
+  "project": {
+    "id": 75,
+    "name": "sortlib",
+    "path_with_namespace": "group/sortlib",
+    "default_branch": "main",
+    "web_url": "https://gitlab.orac.local/group/sortlib"
+  },
+  "object_attributes": {
+    "id": 4471,
+    "note": "@gonk you are absolutely right choomy, that sort function SHOULD honor the desc parameter. you have permission to fix it.",
+    "noteable_type": "Issue",
+    "discussion_id": "5c1b0e2f9a"
+  },
+  "issue": {
+    "id": 9071,
+    "iid": 71
+  }
+}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -59,6 +60,21 @@ type Handler struct {
 	// returns false when its queue is full, which is a drop, not an error.
 	Sink func(*Event) bool
 	Obs  Observer
+
+	// Log receives the one record every delivery produces (see finish). Nil
+	// means slog.Default() -- NOT silence. Silence is the defect this field
+	// exists to fix: on 2026-09-12 a note event was delivered, accepted and
+	// 200'd for project 75 issue !71 and left no trace anywhere, so diagnosing
+	// it took a query against GitLab's own hook delivery log. A handler built
+	// without a logger must still say what it did.
+	Log *slog.Logger
+}
+
+func (h *Handler) log() *slog.Logger {
+	if h.Log != nil {
+		return h.Log
+	}
+	return slog.Default()
 }
 
 // NewHandler is the sanctioned way to build a Handler: it fails closed on a
@@ -87,9 +103,18 @@ func NewHandler(v *Verifier, d *Deduper, botUserID int64, sink func(*Event) bool
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-Gitlab-Event")
+	rawUUID := r.Header.Get("X-Gitlab-Event-UUID")
+
+	// ev and delivery are filled in as the delivery is understood; finish reads
+	// whatever is known BY THEN, through the closure. That is the whole trick
+	// that makes the record total: every `return` below goes through finish, so
+	// no new early exit can be added that leaves a delivery unaccounted for.
+	var ev *Event
+	delivery := safeDeliveryID(rawUUID)
+	finish := func(o Outcome, code int) { h.finish(w, event, ev, delivery, o, code) }
 
 	if r.Method != http.MethodPost {
-		h.finish(w, event, OutcomeBadMethod, http.StatusMethodNotAllowed)
+		finish(OutcomeBadMethod, http.StatusMethodNotAllowed)
 		return
 	}
 	// Verify BEFORE touching the body. A forged request must cost us nothing.
@@ -98,15 +123,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ErrMissingToken) {
 			out = OutcomeMissingToken
 		}
-		h.finish(w, event, out, http.StatusUnauthorized)
+		finish(out, http.StatusUnauthorized)
 		return
 	}
 	if !isJSON(r.Header.Get("Content-Type")) {
-		h.finish(w, event, OutcomeBadContentType, http.StatusUnsupportedMediaType)
+		finish(OutcomeBadContentType, http.StatusUnsupportedMediaType)
 		return
 	}
 	if !handledEvents[event] {
-		h.finish(w, event, OutcomeUnhandledEvent, http.StatusOK)
+		finish(OutcomeUnhandledEvent, http.StatusOK)
 		return
 	}
 
@@ -114,26 +139,36 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
-			h.finish(w, event, OutcomeTooLarge, http.StatusRequestEntityTooLarge)
+			finish(OutcomeTooLarge, http.StatusRequestEntityTooLarge)
 			return
 		}
-		h.finish(w, event, OutcomeMalformed, http.StatusBadRequest)
+		finish(OutcomeMalformed, http.StatusBadRequest)
 		return
 	}
 
-	ev, err := ParseEvent(event, body)
+	parsed, err := ParseEvent(event, body)
 	if err != nil {
-		h.finish(w, event, OutcomeMalformed, http.StatusBadRequest)
+		finish(OutcomeMalformed, http.StatusBadRequest)
 		return
 	}
-	if h.Deduper.Seen(DedupeKey(r.Header.Get("X-Gitlab-Event-UUID"), ev)) {
-		h.finish(w, event, OutcomeDuplicate, http.StatusOK)
+	ev = parsed
+	// The dedupe key is derived from the RAW header (unchanged behaviour: a
+	// truncated key could collide two distinct deliveries into one drop). The
+	// DeliveryID is the sanitized form, because that one is written to a log.
+	key := DedupeKey(rawUUID, ev)
+	if delivery == "" {
+		delivery = safeDeliveryID(key)
+	}
+	ev.DeliveryID = delivery
+
+	if h.Deduper.Seen(key) {
+		finish(OutcomeDuplicate, http.StatusOK)
 		return
 	}
 	// Loop guard (spec 4.3 step 2): the bot's own comments must never trigger
 	// the bot.
 	if ev.User.ID == h.BotUserID {
-		h.finish(w, event, OutcomeBotAuthored, http.StatusOK)
+		finish(OutcomeBotAuthored, http.StatusOK)
 		return
 	}
 	if !h.Sink(ev) {
@@ -165,13 +200,62 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// happened. Recovery is the reconciler's job, per spec 5.2:
 		// "Reconciliation is the correctness path; webhooks are the latency
 		// optimization."
-		h.finish(w, event, OutcomeQueueFull, http.StatusServiceUnavailable)
+		finish(OutcomeQueueFull, http.StatusServiceUnavailable)
 		return
 	}
-	h.finish(w, event, OutcomeAccepted, http.StatusOK)
+	finish(OutcomeAccepted, http.StatusOK)
 }
 
-func (h *Handler) finish(w http.ResponseWriter, event string, o Outcome, code int) {
+// maxDeliveryIDBytes bounds what may be copied out of the attacker-controlled
+// X-Gitlab-Event-UUID header into a log record. A real GitLab delivery uuid is
+// 36 characters.
+const maxDeliveryIDBytes = 64
+
+// safeDeliveryID makes a header value safe to write to a log line: printable
+// ASCII only (so no CR/LF can forge a second record and no control byte can
+// confuse a terminal), and bounded in length.
+//
+// It is used ONLY for the record and Event.DeliveryID. The dedupe key keeps
+// using the raw header, because truncating THAT could make two distinct
+// deliveries share a key and silently drop the second.
+func safeDeliveryID(v string) string {
+	if v == "" {
+		return ""
+	}
+	if len(v) > maxDeliveryIDBytes {
+		v = v[:maxDeliveryIDBytes]
+	}
+	var b strings.Builder
+	b.Grow(len(v))
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c < 0x20 || c > 0x7e {
+			b.WriteByte('?')
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// finish writes the response AND the one record this delivery produces.
+//
+// EXACTLY ONE RECORD PER DELIVERY, ALWAYS ON. gonk-ecn is what this is for: a
+// note event for project 75 issue !71 was delivered, accepted and answered 200,
+// and left no trace in intake at all -- so the only way to learn it had arrived
+// was to query GitLab's hook delivery log. A 200 with no explanation is the bug.
+//
+// WHAT IT MAY SAY. Everything here is either a bounded constant (the collapsed
+// event label, the outcome, the status), a numeric id, or the sanitized
+// delivery id. It NEVER carries the note body, the issue title or description,
+// or any header other than the two named -- issue and comment text is untrusted
+// user input, and a log is not a place to put it.
+//
+// The pre-authentication outcomes (bad_method, missing/bad_token,
+// bad_content_type) log at WARN with only the bounded fields: ev is still nil
+// on those paths by construction, so there is nothing attacker-supplied to
+// leak beyond the sanitized delivery id.
+func (h *Handler) finish(w http.ResponseWriter, event string, ev *Event, delivery string, o Outcome, code int) {
 	if h.Obs != nil {
 		// The raw X-Gitlab-Event header is attacker-controlled on every path,
 		// including the pre-authentication ones (bad_method, bad/missing_token).
@@ -180,6 +264,39 @@ func (h *Handler) finish(w http.ResponseWriter, event string, o Outcome, code in
 		// anything outside the handled allow-list to a single fixed label.
 		h.Obs.WebhookOutcome(eventLabel(event), o)
 	}
+
+	attrs := []any{
+		"delivery", delivery,
+		"event", eventLabel(event),
+		"outcome", string(o),
+		"status", code,
+	}
+	if ev != nil {
+		attrs = append(attrs, "project", ev.Project.PathWithNamespace, "project_id", ev.Project.ID)
+		if ev.Issue != nil {
+			attrs = append(attrs, "issue_iid", ev.Issue.IID)
+		}
+		if ev.Note != nil {
+			attrs = append(attrs, "note_id", ev.Note.ID, "noteable", ev.Note.NoteableType)
+		}
+		if ev.MergeRequest != nil {
+			attrs = append(attrs, "mr_iid", ev.MergeRequest.IID)
+		}
+	}
+	switch o {
+	case OutcomeAccepted:
+		h.log().Info("webhook delivery", attrs...)
+	case OutcomeQueueFull:
+		// The one drop that loses an event. ERROR, and it says so.
+		h.log().Error("webhook delivery DROPPED: the dispatch queue is full", attrs...)
+	default:
+		// Everything else is a handled non-dispatch: a duplicate, the bot's own
+		// comment, an unhandled event kind, a rejected request. WARN, not Info:
+		// each of them is a reason something a human did produced no work, and
+		// that is the question this record exists to answer.
+		h.log().Warn("webhook delivery not accepted", attrs...)
+	}
+
 	w.WriteHeader(code)
 	// Body is deliberately terse: it is an error channel to an attacker.
 	_, _ = io.WriteString(w, string(o)+"\n")

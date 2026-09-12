@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -56,6 +57,18 @@ var agentForTrigger = map[string]string{
 	// its prompt (#4891) or even learn which repository it was for (#4668). A
 	// newly onboarded project therefore sat at `pending` forever -- see gonk-bgx.
 	"scaffold": "scaffold",
+}
+
+// routableTriggers lists, in a stable order, the triggers agentForTrigger will
+// actually dispatch. It exists so the refusal in runDispatch can say what the
+// alternative WAS, rather than leaving a reader to go find this map.
+func routableTriggers() []string {
+	out := make([]string, 0, len(agentForTrigger))
+	for k := range agentForTrigger {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // brokerSessionAlias is the correlation key stamped on the created session and
