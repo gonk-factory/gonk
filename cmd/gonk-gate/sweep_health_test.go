@@ -220,3 +220,28 @@ func TestSweepHealthFilePathAndOverride(t *testing.T) {
 		t.Errorf("sweepHealthFile() = %q, want the override", got)
 	}
 }
+
+// The chart's bootstrap initContainer seeds a health record with a one-line
+// `printf` (see chart/gonk/templates/workload-gonk-controller.yaml). If this
+// package ever stops parsing that shape, the seed silently becomes "no record"
+// -- which reads as READY -- and the hole it closes reopens.
+func TestTheChartsSeededHealthRecordParsesAndReadsReady(t *testing.T) {
+	health := filepath.Join(t.TempDir(), "h.json")
+	seeded := `{"at":"` + time.Now().UTC().Format("2006-01-02T15:04:05Z") + `","ok":true,"consecutive_failures":0}` + "\n"
+	if err := os.WriteFile(health, []byte(seeded), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h, found := readSweepHealth(health)
+	if !found || !h.OK {
+		t.Fatalf("the chart's seeded record parsed as %+v found=%v; the probe would read it as 'no record'", h, found)
+	}
+	if code, _, errOut := probe(t, "--file", health); code != 0 {
+		t.Errorf("a freshly seeded record exits %d, want 0 -- a booting pod must not be born unready: %s", code, errOut)
+	}
+	// ...and once it goes stale, readiness fails -- which is the whole point:
+	// a sweep order that never runs can no longer hide behind "no record yet".
+	if code, _, _ := probe(t, "--file", health, "--max-age", "1ns"); code != 1 {
+		t.Errorf("a stale seed exits %d, want 1 -- a sweep that never ran must go unready", code)
+	}
+}

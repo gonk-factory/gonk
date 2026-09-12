@@ -166,3 +166,51 @@ func TestTranscriptArchiveWiresAWritableBoundedVolumeWhenEnabled(t *testing.T) {
 		t.Errorf("transcripts mountPath = %q, want /transcripts (it must match GONK_TRANSCRIPT_DIR)", found)
 	}
 }
+
+// The readinessProbe treats a MISSING health record as READY, so that a pod
+// which has not yet completed its first 30s sweep pass is not held out of its
+// own Service. That leaves one hole: a gonk-sweep cooldown order that never
+// runs AT ALL writes no record ever, and the probe would stay green through a
+// total outage -- the same class of invisible failure as gonk-p7qh.
+//
+// The bootstrap initContainer closes it by seeding an ok record stamped at pod
+// start, so the staleness check runs from then. This test exists because the
+// seed is one line in a shell script and deleting it would break nothing
+// visible.
+func TestBootstrapSeedsTheSweepHealthRecord(t *testing.T) {
+	o := controllerWorkload(t)
+	spec, _ := o.Raw["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	pspec, _ := tmpl["spec"].(map[string]any)
+	inits, _ := pspec["initContainers"].([]any)
+
+	script := ""
+	for _, c := range inits {
+		cm, _ := c.(map[string]any)
+		if cm["name"] != "bootstrap-city" {
+			continue
+		}
+		args, _ := cm["args"].([]any)
+		for _, a := range args {
+			s, _ := a.(string)
+			script += s
+		}
+	}
+	if script == "" {
+		t.Fatal("no bootstrap-city initContainer script in the render")
+	}
+	if !strings.Contains(script, "/city/gonk-sweep-health.json") {
+		t.Errorf("the bootstrap does not seed the sweep health record; a sweep that never runs would stay READY forever:\n%s", script)
+	}
+	// It must seed OK, not failed: a pod whose sweep is merely still starting
+	// must not be born unready.
+	if !strings.Contains(script, `"ok":true`) {
+		t.Errorf("the seeded record is not an ok record:\n%s", script)
+	}
+	// And it must be written to the SAME path the sweep and the probe use.
+	env := workloadEnv(t, o)
+	if !strings.Contains(script, env["GONK_SWEEP_HEALTH_FILE"]) {
+		t.Errorf("the bootstrap seeds a different path (%s) than GONK_SWEEP_HEALTH_FILE (%s)",
+			"see script", env["GONK_SWEEP_HEALTH_FILE"])
+	}
+}

@@ -1509,6 +1509,27 @@ spec:
                 echo "bootstrap-city: selected the k8s session provider in city.toml"
               fi
 
+              # ---- SEED THE SWEEP HEALTH RECORD (gonk-pop3 item 4) ---------------
+              # The readinessProbe treats a MISSING health record as READY, because a
+              # pod that has not completed its first sweep pass must not be held out
+              # of its own Service. But that leaves one hole: if the gonk-sweep
+              # cooldown order never runs AT ALL -- unregistered, a broken pack, a
+              # supervisor that never schedules it -- no record is ever written and
+              # the probe stays green through a total outage. That is the same class
+              # of failure as gonk-p7qh, and it would be just as invisible.
+              #
+              # Seeding an OK record stamped NOW closes it: the probe's staleness
+              # check (gascity.sweepHealthMaxAge) then runs from POD START, so a
+              # controller whose sweep never fires goes unready on schedule instead
+              # of never. The sweep overwrites this on its first pass.
+              #
+              # ALWAYS overwritten, never --preserve-existing: a stale record left on
+              # the emptyDir by a previous container in this pod would start the
+              # staleness clock in the past.
+              printf '{"at":"%s","ok":true,"consecutive_failures":0}\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /city/gonk-sweep-health.json
+              echo "bootstrap-city: seeded the sweep health record"
+
               # ---- STATIC SESSION INFERENCE CONFIG (gonk-aql) --------------------
               # An agent SESSION pod's env is resolved.Env -- the agent/city config
               # -- plus a fixed passthrough allow-list. Controller env does NOT

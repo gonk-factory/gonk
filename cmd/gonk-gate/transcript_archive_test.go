@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +11,9 @@ import (
 
 	"gitlab.orac.local/agentic/gonk-project/pkg/beadstore"
 	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi"
+	"gitlab.orac.local/agentic/gonk-project/pkg/gcapi/gcapitest"
+	"gitlab.orac.local/agentic/gonk-project/pkg/glab"
+	"gitlab.orac.local/agentic/gonk-project/pkg/glab/glabtest"
 )
 
 func transcriptFixture() *gcapi.SessionTranscript {
@@ -35,7 +39,7 @@ func recFixture() beadstore.Record {
 // user input.
 func TestTranscriptRecordDescribesShapeAndCarriesNoContent(t *testing.T) {
 	tr := transcriptFixture()
-	got := describeTranscript(recFixture(), tr)
+	got := describeTranscript(recFixture(), tr, tr.Text())
 
 	if got.Turns != 3 {
 		t.Errorf("Turns = %d, want 3", got.Turns)
@@ -78,7 +82,7 @@ func TestUnreadableAndPaginatedTranscriptsAreErrors(t *testing.T) {
 	}
 	for name, tr := range cases {
 		var b strings.Builder
-		describeTranscript(recFixture(), tr).log(testLogger(&b))
+		describeTranscript(recFixture(), tr, tr.Text()).log(testLogger(&b))
 		if !strings.Contains(b.String(), "level=ERROR") {
 			t.Errorf("%s transcript did not produce an ERROR:\n%s", name, b.String())
 		}
@@ -215,5 +219,68 @@ func TestTranscriptArchiveFailureIsNeverFatal(t *testing.T) {
 	}
 	if !strings.Contains(b.String(), "transcript archive") {
 		t.Errorf("the failure was not reported:\n%s", b.String())
+	}
+}
+
+// THE FULL-PATH CHECK (gonk-pop3 item 2). The tests above prove
+// describeTranscript and archiveTranscript behave; this proves the SWEEP calls
+// them -- which is a different claim, and the one that decides whether anything
+// survives the reaper in the cluster. It drives runSweep end to end, exactly as
+// the cooldown order does, with the dev switch on.
+func TestTheSweepItselfRecordsAndArchivesTheTranscript(t *testing.T) {
+	gl := glabtest.New(t)
+	gl.Me = glab.User{ID: 1, Username: "gonk"}
+	p := gl.AddProject("group/repo", glab.AccessMaintainer)
+	gl.AddIssue(p.ID, 3, "opened")
+
+	gc := gcapitest.New(t)
+	gc.FinishSession("gonk.triage.p42.i3.a1", "thinking...\n"+
+		"GONK_BATCH_START\n"+
+		`{"effects":[{"kind":"comment","body":"Looks like a Safari-only CSS bug."}]}`+
+		"\nGONK_BATCH_END\n")
+
+	store := beadstore.NewMemory()
+	rec := brokerRunningRecord(p.ID)
+	_ = store.Put(context.Background(), rec)
+	fm := &fakeOutcomeMeter{outcomeNext: "done"}
+
+	archive := t.TempDir()
+	var logged strings.Builder
+	code := runSweep(context.Background(), sweepDeps{
+		Meter: meterClient(fm.server(t)), GC: gc.Client("gonk-city"), GL: gl.Client(),
+		Apply: &recordingApplier{}, Store: store, BotUsername: "gonk", PackDir: repoPackDir,
+		Log: testLogger(&logged), TranscriptDir: archive,
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d:\n%s", code, logged.String())
+	}
+
+	t.Logf("\n--- what `kubectl logs deploy/gonk-controller` now shows for this session ---\n%s", logged.String())
+
+	if !strings.Contains(logged.String(), `msg="transcript read"`) {
+		t.Fatalf("the sweep never recorded the transcript it judged from:\n%s", logged.String())
+	}
+	if !strings.Contains(logged.String(), "batch_fence=true") {
+		t.Errorf("the record does not say the batch fence was found:\n%s", logged.String())
+	}
+	if !strings.Contains(logged.String(), "archived=") {
+		t.Errorf("the record does not name the archived copy:\n%s", logged.String())
+	}
+
+	entries, err := os.ReadDir(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("the archive holds %d files, want 1 -- the transcript did not survive the sweep", len(entries))
+	}
+	body, err := os.ReadFile(filepath.Join(archive, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The evidence that was being lost: the agent's own words, after the
+	// session that produced them is classified and its pod is due for reaping.
+	if !strings.Contains(string(body), "Safari-only CSS bug") {
+		t.Errorf("the archived transcript does not contain the agent's output:\n%s", body)
 	}
 }

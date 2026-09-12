@@ -187,9 +187,12 @@ func recordSweepFailure(log *slog.Logger, path, stage string, now time.Time, cau
 	if !h.LastGoodAt.IsZero() {
 		attrs = append(attrs, "last_good_pass", h.LastGoodAt)
 	}
-	// deadSweepThreshold passes is one minute of total outage at the 30s
-	// cooldown interval -- long enough that a single transient blip does not
-	// shout, short enough that a real outage is named almost immediately.
+	// Two consecutive passes is 30 seconds of outage at the sweep's cooldown
+	// interval -- long enough that a single transient blip (a restarting Dolt,
+	// one dropped connection) does not shout, short enough that a real outage
+	// is named almost immediately. The readiness probe does NOT wait for this
+	// threshold: it fails on the first recorded failure, because a partial
+	// outcome path is already one that can strand a bead.
 	if h.ConsecutiveFailures >= deadSweepThreshold {
 		log.Error("SWEEP IS DEAD: the outcome path is down -- no session can be classified, "+
 			"no outcome reported, and every finished session is being discarded", attrs...)

@@ -130,7 +130,9 @@ kubectl exec deploy/gonk-controller -- cat /city/gonk-sweep-health.json
 ```
 
 A **missing** health record reads as READY, not failed: a fresh pod has not
-completed a pass yet.
+completed a pass yet. The bootstrap initContainer seeds an ok record stamped at
+pod start, so the staleness check runs from then -- a `gonk-sweep` order that
+never runs at all cannot hide behind "no record yet".
 
 In the log, a repeated failure escalates from `sweep: pass failed` to one
 cumulative statement, so the log says how long it has been broken:

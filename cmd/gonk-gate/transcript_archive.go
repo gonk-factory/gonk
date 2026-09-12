@@ -86,8 +86,10 @@ type transcriptRecord struct {
 // 9 previously required a port-forward to gonk-meter and a bearer token against
 // /v1/cost/bead. The turn shape is free, comes from a process that survives the
 // pod, and answers most of the same question.
-func describeTranscript(rec beadstore.Record, tr *gcapi.SessionTranscript) transcriptRecord {
-	text := tr.Text()
+// text is the caller's already-joined tr.Text(); it is passed in rather than
+// recomputed because Text() rebuilds the whole transcript on every call and the
+// caller needs it twice more.
+func describeTranscript(rec beadstore.Record, tr *gcapi.SessionTranscript, text string) transcriptRecord {
 	sum := sha256.Sum256([]byte(text))
 	out := transcriptRecord{
 		Bead:    rec.BeadAnchor,

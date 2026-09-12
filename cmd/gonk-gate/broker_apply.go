@@ -217,7 +217,13 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 	// when the dev switch is on. Both happen BEFORE any of the refusals below,
 	// so the hardest cases to investigate -- paginated, empty, no fence -- are
 	// the ones that leave evidence.
-	tdesc := describeTranscript(rec, tr)
+	//
+	// text is joined ONCE and reused by all three readers below. Text()
+	// rebuilds a fresh copy of the whole transcript on every call (see
+	// pkg/gcapi/transcript.go), and a 4 MiB transcript is a real allocation;
+	// adding the record must not add a third one.
+	text := tr.Text()
+	tdesc := describeTranscript(rec, tr, text)
 	tdesc.Archived = archiveTranscript(d.Log, d.TranscriptDir, rec, tr)
 	tdesc.log(d.Log)
 
@@ -239,10 +245,10 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, rec beadst
 	// same reason: an incomplete read must resolve to UNKNOWN -> retry, never to
 	// a verdict. A genuinely silent agent still produces a non-empty transcript
 	// (the harness banner alone guarantees that), so this cannot mask one.
-	if isUnreadableTranscript(tr.Text()) {
+	if isUnreadableTranscript(text) {
 		return false, "", fmt.Errorf("transcript for %q is empty; refusing to judge an unreadable session", rec.SessionID)
 	}
-	raw, ok := extractBatch(tr.Text())
+	raw, ok := extractBatch(text)
 	if !ok {
 		return false, "no GONK_BATCH_START/END fence in session transcript", nil
 	}
