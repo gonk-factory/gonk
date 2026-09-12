@@ -16,11 +16,37 @@ happened to exist.
 The lesson generalises past this one script: an API check must assert on a FIELD
 IT EXPECTS, never on the response being well-formed. That is what this encodes.
 
-    hack/require_image_tags.py v0.1.0-1ef548b06598
-    hack/require_image_tags.py --tag-from-git        # tag of the current HEAD
+    hack/require_image_tags.py v0.1.0-337.c0fe5bcb2c0c
 
 Exits 0 only when every gonk image carries the tag. Anything else is non-zero
 and says which are missing.
+
+--tag-from-git IS GONE (gonk-7ywn). It reconstructed $GONK_VERSION-<sha12>
+from git, which stopped being the tag a DEFAULT-BRANCH build publishes when
+0f13d63 split the shapes:
+
+    default branch   $GONK_VERSION-$CI_PIPELINE_IID.<sha12>   v0.1.0-337.c0fe5bcb2c0c
+    any other ref    $GONK_VERSION-<sha12>                    v0.1.0-c0fe5bcb2c0c
+
+and gitops pins default-branch builds, so the case the flag was used for is
+exactly the case it got wrong. It failed loudly -- all four images ABSENT --
+but it lied about WHY, pointing at a pipeline that had not built instead of at
+a tag that was never going to exist.
+
+IT CANNOT BE FIXED FROM GIT. The pipeline IID is assigned by GitLab when the
+pipeline is created and is recorded nowhere in the repository; no amount of
+`git rev-parse` reaches it. Recovering it would mean a SECOND API call
+(projects/69/pipelines?sha=...) picking one pipeline out of however many ran
+for that commit -- retries, merge-request pipelines, manual runs -- and then
+asserting against a tag nobody is deploying while printing "all present". That
+is a new instance of exactly the trust-the-API-reply failure this script exists
+to prevent, so it is not worth having.
+
+PASS THE TAG. Read it from the pipeline: every image job echoes GONK_TAG=... as
+its first line (.gitlab-ci.yml, .gonk-tag). Or ask the registry what it has:
+
+    glab api "projects/69/registry/repositories/98/tags?per_page=20" |
+      python3 -c 'import json,sys;[print(t["name"]) for t in json.load(sys.stdin)]'
 """
 import json
 import subprocess
@@ -71,27 +97,35 @@ def tag_present(repo_id, tag):
     return True, None
 
 
-def head_tag():
-    sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-    ).stdout.strip()[:12]
-    version = "0.1.0"
-    try:
-        with open("images/versions.env", encoding="utf-8") as fh:
-            for line in fh:
-                if line.startswith("GONK_VERSION="):
-                    version = line.split("=", 1)[1].strip()
-                    break
-    except OSError:
-        pass
-    return f"{version}-{sha}"
+USAGE = """usage: require_image_tags.py <tag>
+
+Give the EXACT tag, e.g. v0.1.0-337.c0fe5bcb2c0c (default branch) or
+v0.1.0-c0fe5bcb2c0c (any other ref). See the module docstring for where to
+read it from; there is no way to derive it from a git checkout, because the
+pipeline IID in a default-branch tag exists only in GitLab."""
+
+# --tag-from-git is still RECOGNISED so it produces this explanation rather
+# than being taken for a literal tag name and reported as four absent images,
+# which is a worse lie than the one it used to tell.
+REMOVED_FLAG_MESSAGE = """--tag-from-git was removed (gonk-7ywn).
+
+It rebuilt $GONK_VERSION-<sha12> from git. Since 0f13d63 that is NOT the tag a
+default-branch build publishes -- those are $GONK_VERSION-<iid>.<sha12>, and
+the pipeline IID is assigned by GitLab and recorded nowhere in the repo, so no
+git command can reach it. Against a main build the flag reported all four
+images ABSENT and named the wrong reason.
+
+""" + USAGE
 
 
 def main(argv):
-    if not argv or argv[0] == "--tag-from-git":
-        tag = head_tag()
-    else:
-        tag = argv[0]
+    if not argv or argv[0] in ("-h", "--help"):
+        print(USAGE, file=sys.stderr)
+        return 2
+    if argv[0] == "--tag-from-git":
+        print(REMOVED_FLAG_MESSAGE, file=sys.stderr)
+        return 2
+    tag = argv[0]
 
     print(f"requiring tag {tag} on {len(REPOS)} images")
     missing = []
