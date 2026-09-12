@@ -24,6 +24,12 @@ USAGE
     hack/registry_prune.py              # dry run: print what would be deleted
     hack/registry_prune.py --apply      # actually delete
 
+The deployed tag is read out of the gitops HelmRelease so the prune can never
+remove what is running. BOTH tag shapes are recognised (see TAG_RE): the legacy
+/ branch-build v0.1.0-<sha12>, and the default-branch v0.1.0-<iid>.<sha12> that
+.gitlab-ci.yml has published since 0f13d63. EVERY tag the HelmRelease pins is
+protected, not just the first one found.
+
 Requires glab, authenticated against gitlab.orac.local (`glab auth status`).
 """
 
@@ -35,7 +41,26 @@ import sys
 
 PROJECT = "agentic%2Fgonk-project"
 DEFAULT_HELMRELEASE = "../gitops/clusters/orac/apps/gonk/helmrelease-gonk.yaml"
-TAG_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{12}")
+# BOTH deployable tag shapes, because both exist and both are deployable.
+#
+#   v0.1.0-c0fe5bcb2c0c        legacy, and still what every NON-default-branch
+#                              build publishes (.gitlab-ci.yml .gonk-tag)
+#   v0.1.0-337.c0fe5bcb2c0c    what the default branch has published since
+#                              0f13d63: $GONK_VERSION-$CI_PIPELINE_IID.<sha12>
+#
+# Before this was widened the new shape matched NOTHING, so deployed_tags()
+# returned None and the script refused to run. That is fail-safe but it is not
+# working: the prune stops the moment gitops pins a new-shape tag, and this
+# registry has already filled its volume once (gonk-mzm).
+#
+# The trailing (?![0-9a-f]) is deliberate. Without it a hand-written tag with a
+# longer hex run would match its first 12 characters and yield a `deployed`
+# string that is not any real tag. That happens to stay SAFE (protected() is a
+# startswith, so a short prefix over-protects) but it would print a tag that
+# does not exist in the "protecting deployed tag X" banner -- and the operator
+# reading that banner is the last line of defence here. Refusing outright is
+# the better failure.
+TAG_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+-(?:[0-9]+\.)?[0-9a-f]{12}(?![0-9a-f])")
 ARCH_SUFFIX_RE = re.compile(r"-(amd64|arm64)$")
 
 
@@ -82,19 +107,45 @@ def base_tag(name):
     return ARCH_SUFFIX_RE.sub("", name)
 
 
-def deployed_tag(helmrelease_path, override):
-    if override:
-        return override
+def deployed_tags(helmrelease_path, overrides):
+    """Every tag the HelmRelease pins, as a sorted tuple. Empty when unreadable.
+
+    IT RETURNS ALL OF THEM, not one. The old version did
+    `sorted(set(...))[0]` behind a `len(found) == 1` test whose two branches
+    were identical -- so a HelmRelease naming two different tags (a partial
+    bump, a per-image pin, a migration with one image on each shape) silently
+    protected the alphabetically-first and put the OTHER ONE, which is also
+    deployed, in the delete set. Nothing downstream would have caught it:
+    plan_for_repo's hard stop only looks for the single tag it was handed.
+
+    That defect predates the tag-shape change and is shape-independent, but
+    widening TAG_RE widens the exposure to it, so it is fixed here rather than
+    left as a trap for the first mixed-shape bump. Protecting every pinned tag
+    is strictly safer than protecting one: the keep set only ever grows.
+    """
+    if overrides:
+        return tuple(sorted(set(overrides)))
     try:
         with open(helmrelease_path) as fh:
-            found = sorted(set(TAG_RE.findall(fh.read())))
+            return tuple(sorted(set(TAG_RE.findall(fh.read()))))
     except OSError:
-        return None
-    return found[0] if len(found) == 1 else (found[0] if found else None)
+        return ()
 
 
 def plan_for_repo(rid, rpath, deployed, keep_groups):
-    """Return (keep, delete) tag-name lists for one repository, newest first."""
+    """Return (keep, delete) tag-name lists for one repository, newest first.
+
+    `deployed` may be one tag or an iterable of them; EVERY one is protected.
+
+    NOTHING BELOW READS THE SHAPE OF A TAG. Grouping is base_tag(), which only
+    strips an -amd64/-arm64 suffix; ordering is the registry's created_at, not
+    the tag string; protection is a prefix test. So widening TAG_RE cannot move
+    a tag from keep to delete -- it can only change WHICH tags are named as
+    deployed, and naming more of them only ever grows the keep set.
+    """
+    if isinstance(deployed, str):
+        deployed = (deployed,)
+    deployed = tuple(deployed)
     names = [t["name"] for t in glab_paged(
         f"projects/{PROJECT}/registry/repositories/{rid}/tags")]
 
@@ -113,7 +164,7 @@ def plan_for_repo(rid, rpath, deployed, keep_groups):
             seen.add(b)
             order.append(b)
 
-    keepset = set(order[:keep_groups]) | {deployed}
+    keepset = set(order[:keep_groups]) | set(deployed)
 
     def protected(name):
         # Keep the recent build groups, and keep EVERY tag carrying the deployed
@@ -122,15 +173,20 @@ def plan_for_repo(rid, rpath, deployed, keep_groups):
         # fold into the deployed group because -testclock is not an arch suffix.
         # Nothing in gitops pins it, so deleting it would probably be harmless,
         # and "probably harmless" is not worth three tags of disk.
+        #
+        # str.startswith takes a TUPLE of prefixes and is true if any matches,
+        # which is exactly the multi-pin semantics wanted here.
         return base_tag(name) in keepset or name.startswith(deployed)
 
     keep = [n for _, n in dated if protected(n)]
     delete = [n for _, n in dated if not protected(n)]
 
     # Hard stop. Removing what Flux has pinned is how you unschedule production.
-    if any(n.startswith(deployed) for n in delete):
+    leaked = [n for n in delete if n.startswith(deployed)]
+    if leaked:
         raise SystemExit(
-            f"REFUSING: {rpath} delete set contains the deployed tag {deployed}")
+            f"REFUSING: {rpath} delete set contains deployed tag(s) "
+            f"{', '.join(leaked)} (pinned: {', '.join(deployed)})")
     return keep, delete
 
 
@@ -142,23 +198,26 @@ def main():
     ap.add_argument("--keep-groups", type=int, default=5,
                     help="recent build groups to keep per image repo (default 5)")
     ap.add_argument("--helmrelease", default=DEFAULT_HELMRELEASE)
-    ap.add_argument("--deployed-tag", default=None,
-                    help="override the deployed tag read from the HelmRelease")
+    ap.add_argument("--deployed-tag", action="append", default=None,
+                    metavar="TAG",
+                    help="override the deployed tag read from the HelmRelease; "
+                         "repeat to protect more than one")
     ap.add_argument("--keep-cache", action="store_true",
                     help="do not delete the kaniko cache repository")
     args = ap.parse_args()
 
-    deployed = deployed_tag(args.helmrelease, args.deployed_tag)
+    deployed = deployed_tags(args.helmrelease, args.deployed_tag)
     if not deployed:
         print("REFUSING TO RUN: could not determine the deployed tag from "
               f"{args.helmrelease}.\nDeleting tags without knowing what is "
               "deployed is how you unschedule production.\nPass --deployed-tag "
-              "explicitly, or point --helmrelease at the right file.",
+              "explicitly, or point --helmrelease at the right file.\nBoth tag "
+              "shapes are recognised: v0.1.0-<sha12> and v0.1.0-<iid>.<sha12>.",
               file=sys.stderr)
         return 1
 
     mode = "APPLY" if args.apply else "DRY RUN"
-    print(f"[{mode}] protecting deployed tag {deployed}; "
+    print(f"[{mode}] protecting deployed tag(s) {', '.join(deployed)}; "
           f"keeping {args.keep_groups} newest build groups per repo\n")
 
     repos = glab_paged(f"projects/{PROJECT}/registry/repositories")
