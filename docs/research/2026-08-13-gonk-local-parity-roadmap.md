@@ -32,7 +32,9 @@ Triage scales. Implementation doesn't. Their published rate is **20–30% of PRs
 
 gonk is at exactly the same inflection: triage works (issue 21 → `qwen3-14b` → well-formed effects batch), and there is no implementation path at all. **Do not widen intake before the implement→verify→MR path can absorb the queue.** That defers the `gonk-6po` source-beads epic and instance-wide watching (`gonk-8s0`) behind Phases 1–3, despite them being ready to work.
 
-Their build guide agrees, and states the ordering rule explicitly: *"Each part adds one skill to the loop, in the order that makes the next part possible. You can stop at any part and have something that works."* Review is called out as the bottleneck that appears **only after** agents produce code at volume — so review comes after implementation, not before.
+Their build guide agrees, and states the ordering rule explicitly: *"Each part adds one skill to the loop, in the order that makes the next part possible. You can stop at any part and have something that works."* Review is called out as the bottleneck that appears **only after** agents produce code at volume — so review comes after implementation, not before. 
+
+> **⚠️ QUALIFIED BY §11d (2026-09-12): this holds for REVIEW, not for VERIFICATION.** The two are separable and this sentence conflates them. Review — reading a diff and judging it — is indeed a volume problem and stays after implementation. Verification — running the tests and deciding red/green on evidence — is what makes a wrong diff cheap to detect, and it now precedes the implementation agent. See §11d.
 
 ---
 
@@ -440,9 +442,84 @@ Worth noting as context rather than as a gonk claim: a cloud-proxied product lik
 
 ---
 
+## 11d. Owner decision of 2026-09-12: the verifier substrate moves ahead of the implementation agent
+
+Set by the owner after the first live end-to-end triage run on the deployed
+build (project 75 issue !71: a correct finding naming the file, the function and
+the fix). Full working through in
+`docs/plans/2026-09-12-sequencing-decision.md`.
+
+**The order.** `gonk-2xev` (a non-answer is booked as rung success, so the
+escalation ladder never fires) first; then `gonk-xsk3` and `gonk-7s9p` tested
+and done; then the `gonk-3so` track resumes behind the **safety gates**
+(`gonk-066`, `gonk-kxg`) and the **verifier substrate** (`gonk-3jm`,
+`gonk-qhe`). `gonk-t24` drops to nice-to-have.
+
+**Why this is not a reversal of §11b Revision 2, but an extension of it.**
+Revision 2 argued verification-before-spec-agent from the economics of a
+one-operator shop: what costs the operator is wrong diffs, so build the
+detector. This decision moves verification earlier still — ahead of the
+implementation agent — on a different ground, in the owner's words:
+
+> other people facing this problem are including trajectory verifiers in their
+> implementation agents
+
+**THE RATIONALE FOR VERIFIER-FIRST IS ALREADY WRITTEN DOWN HERE, and is what
+this decision rests on:** the §Sequencing section of
+`docs/superpowers/specs/2026-08-02-verified-change-pipeline-design.md:329`.
+Cite that rather than reconstructing an argument.
+
+**The owner's trajectory remark argues for `gonk-hsb`, not for these beads.**
+`gonk-3jm`/`gonk-qhe` are the red/green TEST-RUN verifier; gonk's trajectory
+verifier is `pkg/trace` + `gonk-hsb`. And `cmd/gonk-gate/broker_trajectory.go`
+— cited in an earlier draft as an existing seam — cannot carry the weight: it
+runs AFTER the session on the finished batch (`broker_apply.go:290`),
+enforcement is off by default (`main.go:148`, gated on
+`GONK_ENFORCE_TRAJECTORY`), it is triage-scoped, and it imports `pkg/beadstore`
+and reads `pack/`, both removed by `gonk-t56`. Whether to raise `gonk-hsb` is
+an open owner question (`docs/plans/2026-09-12-sequencing-decision.md` §6), not
+a consequence of this decision.
+
+**This IS a partial phase reversal — §1 is qualified, not preserved.** An
+earlier draft claimed Phase 3 was merely the *consumer* of the substrate. That
+does not survive inspection: `gonk-td7`'s items (d) reproduce/verify red-green,
+(e) artifact-backed status, (f) attempt cap and (g) the resolve/work/apply
+privilege split are what `gonk-cyr`/`gonk-3jm`/`gonk-qhe` deliver, and §6 3.6
+says verbatim *"`gonk-qhe` already specifies the sandboxed runner"*. Nor is the
+chain independent of Phase 1 — `gonk-3jm` IS Phase 1.2, the code-effects
+vocabulary.
+
+So, precisely: **the VERIFY half of Phase 3 moves ahead of Phase 1's
+implementation agent; the REVIEW half (a–c: annotated-diff coordinates,
+validator, read-only reviewer) stays.** §1's "review comes after
+implementation, not before" holds for review and no longer holds for
+verification. The phase NUMBERING is unchanged; what each phase contains is
+not.
+
+**The open question this decision does not settle.** `gonk-4v8` blocks
+`gonk-3so` and depends only on `gonk-066` (plus two closed beads), so the graph
+puts the implementation agent **two hops out, behind the safety gate**. The
+longer route through `gonk-t53` → `gonk-t21` → `gonk-t20` → the Gas City
+cutover is real work but is NOT a graph edge: `gonk-t53` merely says *"Closes:
+`gonk-4v8`"* in prose. Which route applies is a scoping decision — does
+`gonk-4v8` mean "one triage-only repo onboarded by hand" or "all three proven
+through the v1 CI scenario"? Options in
+`docs/plans/2026-09-12-sequencing-decision.md` §3.1. Recorded here because the
+phase table cannot express it and it dominates the practical schedule.
+
+**A precondition that is filed but unscheduled, and unlinked.** `gonk-qhe` must
+not ship before CNI policy enforcement is settled. That work IS filed —
+`gonk-dku` (P1, open): flannel with no policy controller, remedy option 1
+"install Calico or Cilium alongside flannel". But `gonk-qhe` depends only on
+`gonk-3jm`, so making `gonk-3so` depend on `gonk-qhe` would inherit an
+unscheduled CNI migration as a HIDDEN precondition. The fix is the edge
+`gonk-qhe → gonk-dku`.
+
+---
+
 ## 12. Sequencing summary
 
-Revised per §11b **and §11c**:
+Revised per §11b, §11c **and §11d**:
 
 ```
 Phase 0  Unblock          fail-open (ob5) FIRST, then registry, prompt-by-reference,
@@ -451,17 +528,27 @@ Phase 0  Unblock          fail-open (ob5) FIRST, then registry, prompt-by-refere
    │                      SCAFFOLD/ONBOARDING (bgx, msz) is now a hard blocker —
    │                      it gates the test repo, which gates everything
    │                      + pick and onboard the real non-gonk test repo (§11c.2)
-Phase 1  Throughput       edit-tool investigation + hunk-only returns, PAGER, tool-name
-   │                      tuning for qwen3_xml; THEN implementation agent, code effects,
+Phase 1  Throughput       PRECONDITIONS FIRST (§11d): safety gate 066 (workflow-scope
+   │                      shape gate) — kxg's verdict half already shipped in aib and
+   │                      its remainder needs a second agent to exist — then the
+   │                      verifier substrate 3jm -> qhe. A code-writing agent does not
+   │                      ship before the gate that can say "this diff is out of scope"
+   │                      and the runner that can say "this diff does not work".
+   │                      Then: edit-tool investigation + hunk-only returns, PAGER,
+   │                      tool-name tuning for qwen3_xml;
+   │                      THEN implementation agent, code effects,
    │                      anti-lying validator, annotated-diff coordinates + validator,
    │                      MR↔bead marker, .gonk.yml validation contract, fix attribution
    │                      → THE gap; Warp's own factory stalled exactly here.
    │                        Search subagent is NOT here — 128K makes it an optimization
 Phase 2  Route            roadmap.md/vision.md, 4-state rubric, skills-as-files
    │                      → cheap, high-leverage; the spec agent is NOT here any more
-Phase 3  Review + verify  annotated-diff coordinates, validator, read-only reviewer,
-   │                      reproduce/verify modes, artifact-backed status, attempt cap
-   │                      → the detector for wrong diffs, which is what costs the operator
+Phase 3  Review only     annotated-diff coordinates, validator, read-only reviewer
+   │       (§11d)         → reproduce/verify modes, artifact-backed status and the
+   │                        attempt cap MOVED TO PHASE 1 as the verifier substrate
+   │                        (cyr -> 3jm -> qhe). What is left here is REVIEW: reading
+   │                        a diff and judging it, which is the volume problem §1
+   │                        describes and does belong after implementation.
 Phase 3b Spec agent       PRODUCT/TECH specs + human spec gate
    │                      → only once verification proves the work is worth pre-specifying
 Phase 4  Package          environments as one object, sidecar-merged harness, warm cache
