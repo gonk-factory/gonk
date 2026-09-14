@@ -25,13 +25,34 @@
 //
 //   - READINESS. This is the answer. `kubectl get pods` showing 0/1 READY is
 //     the one signal in this stack that is visible WITHOUT knowing to look for
-//     it, and it is already wired to something that matters: an unready
-//     controller leaves the Service's endpoints, so intake's FireOrder fails
-//     and logs `fire_error`, and the work is simply NOT DISPATCHED -- instead
-//     of being dispatched into a session whose outcome can never be written,
-//     which is exactly how gonk-p7qh stranded beads permanently. Nothing kills
-//     the pod (liveness is untouched), the sweep keeps retrying, and readiness
-//     returns on its own the moment the store is reachable again.
+//     it. Nothing kills the pod (liveness is untouched), the sweep keeps
+//     retrying, and readiness returns on its own once the outcome path is back.
+//
+// WHAT READINESS DOES AND DOES NOT DO, as observed on a live outage (gonk-7s9p,
+// kind, 2026-09-14: the Dolt `gc` user's password rotated server-side, so every
+// client holding the mounted Secret was denied). This corrects the original
+// design claim that an unready controller is what stops intake dispatching:
+//
+//   - IT DOES NOT CAUSE INTAKE'S REFUSAL. Intake refused from the first minute,
+//     while the pod was still 1/1: Gas City's order-run endpoint answers 503
+//     when it cannot write its own tracking bead, and intake logs that as
+//     `fire_error`. Once the pod went 0/1 the same refusal became a refused
+//     connection. Readiness makes a dead store VISIBLE; it does not gate work.
+//     (The one case where readiness does change dispatch is a FALSE unready on
+//     a healthy controller -- which is why the window is not tight.)
+//   - A DEAD STORE IS CAUGHT BY STALENESS, NOT BY THE FAILED-PASS BRANCH. Gas
+//     City would not launch gonk-sweep at all (its order dispatcher reads the
+//     same store first and fails closed), so no failure was recorded, the ok
+//     record went stale, and no "SWEEP IS DEAD" line was ever logged. Detection
+//     time is therefore the probe's --max-age: 14m31s on 15m. The failed-pass
+//     branch still covers a store that fails for the sweep but not for Gas City,
+//     which is the gonk-p7qh shape; it was not reproducible on the kind run.
+//   - Refused ISSUE work is replayed by intake's reconciler issue sweep after
+//     recovery; a refused mention is not.
+//
+// Recovery took 11-19s from the store coming back to a passing record, and
+// 16-26s to the pod rejoining its endpoints, over two runs. One pod ran 2h39m
+// unready with no restart.
 //
 // A MISSING HEALTH FILE IS NOT A FAILURE. A fresh pod has not run a sweep yet,
 // and a probe that failed on absence would hold a healthy controller out of its
@@ -58,11 +79,34 @@ const sweepHealthFileEnv = "GONK_SWEEP_HEALTH_FILE"
 const defaultSweepHealthFile = "/city/gonk-sweep-health.json"
 
 // defaultSweepMaxAge is how stale a health record may be before the probe
-// treats it as a dead sweep. The sweep order runs every 30s
-// (pack/orders/gonk-sweep.toml interval) with a 300s timeout, so one pass can
-// legitimately take five minutes. Three times that is a margin wide enough that
-// a slow pass never flaps readiness, and narrow enough that an outage is
-// visible in single-digit minutes rather than in days.
+// treats it as a dead sweep. It matches the chart's gascity.sweepHealthMaxAge,
+// which is what the controller's readinessProbe actually passes.
+//
+// 15m IS DELIBERATE, NOT SLACK (owner decision, gonk-7s9p). It is also the time
+// it takes a dead bead store to show as 0/1 (see the file comment), and it was
+// tempting to tighten it. It stays, because under disk pressure -- which gonk
+// must tolerate -- Gas City delays the sweep's launch by amounts its source does
+// not bound:
+//
+//   - A pressure-skipped supervisor tick returns before order dispatch, and only
+//     every 6th patrol tick is forced through (cmd/gc/fs_pressure.go,
+//     cmd/gc/city_runtime.go at GASCITY_REF): up to 180s to launch.
+//   - Each tick runs TWO bounded open-work gates for the order (open tracking,
+//     then open work; cmd/gc/order_dispatch.go). If either times out, a
+//     non-idempotent order like gonk-sweep is skipped for that tick -- and
+//     nothing counts consecutive misses or fails open, so each miss can cost
+//     another forced tick.
+//   - A tick that overruns its 30s slot drops the ticker's pending ticks.
+//
+// One named scenario -- 30s interval, one forced-tick wait, ONE gate miss, a
+// 300s pass, no overrun -- already reaches 11m30s; two misses reach 14m30s. A
+// false unready on a healthy but pressured controller is the one case where
+// readiness changes dispatch (intake refuses, and a refused mention is never
+// replayed), while tightening would buy only a few minutes of earlier 0/1 for an
+// outage intake is already refusing. Faster dead-store detection is gonk-hkjh.
+//
+// internal/buildgate/sweep_health_max_age_test.go keeps the chart value from
+// being tightened below that one-miss scenario.
 const defaultSweepMaxAge = 15 * time.Minute
 
 // sweepHealth is the record every pass writes. It is deliberately small and
@@ -265,7 +309,13 @@ func runSweepHealthCheck(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if age := time.Since(h.At); age > *maxAge {
-		_, _ = fmt.Fprintf(stderr, "NOT READY: the last sweep pass was %s ago (max %s) -- the cooldown order is not running\n",
+		// The likeliest cause is named, because it is the one this message would
+		// not suggest on its own: Gas City will not launch the order at all while
+		// the bead store is unreachable (gonk-7s9p), so a dead store looks like a
+		// stopped order rather than a failing one.
+		_, _ = fmt.Fprintf(stderr, "NOT READY: the last sweep pass was %s ago (max %s) -- the cooldown order is not running; "+
+			"Gas City does not launch it while the bead store is unreachable, so check the controller log for "+
+			"`checking open work for gonk-sweep`\n",
 			age.Round(time.Second), *maxAge)
 		return 1
 	}
