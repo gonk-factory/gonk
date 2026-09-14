@@ -116,11 +116,53 @@ NAME                               READY   STATUS
 gonk-controller-7c9f4b8d6-xk2ql    0/1     Running
 ```
 
-An unready controller leaves its Service's endpoints, so intake's `FireOrder`
-fails (`reason=fire_error`) and work is **not dispatched** -- rather than
-dispatched into a session whose outcome can never be written, which is exactly
-how gonk-p7qh stranded beads. Nothing kills the pod: liveness is untouched, the
-sweep keeps retrying, and readiness returns on its own.
+Readiness is how a dead outcome path becomes **visible**. It is not what stops
+dispatch: that was the original design claim (gonk-pop3), and a live outage
+showed it is wrong -- intake refuses because Gas City refuses, from the first
+minute, whatever readiness says (below). An unready controller does leave its
+Service's endpoints, which turns that refusal into `connection refused`.
+Nothing kills the pod: liveness is untouched, the sweep keeps retrying, and
+readiness returns on its own.
+
+**What a dead bead store actually looks like** (gonk-7s9p, observed on a kind
+cluster with the Dolt `gc` password rotated server-side):
+
+- **It is caught by staleness, not by a failed pass.** Gas City will not launch
+  `gonk-sweep` while it cannot read its own order-tracking beads, so no pass
+  runs, nothing records a failure, and `SWEEP IS DEAD` is never logged. The ok
+  record just ages. `gascity.sweepHealthMaxAge` is therefore the time to go
+  `0/1`: 14m31s after the break, on 15m. The probe says so, and names the
+  likely cause: `NOT READY: the last sweep pass was ... -- the cooldown order is
+  not running; Gas City does not launch it while the bead store is unreachable`.
+  The confirming line is Gas City's own, in the controller log:
+  `gc: order dispatch: checking open work for gonk-sweep: ... Access denied`.
+- **Intake refuses from the first minute, not from `0/1`.** Gas City's order-run
+  endpoint answers `503 ... creating tracking bead` while the store is down, and
+  intake logs that as `reason=fire_error`. Once the pod is unready the error
+  becomes `connection refused`. Either way nothing is dispatched.
+- **Refused issue work comes back; refused mentions do not.** The reconciler's
+  issue sweep re-dispatches open issues with no `gonk::` label (updated in the
+  last 24h, 5 per project per pass), so a refused issue is picked up on the first
+  reconcile pass after recovery -- 6m and 10m later in two runs; the bound is
+  `intake.reconcileInterval` (10m). Until then every pass logs `fire_error`. A
+  refused `@gonk` mention is not replayed: notes have no reconcile path (read
+  from `pkg/intake/reconcile.go`, not observed), so the mention reply is lost,
+  and on an issue that already carries a `gonk::` label nothing at all comes
+  back. An outage longer than 24h also ages issues out of the sweep.
+- Recovery: 11-19s from the store returning to a passing record, 16-26s to
+  rejoin the Service.
+
+**Why the window stays at 15m** (owner decision, gonk-7s9p). A 7m window was
+tried and went `0/1` 7m15s after the break, but it would flap on a healthy
+controller under disk pressure, which gonk must tolerate. Under pressure Gas
+City dispatches orders only on every 6th patrol tick (180s); each tick runs two
+bounded open-work gates, either of which skips a non-idempotent order when it
+times out, and nothing bounds how many ticks in a row that happens; and a tick
+that overruns its slot drops pending ticks. One gate miss already makes a
+healthy gap of 11m30s, two make 14m30s. A false unready is the one case where
+readiness changes dispatch -- and a refused mention is never replayed -- while
+a tighter window would only show an outage intake is already refusing a few
+minutes sooner. Faster dead-store detection is gonk-hkjh.
 
 Ask it directly:
 
@@ -134,8 +176,11 @@ completed a pass yet. The bootstrap initContainer seeds an ok record stamped at
 pod start, so the staleness check runs from then -- a `gonk-sweep` order that
 never runs at all cannot hide behind "no record yet".
 
-In the log, a repeated failure escalates from `sweep: pass failed` to one
-cumulative statement, so the log says how long it has been broken:
+When the sweep does run and its store reads fail (the gonk-p7qh shape: broken
+for the sweep, working for Gas City), a repeated failure escalates from
+`sweep: pass failed` to one cumulative statement, so the log says how long it
+has been broken. It is NOT logged when the whole store is down, because then
+the sweep never runs (above):
 
 ```
 level=ERROR msg="SWEEP IS DEAD: the outcome path is down -- no session can be
@@ -152,7 +197,7 @@ Recovery says so once: `sweep: RECOVERED -- the outcome path is alive again`.
 | `dev.transcripts.enabled` | `false` | dev-only transcript archive |
 | `dev.transcripts.dir` | `/transcripts` | where it writes (`GONK_TRANSCRIPT_DIR`) |
 | `dev.transcripts.sizeLimit` | `512Mi` | the emptyDir bound |
-| `gascity.sweepHealthMaxAge` | `15m` | how stale a health record may be before readiness fails |
+| `gascity.sweepHealthMaxAge` | `15m` | how stale a health record may be before readiness fails -- and so how long a dead bead store takes to go `0/1` (gonk-7s9p). Deliberately not tighter; see "Why the window stays at 15m". `internal/buildgate/sweep_health_max_age_test.go` refuses anything below 12m |
 | `GONK_SWEEP_HEALTH_FILE` | `/city/gonk-sweep-health.json` | where the sweep records its health |
 | `GONK_LOG_SINK` | `/proc/1/fd/1` | where `gonk-gate` writes in addition to stderr (see `cmd/gonk-gate/logsink.go`) |
 

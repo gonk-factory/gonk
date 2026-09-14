@@ -174,6 +174,13 @@ func TestAStaleHealthRecordFailsTheProbe(t *testing.T) {
 	if !strings.Contains(errOut, "not running") {
 		t.Errorf("probe message does not explain the staleness:\n%s", errOut)
 	}
+	// A dead bead store is the common cause and it presents ONLY as staleness,
+	// because Gas City will not launch the order while its store read fails
+	// (gonk-7s9p). The message must point the operator at that, by the log
+	// line that confirms it.
+	if !strings.Contains(errOut, "bead store") || !strings.Contains(errOut, "checking open work for gonk-sweep") {
+		t.Errorf("probe message does not name the bead store as the likely cause:\n%s", errOut)
+	}
 	// ...and a record inside the window passes.
 	fresh, err := json.Marshal(sweepHealth{At: time.Now(), OK: true, LastGoodAt: time.Now()})
 	if err != nil {
