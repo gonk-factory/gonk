@@ -1,0 +1,244 @@
+{{- if .Values.intake.enabled }}
+{{- $root := .Values.secrets.mountRoot }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gonk-intake
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: intake
+spec:
+  replicas: {{ .Values.intake.replicaCount }}
+  # Intake IS safe to roll and to scale: it holds no persistent state, its project
+  # cache is derived from GitLab on every pass, and its writes (the onboarding MR,
+  # the hook) are idempotent. The controller dedupes orders on BeadAnchor.
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "gonk.selectorLabels" (dict "ctx" . "component" "intake") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gonk.labels" . | nindent 8 }}
+        app.kubernetes.io/component: intake
+      {{- with .Values.intake.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: intake
+          image: {{ include "gonk.releaseImage" (dict "ctx" . "image" .Values.intake.image "value" "intake.image.tag") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: GONK_GITLAB_URL
+              value: {{ .Values.gitlab.url | quote }}
+            - name: GONK_BOT_USERNAME
+              value: {{ .Values.gitlab.botUsername | quote }}
+            # *** PATHS, NOT VALUES. ***
+            - name: GONK_GITLAB_TOKEN_FILE
+              value: {{ include "gonk.secretPath" (dict "root" $root "name" "gitlab" "key" .Values.secrets.gitlab.keys.token) | quote }}
+            {{- if .Values.secrets.rotation.gitlabPrevious }}
+            # ROTATION SLOT 2 for a credential intake PRESENTS (P02 AD-4b). Not the
+            # same mechanism as the webhook token's slot 2: nobody on gonk's side
+            # verifies a PAT, so "accept either" is meaningless. Intake presents
+            # slot 1 and, on a 401/403 from GitLab, retries ONCE with slot 2 --
+            # turning the mid-rotation window from an outage into the counter
+            # gonk_intake_gitlab_auth_fallback_total (alert on it: nonzero means a
+            # rotation is half-finished).
+            - name: GONK_GITLAB_TOKEN_PREVIOUS_FILE
+              value: {{ include "gonk.secretPath" (dict "root" $root "name" "gitlab" "key" .Values.secrets.gitlab.keys.tokenPrevious) | quote }}
+            {{- end }}
+            {{- if eq .Values.gitlab.mode "split-credential" }}
+            # Used ONLY for /hooks calls (spec 5.1). Unset -> the bot token does
+            # everything, which is the homelab default. NO second slot: a failed
+            # hook repair is simply repaired on the next reconcile pass.
+            - name: GONK_GITLAB_ADMIN_TOKEN_FILE
+              value: {{ include "gonk.secretPath" (dict "root" $root "name" "gitlab" "key" .Values.secrets.gitlab.keys.adminToken) | quote }}
+            {{- end }}
+            {{- with (include "gonk.caTrustEnv" .) }}
+            # THE PRIVATE CA (gitlab.caCert), rendered ONLY when a CA ConfigMap is
+            # named. *** THIS IS HOW WE TRUST A GITLAB BEHIND A PRIVATE CA. ***
+            # The image carries no trust setting of its own: gonk.caTrustEnv
+            # (_helpers.tpl) ADDS the mounted bundle's directory to the system
+            # roots, it does not replace them. It is the reason no code in this
+            # repo ever sets InsecureSkipVerify -- there is no value that disables
+            # TLS verification, and there never will be.
+            {{- . | nindent 12 }}
+            {{- end }}
+            - name: GONK_WEBHOOK_SECRET_FILE
+              value: {{ include "gonk.secretPath" (dict "root" $root "name" "webhook" "key" .Values.secrets.webhook.keys.token) | quote }}
+            {{- if .Values.secrets.rotation.webhookPrevious }}
+            - name: GONK_WEBHOOK_SECRET_PREVIOUS_FILE
+              value: {{ include "gonk.secretPath" (dict "root" $root "name" "webhook" "key" .Values.secrets.webhook.keys.tokenPrevious) | quote }}
+            {{- end }}
+            - name: GONK_WEBHOOK_TOKEN_GEN
+              value: {{ .Values.intake.webhookTokenGen | quote }}
+            - name: GONK_WEBHOOK_PUBLIC_URL
+              value: {{ .Values.intake.webhookPublicURL | quote }}
+            - name: GONK_WEBHOOK_SSL_VERIFY
+              value: {{ .Values.intake.webhookSSLVerify | quote }}
+            - name: GONK_METER_URL
+              value: "http://gonk-meter:{{ .Values.meter.port }}"
+            - name: GONK_METER_TOKEN_FILE
+              value: {{ include "gonk.secretPath" (dict "root" $root "name" "meter-api" "key" .Values.secrets.meterAPI.keys.token) | quote }}
+            # Empty -> the LogDispatcher: orders are LOGGED and never fired. It is
+            # set explicitly (not omitted) so a stale env cannot resurrect the HTTP
+            # dispatcher on a rolling update. When dispatch=http the URL is DERIVED
+            # from the in-chart controller Service (gascity.enabled) or from
+            # gascity.supervisorURL (BYO controller) -- see `gonk.supervisorURL`.
+            - name: GONK_SUPERVISOR_URL
+              value: {{ if eq .Values.gascity.dispatch "log" }}""{{ else }}{{ include "gonk.supervisorURL" . | quote }}{{ end }}
+            {{- if and .Values.gascity.enabled (eq .Values.gascity.dispatch "http") }}
+            # WRITE-AUTH (gonk-fsl / gonk-5we). The bundled controller runs
+            # `gc start --foreground` grant-gated, so every order-run POST must
+            # carry a fresh ed25519 X-GC-City-Write grant. These name the 0400
+            # file mount of the PRIVATE signing key (a PATH, never a value) and the
+            # kid derived from gascity.writeAuth.verifyKey's public half -- the same
+            # keypair the in-controller gonk-gate signs with. Empty key file => no
+            # grant => the controller rejects the dispatch, which G22 prevents by
+            # requiring the key when gascity.enabled.
+            {{- include "gonk.gcWriteEnv" . | nindent 12 }}
+            {{- end }}
+            # RECONCILED, Task 0: intake carries its OWN copy of the operator
+            # ladder (main.go's loadConfig fails closed if this is unset/empty --
+            # ADR-002). It MUST be the same ladder gonk-meter resolves rungs
+            # against (operatorConfig.instance.ladder), never a separate value
+            # that could drift from it. Comma-separated; the schema's minItems:1
+            # on operatorConfig.instance.ladder is what already guards "empty".
+            - name: GONK_INSTANCE_LADDER
+              value: {{ join "," .Values.operatorConfig.instance.ladder | quote }}
+            - name: GONK_RECONCILE_INTERVAL
+              value: {{ .Values.intake.reconcileInterval | quote }}
+            {{- if .Values.intake.dispatchStalenessWindow }}
+            - name: GONK_DISPATCH_STALENESS_WINDOW
+              value: {{ .Values.intake.dispatchStalenessWindow | quote }}
+            {{- end }}
+            - name: GONK_LISTEN_ADDR
+              value: ":{{ .Values.intake.ports.public }}"
+            {{- with .Values.intake.blockedProjects }}
+            # Projects gonk must never work on. Unparseable entries make intake refuse
+            # to start -- fail closed, never "block less than was written" (gonk-jn5).
+            - name: GONK_BLOCKED_PROJECTS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.intake.issueSweep.limit }}
+            - name: GONK_ISSUE_SWEEP_LIMIT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.intake.issueSweep.maxAge }}
+            - name: GONK_ISSUE_SWEEP_MAX_AGE
+              value: {{ . | quote }}
+            {{- end }}
+            - name: GONK_PRIVATE_ADDR
+              value: ":{{ .Values.intake.ports.private }}"
+            - name: GONK_VERSION
+              value: {{ .Chart.AppVersion | quote }}
+            {{- if .Values.monitoring.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.monitoring.otlpEndpoint | quote }}
+            {{- end }}
+          ports:
+            # The PUBLIC listener: POST /hook/gitlab, and 404 for everything else.
+            - name: http-hook
+              containerPort: {{ .Values.intake.ports.public }}
+            # The PRIVATE listener: /healthz, /readyz, /metrics, POST /admin/reconcile.
+            # NEVER INGRESSED. /admin/reconcile is unauthenticated.
+            - name: http-private
+              containerPort: {{ .Values.intake.ports.private }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http-private}
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          # /readyz is true only when the bot identity resolved, the first
+          # reconcile completed, AND gonk-meter's /healthz is OK. So a meter
+          # outage takes intake OUT of the Service -- the webhook 502s and GitLab
+          # retries. That is fail-closed (no unmetered dispatch), but GitLab
+          # auto-disables hooks that fail repeatedly: Plan 06 must test the
+          # recovery path.
+          #
+          # failureThreshold IS SIZED FOR A PEER RESTART, NOT JUST A PEER OUTAGE
+          # (gonk-4za). The coupling above is deliberate and stays -- intake must
+          # not dispatch unmetered. But 3 x 10s = 30s cannot ride out a ROLLING
+          # RESTART of the meter, which is a routine deploy rather than a fault,
+          # and the consequence was not merely a blip: on 2026-09-01 a Helm
+          # upgrade rolled meter and intake together, both the old AND the new
+          # intake answered /readyz 503 while the meter was down, the Deployment
+          # went to zero available replicas, and Flux failed the upgrade AND the
+          # rollback -- three times. The stack had to be recovered by hand.
+          #
+          # 12 x 10s = 120s covers a meter roll with headroom while still taking
+          # intake out of the Service inside two minutes for a genuine outage,
+          # which is what the fail-closed argument actually requires.
+          readinessProbe:
+            httpGet: {path: /readyz, port: http-private}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
+          resources:
+            {{- toYaml .Values.intake.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "gonk.secretMount" (dict "root" $root "name" "gitlab") | nindent 12 }}
+            {{- include "gonk.secretMount" (dict "root" $root "name" "webhook") | nindent 12 }}
+            {{- include "gonk.secretMount" (dict "root" $root "name" "meter-api") | nindent 12 }}
+            {{- if and .Values.gascity.enabled (eq .Values.gascity.dispatch "http") }}
+            # The ed25519 PRIVATE signing key, 0400, mounted at $root/gc-write-key.
+            {{- include "gonk.secretMount" (dict "root" $root "name" "gc-write-key") | nindent 12 }}
+            {{- end }}
+            {{- if .Values.gitlab.caCert.existingConfigMap }}
+            # The private-CA bundle, one file in the directory gonk.caTrustEnv names.
+            # subPath so the file lands at the configured mountPath and not in a dir.
+            - name: gitlab-ca
+              mountPath: {{ .Values.gitlab.caCert.mountPath }}
+              subPath: {{ .Values.gitlab.caCert.key }}
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        {{- $glKeys := list .Values.secrets.gitlab.keys.token }}
+        {{- if .Values.secrets.rotation.gitlabPrevious }}{{- $glKeys = append $glKeys .Values.secrets.gitlab.keys.tokenPrevious }}{{- end }}
+        {{- if eq .Values.gitlab.mode "split-credential" }}{{- $glKeys = append $glKeys .Values.secrets.gitlab.keys.adminToken }}{{- end }}
+        {{- include "gonk.secretVolume" (dict "name" "gitlab" "secret" .Values.secrets.gitlab.existingSecret "keys" $glKeys) | nindent 8 }}
+        {{- $whKeys := list .Values.secrets.webhook.keys.token }}
+        {{- if .Values.secrets.rotation.webhookPrevious }}{{- $whKeys = append $whKeys .Values.secrets.webhook.keys.tokenPrevious }}{{- end }}
+        {{- include "gonk.secretVolume" (dict "name" "webhook" "secret" .Values.secrets.webhook.existingSecret "keys" $whKeys) | nindent 8 }}
+        {{- include "gonk.secretVolume" (dict "name" "meter-api" "secret" .Values.secrets.meterAPI.existingSecret "keys" (list .Values.secrets.meterAPI.keys.token)) | nindent 8 }}
+        {{- if and .Values.gascity.enabled (eq .Values.gascity.dispatch "http") }}
+        # The ed25519 PRIVATE write-auth signing key (gonk-fsl / gonk-5we). Same
+        # pre-provisioned Secret the controller pod mounts; the chart creates none.
+        {{- include "gonk.secretVolume" (dict "name" "gc-write-key" "secret" .Values.secrets.gcWriteKey.existingSecret "keys" (list .Values.secrets.gcWriteKey.key)) | nindent 8 }}
+        {{- end }}
+        {{- if .Values.gitlab.caCert.existingConfigMap }}
+        # gitlab.caCert.existingConfigMap is a NAME: the chart does not create the
+        # ConfigMap (trust-manager, or you, publish it into this namespace).
+        # It is how a Go service trusts a GitLab behind a private CA --
+        # and it is the reason no code in this repo ever sets InsecureSkipVerify.
+        - name: gitlab-ca
+          configMap:
+            name: {{ .Values.gitlab.caCert.existingConfigMap }}
+            items:
+              - key: {{ .Values.gitlab.caCert.key }}
+                path: {{ .Values.gitlab.caCert.key }}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.intake.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.intake.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.intake.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

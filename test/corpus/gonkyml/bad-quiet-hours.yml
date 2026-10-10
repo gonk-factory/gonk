@@ -1,0 +1,5 @@
+# quiet_hours: "25:00-99:00" -- 25h/99m fail the HH:MM-HH:MM pattern.
+version: 1
+enabled: true
+schedule:
+  quiet_hours: "25:00-99:00"

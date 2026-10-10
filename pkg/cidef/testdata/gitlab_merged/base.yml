@@ -1,0 +1,50 @@
+---
+".probe-job":
+  tags:
+  - cluster
+  before_script:
+  - echo "probe job $CI_JOB_NAME"
+workflow:
+  rules:
+  - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  - if: "$CI_COMMIT_BRANCH =~ /^probe\\/pipefix-.*-(base|fixed|skipci)$/"
+stages:
+- ".pre"
+- check
+- report
+- ".post"
+default:
+  interruptible: true
+variables:
+  PROBE_WORD: crates
+".probe-vars":
+  PROBE_KIND: synthetic
+probe-lint:
+  tags:
+  - cluster
+  before_script:
+  - echo "probe job $CI_JOB_NAME"
+  extends: ".probe-job"
+  stage: check
+  variables:
+    PROBE_KIND: synthetic
+  script:
+  - test -f status.sh
+probe-status:
+  tags:
+  - cluster
+  before_script:
+  - echo "probe job $CI_JOB_NAME"
+  extends: ".probe-job"
+  stage: check
+  script:
+  - sh status.sh
+probe-report:
+  tags:
+  - cluster
+  before_script:
+  - echo "probe job $CI_JOB_NAME"
+  extends: ".probe-job"
+  stage: report
+  script:
+  - echo "report for $PROBE_WORD"

@@ -1,0 +1,157 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-agent
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-session
+  annotations:
+    {{- include "gonk.networkPolicyBanner" . | nindent 4 }}
+spec:
+  # ==========================================================================
+  # *** THE POLICY SPEC 9's CENTRAL CLAIM RESTS ON -- AND IT IS NOT ENFORCED. ***
+  #
+  # "Cloud access exists only through the metered proxy, so budgets cannot be
+  # bypassed" is TRUE ONLY IF (a) this selector matches the pods Gas City's k8s
+  # session provider actually creates (OD-5 -- Gas City is not even deployed yet,
+  # so nobody knows the labels), AND (b) the CNI actually enforces policy.
+  #
+  # (b) IS FALSE TODAY. Flannel does not implement NetworkPolicy and the Cilium
+  # HelmRelease is SUSPENDED. So RIGHT NOW an agent pod can reach anything --
+  # including a model server on the LAN (e.g. http://192.0.2.10:11434) THAT NEEDS NO CREDENTIAL --
+  # skip LiteLLM entirely, and burn local GPU with ZERO METERING.
+  #
+  # Owner decision 2026-07-13: SHIP IT, DOCUMENT THE GAP, DO NOT GATE ON IT.
+  # Therefore:
+  #   * CLOUD-rung budgets ARE hard: a cloud call needs an API key, and the pod's
+  #     only route to one is LiteLLM's virtual key, which refuses at the ceiling.
+  #   * LOCAL-model budgets are ADVISORY until Cilium lands.
+  # Say it that way in every README, dashboard and demo. Not "budgets cannot be
+  # bypassed".
+  #
+  # Plan 06 writes the egress-denial test and SKIPS it, naming Cilium. UN-SKIPPING
+  # THAT TEST IS THE GATE -- and note that a WRONG selector renders fine and
+  # enforces nothing, so the test, not this template, is what proves it.
+  # ==========================================================================
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.networkPolicy.agentPodSelector | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    # DNS. Without it the pod resolves nothing and reaches nothing.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 14 }}
+      ports:
+        {{- range .Values.networkPolicy.dns.ports }}
+        - protocol: UDP
+          port: {{ . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    # LiteLLM: THE ONLY DOOR TO A MODEL. Every token an agent spends passes
+    # through it, tagged, budgeted, and hard-refusable.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.litellm.namespaceSelector | nindent 14 }}
+          {{- with .Values.networkPolicy.litellm.podSelector }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.litellm.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    # gonk-intake (PRIVATE listener): the per-session checkout. gonk-gate
+    # shallow-clones the project CONTROLLER-SIDE at the decision point and
+    # registers it under the session alias; the pod fetches that tree here
+    # before opencode starts. This is the only reason an agent needs a
+    # repository, and it deliberately does NOT go to the forge -- the bytes come
+    # from gonk, so the pod still holds no forge credentials (gonk-msz).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "intake") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.intake.ports.private }}
+    # GitLab: DELIBERATELY NO EGRESS (gonk-7oz).
+    #
+    # This used to allow the agent the WHOLE gitlab namespace on EVERY port,
+    # under the v1 assumption in the old comment here ("the agent clones the rig
+    # and posts comments as the bot"). Neither is true under the broker design:
+    # the controller does all forge I/O -- it reads the issue, and gonk-sweep
+    # applies the agent's proposed-effects batch under its own PAT -- and the
+    # checkout now comes from gonk-intake above.
+    #
+    # It mattered because "the agent never talks to GitLab" (images/agent/
+    # entrypoint.sh) was enforced by ONE thing: the absence of a credential.
+    # With this rule in place, anything that put a usable token in the pod got
+    # full forge reach with no second line of defence -- and the v1 formula pour
+    # did exactly that, handing every session a bot_token. That pour is gone
+    # (ADR-007 deleted the formula layer and the order vars map with it), so no
+    # forge credential reaches an agent pod today. This rule is the second line
+    # of defence that keeps "the agent never talks to GitLab" true even if one
+    # ever does again. The agent also runs attacker-influenceable text by
+    # construction (issue titles and bodies), which gonk-e9m already showed
+    # reaching a shell.
+    #
+    # `mention-reply` is still not ported to the broker, and since the formula
+    # layer was deleted it does not run at all: it is absent from agentForTrigger
+    # (cmd/gonk-gate/broker_inject.go), so runDispatch refuses the trigger
+    # outright rather than pouring a session. Nothing is broken by this rule
+    # today, and turning the egress back on would not revive mention -- porting
+    # it (T-24) means putting it on the broker, where the CONTROLLER does the
+    # forge I/O. networkPolicy.gitlabEgress.enabled=true restores the old
+    # behaviour and re-opens exactly the hole described above.
+    {{- if .Values.networkPolicy.gitlabEgress.enabled }}
+    {{- if .Values.networkPolicy.gitlabInCluster.enabled }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.gitlabInCluster.namespaceSelector | nindent 14 }}
+          {{- with .Values.networkPolicy.gitlabInCluster.podSelector }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.gitlab.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- else }}
+    - to:
+        {{- range .Values.networkPolicy.gitlab.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.gitlab.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- end }}
+    {{- end }}
+    # gonk-meter: prompt-by-reference (gonk-mzd). THE POD RECEIVES NO WORK
+    # WITHOUT THIS RULE -- images/agent/entrypoint.sh fetches its own prompt at
+    # GET /v1/prompt/{GC_ALIAS} (the alias is the capability; no token rides
+    # this call) and posts trajectory evidence back at POST /v1/trace. This rule
+    # predates that: it was opened so the agent could read its own session cost
+    # for the commit trailers, and those were deleted with the trailers hook.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "meter") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.meter.port }}
+    # AND NOTHING ELSE. No 0.0.0.0/0. No "just for pip". An agent pod that can
+    # reach the internet can reach api.anthropic.com directly, with a key from
+    # anywhere, and every budget in this system becomes a suggestion.
+{{- end }}

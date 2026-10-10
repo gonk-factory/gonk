@@ -1,0 +1,68 @@
+# Expected-effect-shape for the pipefix agent (gonk-2usw plan 4.1, 5.2).
+#
+# Broker data, NOT Gas City pack data: the broker reads this from the baked pack
+# (/opt/gonk/pack/agents/pipefix/), never agent.toml. Per-kind cardinality
+# {min,max}; a kind absent here is forbidden ({0,0}).
+#
+# pipefix -> edit {0,10}, fix_meta {0,1}, scope_request {0,1}; nothing else.
+#
+# The minimums are 0 because WHICH kinds a batch must carry depends on its
+# verdict, and that rule lives in the validator (pkg/effects verdictKindRule),
+# not here:
+#   verdict "fix"          -> at least 1 edit, exactly 1 fix_meta, 0 scope_request
+#   verdict "needs-scope"  -> exactly 1 scope_request, 0 edit, 0 fix_meta
+# A batch with neither verdict cannot carry any of the three kinds, and this
+# shape allows no other kind, so such a batch is refused.
+#
+# What is absent and must stay absent: `comment`, `label`, `file`,
+# `diagnosis`, `new_issue`, and any branch / commit / merge request / assignee
+# / reviewer / approval kind. The branch, the commit, the merge request, its
+# labels and every note are written by the controller (plan 5.4, 8.1); the
+# agent proposes text replacements and an explanation, and that is all.
+# internal/packtest pins this exact set.
+
+[edit]
+min = 0
+max = 10
+
+[fix_meta]
+min = 0
+max = 1
+
+[scope_request]
+min = 0
+max = 1
+
+# WHAT THE AGENT MUST HAVE DONE TO BE ALLOWED TO SAY IT (gonk-hsb; plan 4.4).
+# "needs-scope" lands no change, so nothing downstream can catch a session
+# that refused the task without looking. Requiring one observed file read is
+# the floor under that. "fix" is deliberately absent: it produces a diff, and
+# the project's pipeline judges that on outcome evidence. Matched against the
+# batch's verdict. Observing-only until GONK_ENFORCE_TRAJECTORY=1.
+[trajectory]
+read_tools = ["read", "Read"]
+require_any_read_for = ["needs-scope"]
+
+# THE PACK ROW (gonk-066 3.1; plan 4.2, 4.3): the MAXIMUM a pipeline-fix may
+# ever touch. Read by pkg/scope.LoadRow from the baked pack. Operator config
+# and the project's .gonk.yml can only narrow it; the controller narrows it
+# again per dispatch to the row of plan 4.2 for the diagnosis's class, and to
+# the diagnosis's cited files. pipefix is the ONLY agent with this section
+# (internal/packtest), which is what makes it the only agent whose edits can
+# pass the gate at all: an agent with no row is allowed no class.
+#
+# classes  -- what a fix may write when the project opts in.
+# liftable -- `ci` is protected; a dispatch may be granted it only when the
+#             project set pipeline_fix.allow_ci (the controller's decision,
+#             never the agent's). `control` and `secret` are the floor and
+#             cannot appear here.
+# caps     -- "small" is enforced, not hoped for. max_deletes is 0: an edit
+#             cannot delete a file, and a fix that needs to answers needs-scope.
+[scope]
+classes = ["source", "docs", "test"]
+liftable = ["ci"]
+max_files = 3
+max_lines = 40
+max_deletes = 0
+max_file_bytes = 262144
+max_patch_bytes = 16384

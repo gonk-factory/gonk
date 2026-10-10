@@ -1,0 +1,10 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# extends_not_names: byte-identical sides. `extends` is a mapping, which is
+# neither a name nor a list of names.
+.tmpl:
+  script:
+    - ./tools/assemble.sh
+
+assemble:
+  extends:
+    from: .tmpl

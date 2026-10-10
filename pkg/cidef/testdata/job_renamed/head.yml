@@ -1,0 +1,9 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# job_renamed/head.yml: `measure` is now `measure-later`, otherwise unchanged.
+assemble:
+  script:
+    - ./tools/assemble.sh
+
+measure-later:
+  script:
+    - ./tools/measure.sh

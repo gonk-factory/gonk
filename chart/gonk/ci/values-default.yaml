@@ -1,0 +1,74 @@
+# =============================================================================
+# ci/values-default.yaml -- THE MINIMUM SAFE INSTALL: the whole bundled factory.
+#
+# This is the profile that MUST be safe. It renders the Gas City controller +
+# Dolt (beads) + intake + meter + the operator config together -- the whole
+# factory -- with meter pointed at the EXISTING CNPG cluster's ledger tenancy
+# (ledger.postgres.mode: shared, the default). Everything else is left at the
+# values.yaml default, which is deliberately SAFE, not USEFUL:
+#
+#   * no Ingress (ingress.enabled: false) -- exposes nothing;
+#   * no monitoring (ServiceMonitor/PrometheusRule/dashboards off);
+#   * the instance budget ceiling is $0 -- NO PROJECT CAN SPEND A DOLLAR;
+#   * the only rung is LOCAL (synthetic-priced), so no cloud key exists to spend.
+#
+# It supplies ONLY what has no safe default: the ONE release tag every gonk
+# image deploys under (releaseTag) plus the Dolt image tag, the two BYO URLs
+# (GitLab is a values.yaml default; webhook + LiteLLM are not), and the
+# operator ladder/catalog/defaultRung (site-local; the chart ships none -- a
+# phantom-model default 404s at first token, Plan 04 AD-1).
+#
+# NO SECRET VALUE APPEARS HERE. The chart renders no Secret; it references
+# externally-provisioned ones by name (see chart/gonk/README.md).
+# =============================================================================
+# release-unit: every gonk image (controller, intake, meter, and the agent
+# image the controller hands to session pods) deploys under ONE tag.
+releaseTag: v0.1.0
+
+intake:
+  webhookPublicURL: https://gonk.example.internal/hook/gitlab
+
+gascity:
+  # G22: a TEST public verify key -- the repo golden vector's real ed25519
+  # pubkey (chart/gonk/smoke). Grant-gating on; the private half is the Secret
+  # gonk-gc-write-key (secrets.gcWriteKey default), provisioned out of band.
+  writeAuth:
+    verifyKey: "k1:1hcioE4eYD4PsM66wVJ8oBErEfCTyNPt9Q/+ZT0drmk="
+
+dolt:
+  image:
+    tag: 2.1.7
+
+# REQUIRED: the chart has no default GitLab.
+gitlab:
+  url: https://gitlab.example.internal
+
+litellm:
+  externalURL: http://litellm.litellm.svc.cluster.local:4000
+
+# ledger.backend stays at its only value (postgres); ledger.postgres.mode stays
+# at the default (shared) -- tenancy on the databases-app/postgres cluster the
+# owner already runs. The chart renders NOTHING for the ledger in this mode; it
+# just consumes the DSN. See README (the four gitops objects it needs).
+
+operatorConfig:
+  instance:
+    ladder: [qwen-local]
+    budget:
+      monthly_cost_usd: 0     # the safe default: no project can spend a dollar
+  rungs:
+    - name: qwen-local
+      kind: local
+      model: qwen3-14b
+      est_cost_usd: 0
+      est_tokens: 200K
+      synthetic_usd_per_1m_tokens: 0.20
+
+onboarding:
+  defaultRung: qwen-local
+
+# A render profile, not a deployment: its tags (v0.1.0) carry no build number,
+# so the image-floor guard (G23, gonk-xsk3) cannot rank them and would refuse
+# the render. Saying so here is the explicit opt-in that guard requires.
+imageFloor:
+  acceptUnrankedTags: true

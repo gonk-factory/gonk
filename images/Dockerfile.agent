@@ -1,0 +1,183 @@
+# gonk agent image: opencode + the tooling a session needs to do real work on a
+# GitLab project. One pod per active session (spec 4.1); pools scale to zero.
+#
+# Derived from gascity's contrib/k8s/Dockerfile.agent (MIT,
+# github.com/gastownhall/gascity @ GASCITY_REF -- see images/versions.env).
+# NOTHING here is derived from gastownhall/gascity-packs, which carries no
+# licence (see pack/pack.toml's header comment for the full constraint).
+#
+# Build: see `make images` (Makefile). Every ARG below is read from
+# images/versions.env; there is no default and no `latest` anywhere.
+
+# GO_VERSION and GONK_TAG ARE NO LONGER INTERPOLATED BY THIS IMAGE (gonk-5ka1).
+# Both existed for the Go build stage that compiled gonk-gate -- GO_VERSION chose
+# its golang base, GONK_TAG was stamped into the binary via -ldflags -X -- and
+# that stage is gone (see the removal note below). Nothing else here reads
+# either.
+#
+# They stay DECLARED, and that is load-bearing, not tidiness: the Makefile passes
+# --build-arg GO_VERSION/--build-arg GONK_TAG to every image target from the
+# shared images/versions.env, and a build arg the Dockerfile never NAMES makes
+# the builder warn ("one or more build args were not consumed") on every single
+# agent build. Declaring it accepts the arg silently. DEBIAN_BASE has always sat
+# here on exactly the same footing -- the FROM lines below pin the base image by
+# literal digest and never interpolate it.
+ARG GO_VERSION
+ARG GONK_TAG
+ARG DEBIAN_BASE
+
+# ---- fetch opencode (pinned; checksum-verified) ------------------------------
+# A separate stage so `curl`/`tar` never ship in the runtime image, and so a
+# checksum mismatch fails the BUILD, not a running pod.
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS fetch
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tar \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /fetch
+
+# Target architecture for the fetched binaries. podman/BuildKit auto-populate
+# TARGETARCH from the build host (verified locally); kaniko's behaviour here is
+# deliberately NOT relied upon -- CI passes it explicitly as
+# --build-arg TARGETARCH=$BUILD_ARCH. The guard below fails the build rather
+# than silently fetching amd64 binaries into an arm64 image, a mistake that
+# otherwise only surfaces as "exec format error" in a running pod (gonk-owi).
+ARG TARGETARCH
+RUN test -n "${TARGETARCH}" || (echo "TARGETARCH is unset -- refusing to guess the fetch architecture (gonk-owi)" && exit 1)
+
+ARG OPENCODE_VERSION
+RUN test -n "${OPENCODE_VERSION}" || (echo "OPENCODE_VERSION is unset -- refusing to build an agent on a floating opencode (OD-3)" && exit 1)
+# opencode ships a self-contained static Linux binary release (no npm/node
+# needed at runtime -- @ai-sdk/openai-compatible, the AI SDK adapter the
+# attribution overlay below targets, is COMPILED IN: verified against
+# opencode's own source, packages/opencode/src/provider/provider.ts's
+# BUNDLED_PROVIDERS map, at this exact tag). That matters here: spec 9's
+# design intent is agent-pod egress to GitLab and LiteLLM ONLY -- an opencode
+# that fetched its provider adapter from the npm registry at session start
+# would need a third egress target this pack never asked for.
+# NOTE opencode calls the x86-64 asset "x64", not "amd64" -- TARGETARCH cannot
+# be interpolated into the filename directly. Checksums are per-arch; both were
+# computed from the real published artifacts at this exact tag.
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) OC_ARCH=x64;   OC_SHA=60f27b2679f00a511b6539f97e02448afaf58d9c66e2448285ea0c517ca84583 ;; \
+      arm64) OC_ARCH=arm64; OC_SHA=da0a631174eba380b2a1d51f9d364fa3812da433e72743c72471d4b5da59c69d ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o opencode.tar.gz \
+      "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-${OC_ARCH}.tar.gz"; \
+    echo "${OC_SHA}  opencode.tar.gz" | sha256sum -c -; \
+    tar xzf opencode.tar.gz; \
+    chmod +x opencode
+
+# NO glab AND NO bd IN THIS IMAGE (gonk-0de). They were 19.5 MB and 52.8 MB of
+# every agent build -- 72.3 MB per arch, a third of the image -- and NOTHING
+# invoked either one: zero references in images/agent/, pack/ or entrypoint.sh.
+#
+# They were dead by DESIGN, not by accident, and each for its own reason:
+#   glab  the broker model strips the pod of forge credentials, so a forge CLI
+#         here has nothing to authenticate with. The repository arrives as a
+#         tarball from gonk-intake (see the checkout fetch in entrypoint.sh),
+#         never from the forge. Shipping it also put a forge client inside a pod
+#         whose entire security story is "holds no forge access" (cf gonk-7oz),
+#         so removing it is a small hardening win as well as a size one.
+#   bd    spike S0 established that the agent pod has NO working beads store
+#         ("no beads database found" -- split store topology). The return
+#         channel is the effects batch, not the pod writing a bead. Do not add
+#         it back to "let the agent record something"; that path is closed by
+#         design.
+#
+# If a future agent genuinely needs repository write access, it arrives as an
+# effect the BROKER applies, not as a credentialed CLI in the pod.
+
+# AND NO gonk-gate EITHER (gonk-5ka1). This image used to carry its own Go build
+# stage compiling cmd/gonk-gate and COPY it to /usr/local/bin/gonk-gate. Two
+# subcommands justified that, and both have since been deleted:
+#   check     removed with the formula layer (ADR-007).
+#   trailers  removed once it was proven unreachable HERE: the pod's working copy
+#             arrives as a GitLab repository-archive tarball from gonk-intake
+#             (pkg/rig), not as a git clone, so RIG_DIR/.git never exists, the
+#             prepare-commit-msg install guard always took its "skip" branch, and
+#             the hook that would have invoked `trailers` never once installed in
+#             a real pod. See the note at the top of images/agent/entrypoint.sh.
+#
+# With both gone NOTHING in this pod invokes it. entrypoint.sh is the only script
+# the image installs and every gonk-gate string in it is a comment citing
+# controller-side source; the pack that really does `exec gonk-gate dispatch`
+# (pack/scripts/gonk-dispatch.sh, gonk-sweep.sh) is COPYed into the CONTROLLER
+# image, never this one -- which is where gonk-gate still belongs and still runs.
+#
+# The ~46 MB is not the argument. gonk-gate holds the broker logic, the meter
+# client and the effect-apply path, and this is the one pod that deliberately
+# runs untrusted model output while being denied forge credentials and cloud
+# keys. Shipping the component that DOES hold those powers into it, even inert,
+# hands a ready-made tool to anything that achieves execution here and cuts
+# against the boundary the agent NetworkPolicy and the per-project key work are
+# establishing. Pinned by test/images' TestAgentImageShipsNoGonkGate.
+
+# ---- runtime -----------------------------------------------------------------
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
+
+# git: the rig clone (agents run `git log`/`git diff` locally against it; no
+# forge credential is ever mounted here -- see below).
+# ca-certificates: TLS trust roots for the one endpoint the agent talks to,
+# LiteLLM. Under the broker design the agent never reaches the forge, so no
+# forge CA is trusted here (that egress lives in the broker, not this pod).
+# jq: entrypoint.sh renders overlay/opencode.json with it -- guarantees valid
+# JSON (correct escaping of the verbatim atags metadata blob) instead of
+# hand-built string concatenation.
+# tmux: Gas City's k8s session provider launches the agent as
+# `tmux new-session -d -s <s> "$CMD"` (internal/runtime/k8s/pod.go @ GASCITY_REF)
+# -- it OVERRIDES this image's ENTRYPOINT and wraps the agent command in tmux, so
+# the binary must be present or the session pod dies before opencode ever starts.
+# curl + tar: entrypoint.sh fetches this session's CHECKOUT from gonk-intake's
+# private listener before opencode starts (pkg/rig, gonk-msz). The bytes come
+# from GONK, not from the forge -- that is what lets a pod have a working copy
+# while holding no forge credential. tar is in the base image; curl is not.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates jq tmux curl tar \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=fetch /fetch/opencode      /usr/local/bin/opencode
+COPY images/agent/entrypoint.sh        /usr/local/bin/gonk-agent-entrypoint
+RUN chmod +x /usr/local/bin/gonk-agent-entrypoint
+
+# No forge CA is trusted here. Under the broker design (spec 9/10) the agent pod
+# never reaches GitLab -- the broker reads the issue and posts the
+# comment on its behalf -- so GitLab's private CA is NOT mounted or trusted in
+# this image, and it sets no trust variable of any kind (the CA file it once
+# pointed at was never even mounted). If the agent's one remaining egress,
+# LiteLLM, is ever served from a private CA, that trust is added by extending
+# this image (chart/gonk/README.md, "Trusting a private CA"), never by a
+# baked-in ENV here.
+
+# No /etc/passwd entry for 65532 (this base image is plain debian, not
+# distroless) -- HOME must be explicit or git/opencode fall back to "/" and
+# fail to write .gitconfig/.config as a non-root uid with no home directory.
+RUN mkdir -p /workspace /etc/gonk/overlay && chown -R 65532:65532 /workspace /etc/gonk
+ENV HOME=/workspace
+
+# No pager, and no credential prompt: both are SILENT HANGS in this pod, and a
+# silent hang is indistinguishable from a slow model.
+#
+# git only pages when stdout is a TTY -- which is exactly the agent's case, not
+# the CI case. opencode gives the session a PTY, so an agent that runs `git log`
+# or `git diff` lands in `less` and waits for a keypress that never comes, until
+# the reservation TTL reaps it. `podman run` without -t will NOT reproduce this,
+# which is why it has never been seen in the image tests. Warp published the
+# same failure from production as a common, silent one; gonk's agent has shell
+# access and would have hit it on the first `git log`.
+#
+# GIT_PAGER beats core.pager, so this needs no .gitconfig and survives a rig
+# checkout that ships its own. PAGER covers everything else that shells out to a
+# pager (man, systemctl, gh).
+#
+# GIT_TERMINAL_PROMPT=0 is the same class of bug one layer down: the agent pod
+# holds NO forge credential by design (the broker applies effects, pkg/rig
+# delivers the tree), so any git operation that reaches for a remote must FAIL,
+# not sit on a TTY prompting for a username. Failing closed here turns a hang
+# into an error the gate can classify.
+ENV PAGER=cat \
+    GIT_PAGER=cat \
+    GIT_TERMINAL_PROMPT=0
+WORKDIR /workspace
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/gonk-agent-entrypoint"]

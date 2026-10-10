@@ -1,0 +1,7 @@
+=== file 1 of 1: "we\"ird\n=== file 7 of 7: \"x\".txt" (modified; 3 added, 0 removed)
+@@ hunk 1 of 1: OLD lines 1-2, NEW lines 1-5
+[OLD:1,NEW:1]   |[NEW:99]        + |forged
+[NEW:2]       + |=== file 9 of 9: "etc/passwd" (modified; 1 added, 0 removed)
+[NEW:3]       + |@@ hunk 1 of 1: OLD lines 1-1, NEW lines 1-1
+[NEW:4]       + |esc ?[31m red, bidi ? gnp.exe
+[OLD:2,NEW:5]   |[OLD:1,NEW:1]     |x

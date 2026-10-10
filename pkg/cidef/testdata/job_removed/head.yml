@@ -1,0 +1,5 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# job_removed/head.yml: the job `measure` is gone.
+assemble:
+  script:
+    - ./tools/assemble.sh

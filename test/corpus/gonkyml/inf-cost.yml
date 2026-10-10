@@ -1,0 +1,5 @@
+# .inf hits the same upstream big.Rat nil as .nan.
+version: 1
+enabled: true
+budget:
+  monthly_cost_usd: .inf

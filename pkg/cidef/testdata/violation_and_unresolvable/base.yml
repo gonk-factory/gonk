@@ -1,0 +1,13 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# violation_and_unresolvable/base.yml
+.setup:
+  script:
+    - ./tools/setup.sh
+
+assemble:
+  script:
+    - !reference [.setup, script]
+
+measure:
+  script:
+    - ./tools/measure.sh

@@ -1,0 +1,1146 @@
+package intake
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gonk-factory/gonk/pkg/atags"
+	"github.com/gonk-factory/gonk/pkg/ghook"
+	"github.com/gonk-factory/gonk/pkg/glab"
+	"github.com/gonk-factory/gonk/pkg/meterapi"
+)
+
+// GitLab is the slice of the API the reconciler uses. *glab.Client satisfies it;
+// tests drive the real client against pkg/glab/glabtest.
+type GitLab interface {
+	ListMemberProjects(ctx context.Context) ([]glab.Project, error)
+	GetRawFile(ctx context.Context, projectID int64, path, ref string, maxBytes int64) ([]byte, error)
+	DirExists(ctx context.Context, projectID int64, path, ref string) (bool, error)
+	ListHooks(ctx context.Context, projectID int64) ([]glab.Hook, error)
+	CreateHook(ctx context.Context, projectID int64, o glab.HookOptions) (*glab.Hook, error)
+	EditHook(ctx context.Context, projectID, hookID int64, o glab.HookOptions) (*glab.Hook, error)
+	ListMergeRequests(ctx context.Context, projectID int64, o glab.MRListOptions) ([]glab.MergeRequest, error)
+	ListMembers(ctx context.Context, projectID int64) ([]glab.Member, error)
+	ListIssues(ctx context.Context, projectID int64, o glab.IssueListOptions) ([]glab.Issue, error)
+}
+
+// IssueSweeper is the one method the issue sweep needs from *Dispatch. Nil is
+// legal: the reconciler simply does not sweep.
+//
+// It is deliberately the SAME entry point the webhook path uses, fed a
+// synthesized event, rather than a second dispatch route. A parallel path would
+// be a second place for the staleness window, the Decide rules and the
+// classification gate to drift apart, and those are the rules that stop gonk
+// spending money it should not.
+//
+// Handle reports whether it actually fired an order (Gate 1's `run` decision
+// reached FireOrder), not merely whether it was called. sweepIssues needs that
+// to tell an ATTEMPT (handed to Dispatch) from a real dispatch (Decide said
+// yes) -- see Summary.Dispatched, which must count the latter only.
+type IssueSweeper interface {
+	Handle(ctx context.Context, ev *ghook.Event) bool
+}
+
+// Onboarder opens the deterministic onboarding MR (Task 8). Nil is legal: the
+// reconciler simply does not onboard.
+type Onboarder interface {
+	Onboard(ctx context.Context, p glab.Project) error
+	// Declined reports whether an onboarding MR was closed unmerged and the bot
+	// has not been re-invited since (spec 5.3, AD-3).
+	Declined(ctx context.Context, p glab.Project) (bool, error)
+}
+
+// Scaffolder fires the metered .agent/ scaffold order for a project that has no
+// `.agent/` AND has opted in with `actions.scaffold: true` (spec 5.3; see
+// Classification.MayScaffold, which is the only place that rule lives). It is
+// satisfied by *Dispatch (pkg/intake/dispatch.go, Task 9); the reconciler is
+// declared against the narrow interface it actually calls, rather than the
+// concrete type, so this package does not need Task 9's file to exist to build
+// or test the reconciler on its own. Nil is legal: the reconciler simply does
+// not scaffold.
+type Scaffolder interface {
+	FireScaffold(ctx context.Context, e Entry) error
+}
+
+// Observer is intake's metric surface (Prometheus impl in Task 10).
+type Observer interface {
+	WebhookOutcome(event string, o ghook.Outcome) // also satisfies ghook.Observer
+	ReconcileResult(result string, d time.Duration)
+	ProjectStates(counts map[State]int)
+	// MeterPush result is one of: ok | invalid | error.
+	//   ok      -- 200, meter resolved the config
+	//   invalid -- 422, the PROJECT's yaml is bad (recorded; not our bug)
+	//   error   -- 5xx / unreachable / 400 (400 IS our bug; log it loudly)
+	MeterPush(result string)
+	OnboardingResult(result string)
+	Dispatched(trigger string)
+	DispatchDropped(reason string)
+}
+
+type NopObserver struct{}
+
+func (NopObserver) WebhookOutcome(string, ghook.Outcome)  {}
+func (NopObserver) ReconcileResult(string, time.Duration) {}
+func (NopObserver) ProjectStates(map[State]int)           {}
+func (NopObserver) MeterPush(string)                      {}
+func (NopObserver) OnboardingResult(string)               {}
+func (NopObserver) Dispatched(string)                     {}
+func (NopObserver) DispatchDropped(string)                {}
+
+type Summary struct {
+	Projects int
+	Errors   int
+	Duration time.Duration
+	// MeterPushes and Dispatched are the counts Task 10's ReconcileSummary (the
+	// `?wait=true` wire type, server.go) reports; they are gathered here rather
+	// than re-derived from the Obs metric calls, which have no query API.
+	MeterPushes int
+	Dispatched  int
+	// Blocked counts projects skipped because they are on the blocklist. It is
+	// normally a small constant (gonk's own repository); a sudden rise means
+	// membership widened somewhere.
+	Blocked int
+	// IssuesSwept counts open issues the sweep handed to Dispatch this pass. It
+	// is a count of ATTEMPTS, not of dispatches: Handle re-applies the staleness
+	// window and the Decide rules and may drop any of them.
+	IssuesSwept int
+	// PipelinesSwept counts failed pipelines the pipeline backfill handed to
+	// Dispatch this pass (attempts, like IssuesSwept).
+	PipelinesSwept int
+	// ErrorMsgs is one line per failed project, "path: err". Never a token, never
+	// a secret: pkg/glab's APIError and MeterClient.do both refuse to put
+	// credential material in an error string, so echoing these here (they end up
+	// in ReconcileSummary.Errors, a test/operator surface) is safe.
+	ErrorMsgs []string
+}
+
+type Reconciler struct {
+	GL        GitLab
+	Meter     *MeterClient
+	Cache     *Cache
+	Onboarder Onboarder
+	Dispatch  Scaffolder
+	// Issues drives the issue sweep (spec 5.2). Nil disables it.
+	Issues IssueSweeper
+	// Pipelines and PipelineGL drive the pipeline backfill (gonk-tios D4,
+	// sweepPipelines). Either nil disables it.
+	Pipelines  PipelineSweeper
+	PipelineGL PipelineSweepGitLab
+	// IssueLabelPrefix is the namespace the broker applies to labels it adds
+	// (`gonk::` by default). An open issue already carrying one has been triaged,
+	// so the sweep skips it.
+	//
+	// THIS IS AN OPTIMISATION, NOT THE SAFETY PROPERTY, and the distinction
+	// matters: the prefix is per-project configurable in the broker, so this can
+	// be wrong, and an issue dispatched seconds ago has no label yet either way.
+	// What makes a re-fire harmless is the deterministic bead anchor -- the meter
+	// keys /decide idempotency, ladder state and the reservation on it
+	// (cmd/gonk-gate/dispatch.go, dispatch_idempotency_test.go), so a second
+	// order for the same issue rejoins the first reservation instead of spending
+	// twice. Exactly the tradeoff Entry.ScaffoldFiredAt already documents.
+	IssueLabelPrefix string
+	// IssueSweepLimit caps how many issues one pass may hand to Dispatch, per
+	// project. Zero means DefaultIssueSweepLimit.
+	//
+	// THIS IS A SPEND GUARD, not a performance one. Onboard a project with a
+	// hundred open issues and an uncapped sweep fires a hundred triage orders in
+	// a single pass -- each one a real model call against the project's budget.
+	// The meter's ceiling would eventually refuse them, but "eventually" is after
+	// the money is gone, and a backlog is not urgent. Capped, a backlog drains a
+	// few per pass and an operator has time to notice.
+	IssueSweepLimit int
+	// Blocked names projects gonk must never work on, however it came to see
+	// them (gonk-jn5). Enforced HERE as well as at dispatch: a blocked project
+	// must never be registered with meter, never have a webhook provisioned,
+	// and never enter the cache -- not merely be refused later.
+	Blocked Blocklist
+	// IssueSweepMaxAge bounds how far back the sweep looks. Zero means
+	// DefaultIssueSweepMaxAge.
+	//
+	// THIS IS WHAT MAKES THE SWEEP A SAFETY NET RATHER THAN A BACKFILL. A LOST
+	// EVENT IS RECENT BY DEFINITION -- it was delivered, ACKed and dropped
+	// minutes ago. An issue nobody has touched in two months is not a lost
+	// event, it is backlog, and triaging it is a decision an operator should
+	// make deliberately rather than something a bug fix does on their behalf.
+	//
+	// Measured on project 75, 2026-09-07: unbounded, the first pass would have
+	// dispatched 57 orders against stale e2e issues dating to July -- 11.4M est
+	// tokens, 22.8% of that project's monthly budget, in under two hours.
+	// Bounded to 24h it dispatches 8, which are the ones that were actually
+	// lost. It also collapses the listing: `updated_after` is applied
+	// server-side, so a project with thousands of open issues is a page or two
+	// rather than fifty per pass.
+	IssueSweepMaxAge time.Duration
+	Obs              Observer
+	Log              *slog.Logger
+
+	BotUserID int64
+	HookURL   string // public webhook URL, WITHOUT the gen parameter
+	HookToken string // current secret (rotation slot 1)
+	TokenGen  string // bumped on rotation; embedded in the hook URL (ADR-003)
+	SSLVerify bool
+
+	// MeterResyncInterval re-registers a project with meter even when its config
+	// hash has not changed (default 1h). This is NOT belt-and-braces: meter's
+	// answer can change WITHOUT the project's .gonk.yml changing -- an operator
+	// flipping the instance kill switch, or tightening a group ceiling, changes
+	// Effective for a project whose file never moved. Without this, the
+	// config-hash short-circuit would pin intake's copy of the policy forever.
+	// Zero (the test default) disables periodic forcing: only the config-hash
+	// change and the "meter has never answered" case trigger a re-PUT.
+	MeterResyncInterval time.Duration
+
+	// NOTE what is NOT here: `Instance gonkcfg.Policy` and
+	// `GroupPolicy func(string) gonkcfg.Policy`. Intake does not hold operator
+	// policy and does not resolve. Meter does. (Conflict A.)
+
+	// StartupLadder is how long to wait between reconcile attempts at BOOT,
+	// before settling into the periodic interval. Nil means defaultStartupLadder.
+	// See runStartupLadder for why it exists; tests set tiny values.
+	StartupLadder []time.Duration
+
+	// UnsettledRetryInterval is how soon to reconcile again after a pass that
+	// left a project UNSYNCED, instead of waiting the full interval. Zero means
+	// defaultUnsettledRetry.
+	//
+	// This is the non-boot half of gonk-fan and it is easy to miss: a meter 5xx
+	// or timeout during ANY pass -- not just the first -- downgrades a perfectly
+	// healthy project to unsynced (see reconcileProject: "Classify will make it
+	// `unsynced`, and nothing will be dispatched"). Without this, one transient
+	// blip during a routine pass silently stops dispatching for up to a full
+	// interval, with no restart to correlate it against.
+	UnsettledRetryInterval time.Duration
+
+	// The fields below back Loop/Kick/WaitForNextPass (Task 10, HB-1). They are
+	// zero-value-safe: every existing test that builds a Reconciler by literal
+	// keeps working, and initPass lazily wires them on first use.
+	loopInit sync.Once
+	kickCh   chan struct{}
+
+	passMu       sync.Mutex
+	startSeq     uint64 // seq of the pass currently running or most recently started
+	completedSeq uint64 // seq of the most recently COMPLETED pass
+	passDone     chan struct{}
+	lastSummary  ReconcileSummary
+	haveSummary  bool
+
+	// newTicker builds the ticker Loop paces itself with. Nil means a real
+	// *time.Ticker. It exists so tests can observe the loop's CADENCE -- what
+	// interval it re-arms with after each pass, and that a tick runs a pass --
+	// without measuring wall-clock time. A test that counts passes inside a
+	// real-time budget is asserting on how busy the CPU is, not on the loop
+	// (gonk-oxb8: 'only 4 passes in 100ms' under a loaded `make gate`).
+	newTicker func(time.Duration) loopTicker
+}
+
+// loopTicker is the part of *time.Ticker that Loop uses.
+type loopTicker interface {
+	C() <-chan time.Time
+	Reset(time.Duration)
+	Stop()
+}
+
+type realTicker struct{ t *time.Ticker }
+
+func (r realTicker) C() <-chan time.Time   { return r.t.C }
+func (r realTicker) Reset(d time.Duration) { r.t.Reset(d) }
+func (r realTicker) Stop()                 { r.t.Stop() }
+
+// NewReconciler is the sanctioned way to build a Reconciler: it fails closed
+// on a configuration that would disable a safety property, exactly the way
+// ghook.NewHandler already does for BotUserID. In particular BotUserID must be
+// a positive GitLab user id -- at its zero value the issue-sweep loop guard
+// silently no-ops (sweepIssues: `r.BotUserID != 0 && is.Author.ID ==
+// r.BotUserID` treats unset as "guard disabled", not "misconfigured"), gonk
+// can react to its own issues, and spend runs away.
+//
+// r is returned as-is (not copied: Reconciler carries a sync.Mutex and a
+// sync.Once, which must never be copied by value), so the caller builds the
+// struct literal as before and wraps the result in NewReconciler before using
+// it, rather than filling in fields on a value this function hands back.
+func NewReconciler(r *Reconciler) (*Reconciler, error) {
+	if r == nil {
+		return nil, errors.New("intake: nil Reconciler")
+	}
+	if r.BotUserID <= 0 {
+		return nil, fmt.Errorf("intake: BotUserID must be a positive GitLab user id, got %d (the issue-sweep loop guard cannot be disabled)", r.BotUserID)
+	}
+	return r, nil
+}
+
+// initPass lazily wires the Loop/Kick/WaitForNextPass machinery. Safe to call
+// from any of those methods, any number of times, from any goroutine.
+func (r *Reconciler) initPass() {
+	r.loopInit.Do(func() {
+		r.kickCh = make(chan struct{}, 1)
+		r.passDone = make(chan struct{})
+	})
+}
+
+// Kick requests an out-of-band reconcile pass. Concurrent kicks coalesce: the
+// channel is buffered to exactly 1, so no matter how many callers kick while a
+// pass is in flight (or already queued), at most ONE extra pass runs. This is
+// what makes /admin/reconcile (unauthenticated, private-listener-only, spec
+// 5.2) a bounded amount of free work rather than an amplifier.
+func (r *Reconciler) Kick() {
+	r.initPass()
+	select {
+	case r.kickCh <- struct{}{}:
+	default:
+	}
+}
+
+// Loop runs ReconcileOnce every interval (a zero or negative interval uses the
+// documented default of 10 minutes) and also whenever Kick is called, until ctx
+// is done. It is meant to run in its own goroutine for the lifetime of the
+// process.
+func (r *Reconciler) Loop(ctx context.Context, interval time.Duration) {
+	r.initPass()
+	if interval <= 0 {
+		interval = 10 * time.Minute
+	}
+	// BEFORE the ticker, not after it. This is gonk-fan: without it the first
+	// reconcile happens a full interval after boot, and for those ten minutes
+	// every webhook is answered 200 and dropped as state_unsynced.
+	r.runStartupLadder(ctx)
+	newTicker := r.newTicker
+	if newTicker == nil {
+		newTicker = func(d time.Duration) loopTicker { return realTicker{time.NewTicker(d)} }
+	}
+	t := newTicker(r.nextInterval(interval))
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C():
+			r.runPass(ctx)
+		case <-r.kickCh:
+			r.runPass(ctx)
+		}
+		// Re-arm from the state the pass just produced: fast while anything is
+		// unsynced, normal cadence once it settles.
+		t.Reset(r.nextInterval(interval))
+	}
+}
+
+// nextInterval is how long until the next pass should be due: the normal
+// cadence when everything is resolved, the much shorter retry when something is
+// still unsynced. See UnsettledRetryInterval for why the distinction matters.
+func (r *Reconciler) nextInterval(interval time.Duration) time.Duration {
+	if r.startupSettled() {
+		return interval
+	}
+	retry := r.UnsettledRetryInterval
+	if retry <= 0 {
+		retry = defaultUnsettledRetry
+	}
+	// Never SLOWER than the normal cadence: a caller running a 5s interval must
+	// not be pushed out to 30s by this.
+	if retry > interval {
+		return interval
+	}
+	return retry
+}
+
+// defaultStartupLadder is the boot-time retry schedule: reconcile immediately,
+// then at 5s, 15s and 60s if anything is still unresolved, then hand over to the
+// periodic interval.
+//
+// The first rung is what closes gonk-fan's ten-minute window. The REST of the
+// ladder exists because one pass is demonstrably not enough: intake and meter
+// start together and intake usually wins, so the first registration fails with
+// "connect: connection refused" (observed twice on 2026-07-31 and again on the
+// 2026-08-04 deploy). Without the retries, a boot race puts the project right
+// back to unsynced-until-the-next-tick, which is the whole window again.
+//
+// The rungs are spaced to cover a pod start, not to hammer: a meter that is
+// still not answering after 80 seconds has a problem no amount of retrying from
+// here will fix, and the periodic loop takes it from there.
+var defaultStartupLadder = []time.Duration{0, 5 * time.Second, 15 * time.Second, 60 * time.Second}
+
+// defaultUnsettledRetry is how soon to try again after a pass that left
+// something unsynced, once the startup ladder is over. It is far shorter than
+// the 10m cadence and far longer than a hot loop: a meter that is down stays
+// down for a while, and hammering it does not help.
+const defaultUnsettledRetry = 30 * time.Second
+
+// runStartupLadder reconciles at boot until nothing is left unsynced, or the
+// ladder is exhausted, or ctx is done.
+//
+// WHAT "SETTLED" MEANS HERE, and it is deliberately narrow: no project is in
+// StateUnsynced. Unsynced is the ONE state that means "meter has not answered",
+// which is the condition this ladder can actually do something about. Every
+// other non-dispatchable state -- invalid, disabled, key-missing, declined --
+// is a resolved answer, and retrying it would be a boot-time loop over
+// something a human has to change. Zero projects is settled too: an instance
+// with nothing onboarded has nothing to wait for.
+//
+// It does NOT lower the bar for dispatching. Nothing here makes an unsynced
+// project dispatchable; it only shortens how long the project stays unsynced.
+func (r *Reconciler) runStartupLadder(ctx context.Context) {
+	ladder := r.StartupLadder
+	if ladder == nil {
+		ladder = defaultStartupLadder
+	}
+	for _, wait := range ladder {
+		if wait > 0 {
+			t := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		r.runPass(ctx)
+		if r.startupSettled() {
+			return
+		}
+	}
+}
+
+// startupSettled reports whether the ladder has nothing left to wait for.
+func (r *Reconciler) startupSettled() bool {
+	if r.Cache == nil {
+		return true
+	}
+	return r.Cache.CountByState()[StateUnsynced] == 0
+}
+
+// runPass runs one ReconcileOnce and records its ReconcileSummary under
+// passMu, bumping completedSeq and broadcasting passDone so WaitForNextPass
+// wakes up. Every pass gets a monotonically increasing start sequence number,
+// assigned BEFORE ReconcileOnce runs -- that is what lets WaitForNextPass tell
+// "a pass that started before my request" apart from "the pass I asked for".
+func (r *Reconciler) runPass(ctx context.Context) ReconcileSummary {
+	r.initPass()
+
+	r.passMu.Lock()
+	r.startSeq++
+	mySeq := r.startSeq
+	r.passMu.Unlock()
+
+	started := time.Now()
+	sum, err := r.ReconcileOnce(ctx)
+	finished := time.Now()
+
+	rs := ReconcileSummary{
+		StartedAt:   started,
+		FinishedAt:  finished,
+		Projects:    sum.Projects,
+		States:      stateCountsToWire(r.Cache.CountByState()),
+		MeterPushes: sum.MeterPushes,
+		Dispatched:  sum.Dispatched,
+		IssuesSwept: sum.IssuesSwept,
+		Errors:      sum.ErrorMsgs,
+		Result:      "ok",
+	}
+	switch {
+	case err != nil:
+		rs.Result = "error"
+		rs.Errors = append(rs.Errors, err.Error())
+	case sum.Errors > 0:
+		rs.Result = "partial"
+	}
+
+	r.passMu.Lock()
+	r.completedSeq = mySeq
+	r.lastSummary = rs
+	r.haveSummary = true
+	done := r.passDone
+	r.passDone = make(chan struct{})
+	r.passMu.Unlock()
+	close(done)
+
+	return rs
+}
+
+// WaitForNextPass kicks a pass and blocks until a pass that STARTED AT OR AFTER
+// this call has COMPLETED, then returns its summary. This is HB-1 (Plan 06):
+// the guarantee that makes `?wait=true` an "ask", not a "sleep and hope" --
+// without it, a pass already in flight when the request arrived could satisfy
+// the wait while reflecting a pre-request world.
+//
+// It requires Loop to be running (nothing else drains kickCh); if it is not,
+// this blocks until ctx is done. The caller (server.go) bounds ctx with a
+// server-side timeout, per spec.
+func (r *Reconciler) WaitForNextPass(ctx context.Context) (ReconcileSummary, error) {
+	r.initPass()
+
+	r.passMu.Lock()
+	baselineSeq := r.startSeq // any pass with seq <= this already started strictly before this call
+	ch := r.passDone
+	r.passMu.Unlock()
+
+	r.Kick()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ReconcileSummary{}, ctx.Err()
+		case <-ch:
+		}
+		r.passMu.Lock()
+		completed, rs, next := r.completedSeq, r.lastSummary, r.passDone
+		r.passMu.Unlock()
+		if completed > baselineSeq {
+			return rs, nil
+		}
+		ch = next
+	}
+}
+
+// LastSummary returns the most recently completed pass's summary, and whether
+// any pass has completed yet. Used for readiness (main.go): "first reconcile
+// completed" is exactly `ok == true` here.
+func (r *Reconciler) LastSummary() (ReconcileSummary, bool) {
+	r.passMu.Lock()
+	defer r.passMu.Unlock()
+	return r.lastSummary, r.haveSummary
+}
+
+// stateCountsToWire converts the State-keyed gauge map to the plain
+// map[string]int the wire ReconcileSummary carries.
+func stateCountsToWire(counts map[State]int) map[string]int {
+	out := make(map[string]int, len(counts))
+	for s, n := range counts {
+		out[string(s)] = n
+	}
+	return out
+}
+
+// log returns a non-nil logger: callers that build a Reconciler by literal (as
+// every test in this package does) commonly leave Log unset, and log/slog's
+// *Logger panics on a nil receiver.
+func (r *Reconciler) log() *slog.Logger {
+	if r.Log != nil {
+		return r.Log
+	}
+	return slog.Default()
+}
+
+// RigName derives the Gas City rig name from a project path (spec 4.2).
+//
+// It must be stable: it is an attribution tag value in every spend row, and it is
+// what meter and the ledger join on. Note it flattens the WHOLE path -- the rig
+// for `group/repo` is `group-repo`, NOT `repo`. Two projects named `repo` in
+// different groups would otherwise share a rig, and their spend would merge.
+func RigName(path string) string {
+	return strings.ReplaceAll(path, "/", "-")
+}
+
+// ReconcileOnce rebuilds gonk's entire view of the world from GitLab and
+// gonk-meter. It is the correctness path (spec 5.2): it must never abort the
+// whole pass because one project misbehaved.
+func (r *Reconciler) ReconcileOnce(ctx context.Context) (Summary, error) {
+	start := time.Now()
+	projects, err := r.GL.ListMemberProjects(ctx)
+	if err != nil {
+		r.Obs.ReconcileResult("error", time.Since(start))
+		return Summary{}, fmt.Errorf("reconcile: list memberships: %w", err)
+	}
+
+	seen := make(map[int64]bool, len(projects))
+	sum := Summary{Projects: len(projects)}
+	for _, p := range projects {
+		// Blocked projects are dropped BEFORE anything observes them. Not
+		// "reconciled and then refused": no meter registration, no webhook
+		// provisioning, no cache entry, so nothing downstream can act on one
+		// even by mistake. `seen` is deliberately NOT set, so a project that
+		// becomes blocked while already cached is de-registered by the
+		// vanished-membership sweep below, exactly as if the bot had been
+		// removed from it.
+		if r.Blocked.Blocked(p) {
+			sum.Blocked++
+			r.log().Warn("project is on the blocklist; not reconciling it",
+				"project", p.PathWithNamespace, "project_id", p.ID)
+			continue
+		}
+		seen[p.ID] = true
+		out, err := r.reconcileProject(ctx, p)
+		if out.meterPushed {
+			sum.MeterPushes++
+		}
+		if out.scaffoldFired {
+			sum.Dispatched++
+		}
+		swept, dispatched, serr := r.sweepIssues(ctx, p)
+		if serr != nil {
+			sum.Errors++
+			sum.ErrorMsgs = append(sum.ErrorMsgs, fmt.Sprintf("%s: sweep issues: %s", p.PathWithNamespace, serr))
+			r.log().Error("issue sweep failed", "project", p.PathWithNamespace, "err", serr)
+		} else {
+			sum.IssuesSwept += swept
+			// dispatched counts every order the sweep actually FIRED (Decide said
+			// `run` and FireOrder succeeded), not every issue handed to Dispatch --
+			// IssuesSwept already covers attempts. Before this, a swept issue that
+			// fired never reached Summary.Dispatched at all: only reconcileProject's
+			// scaffold path did, so an operator watching Dispatched during an
+			// incident where the WEBHOOK was down and the sweep was the only thing
+			// firing triage orders would see zero and conclude nothing was
+			// dispatching, when it was.
+			sum.Dispatched += dispatched
+		}
+		plSwept, plDispatched, perr := r.sweepPipelines(ctx, p)
+		if perr != nil {
+			sum.Errors++
+			sum.ErrorMsgs = append(sum.ErrorMsgs, fmt.Sprintf("%s: sweep pipelines: %s", p.PathWithNamespace, perr))
+			r.log().Error("pipeline sweep failed", "project", p.PathWithNamespace, "err", perr)
+		}
+		// Counted even on a later error: these orders really fired.
+		sum.PipelinesSwept += plSwept
+		sum.Dispatched += plDispatched
+		if err != nil {
+			sum.Errors++
+			sum.ErrorMsgs = append(sum.ErrorMsgs, fmt.Sprintf("%s: %s", p.PathWithNamespace, err))
+			r.log().Error("reconcile project failed", "project", p.PathWithNamespace, "err", err)
+		}
+	}
+
+	// Projects that vanished from the membership list were de-onboarded (spec
+	// 5.1: removing the bot de-onboards). DELETE the meter registration -- that
+	// is what disables the project and deletes its LiteLLM key -- then drop them.
+	for _, id := range r.Cache.IDs() {
+		if seen[id] {
+			continue
+		}
+		if e, ok := r.Cache.Get(id); ok {
+			if err := r.Meter.Deregister(ctx, e.Project.PathWithNamespace); err != nil {
+				r.Obs.MeterPush("error")
+				r.log().Warn("failed to deregister on de-onboard", "project", e.Project.PathWithNamespace, "err", err)
+				continue // keep it cached and retry next pass; do NOT forget a live key
+			}
+			r.Obs.MeterPush("ok")
+		}
+		r.Cache.Delete(id)
+	}
+
+	r.Obs.ProjectStates(r.Cache.CountByState())
+	sum.Duration = time.Since(start)
+	result := "ok"
+	if sum.Errors > 0 {
+		result = "partial"
+	}
+	r.Obs.ReconcileResult(result, sum.Duration)
+	return sum, nil
+}
+
+// observe gathers the facts Classify needs FROM GITLAB. Note the ordering: the
+// config is fetched with an explicit byte cap, because these bytes are
+// attacker-controlled (ADR-002 "Untrusted input").
+//
+// Member is always true here: reconcileProject is only called for projects
+// ListMemberProjects returned, and that call is itself scoped to the bot's
+// memberships. StateUnmanaged is reachable only via Classify's other callers
+// (e.g. a webhook for a project the bot has since left).
+func (r *Reconciler) observe(ctx context.Context, p glab.Project) (Observation, error) {
+	obs := Observation{Member: true}
+	ref := p.DefaultBranch
+	if ref == "" {
+		ref = "main"
+	}
+
+	raw, err := r.GL.GetRawFile(ctx, p.ID, ConfigPath, ref, MaxConfigBytes)
+	switch {
+	case err == nil:
+		obs.ConfigBytes = raw
+	case glab.IsNotFound(err):
+		// absent: onboarding candidate
+	case strings.Contains(err.Error(), "too large"):
+		obs.ConfigTooLarge = true
+	default:
+		return Observation{}, fmt.Errorf("fetch %s: %w", ConfigPath, err)
+	}
+
+	if obs.ConfigBytes == nil && !obs.ConfigTooLarge {
+		if r.Onboarder != nil {
+			declined, err := r.Onboarder.Declined(ctx, p)
+			if err != nil {
+				return Observation{}, fmt.Errorf("check decline: %w", err)
+			}
+			obs.OnboardingDeclined = declined
+		}
+		return obs, nil
+	}
+
+	present, err := r.GL.DirExists(ctx, p.ID, AgentDir, ref)
+	if err != nil {
+		return Observation{}, fmt.Errorf("check %s/: %w", AgentDir, err)
+	}
+	obs.AgentDirPresent = present
+	return obs, nil
+}
+
+// hookURL embeds the secret generation. GitLab never returns a hook's token, so
+// there is no way to compare the configured token with the live one; the
+// generation marker in the URL is the observable proxy for "this hook was
+// provisioned with the current secret" (ADR-003).
+func (r *Reconciler) hookURL() string {
+	sep := "?"
+	if strings.Contains(r.HookURL, "?") {
+		sep = "&"
+	}
+	return r.HookURL + sep + "gen=" + url.QueryEscape(r.TokenGen)
+}
+
+// hookOptions is the hook gonk wants on a project. pipeline_events follows
+// the project's classification (gonk-tios D4): ON only where
+// MayDiagnosePipelines, so a project that has not opted in never even sends
+// gonk its pipeline traffic. Job events stay off everywhere.
+func (r *Reconciler) hookOptions(wantPipelines bool) glab.HookOptions {
+	return glab.HookOptions{
+		URL:                   r.hookURL(),
+		Token:                 r.HookToken,
+		IssuesEvents:          true,
+		NoteEvents:            true,
+		MergeRequestsEvents:   true,
+		PushEvents:            false,
+		PipelineEvents:        wantPipelines,
+		EnableSSLVerification: r.SSLVerify,
+	}
+}
+
+// hookPipelines is what ensureHook does with pipeline_events.
+type hookPipelines int
+
+const (
+	hookPipelinesOff hookPipelines = iota
+	hookPipelinesOn
+	// hookPipelinesKeep: the project's policy is UNKNOWN this pass (a
+	// transient meter registration failure left it unsynced). Keep whatever
+	// our hook already has; a new hook starts with it off. Verify report R10:
+	// reading "unknown" as "opted out" turned an opted-in project's pipeline
+	// traffic off on every meter blip, until the next good pass.
+	hookPipelinesKeep
+)
+
+// ensureHook is idempotent: it creates the hook if missing, repairs it if its URL
+// (generation), event flags, or SSL setting drifted, and does nothing otherwise.
+// "Ours" is decided by URL prefix, so a project's own unrelated hooks are never
+// touched. pipelines turning Off edits pipeline_events back off on the next
+// pass (D11 "off"); Keep leaves it as it is.
+func (r *Reconciler) ensureHook(ctx context.Context, p glab.Project, pipelines hookPipelines) error {
+	hooks, err := r.GL.ListHooks(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	want := r.hookOptions(pipelines == hookPipelinesOn)
+	base := strings.SplitN(r.HookURL, "?", 2)[0]
+	for _, h := range hooks {
+		if !strings.HasPrefix(h.URL, base) {
+			continue
+		}
+		if pipelines == hookPipelinesKeep {
+			want.PipelineEvents = h.PipelineEvents
+		}
+		if h.URL == want.URL &&
+			h.IssuesEvents == want.IssuesEvents &&
+			h.NoteEvents == want.NoteEvents &&
+			h.MergeRequestsEvents == want.MergeRequestsEvents &&
+			h.PushEvents == want.PushEvents &&
+			h.PipelineEvents == want.PipelineEvents &&
+			h.EnableSSLVerification == want.EnableSSLVerification {
+			return nil // already correct
+		}
+		_, err := r.GL.EditHook(ctx, p.ID, h.ID, want)
+		return err
+	}
+	_, err = r.GL.CreateHook(ctx, p.ID, want)
+	return err
+}
+
+// register sends the RAW bytes. Note there is no BudgetFrom, no Resolve, and no
+// Effective anywhere in here -- that is the point.
+func (r *Reconciler) register(ctx context.Context, p glab.Project, obs Observation) (*meterapi.ProjectResponse, error) {
+	return r.Meter.Register(ctx, meterapi.ProjectRequest{
+		Project:         p.PathWithNamespace,
+		ProjectID:       p.ID,
+		Rig:             RigName(p.PathWithNamespace),
+		DefaultBranch:   p.DefaultBranch,
+		ConfigCommitSHA: obs.ConfigCommitSHA,
+		GonkYML:         string(obs.ConfigBytes),
+	})
+}
+
+// projectOutcome is what one reconcileProject call actually DID, so
+// ReconcileOnce can build a ReconcileSummary without re-deriving counts from
+// the Obs metric calls (which have no query API -- Prometheus counters are
+// write-only from this package's side).
+type projectOutcome struct {
+	meterPushed   bool // a real PUT to meter succeeded (the config-hash short-circuit does not count)
+	scaffoldFired bool
+}
+
+func (r *Reconciler) reconcileProject(ctx context.Context, p glab.Project) (projectOutcome, error) {
+	var out projectOutcome
+	if p.Archived {
+		// ReconcileOnce already set seen[p.ID] = true before calling us (it has
+		// to: an archived project is still a membership, not a vanished one), so
+		// the vanished-membership sweep below will never see this project as
+		// gone and will never DELETE its meter registration. This is the only
+		// place that observes Archived, so deregistering has to happen here, or
+		// the LiteLLM key outlives the project's archival.
+		//
+		// The DELETE itself is unconditional in the sense that matters: it is
+		// never gated on a CACHE hit (r.Cache.Get(p.ID)), which is the mistake
+		// the previous fix made and which this one must not repeat. The cache
+		// is derived-only and rebuilds empty on every restart, reschedule,
+		// rollout or fresh replica (cache.go): a project already archived the
+		// first time such a fresh reconciler observes it was never Cache.Put,
+		// so a deregister gated on a cache HIT would skip it forever.
+		//
+		// What IS gated here is repetition, and it is gated on two things that
+		// are NOT the derived cache:
+		//
+		//  1. Cache.WasDeregistered -- an in-memory tombstone, set ONLY after
+		//     this process ITSELF successfully DELETEd the registration
+		//     (below). It records what we DID, never what we merely OBSERVED.
+		//     It is exactly as derived as the rest of the cache (empty on a
+		//     cold start), so it is consulted only to SKIP a call, never to
+		//     justify one -- a false negative here just means one extra
+		//     read-only round trip, never a missed deregistration.
+		//  2. r.Meter.Get -- a read-only GET, answered by meter's own state,
+		//     which is the one place that actually knows and which survives an
+		//     intake restart even though this cache does not. On a cold
+		//     tombstone this is what stands in for "already handled",
+		//     replacing a guess with an answer from the source of truth.
+		//
+		// A NEGATIVE GET IS NOT A TOMBSTONE. "Meter holds no registration
+		// right now" means there is nothing to delete THIS PASS. It does not
+		// mean never ask again. Meter's state can move under us, and a 404
+		// need not even come from meter -- MeterClient.Get rejects a 404 with
+		// no meter error body precisely because an ingress, a proxy or a
+		// wrong BaseURL path prefix produces exactly that. Recording an
+		// observation as though it were an action is how one misrouted
+		// request turns into a permanent, silent "already gone" for the life
+		// of the process: no retry, no error, no log, and the archived
+		// project's LiteLLM key still live. So this branch keeps asking until
+		// it has actually torn something down.
+		//
+		// Cost: MeterClient.Deregister documents deleting an unknown project as
+		// a 204, not a 404, but that DELETE is not free -- meter's own handler
+		// puts a Secret delete and a DB delete behind it. Get has neither; it
+		// only reads. So a warm tombstone costs nothing, and a project meter
+		// already reports gone costs one READ per pass -- no LiteLLM call, no
+		// Secret delete, no DB write. That is the deliberate price of the
+		// continuous enforcement T-12's unconditional DELETE had.
+		if r.Cache.WasDeregistered(p.ID) {
+			return out, nil
+		}
+		_, found, err := r.Meter.Get(ctx, p.PathWithNamespace)
+		if err != nil {
+			r.Obs.MeterPush("error")
+			r.log().Warn("failed to check meter registration for archived project", "project", p.PathWithNamespace, "err", err)
+			return out, err // nothing confirmed, nothing deleted; retry next pass
+		}
+		if !found {
+			// Nothing to deregister this pass. Drop any Entry -- an archived
+			// project has no classification left and must never be
+			// Dispatchable -- but leave the tombstone COLD, per above.
+			r.Cache.Delete(p.ID)
+			return out, nil
+		}
+		if err := r.Meter.Deregister(ctx, p.PathWithNamespace); err != nil {
+			r.Obs.MeterPush("error")
+			r.log().Warn("failed to deregister archived project", "project", p.PathWithNamespace, "err", err)
+			return out, err // tombstone stays cold; retry deregistration next pass
+		}
+		r.Obs.MeterPush("ok")
+		r.Cache.MarkDeregistered(p.ID)
+		return out, nil
+	}
+	obs, err := r.observe(ctx, p) // GitLab: membership, .gonk.yml bytes, .agent/, decline
+	if err != nil {
+		return out, err
+	}
+
+	prev, hadPrev := r.Cache.Get(p.ID)
+
+	// REGISTER WITH METER BEFORE CLASSIFYING. `invalid`, `disabled` and
+	// `key-missing` are meter's answers -- intake cannot compute them.
+	var mr *meterapi.ProjectResponse
+	meterUnknown := false // a transient registration failure: policy unknown this pass
+	lastSync := prev.LastMeterSync
+	if obs.ConfigBytes != nil {
+		hash := hashConfig(obs.ConfigBytes)
+
+		// The config-hash short-circuit: skip the PUT when the bytes have not
+		// changed, meter has already answered, AND we are not overdue for a
+		// periodic resync (meter's answer can change without the config moving).
+		resyncDue := r.MeterResyncInterval > 0 && time.Since(prev.LastMeterSync) >= r.MeterResyncInterval
+		if hadPrev && prev.Classification.ConfigHash == hash && prev.Classification.Meter != nil && !resyncDue {
+			mr = prev.Classification.Meter
+		} else {
+			mr, err = r.register(ctx, p, obs)
+			if err != nil {
+				var inv *ErrInvalidConfig
+				if errors.As(err, &inv) {
+					mr = inv.Response // a 422 IS an answer: state=invalid, key deleted
+					r.Obs.MeterPush("invalid")
+					lastSync = time.Now()
+				} else {
+					// Unreachable / 5xx / our bug. We do not know this project's policy.
+					// Classify will make it `unsynced`, and nothing will be dispatched.
+					// Leave lastSync where it was: mr stays nil, so the ConfigHash
+					// short-circuit's `prev.Classification.Meter != nil` guard will not
+					// fire next pass either, and we retry unconditionally.
+					r.log().Warn("meter registration failed", "project", p.PathWithNamespace, "err", err)
+					r.Obs.MeterPush("error")
+					meterUnknown = true
+				}
+			} else {
+				r.Obs.MeterPush("ok")
+				lastSync = time.Now()
+				out.meterPushed = true
+			}
+		}
+	}
+
+	cls := Classify(obs, mr)
+
+	// The webhook is the latency path; failing to provision it is logged and
+	// retried, never fatal (reconciliation still works without it). It runs
+	// AFTER Classify (gonk-tios D4) because pipeline_events depends on the
+	// classification -- same pass, so a new project still gets its hook on the
+	// first pass exactly as before. A transient meter failure is "unknown", not
+	// "off": the hook keeps its pipeline_events (R10).
+	hp := hookPipelinesOff
+	switch {
+	case meterUnknown:
+		hp = hookPipelinesKeep
+	case cls.MayDiagnosePipelines():
+		hp = hookPipelinesOn
+	}
+	if err := r.ensureHook(ctx, p, hp); err != nil {
+		r.log().Warn("hook provisioning failed", "project", p.PathWithNamespace, "err", err)
+	}
+
+	entry := Entry{Project: p, Classification: cls, LastReconcile: time.Now(), LastMeterSync: lastSync}
+	if hadPrev {
+		entry.ScaffoldFiredAt = prev.ScaffoldFiredAt
+		// Carried forward the same way ScaffoldFiredAt is, and for the same
+		// reason: this Entry is rebuilt from scratch every pass, so without this
+		// line sweepIssues' per-issue dispatch memory would be wiped on every
+		// reconcile before the sweep ever got to read it.
+		entry.TriageDispatchedAt = prev.TriageDispatchedAt
+		// Same reason, for the pipeline backfill's per-anchor memory.
+		entry.PipelineDispatchedAt = prev.PipelineDispatchedAt
+	}
+
+	if cls.MayOnboard() && r.Onboarder != nil {
+		if err := r.Onboarder.Onboard(ctx, p); err != nil {
+			r.Obs.OnboardingResult("error")
+			r.log().Warn("onboarding failed", "project", p.PathWithNamespace, "err", err)
+		}
+	}
+
+	r.Cache.Put(p.ID, entry)
+
+	// spec 5.3: the metered .agent/ scaffold order. OPT-IN since T-08 -- the
+	// onboarding merge request seeds .agent/ deterministically, so MayScaffold
+	// now also requires `actions.scaffold: true` and this is dormant by default.
+	// Triage does NOT depend on it and never waits for it.
+	if entry.Classification.MayScaffold() && r.Dispatch != nil &&
+		time.Since(entry.ScaffoldFiredAt) > time.Hour {
+		if err := r.Dispatch.FireScaffold(ctx, entry); err != nil {
+			r.log().Warn("scaffold dispatch failed", "project", p.PathWithNamespace, "err", err)
+		} else {
+			entry.ScaffoldFiredAt = time.Now()
+			r.Cache.Put(p.ID, entry)
+			out.scaffoldFired = true
+		}
+	}
+	return out, nil
+}
+
+// DefaultIssueLabelPrefix matches the broker's default label namespace
+// (cmd/gonk-gate/broker_label.go). See Reconciler.IssueLabelPrefix for why a
+// mismatch here costs an extra order rather than correctness.
+const DefaultIssueLabelPrefix = "gonk::"
+
+// DefaultIssueSweepLimit is deliberately small. The sweep is a SAFETY NET for
+// events that were lost, not a backfill tool: in steady state the webhook has
+// already handled everything and this finds nothing. A number this size drains
+// a surprise backlog over several passes instead of spending a project's month
+// in one.
+const DefaultIssueSweepLimit = 5
+
+// DefaultIssueSweepMaxAge is the recency bound. A day is comfortably longer
+// than any plausible outage-plus-restart window and comfortably shorter than
+// "the backlog".
+const DefaultIssueSweepMaxAge = 24 * time.Hour
+
+// TriageSweepSuppressWindow is how long the sweep remembers a fired triage
+// dispatch for one issue before it will hand that issue to Dispatch again,
+// mirroring the one-hour window reconcileProject already applies to
+// ScaffoldFiredAt. Without it, an issue the broker has not yet labelled --
+// applying the label takes a real triage session, which spans reconcile
+// passes -- gets swept and re-dispatched on every intervening pass instead of
+// once (see Entry.TriageDispatchedAt).
+const TriageSweepSuppressWindow = time.Hour
+
+// sweepIssues is the ISSUE half of spec 5.2, and it exists because the spec's
+// central claim was only half true:
+//
+//	"Reconciliation is the correctness path; webhooks are the latency
+//	 optimization."
+//
+// Reconciliation was implemented for PROJECTS -- memberships, .gonk.yml, hook
+// provisioning, rig registration -- and for nothing else. For issue events the
+// webhook was the ONLY path, which made it the correctness path, which is
+// exactly what the spec says it must not be.
+//
+// MEASURED CONSEQUENCE (gonk-vrf, 2026-09-07): issues 65 and 67 on project 75
+// were delivered, ACKed 200, accepted into an in-memory sink, and lost when the
+// pod restarted seconds later. GitLab does not retry, nothing reconciled them,
+// and they sat untouched until a human noticed. This closes that: an issue that
+// should have been triaged and was not gets picked up on the next pass.
+//
+// It returns (swept, dispatched, err). swept is the number of issues handed to
+// Dispatch -- a count of ATTEMPTS: Handle re-applies the staleness window and
+// the full Decide rules, so it may drop every one of them. dispatched is the
+// subset Handle reports as an actual fire, which is what Summary.Dispatched
+// must count.
+func (r *Reconciler) sweepIssues(ctx context.Context, p glab.Project) (int, int, error) {
+	if r.Issues == nil {
+		return 0, 0, nil
+	}
+	entry, ok := r.Cache.Get(p.ID)
+	if !ok {
+		return 0, 0, nil
+	}
+	// Ask the REAL rule whether this project could dispatch a triage at all,
+	// rather than re-deriving it. A project that cannot is one whose issues we
+	// must not even list -- listing costs an API call per pass forever, and for
+	// an unmanaged or denied project the answer can never change to yes without
+	// a reconcile that would update the cache first anyway.
+	if _, allowed := gate(entry, atags.TriggerIssueTriage); !allowed {
+		return 0, 0, nil
+	}
+
+	maxAge := r.IssueSweepMaxAge
+	if maxAge <= 0 {
+		maxAge = DefaultIssueSweepMaxAge
+	}
+	cutoff := time.Now().Add(-maxAge)
+
+	issues, err := r.GL.ListIssues(ctx, p.ID, glab.IssueListOptions{
+		State:        "opened",
+		UpdatedAfter: cutoff,
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+
+	prefix := r.IssueLabelPrefix
+	if prefix == "" {
+		prefix = DefaultIssueLabelPrefix
+	}
+
+	limit := r.IssueSweepLimit
+	if limit <= 0 {
+		limit = DefaultIssueSweepLimit
+	}
+
+	// Copy forward only the still-live suppressions. Anything older than the
+	// window can no longer suppress a re-fire, so dropping it here -- on every
+	// pass, whether or not it matches a currently-open issue -- is what keeps
+	// this map bounded: a project's issue history is unbounded, this must not be.
+	now := time.Now()
+	fired := make(map[int64]time.Time, len(entry.TriageDispatchedAt))
+	for iid, at := range entry.TriageDispatchedAt {
+		if now.Sub(at) < TriageSweepSuppressWindow {
+			fired[iid] = at
+		}
+	}
+
+	swept := 0
+	dispatched := 0
+	for _, is := range issues {
+		if swept >= limit {
+			r.log().Warn("issue sweep hit its per-pass limit; the rest wait for the next pass",
+				"project", p.PathWithNamespace, "limit", limit, "open_issues", len(issues))
+			break
+		}
+		// The loop guard, which the webhook path gets from the event payload and
+		// a swept issue would otherwise get from nowhere. An issue the bot opened
+		// must never be triaged by the bot.
+		if r.BotUserID != 0 && is.Author.ID == r.BotUserID {
+			continue
+		}
+		if hasLabelPrefix(is.Labels, prefix) {
+			continue
+		}
+		// Belt and braces on the server-side bound. If `updated_after` is ever
+		// dropped -- an older GitLab, a proxy that strips query params -- the
+		// bound would silently vanish and the sweep would become the backfill it
+		// must not be. A filter that only works when the server cooperates is
+		// not a spend guard.
+		if !is.UpdatedAt.IsZero() && is.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		// Entry.TriageDispatchedAt: the sweep already fired for this issue inside
+		// the suppress window and the label has not shown up yet. Skip without
+		// counting it as an attempt -- it is not one, it is the memory doing its
+		// job.
+		if _, ok := fired[is.IID]; ok {
+			continue
+		}
+		did := r.Issues.Handle(ctx, &ghook.Event{
+			Kind: ghook.KindIssue,
+			Project: ghook.Project{
+				ID:                entry.Project.ID,
+				PathWithNamespace: entry.Project.PathWithNamespace,
+				DefaultBranch:     entry.Project.DefaultBranch,
+				WebURL:            entry.Project.WebURL,
+			},
+			// "open" because that is the only action Decide dispatches on, and a
+			// swept issue IS an open issue nobody triaged. The synthesized event
+			// carries no User: Decide does not read one for KindIssue, and the
+			// bot-author check above is the guard that would have needed it.
+			Issue: &ghook.Issue{
+				IID:         is.IID,
+				Action:      "open",
+				Title:       is.Title,
+				Description: is.Description,
+			},
+		})
+		swept++
+		if did {
+			fired[is.IID] = now
+			dispatched++
+		}
+	}
+	entry.TriageDispatchedAt = fired
+	r.Cache.Put(p.ID, entry)
+	if swept > 0 {
+		// Worth an INFO, not a debug: in steady state this never fires, because
+		// the webhook got there first. When it does fire, events were being lost
+		// and that is the thing an operator wants to see.
+		r.log().Info("issue sweep dispatched issues the webhook path never handled",
+			"project", p.PathWithNamespace, "count", swept, "open_issues", len(issues))
+	}
+	return swept, dispatched, nil
+}
+
+// hasLabelPrefix reports whether any label sits in the broker's namespace.
+// Case-insensitive, because a GitLab label is case-preserving but matched
+// case-insensitively, so `Gonk::bug` and `gonk::bug` are one label.
+func hasLabelPrefix(labels []string, prefix string) bool {
+	for _, l := range labels {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(l)), strings.ToLower(prefix)) {
+			return true
+		}
+	}
+	return false
+}

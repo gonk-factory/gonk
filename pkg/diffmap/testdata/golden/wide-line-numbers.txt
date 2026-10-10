@@ -1,0 +1,13 @@
+=== file 1 of 1: "tools/restock.py" (modified; 3 added, 2 removed)
+@@ hunk 1 of 2: OLD lines 98-101, NEW lines 98-102
+[OLD:98,NEW:98]       |    crates = shelf.crates
+[OLD:99]            - |    if crates > 4:
+[NEW:99]            + |    if crates > shelf.capacity:
+[NEW:100]           + |        log.warning("shelf %s is over capacity", shelf.name)
+[OLD:100,NEW:101]     |        return False
+[OLD:101,NEW:102]     |    return True
+@@ hunk 2 of 2: OLD lines 1203-1205, NEW lines 1204-1206
+[OLD:1203,NEW:1204]   |    total = 0
+[OLD:1204]          - |    for s in shelves[1:]:
+[NEW:1205]          + |    for s in shelves:
+[OLD:1205,NEW:1206]   |        total += s.crates

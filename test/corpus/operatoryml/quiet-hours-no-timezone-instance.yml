@@ -1,0 +1,10 @@
+# instance.schedule.quiet_hours with no timezone. R-20: this validated before,
+# and then EVERY project on the instance failed to resolve on the next hot
+# reload and had its LiteLLM virtual key deleted. Disposition: Reject.
+version: 1
+instance:
+  ladder: [a]
+  schedule:
+    quiet_hours: "22:00-07:00"
+rungs:
+  - { name: a, kind: local, model: m, est_tokens: "200K", synthetic_usd_per_1m_tokens: 0.2 }

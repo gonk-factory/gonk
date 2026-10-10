@@ -1,0 +1,53 @@
+# Task 8.5 toggle-matrix profile: the bundled Gas City controller is disabled
+# and replaced by an external supervisor. No gonk-controller
+# Deployment/ServiceAccount/Role/RoleBinding render; gonk-intake dispatches
+# orders to the external supervisorURL instead. Dolt (beads) and gonk-meter
+# are unaffected -- they have no relationship to the controller toggle.
+#
+# No controller renders, so neither gascity.image nor the agent image
+# (componentImages.agent) is resolved: G24 (_guards.tpl) checks them only when
+# gascity.enabled=true.
+# release-unit: every gonk image (controller, intake, meter, and the agent
+# image the controller hands to session pods) deploys under ONE tag.
+releaseTag: v0.1.0
+
+intake:
+  webhookPublicURL: https://gonk.example.test/hook/gitlab
+
+dolt:
+  image:
+    tag: 2.1.7
+
+gascity:
+  enabled: false
+  # The per-city [api] listener port (9443), NOT the machine-wide supervisor
+  # admin API (8372, which binds 127.0.0.1 only). A BYO supervisor must expose
+  # the 9443-equivalent dispatch endpoint. See chart/gonk/smoke/gc-controller-smoke.md.
+  supervisorURL: http://gc.external.svc:9443
+
+# REQUIRED: the chart has no default GitLab.
+gitlab:
+  url: https://gitlab.example.internal
+
+litellm:
+  externalURL: http://litellm.litellm.svc:4000
+
+operatorConfig:
+  instance:
+    ladder: [qwen-local]
+  rungs:
+    - name: qwen-local
+      kind: local
+      model: stub-local
+      est_cost_usd: 0
+      est_tokens: 200K
+      synthetic_usd_per_1m_tokens: 0.20
+
+onboarding:
+  defaultRung: qwen-local
+
+# A render profile, not a deployment: its tags (v0.1.0) carry no build number,
+# so the image-floor guard (G23, gonk-xsk3) cannot rank them and would refuse
+# the render. Saying so here is the explicit opt-in that guard requires.
+imageFloor:
+  acceptUnrankedTags: true

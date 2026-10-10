@@ -1,0 +1,84 @@
+# ADR-008 prototype: ONE JOB PER SESSION.
+#
+# This is the object that replaces a Gas City session. Every field the T-45
+# bead names is present and load-bearing; the comments say which upstream bug
+# each one closes, because that is the whole argument.
+#
+# NOTE ON LABELS -- this is the trap ADR-008 section 9 records. The pod
+# deliberately keeps `app: gc-agent` so that, on the day the runtime is
+# swapped, chart/gonk/templates/networkpolicy-gonk-agent.yaml (podSelector =
+# .Values.networkPolicy.agentPodSelector = {app: gc-agent}), the helm-test
+# netpol probe, and the pod reaper ALL keep matching. A wrong selector renders
+# fine and enforces nothing. T-27 owns any rename, gated on the probe.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gonk-session-l1
+  namespace: gonk-spike
+  labels:
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/component: agent-session
+spec:
+  # backoffLimit: 0 -- A SESSION IS NEVER SILENTLY RETRIED. gonk has already
+  # consumed the budget reservation for this session; a retry would spend it
+  # twice and would re-run an agent whose effects may already be partly applied.
+  backoffLimit: 0
+
+  # activeDeadlineSeconds = the reservation TTL. When the reservation expires
+  # the session MUST be dead, and the kubelet enforces that directly. Contrast
+  # gonk-cw3, where session start alone could take ~150s because the Gas City
+  # reconciler tick skips itself under host I/O pressure.
+  activeDeadlineSeconds: 600
+
+  # ttlSecondsAfterFinished -- the corpse is bounded WITHOUT gonk doing
+  # anything. This is the field that deletes cmd/gonk-gate/reap.go and
+  # reap_pods.go: the pod is owned by the Job, so it cannot outlive it, and
+  # there is no "closed bead whose pod no call can reach" class (gonk-mfsr).
+  ttlSecondsAfterFinished: 300
+
+  template:
+    metadata:
+      labels:
+        app: gc-agent                       # SEE THE LABEL NOTE ABOVE.
+        app.kubernetes.io/name: gonk
+        app.kubernetes.io/component: agent-session
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: localhost/gonk-l1-agent:spike
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits:   {cpu: "2",  memory: 1Gi}
+          volumeMounts:
+            # THE PROMPT IS A FILE, NOT KEYSTROKES. This is gonk-njz's cure:
+            # prompt delivery is the kubelet mounting a Secret, which either
+            # happens or fails the pod -- it cannot half-arrive.
+            - {name: prompt,   mountPath: /var/run/gonk/prompt,   readOnly: true}
+            - {name: checkout, mountPath: /var/run/gonk/checkout, readOnly: true}
+            - {name: key,      mountPath: /var/run/gonk/key,      readOnly: true}
+            - {name: work,     mountPath: /work}
+            - {name: tmp,      mountPath: /tmp}
+      volumes:
+        - name: prompt
+          secret: {secretName: gonk-session-l1-prompt}
+        - name: checkout
+          secret: {secretName: gonk-session-l1-checkout}
+        - name: key
+          secret: {secretName: gonk-session-l1-key}
+        - name: work
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

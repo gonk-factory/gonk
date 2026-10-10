@@ -1,0 +1,7 @@
+# A non-finite float on a DIFFERENT field (a token quantity, not the cost
+# ceiling) -- somewhere the "minimum" keyword's walk might not reach. The
+# generic rejectNonFinite pre-walk must still catch it.
+version: 1
+enabled: true
+budget:
+  monthly_tokens: .nan

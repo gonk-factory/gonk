@@ -1,0 +1,130 @@
+{
+  "uid": "gonk-health",
+  "title": "gonk / Health",
+  "description": "Component liveness, the ledger, and LiteLLM sync health (spec 8).",
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      },
+      {
+        "name": "project",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": "label_values(gonk_meter_project_state, project)",
+        "multi": true,
+        "includeAll": true,
+        "current": {}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Component up",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {"expr": "up{job=~\".*gonk.*\"}", "legendFormat": "{{job}}"}
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Spend-sync age",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {"expr": "gonk_meter_spend_sync_age_seconds", "legendFormat": "spend-sync age"}
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Spend-sync failures",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "rate(gonk_meter_spend_sync_failures_total[15m])", "legendFormat": "failures/s"}
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Open reservations",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "gonk_meter_reservations_open", "legendFormat": "{{project}}"}
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Expired reservations",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "rate(gonk_meter_reservations_expired_total[1h])", "legendFormat": "{{project}}"}
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Reservation races lost",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {"expr": "rate(gonk_meter_reservation_races_lost_total[15m])", "legendFormat": "{{project}}"}
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Clock skew vs LiteLLM",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "targets": [
+        {"expr": "gonk_meter_clock_skew_seconds", "legendFormat": "skew (s)"}
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Meter cold starts",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "targets": [
+        {"expr": "increase(gonk_meter_cold_start_total[24h])", "legendFormat": "cold starts (24h)"}
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Reconcile duration p99",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "targets": [
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(gonk_intake_reconcile_duration_seconds_bucket[15m])))", "legendFormat": "p99"}
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Rung-catalog drift",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "targets": [
+        {"expr": "gonk_meter_catalog_drift_total", "legendFormat": "drift"}
+      ]
+    }
+  ]
+}

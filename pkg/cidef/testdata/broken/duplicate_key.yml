@@ -1,0 +1,7 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# broken/duplicate_key.yml: the same key twice INSIDE a job.
+assemble:
+  script:
+    - ./tools/assemble.sh
+  script:
+    - "true"

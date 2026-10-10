@@ -1,0 +1,21 @@
+{{- if .Values.gascity.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-controller
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  # The per-city [api] listener ONLY (smoke U1). Port 8372 -- the machine-wide
+  # supervisor admin/dashboard API -- binds 127.0.0.1 LOOPBACK ONLY and is
+  # DELIBERATELY absent here: a Service cannot reach it (a peer pod gets
+  # "connection refused"), so exposing it would be a lie in the object graph.
+  ports:
+    - name: supervisor
+      port: {{ .Values.gascity.supervisorPort }}   # 9443, SETTLED (Task 0.5)
+      targetPort: supervisor
+  selector:
+    {{- include "gonk.selectorLabels" (dict "ctx" . "component" "controller") | nindent 4 }}
+{{- end }}

@@ -1,0 +1,42 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# default_inherit/base.yml: `default:`, a deprecated top-level `before_script`,
+# global variables, and jobs that inherit all, some or none of them. head.yml
+# is the same definition with the defaults written into each job by hand.
+variables:
+  LANE: slow
+  COLOUR: teal
+
+before_script:
+  - echo global-before
+
+default:
+  image: registry.invalid/tools/base:1
+  tags:
+    - wide
+
+takes-all:
+  script:
+    - echo all
+
+own-image:
+  image: registry.invalid/tools/own:5
+  script:
+    - echo own
+  variables:
+    LANE: fast
+
+takes-none:
+  inherit:
+    default: false
+    variables: false
+  script:
+    - echo none
+
+takes-some:
+  inherit:
+    default:
+      - image
+    variables:
+      - COLOUR
+  script:
+    - echo some

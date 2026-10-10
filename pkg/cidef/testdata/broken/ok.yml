@@ -1,0 +1,5 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# broken/ok.yml: the well-formed side of every broken/* comparison.
+assemble:
+  script:
+    - ./tools/assemble.sh

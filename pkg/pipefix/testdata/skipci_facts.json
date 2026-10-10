@@ -1,0 +1,87 @@
+{
+ "now": "2026-10-07T08:03:42.461865507-07:00",
+ "facts": {
+  "Fix": {
+   "Recorded": true,
+   "Targets": [
+    {
+     "Key": {
+      "Stage": "check",
+      "Name": "probe-status",
+      "FailureReason": "script_failure",
+      "ErrorSignature": "es1-5ac92e6b6d614ab5"
+     },
+     "Generic": false
+    }
+   ],
+   "BasePipelineID": 3327,
+   "BaseJobs": [
+    {
+     "Name": "probe-lint",
+     "Status": "success",
+     "AllowFailure": false
+    },
+    {
+     "Name": "probe-report",
+     "Status": "skipped",
+     "AllowFailure": false
+    },
+    {
+     "Name": "probe-status",
+     "Status": "failed",
+     "AllowFailure": false
+    }
+   ],
+   "FixBaseSHA": "745ca84b9a670b3d98f94a9f8cfff684905b972c",
+   "FixCommitSHA": "d3b59c2f0b28cf66d43e2b042d037601bc9587fd",
+   "MRIID": 46,
+   "ExcerptVersion": 2,
+   "SignatureVersion": 1,
+   "Lift": null,
+   "CIExecChanges": "deny",
+   "VerifyDeadline": "2026-10-07T09:03:42.461865507-07:00"
+  },
+  "MR": {
+   "Read": true,
+   "IID": 46,
+   "State": "opened",
+   "SHA": "d3b59c2f0b28cf66d43e2b042d037601bc9587fd"
+  },
+  "Pipelines": {
+   "Read": true,
+   "Pipelines": [
+    {
+     "ID": 3333,
+     "SHA": "d3b59c2f0b28cf66d43e2b042d037601bc9587fd",
+     "Source": "merge_request_event",
+     "Status": "skipped",
+     "JobsRead": true,
+     "IncludeRetried": true,
+     "Jobs": []
+    },
+    {
+     "ID": 3332,
+     "SHA": "d3b59c2f0b28cf66d43e2b042d037601bc9587fd",
+     "Source": "push",
+     "Status": "skipped",
+     "JobsRead": true,
+     "IncludeRetried": true,
+     "Jobs": []
+    }
+   ]
+  },
+  "Definition": {
+   "Read": true,
+   "Delta": {
+    "Kind": "none",
+    "Jobs": null,
+    "Removed": null,
+    "Added": null,
+    "Renamed": null,
+    "Globals": null,
+    "Violations": null,
+    "Unresolvable": null
+   }
+  }
+ }
+}

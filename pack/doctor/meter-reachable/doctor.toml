@@ -1,0 +1,5 @@
+# Optional metadata for the meter-reachable doctor check (pack-spec.md
+# 1.2.10). run/fix default to run.sh/fix.sh and are omitted since we use the
+# defaults.
+description = "gonk-meter answers /healthz. Without it NOTHING may spend, and every dispatch fails closed."
+warmup = true

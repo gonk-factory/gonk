@@ -1,0 +1,12 @@
+[
+  {
+    "old_path": "tools/restock.py",
+    "new_path": "tools/restock.py",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "diff": "@@ -98,4 +98,5 @@ def restock(shelf):\n     crates = shelf.crates\n-    if crates > 4:\n+    if crates > shelf.capacity:\n+        log.warning(\"shelf %s is over capacity\", shelf.name)\n         return False\n     return True\n@@ -1203,3 +1204,3 @@ def audit(shelves):\n     total = 0\n-    for s in shelves[1:]:\n+    for s in shelves:\n         total += s.crates\n",
+    "too_large": false,
+    "collapsed": false
+  }
+]

@@ -1,0 +1,2477 @@
+---
+# Source: gonk/templates/networkpolicy-default-deny.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-default-deny
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+  annotations:
+    gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+spec:
+  # ==========================================================================
+  # !!! NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13) !!!
+  # Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that
+  # would is SUSPENDED (gitops:clusters/<cluster>/foundation/kustomization.yaml).
+  # THIS OBJECT BLOCKS NOTHING TODAY. It is documentation-as-code: it is
+  # correct, it ships, and it starts enforcing the day Cilium is unsuspended --
+  # with no further work. Do not read it as a guarantee.
+  # See docs/environment.md ("KNOWN LIMITATION") and chart/gonk/README.md.
+  # ==========================================================================
+  #
+  # Deny everything, in both directions, for every pod in this namespace. The
+  # policies that follow ADD back exactly what each component needs. Without this
+  # one, they add permissions to pods that already had all of them, and the whole
+  # exercise is theatre.
+  #
+  # THIS APPLIES TO AGENT SESSION PODS TOO -- as long as they are in this
+  # namespace. If Gas City's session provider puts them somewhere else, this
+  # policy does not touch them and spec 9's guarantee does not exist. (OD-5.)
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Source: gonk/templates/networkpolicy-gonk-agent.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-agent
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: agent-session
+  annotations:
+    gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+spec:
+  # ==========================================================================
+  # *** THE POLICY SPEC 9's CENTRAL CLAIM RESTS ON -- AND IT IS NOT ENFORCED. ***
+  #
+  # "Cloud access exists only through the metered proxy, so budgets cannot be
+  # bypassed" is TRUE ONLY IF (a) this selector matches the pods Gas City's k8s
+  # session provider actually creates (OD-5 -- Gas City is not even deployed yet,
+  # so nobody knows the labels), AND (b) the CNI actually enforces policy.
+  #
+  # (b) IS FALSE TODAY. Flannel does not implement NetworkPolicy and the Cilium
+  # HelmRelease is SUSPENDED. So RIGHT NOW an agent pod can reach anything --
+  # including a model server on the LAN (e.g. http://192.0.2.10:11434) THAT NEEDS NO CREDENTIAL --
+  # skip LiteLLM entirely, and burn local GPU with ZERO METERING.
+  #
+  # Owner decision 2026-07-13: SHIP IT, DOCUMENT THE GAP, DO NOT GATE ON IT.
+  # Therefore:
+  #   * CLOUD-rung budgets ARE hard: a cloud call needs an API key, and the pod's
+  #     only route to one is LiteLLM's virtual key, which refuses at the ceiling.
+  #   * LOCAL-model budgets are ADVISORY until Cilium lands.
+  # Say it that way in every README, dashboard and demo. Not "budgets cannot be
+  # bypassed".
+  #
+  # Plan 06 writes the egress-denial test and SKIPS it, naming Cilium. UN-SKIPPING
+  # THAT TEST IS THE GATE -- and note that a WRONG selector renders fine and
+  # enforces nothing, so the test, not this template, is what proves it.
+  # ==========================================================================
+  podSelector:
+    matchLabels:
+      app: gc-agent
+  policyTypes: [Egress]
+  egress:
+    # DNS. Without it the pod resolves nothing and reaches nothing.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # LiteLLM: THE ONLY DOOR TO A MODEL. Every token an agent spends passes
+    # through it, tagged, budgeted, and hard-refusable.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: litellm
+      ports:
+        - protocol: TCP
+          port: 4000
+    # gonk-intake (PRIVATE listener): the per-session checkout. gonk-gate
+    # shallow-clones the project CONTROLLER-SIDE at the decision point and
+    # registers it under the session alias; the pod fetches that tree here
+    # before opencode starts. This is the only reason an agent needs a
+    # repository, and it deliberately does NOT go to the forge -- the bytes come
+    # from gonk, so the pod still holds no forge credentials (gonk-msz).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: intake
+      ports:
+        - protocol: TCP
+          port: 9090
+    # GitLab: DELIBERATELY NO EGRESS (gonk-7oz).
+    #
+    # This used to allow the agent the WHOLE gitlab namespace on EVERY port,
+    # under the v1 assumption in the old comment here ("the agent clones the rig
+    # and posts comments as the bot"). Neither is true under the broker design:
+    # the controller does all forge I/O -- it reads the issue, and gonk-sweep
+    # applies the agent's proposed-effects batch under its own PAT -- and the
+    # checkout now comes from gonk-intake above.
+    #
+    # It mattered because "the agent never talks to GitLab" (images/agent/
+    # entrypoint.sh) was enforced by ONE thing: the absence of a credential.
+    # With this rule in place, anything that put a usable token in the pod got
+    # full forge reach with no second line of defence -- and the v1 formula pour
+    # did exactly that, handing every session a bot_token. That pour is gone
+    # (ADR-007 deleted the formula layer and the order vars map with it), so no
+    # forge credential reaches an agent pod today. This rule is the second line
+    # of defence that keeps "the agent never talks to GitLab" true even if one
+    # ever does again. The agent also runs attacker-influenceable text by
+    # construction (issue titles and bodies), which gonk-e9m already showed
+    # reaching a shell.
+    #
+    # `mention-reply` is still not ported to the broker, and since the formula
+    # layer was deleted it does not run at all: it is absent from agentForTrigger
+    # (cmd/gonk-gate/broker_inject.go), so runDispatch refuses the trigger
+    # outright rather than pouring a session. Nothing is broken by this rule
+    # today, and turning the egress back on would not revive mention -- porting
+    # it (T-24) means putting it on the broker, where the CONTROLLER does the
+    # forge I/O. networkPolicy.gitlabEgress.enabled=true restores the old
+    # behaviour and re-opens exactly the hole described above.
+    # gonk-meter: prompt-by-reference (gonk-mzd). THE POD RECEIVES NO WORK
+    # WITHOUT THIS RULE -- images/agent/entrypoint.sh fetches its own prompt at
+    # GET /v1/prompt/{GC_ALIAS} (the alias is the capability; no token rides
+    # this call) and posts trajectory evidence back at POST /v1/trace. This rule
+    # predates that: it was opened so the agent could read its own session cost
+    # for the commit trailers, and those were deleted with the trailers hook.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: meter
+      ports:
+        - protocol: TCP
+          port: 8080
+    # AND NOTHING ELSE. No 0.0.0.0/0. No "just for pip". An agent pod that can
+    # reach the internet can reach api.anthropic.com directly, with a key from
+    # anywhere, and every budget in this system becomes a suggestion.
+---
+# Source: gonk/templates/networkpolicy-gonk-controller.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-controller
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+  annotations:
+    gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/<cluster>/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: controller
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: intake
+      ports:
+        - protocol: TCP
+          port: 9443
+  egress:
+    # DNS, GitLab, Dolt (beads), gonk-meter, gonk-intake's private listener, the
+    # work store's Postgres, and the API server
+    # (spawn agent pods). The API
+    # server cannot be named by a NetworkPolicy selector -- left to the cluster's
+    # own allowance; if your CNI blocks it, NO SESSION SPAWNS. Plan 06 confirms.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: dolt
+      ports:
+        - protocol: TCP
+          port: 3306
+    # gonk-meter, at GONK_METER_URL -- which this chart sets on THIS pod. Three
+    # callers live here, not one: the in-controller gonk-gate exec orders
+    # (gonk-dispatch POST /v1/policy/decide, gonk-sweep POST /v1/policy/outcome
+    # and its spend gathering) and the `meter-reachable` warm-up doctor check
+    # (GET /healthz). gonk-meter's OWN policy has admitted `component:
+    # controller` on this port since it was written; this is the outbound half
+    # that was never written with it, so the permission was one-sided and every
+    # one of those calls was dropped on the way OUT (gonk-zjk7). A component
+    # that is configured to call a Service it may not reach is the class
+    # TestInClusterDialsHaveEgress now fails the build on.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: meter
+      ports:
+        - protocol: TCP
+          port: 8080
+    # gonk-intake's PRIVATE listener, at GONK_RIG_BASE_URL. gonk-gate REGISTERS
+    # the per-session checkout there (pkg/rig, gonk-msz) before it creates the
+    # session; without this rule the grant POST is dropped and every session
+    # runs with no working copy -- and scaffold falls back quietly rather than
+    # failing, so nothing would go red. Same one-sided permission as the meter
+    # rule above (gonk-zjk7).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: intake
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gitlab
+---
+# Source: gonk/templates/networkpolicy-gonk-dolt.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-dolt
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: dolt
+  annotations:
+    gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/<cluster>/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: dolt
+  policyTypes: [Ingress]
+  ingress:
+    # RECONCILED, Task 0: the Gas City controller (beads) ONLY. gonk-meter is
+    # NOT admitted -- its ledger is Postgres/CNPG, never a Dolt database, so it
+    # never needs to reach this Service at all (ADR-004 Decision 10).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: controller
+      ports:
+        - protocol: TCP
+          port: 3306
+---
+# Source: gonk/templates/networkpolicy-gonk-intake.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-intake
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: intake
+  annotations:
+    gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/<cluster>/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: intake
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # The webhook, from the ingress controller only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 8080
+    # The private listener (metrics, health, and an UNAUTHENTICATED
+    # POST /admin/reconcile), from Prometheus only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # GitLab.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gitlab
+    # gonk-meter (register projects, read state).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: meter
+      ports:
+        - protocol: TCP
+          port: 8080
+    # The Gas City supervisor (fire orders), at GONK_SUPERVISOR_URL. Split the
+    # same way gonk-meter's controller INGRESS is split, and for the same
+    # reason -- the URL is derived, so the rule must follow it:
+    #   * bundled controller -> in THIS namespace (component: controller), on
+    #     gascity.supervisorPort. The gascity namespaceSelector below names a
+    #     namespace the bundled controller does not live in, on a port it does
+    #     not listen on, so it permitted NOTHING the bundled default actually
+    #     dials: a webhook could never become a session. The controller's own
+    #     policy has admitted intake on that port since it was written; this is
+    #     the outbound half that was never written with it (gonk-zjk7).
+    #   * BYO controller     -> the gascity namespaceSelector/ports.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: controller
+      ports:
+        - protocol: TCP
+          port: 9443
+---
+# Source: gonk/templates/networkpolicy-gonk-meter.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-meter
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+  annotations:
+    gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/<cluster>/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: meter
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # intake (project registration) and the agent pods (prompt-by-reference:
+    # GET /v1/prompt/{alias}, POST /v1/trace). Both are in this namespace.
+    # WITHOUT THE AGENT HALF NO SESSION EVER RECEIVES A PROMPT.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: intake
+        - podSelector:
+            matchLabels:
+              app: gc-agent
+      ports:
+        - protocol: TCP
+          port: 8080
+    # The PACK's exec orders -- gonk-dispatch (POST /v1/policy/decide) and
+    # gonk-sweep (POST /v1/policy/outcome) -- run inside the Gas City controller.
+    # WITHOUT THIS RULE, NO SESSION CAN EVER SPAWN.
+    #   * bundled controller  -> in THIS namespace (component: controller)
+    #   * BYO controller      -> the gascity namespaceSelector
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: controller
+      ports:
+        - protocol: TCP
+          port: 8080
+    # THE LITELLM PROXY, for trajectory-evidence ingest only (gonk-p8j).
+    #
+    # This is a DELIBERATE widening of the meter's ingress and it is worth being
+    # precise about what it does and does not grant. The proxy needs to POST
+    # /v1/trace because it is the one collection point the agent pod cannot
+    # reach, edit, or even see -- which is the entire reason the evidence is
+    # worth having. Collecting it inside the pod would make it a field the agent
+    # fills in.
+    #
+    # It grants NETWORK REACHABILITY ONLY. Every route on this port still
+    # requires the bearer token, so this rule cannot read a budget, move a
+    # reservation, or take a prompt; it lets a pod that already holds the meter
+    # token talk to the meter. Scoped to the proxy's own pod labels rather than
+    # the whole namespace, so a sidecar or a cronjob in the litellm namespace
+    # does not inherit it.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: litellm
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: litellm
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Prometheus (/metrics is unauthenticated; the rest of the API is not).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # LiteLLM's ADMIN API: provision virtual keys, read /spend/logs. This is a
+    # different door from the agents' -- same host, admin credential.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: litellm
+      ports:
+        - protocol: TCP
+          port: 4000
+    # The ledger. RECONCILED, Task 0: the OLD `ledger.backend == "dolt"` branch is
+    # DELETED -- that state does not exist any more (ADR-004 Decision 10), and
+    # meter never has a legitimate reason to egress to the Dolt Service (it backs
+    # beads only). The `cnpg` branch below is unchanged. A gap this reconciliation
+    # ALSO closes: the DEFAULT ledger.postgres.mode is `shared` (the existing
+    # databases-app/postgres CNPG cluster), and the original text had NO egress
+    # rule for that mode at all -- meter's own default profile would have had no
+    # NetworkPolicy path to its own ledger. `external` has the same gap. Both now
+    # get a namespaceSelector egress, matching the litellm/dns pattern above.
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: gonk-ledger-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # The Kubernetes API server (the KeySink writes per-project Secrets). A
+    # NetworkPolicy cannot name the API server by service, so this is left to the
+    # cluster's own allowance -- and if your CNI blocks it, meter cannot deliver
+    # keys and NOTHING RUNS. Plan 06 must confirm.
+---
+# Source: gonk/templates/serviceaccount-gc-agent.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gc-agent
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: agent
+# The identity the controller assigns to the agent SESSION pods it spawns
+# (agent_service_account = gc-agent). Its Role is pods:[get] ONLY -- an agent must
+# never create/exec/delete pods. THE CHART DOES NOT CREATE THE AGENT PODS; it
+# provisions the SA/Role they run under so their footprint is least-privilege.
+---
+# Source: gonk/templates/serviceaccount-gc-controller.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gc-controller
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+# The controller's k8s session provider creates/execs/logs agent SESSION pods and
+# reads/writes ConfigMaps, so it needs an API token (Role: role-gc-controller.yaml).
+automountServiceAccountToken: true
+---
+# Source: gonk/templates/serviceaccount-gonk-meter.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gonk-meter
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+# gonk-meter needs an API token: it WRITES per-project LiteLLM virtual keys as
+# Secrets (the KeySink, Task 4). This is the one component in the chart that
+# talks to the API server.
+automountServiceAccountToken: true
+---
+# Source: gonk/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gonk
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+---
+# Source: gonk/templates/configmap-litellm-model-prices.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gonk-litellm-model-prices
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: litellm-advisory
+data:
+  # ADVISORY. Nothing in this chart applies this to LiteLLM -- LiteLLM is BYO
+  # (OD-3). Paste these into LiteLLM's model_list.
+  #
+  # THIS IS NOT COSMETIC. Local inference is free, so without a SYNTHETIC price
+  # configured in LiteLLM, a local rung moves LiteLLM's USD counter by $0 -- and
+  # the USD virtual-key budget is the ONLY HARD DOOR gonk has. A project's
+  # monthly_tokens ceiling is converted into that USD ceiling using exactly these
+  # numbers. If LiteLLM and this file disagree, the hard door is in the wrong
+  # place, and nothing will tell you. Plan 06 diffs LiteLLM's /model/info against
+  # this. (Cloud models are ABSENT on purpose: their prices are real and already
+  # live in LiteLLM.)
+  model-prices.yaml: |
+    model_list:
+      - model_name: stub-local
+        litellm_params:
+          model: stub-local
+          input_cost_per_token: 2e-07
+          output_cost_per_token: 2e-07
+---
+# Source: gonk/templates/configmap-operator-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gonk-operator-config
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+data:
+  # Consumed by gonk-meter via --operator-config. pkg/opercfg validates this and
+  # gonk-meter REFUSES TO START if it does not validate -- every budget decision
+  # flows from this file. Meter re-reads it from disk on each tick (a ConfigMap
+  # update is a file change, not a restart), and keeps the PREVIOUS config if the
+  # new one fails to validate. It never falls back to no config at all.
+  operator-config.yaml: |
+    groups: {}
+    instance:
+      budget:
+        monthly_cost_usd: 0
+        monthly_tokens: 5G
+        per_task_tokens: 2M
+      enabled: true
+      ladder:
+      - qwen-local
+    meter:
+      enforce_ladder_order: true
+      key_retry_backoff: 5m
+      max_clock_skew: 5m
+      max_infra_retries: 5
+      max_spend_staleness: 5m
+      reservation_ttl: 60m
+    rungs:
+    - est_cost_usd: 0
+      est_tokens: 200K
+      kind: local
+      model: stub-local
+      name: qwen-local
+      synthetic_usd_per_1m_tokens: 0.2
+    version: 1
+---
+# Source: gonk/templates/role-gc-agent.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+# NAMESPACED, and pods:[get] ONLY (docs/environment.md). An agent session pod reads
+# its own pod object and NOTHING else -- no list/watch, no create/exec/delete, no
+# configmaps. If this ever grows a verb, a compromised agent gains reach; keep it
+# to the single grant Gas City's source actually needs.
+kind: Role
+metadata:
+  name: gc-agent
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: agent
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get]
+---
+# Source: gonk/templates/role-gc-controller.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+# NAMESPACED Role, NEVER a ClusterRole. A ClusterRole would let a compromised
+# controller reach agent pods in EVERY namespace -- exactly the blast radius this
+# must not have. Verbs transcribed from docs/environment.md (read off Gas City's
+# source): the k8s session provider creates/execs/logs agent SESSION pods and
+# reads/writes the ConfigMaps that carry per-session state. Least privilege --
+# nothing beyond pods, pods/exec, pods/log, configmaps.
+kind: Role
+metadata:
+  name: gc-controller
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # GET ONLY, and only so the agent stops receiving the proxy ADMIN key
+  # (gonk-8gb). The meter keysinks each project's LiteLLM virtual key into a
+  # Secret here and dispatch already carried a POINTER to it; nothing followed
+  # the pointer, so `litellm_key` forwarded the controller's own mounted key --
+  # which is the LiteLLM MASTER key. Every session therefore authenticated as
+  # the proxy administrator, on a key with no alias and no budget, which is why
+  # the per-project ceiling was never consulted.
+  #
+  # THIS IS A NET REDUCTION IN PRIVILEGE, not an increase. The controller
+  # already holds the master key, which can create, read and delete every
+  # virtual key on that proxy; letting it read one project key is strictly less
+  # than that, and it is what allows the admin key to stop leaving this pod.
+  #
+  # get, never list: the controller resolves ONE secret whose name the meter
+  # supplied, and a list verb would let a compromised controller enumerate every
+  # project's credential rather than the one it was told about. resourceNames
+  # cannot be used -- the names derive from project paths that do not exist at
+  # install time (keysink.Slug) -- which is the same constraint the meter's own
+  # Role documents, and the same reason this namespace should hold nothing else.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+---
+# Source: gonk/templates/role-gonk-gate-jobs.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+# THE SESSION RUNTIME'S GRANT (gonk-t55, plan D6/P5). NAMESPACED Role, NEVER a
+# ClusterRole: gonk-gate creates every agent session as a Kubernetes Job in the
+# release namespace, and nowhere else.
+#
+# WHAT EACH RULE IS FOR -- one line per pkg/runtime/jobs call (jobs.go):
+#   batch/jobs  create        Start: the session Job
+#               get           Start's AlreadyExists path (D2: the name is the
+#                             idempotency key; the existing Job is read to check
+#                             it is a gonk session and not being deleted);
+#                             Status; Output; Stop (the Job's UID for the
+#                             delete precondition)
+#               list          List (label gonk-factory.github.io/component=agent-session),
+#                             which the sweep's stale-session pass uses (D7)
+#               delete        Stop, and Start's rollback when the Secret fails (D3)
+#   secrets     create        Start: the per-Job Secret carrying prompt,
+#                             litellm-key, metadata.json and rig-url (D3)
+#               get           Stop: read the Secret to delete it only if the
+#                             stopped Job owns it
+#               delete        Stop, so the prompt and key do not outlive it by
+#                             however long garbage collection takes; normally
+#                             the Secret also goes with the Job through its
+#                             ownerReference
+#   pods        list          Status and Output: find the Job's pod by the
+#                             gonk-factory.github.io/session label (kept only if the
+#                             Job's UID controls it)
+#   pods/log    get           Output: the full container log the sweep judges
+#
+# No watch (nothing watches: the sweep polls) and no pods get (the pod is only
+# ever found by list). Both were in the first version of this Role and were
+# dropped once the runtime existed to check against (t55 verify round 1).
+#
+# NOTHING ELSE. No update or patch on anything, no pods/exec, no create on pods
+# (the Job controller creates the pod, not gonk-gate), no jobs/status. The rule
+# list is asserted exactly by internal/charttest/jobs_rbac_test.go.
+#
+# BE CLEAR ABOUT WHAT THIS ROLE ADDS. gc-controller already holds pods and
+# pods/log and secrets:[get] through Role gc-controller (Gas City's session
+# provider needs them). What is NEW is batch/jobs, and secrets create/delete.
+# secrets:[delete] cannot be narrowed with resourceNames because Job Secret
+# names are minted per session; it is scoped to this namespace and to the one
+# ServiceAccount the binding names, which is the whole of the blast radius.
+kind: Role
+metadata:
+  name: gonk-gate-jobs
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, get, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+---
+# Source: gonk/templates/role-gonk-meter.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gonk-meter
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+rules:
+  # The KeySink (internal/meter/keysink/k8s.go): one Secret per project, holding
+  # that project's LiteLLM virtual key. NAMESPACED (this Role, not a
+  # ClusterRole), and no `get`/`list`/`watch` on Secrets -- meter creates,
+  # updates and deletes the keys IT provisions, and has no business reading
+  # anyone else's (its own credentials arrive as FILE MOUNTS, Task 3, never as
+  # an API read).
+  #
+  # The verbs below are EXACTLY the client-go calls k8s.go makes on Secrets:
+  # Create (new project), Update (rotation / idempotent re-Put -- the sink
+  # falls back to Update on an AlreadyExists from Create), and Delete
+  # (de-onboarding). No `patch`: the sink never calls Patch. This is asserted
+  # against the source, not just this comment
+  # (internal/charttest/secrets_test.go, TestKeySinkRoleVerbsMatchK8sSink) --
+  # a future keysink change that starts calling a new verb fails THAT test
+  # until this Role is updated to match, instead of failing silently as a 403
+  # on a real cluster.
+  #
+  # resourceNames cannot be used here: the names are derived from project paths
+  # that do not exist at install time (keysink.Slug). This is a
+  # namespace-scoped write grant on Secrets, and it is the reason gonk-meter's
+  # namespace (GONK_KEYSINK_NAMESPACE, Task 3) should hold nothing else.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, update, delete]
+---
+# Source: gonk/templates/rolebinding-gc-agent.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gc-agent
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gc-agent
+subjects:
+  - kind: ServiceAccount
+    name: gc-agent
+    namespace: gonk
+---
+# Source: gonk/templates/rolebinding-gc-controller.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gc-controller
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gc-controller
+subjects:
+  # Bound in .Release.Namespace -- the controller acts only in its own namespace.
+  - kind: ServiceAccount
+    name: gc-controller
+    namespace: gonk
+---
+# Source: gonk/templates/rolebinding-gonk-gate-jobs.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gonk-gate-jobs
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gonk-gate-jobs
+subjects:
+  # gc-controller, and ONLY gc-controller. gonk-gate's dispatch and sweep are
+  # exec orders that run inside the controller pod, so they authenticate as that
+  # pod's ServiceAccount (the same one the pod reaper and the key read use).
+  #
+  # NEVER gc-agent. A session pod runs as gc-agent with its token NOT mounted
+  # (D6), and even so it must never hold a grant that could create a Job or read
+  # a sibling session's Secret -- that Secret holds the sibling's LiteLLM key.
+  - kind: ServiceAccount
+    name: gc-controller
+    namespace: gonk
+---
+# Source: gonk/templates/rolebinding-gonk-meter.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gonk-meter
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gonk-meter
+subjects:
+  # gonk-meter's own ServiceAccount (Task 3, serviceaccount-gonk-meter.yaml).
+  # GONK_KEYSINK_NAMESPACE (Task 3's deployment env) is set to the Release
+  # namespace -- the SAME namespace this Release installs into -- so the
+  # subject namespace below matches where the Role actually lives and where
+  # the sink actually writes. If keysink is ever pointed at a DIFFERENT
+  # namespace than the release, this binding (and the Role) must move there
+  # too; nothing in this chart currently does that.
+  - kind: ServiceAccount
+    name: gonk-meter
+    namespace: gonk
+---
+# Source: gonk/templates/service-gonk-controller.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-controller
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  # The per-city [api] listener ONLY (smoke U1). Port 8372 -- the machine-wide
+  # supervisor admin/dashboard API -- binds 127.0.0.1 LOOPBACK ONLY and is
+  # DELIBERATELY absent here: a Service cannot reach it (a peer pod gets
+  # "connection refused"), so exposing it would be a lie in the object graph.
+  ports:
+    - name: supervisor
+      port: 9443   # 9443, SETTLED (Task 0.5)
+      targetPort: supervisor
+  selector:
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/component: controller
+---
+# Source: gonk/templates/service-gonk-dolt.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-dolt
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: dolt
+spec:
+  # Headless: a StatefulSet's stable network identity (gonk-dolt-0.gonk-dolt).
+  clusterIP: None
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+  selector:
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/component: dolt
+---
+# Source: gonk/templates/service-gonk-intake-internal.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-intake-internal
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: intake
+    gonk-factory.github.io/exposure: internal
+spec:
+  type: ClusterIP
+  # /healthz, /readyz, /metrics, POST /admin/reconcile. Cluster-internal ONLY:
+  # /admin/reconcile has no authentication. The Ingress must never reference this
+  # Service (a chart test asserts it does not).
+  ports:
+    - name: http-private
+      port: 9090
+      targetPort: http-private
+  selector:
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/component: intake
+---
+# Source: gonk/templates/service-gonk-intake-public.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-intake
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: intake
+    gonk-factory.github.io/exposure: public
+spec:
+  type: ClusterIP
+  # ONE PORT. This is the Service the Ingress points at, and the listener behind
+  # it serves POST /hook/gitlab and 404s everything else. Adding a port here is
+  # how you would accidentally expose /metrics and POST /admin/reconcile to the
+  # internet. Do not.
+  ports:
+    - name: http-hook
+      port: 8080
+      targetPort: http-hook
+  selector:
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/component: intake
+---
+# Source: gonk/templates/service-gonk-meter.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-meter
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+spec:
+  type: ClusterIP
+  # One port. /healthz, /readyz and /metrics are unauthenticated on it; every
+  # other path requires the bearer token. This service is NEVER ingressed --
+  # spec 9: the webhook is the only ingress.
+  ports:
+    - name: http-api
+      port: 8080
+      targetPort: http-api
+  selector:
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/component: meter
+---
+# Source: gonk/templates/deployment-gonk-intake.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gonk-intake
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: intake
+spec:
+  replicas: 2
+  # Intake IS safe to roll and to scale: it holds no persistent state, its project
+  # cache is derived from GitLab on every pass, and its writes (the onboarding MR,
+  # the hook) are idempotent. The controller dedupes orders on BeadAnchor.
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: intake
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: gonk-0.0.0-golden
+        app.kubernetes.io/name: gonk
+        app.kubernetes.io/instance: gonk
+        app.kubernetes.io/version: "0.2.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: gonk
+        app.kubernetes.io/component: intake
+    spec:
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: intake
+          image: ghcr.io/gonk-factory/gonk/gonk-intake:v0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GONK_GITLAB_URL
+              value: "https://gitlab.example.internal"
+            - name: GONK_BOT_USERNAME
+              value: "gonk"
+            # *** PATHS, NOT VALUES. ***
+            - name: GONK_GITLAB_TOKEN_FILE
+              value: "/etc/gonk/secrets/gitlab/token"
+            - name: GONK_WEBHOOK_SECRET_FILE
+              value: "/etc/gonk/secrets/webhook/token"
+            - name: GONK_WEBHOOK_TOKEN_GEN
+              value: "1"
+            - name: GONK_WEBHOOK_PUBLIC_URL
+              value: "https://gonk.example.test/hook/gitlab"
+            - name: GONK_WEBHOOK_SSL_VERIFY
+              value: "true"
+            - name: GONK_METER_URL
+              value: "http://gonk-meter:8080"
+            - name: GONK_METER_TOKEN_FILE
+              value: "/etc/gonk/secrets/meter-api/token"
+            # Empty -> the LogDispatcher: orders are LOGGED and never fired. It is
+            # set explicitly (not omitted) so a stale env cannot resurrect the HTTP
+            # dispatcher on a rolling update. When dispatch=http the URL is DERIVED
+            # from the in-chart controller Service (gascity.enabled) or from
+            # gascity.supervisorURL (BYO controller) -- see `gonk.supervisorURL`.
+            - name: GONK_SUPERVISOR_URL
+              value: "http://gonk-controller.gonk.svc:9443"
+            # WRITE-AUTH (gonk-fsl / gonk-5we). The bundled controller runs
+            # `gc start --foreground` grant-gated, so every order-run POST must
+            # carry a fresh ed25519 X-GC-City-Write grant. These name the 0400
+            # file mount of the PRIVATE signing key (a PATH, never a value) and the
+            # kid derived from gascity.writeAuth.verifyKey's public half -- the same
+            # keypair the in-controller gonk-gate signs with. Empty key file => no
+            # grant => the controller rejects the dispatch, which G22 prevents by
+            # requiring the key when gascity.enabled.
+            - name: GONK_GC_WRITE_KEY_FILE
+              value: "/etc/gonk/secrets/gc-write-key/key"
+            - name: GONK_GC_WRITE_KEY_ID
+              value: "k1"
+            # RECONCILED, Task 0: intake carries its OWN copy of the operator
+            # ladder (main.go's loadConfig fails closed if this is unset/empty --
+            # ADR-002). It MUST be the same ladder gonk-meter resolves rungs
+            # against (operatorConfig.instance.ladder), never a separate value
+            # that could drift from it. Comma-separated; the schema's minItems:1
+            # on operatorConfig.instance.ladder is what already guards "empty".
+            - name: GONK_INSTANCE_LADDER
+              value: "qwen-local"
+            - name: GONK_RECONCILE_INTERVAL
+              value: "10m"
+            - name: GONK_LISTEN_ADDR
+              value: ":8080"
+            # Projects gonk must never work on. Unparseable entries make intake refuse
+            # to start -- fail closed, never "block less than was written" (gonk-jn5).
+            - name: GONK_BLOCKED_PROJECTS
+              value: "agentic/gonk-project"
+            - name: GONK_PRIVATE_ADDR
+              value: ":9090"
+            - name: GONK_VERSION
+              value: "0.2.0"
+          ports:
+            # The PUBLIC listener: POST /hook/gitlab, and 404 for everything else.
+            - name: http-hook
+              containerPort: 8080
+            # The PRIVATE listener: /healthz, /readyz, /metrics, POST /admin/reconcile.
+            # NEVER INGRESSED. /admin/reconcile is unauthenticated.
+            - name: http-private
+              containerPort: 9090
+          livenessProbe:
+            httpGet: {path: /healthz, port: http-private}
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          # /readyz is true only when the bot identity resolved, the first
+          # reconcile completed, AND gonk-meter's /healthz is OK. So a meter
+          # outage takes intake OUT of the Service -- the webhook 502s and GitLab
+          # retries. That is fail-closed (no unmetered dispatch), but GitLab
+          # auto-disables hooks that fail repeatedly: Plan 06 must test the
+          # recovery path.
+          #
+          # failureThreshold IS SIZED FOR A PEER RESTART, NOT JUST A PEER OUTAGE
+          # (gonk-4za). The coupling above is deliberate and stays -- intake must
+          # not dispatch unmetered. But 3 x 10s = 30s cannot ride out a ROLLING
+          # RESTART of the meter, which is a routine deploy rather than a fault,
+          # and the consequence was not merely a blip: on 2026-09-01 a Helm
+          # upgrade rolled meter and intake together, both the old AND the new
+          # intake answered /readyz 503 while the meter was down, the Deployment
+          # went to zero available replicas, and Flux failed the upgrade AND the
+          # rollback -- three times. The stack had to be recovered by hand.
+          #
+          # 12 x 10s = 120s covers a meter roll with headroom while still taking
+          # intake out of the Service inside two minutes for a genuine outage,
+          # which is what the fail-closed argument actually requires.
+          readinessProbe:
+            httpGet: {path: /readyz, port: http-private}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: secret-gitlab
+              mountPath: /etc/gonk/secrets/gitlab
+              readOnly: true
+            - name: secret-webhook
+              mountPath: /etc/gonk/secrets/webhook
+              readOnly: true
+            - name: secret-meter-api
+              mountPath: /etc/gonk/secrets/meter-api
+              readOnly: true
+            # The ed25519 PRIVATE signing key, 0400, mounted at $root/gc-write-key.
+            - name: secret-gc-write-key
+              mountPath: /etc/gonk/secrets/gc-write-key
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: secret-gitlab
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-gitlab
+                  items:
+                    - key: token
+                      path: token
+        - name: secret-webhook
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-webhook
+                  items:
+                    - key: token
+                      path: token
+        - name: secret-meter-api
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-meter-api
+                  items:
+                    - key: token
+                      path: token
+        # The ed25519 PRIVATE write-auth signing key (gonk-fsl / gonk-5we). Same
+        # pre-provisioned Secret the controller pod mounts; the chart creates none.
+        - name: secret-gc-write-key
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-gc-write-key
+                  items:
+                    - key: key
+                      path: key
+        - name: tmp
+          emptyDir: {}
+---
+# Source: gonk/templates/deployment-gonk-meter.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gonk-meter
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: meter
+spec:
+  replicas: 1
+  strategy:
+    # Recreate, NOT RollingUpdate. A rolling update runs the old and the new pod
+    # at the same time, and gonk-meter's per-project budget lock is IN-PROCESS:
+    # two meters, briefly, is the exact state that can grant the last of a budget
+    # twice. The cost is a few seconds where /policy/decide is unreachable -- and
+    # a decide that fails is a session that does not spawn, which is fail-closed.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: meter
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: gonk-0.0.0-golden
+        app.kubernetes.io/name: gonk
+        app.kubernetes.io/instance: gonk
+        app.kubernetes.io/version: "0.2.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: gonk
+        app.kubernetes.io/component: meter
+      annotations:
+        # Roll the pod when the operator config changes. (Meter also re-reads it
+        # from disk on each tick, so this is belt-and-braces -- but a config that
+        # fails to validate should surface as a failed rollout, not a quiet
+        # "kept the previous config" log line.)
+        checksum/operator-config: c1260a86d79e6cdfda81a893c438a701df149c8ac82d8308b767e9be87b44755
+    spec:
+      serviceAccountName: gonk-meter
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: meter
+          image: ghcr.io/gonk-factory/gonk/gonk-meter:v0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --operator-config=/etc/gonk/operator/operator-config.yaml
+            - --listen=:8080
+          env:
+            # *** NO SECRET VALUE IS AN ENV VAR. These are PATHS. ***
+            - name: LITELLM_URL
+              value: "http://litellm.litellm.svc:4000"
+            - name: LITELLM_ADMIN_KEY_FILE
+              value: "/etc/gonk/secrets/litellm/admin-key"
+            - name: GONK_METER_TOKEN_FILE
+              value: "/etc/gonk/secrets/meter-api/token"
+            # THE STORE. Both are REQUIRED and neither has a default: defaulting
+            # to the in-memory store would lose reservations on every restart,
+            # which is fail-OPEN on budget headroom. `memory` is not selectable
+            # at all (values.schema.json + G15). An unknown backend, an empty
+            # DSN file, or a store that will not connect is a FATAL startup error.
+            - name: GONK_METER_STORE_BACKEND
+              value: "postgres"
+            - name: GONK_METER_STORE_DSN_FILE
+              value: "/etc/gonk/secrets/ledger/dsn"
+            # The KeySink (Task 4) writes per-project Secrets into this namespace.
+            - name: GONK_KEYSINK_NAMESPACE
+              value: "gonk"
+            - name: GONK_KEYSINK_PREFIX
+              value: "gonk-key-"
+          ports:
+            - name: http-api
+              containerPort: 8080
+          # /healthz = the process is alive.
+          livenessProbe:
+            httpGet: {path: /healthz, port: http-api}
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          # /readyz = the FIRST SPEND SYNC has completed. Until then meter's view
+          # of what has been spent is empty, and an empty view is fail-OPEN on
+          # headroom -- so it must not serve /policy/decide. A long cold start is
+          # correct behaviour; give it room.
+          readinessProbe:
+            httpGet: {path: /readyz, port: http-api}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          startupProbe:
+            httpGet: {path: /healthz, port: http-api}
+            periodSeconds: 3
+            failureThreshold: 20
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: operator-config
+              mountPath: /etc/gonk/operator
+              readOnly: true
+            - name: secret-litellm
+              mountPath: /etc/gonk/secrets/litellm
+              readOnly: true
+            - name: secret-meter-api
+              mountPath: /etc/gonk/secrets/meter-api
+              readOnly: true
+            - name: secret-ledger
+              mountPath: /etc/gonk/secrets/ledger
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: operator-config
+          configMap:
+            name: gonk-operator-config
+        - name: secret-litellm
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-litellm
+                  items:
+                    - key: admin-key
+                      path: admin-key
+        - name: secret-meter-api
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-meter-api
+                  items:
+                    - key: token
+                      path: token
+        - name: secret-ledger
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-ledger
+                  items:
+                    - key: dsn
+                      path: dsn
+        - name: tmp
+          emptyDir: {}
+---
+# Source: gonk/templates/workload-gonk-controller.yaml
+# The bundled Gas City controller. SETTLED by Task 0.5 + the gonk-fsl re-smoke
+# (smoke/gc-controller-smoke.md), overriding the plan's provisional draft:
+#   - `gc start --foreground /city` as PID 1 (NOT `gc supervisor run`, which logs
+#     `[api] port=9443 ... ignored under supervisor mode` and never binds 9443).
+#     Foreground mode binds the per-city [api] on 0.0.0.0:9443, calls
+#     WithAnyHostAllowed() (any Host, NO allowed_hosts, no 421), and is the only
+#     mode that serves the /v0/city/<city>/order/<name>/run route intake dispatches
+#     to. NEVER `gc register` (daemonizes a second supervisor and crashes PID 1).
+#   - GRANT-GATED: the [api] plane is 0.0.0.0 + allow_mutations=true, i.e. an
+#     UNAUTHENTICATED mutation endpoint unless write-auth is on. GC_CITY_WRITE_PUBKEY
+#     (gascity.writeAuth.verifyKey) turns on ed25519 grant verification; intake and
+#     the in-pod gonk-gate sign every POST with the matching private key. G22 fails
+#     the render closed if either half is missing.
+#   - City NAME must be `gonk`: foreground mode serves the name from city.toml
+#     [workspace], and intake's client dials /v0/city/gonk/... (hardcoded). A
+#     mismatch passes auth then 404s city-not-found -- so `gc init --name gonk`.
+#   - prebaked delivery: an initContainer copies the baked pack into a WRITABLE
+#     emptyDir /city and runs `gc init --preserve-existing --bootstrap-profile
+#     k8s-cell` (writes [api] bind=0.0.0.0/allow_mutations=true/port=9443; a
+#     read-only ConfigMap at /city is not viable -- smoke U2);
+#   - Deployment, replicas 1, strategy Recreate (StatefulSet is the single-instance
+#     alternative). No leader election exists, so EXACTLY ONE controller runs.
+#
+# The gonk-fsl re-smoke proved the full CSRF + ed25519 write-auth + order-handler
+# path end-to-end on the fixed image (local, torn down); the charttest gate asserts
+# this SHAPE renders. In-cluster 9443 cross-pod reachability is the remaining check.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gonk-controller
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: controller
+spec:
+  # EXACTLY ONE. No leader election (smoke U3): two reconcile loops would race the
+  # Dolt beads store. Pinned to 1 and deliberately NOT exposed as a knob.
+  replicas: 1
+  # Recreate, never RollingUpdate: maxSurge could briefly run two controllers
+  # during a rollout (smoke U3). Recreate terminates the old pod before the new one
+  # starts -- the exactly-one guarantee in the absence of leader election.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: gonk-0.0.0-golden
+        app.kubernetes.io/name: gonk
+        app.kubernetes.io/instance: gonk
+        app.kubernetes.io/version: "0.2.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: gonk
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: gc-controller
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # PREBAKED DELIVERY (smoke U2). The gonk pack is baked into the image at
+      # /opt/gonk/pack. This initContainer copies it into the writable emptyDir
+      # /city and runs `gc init --preserve-existing` (which keeps the gonk pack.toml
+      # -- `gc init --template gascity` would DISCARD it and pull remote GitHub
+      # imports) with `--bootstrap-profile k8s-cell` (which writes the
+      # [api] bind=0.0.0.0/allow_mutations=true/port=9443 block). The exact command
+      # is the one the smoke recorded as working.
+      initContainers:
+        - name: bootstrap-city
+          image: ghcr.io/gonk-factory/gonk/gonk-controller:v0.1.0
+          imagePullPolicy: IfNotPresent
+          # R-48/T-26: the `gc` user's password, read from the FILE-mounted
+          # secrets.dolt.keys.gcPassword Secret key below and exported for
+          # ONLY this process -- it is never a Kubernetes-native secret
+          # reference and never a chart literal (see the gonk.controllerEnv
+          # definition of GC_DOLT_USER for why the user, unlike the password,
+          # is a plain env entry instead). NOTE: this explanation lives in a
+          # real YAML comment, ABOVE the script, on purpose -- a comment
+          # INSIDE the `args` block scalar becomes literal shell-script DATA
+          # in the rendered manifest, and would trip
+          # TestSecretsAreNeverEnvironmentVariables's chart-wide grep for the
+          # very k8s primitive this wrapper exists to avoid.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              export GC_DOLT_PASSWORD="$(cat /etc/gonk/secrets/dolt-gc/gc-password)"
+              cp -r /opt/gonk/pack/. /city/
+              # --name gonk is LOAD-BEARING: `gc start --foreground` serves the city
+              # under the name in city.toml [workspace], and intake dials
+              # /v0/city/gonk/... (hardcoded). Without it gc init defaults the name to
+              # "city" and every grant/dispatch for "gonk" 404s city-not-found.
+              gc init --preserve-existing --bootstrap-profile k8s-cell \
+                --name gonk \
+                --default-provider claude --skip-provider-readiness \
+                --dolt-host "$GC_DOLT_HOST" --dolt-port "$GC_DOLT_PORT" \
+                --dolt-database "bd_gonk" \
+                --dolt-project-id "gonk" \
+                --no-start /city
+              # ---- SELECT THE K8S SESSION PROVIDER -------------------------------
+              # THIS IS THE ONLY THING THAT MAKES AGENT SESSIONS RUN AS PODS, and it
+              # is CITY CONFIG, NOT ENV. config.SessionConfig is `toml:"session"` on
+              # the city config; Gas City has no GC_SESSION_PROVIDER at all (the
+              # string does not appear in its source at GASCITY_REF). The chart used
+              # to set that env, which did nothing: the runtime defaulted to tmux and
+              # every session "started" successfully while logging `tmux server
+              # unreachable: no tmux server running` and never creating a pod.
+              #
+              # Written here rather than passed to `gc init` because init has no flag
+              # for it. Appended only when absent so a re-run is idempotent; the
+              # GC_K8S_* details (image/namespace/SA/prebaked) stay env, which IS
+              # where the provider reads them.
+              if ! grep -q '^\[session\]' /city/city.toml; then
+                printf '\n[session]\nprovider = "k8s"\n' >> /city/city.toml
+                echo "bootstrap-city: selected the k8s session provider in city.toml"
+              fi
+
+              # ---- SEED THE SWEEP HEALTH RECORD (gonk-pop3 item 4) ---------------
+              # The readinessProbe treats a MISSING health record as READY, because a
+              # pod that has not completed its first sweep pass must not be held out
+              # of its own Service. But that leaves one hole: if the gonk-sweep
+              # cooldown order never runs AT ALL -- unregistered, a broken pack, a
+              # supervisor that never schedules it -- no record is ever written and
+              # the probe stays green through a total outage. That is the same class
+              # of failure as gonk-p7qh, and it would be just as invisible.
+              #
+              # Seeding an OK record stamped NOW closes it: the probe's staleness
+              # check (gascity.sweepHealthMaxAge) then runs from POD START, so a
+              # controller whose sweep never fires goes unready on schedule instead
+              # of never. The sweep overwrites this on its first pass.
+              #
+              # ALWAYS overwritten, never --preserve-existing: a stale record left on
+              # the emptyDir by a previous container in this pod would start the
+              # staleness clock in the past.
+              printf '{"at":"%s","ok":true,"consecutive_failures":0}\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /city/gonk-sweep-health.json
+              echo "bootstrap-city: seeded the sweep health record"
+
+              # ---- STATIC SESSION INFERENCE CONFIG (gonk-aql) --------------------
+              # An agent SESSION pod's env is resolved.Env -- the agent/city config
+              # -- plus a fixed passthrough allow-list. Controller env does NOT
+              # reach it and neither does any per-session order arg (GC_WEBHOOK_ARG_*
+              # is an EXEC-order overlay). So the only way to hand the session its
+              # LiteLLM endpoint/key is to write them into the agent config in /city,
+              # here, from the mounted secret file.
+              #
+              # These are STATIC per-install values, which is exactly why this works;
+              # the per-session values (model, attribution metadata) cannot come this
+              # way and ride the prompt instead: the pod fetches it from gonk-meter
+              # at GET /v1/prompt/{GC_ALIAS} and reads `model` and `metadata` out of
+              # that response (gonk-mzd; GONK_PROMPT_URL is injected just below).
+              #
+              # gonk-0y6 / v2 broker: the agent pod holds NO forge credentials. It
+              # makes no glab/git calls -- the controller-side broker fetches issue
+              # context (dispatch) and applies the validated batch (sweep) under the
+              # bot PAT. So the ONLY cred written here is the LiteLLM key the agent
+              # needs to call inference; the bot token and the forge URL are gone
+              # (they used to be injected as GONK_BOT_TOKEN/GONK_GITLAB_URL). /city is
+              # an emptyDir private to this pod, and the file is 0600.
+              #
+              # Inserted directly after the existing `[env]` header rather than
+              # appended: appending to EOF happens to land in [env] today only
+              # because [env] is the last table, and that is not a property worth
+              # depending on.
+              # The ADMIN key is deliberately NOT read here any more (gonk-8gb).
+              # It used to be written into every agent.toml, which handed each
+              # session the credential that can create, read and delete every
+              # virtual key on the proxy. The per-project key now arrives
+              # per-session from dispatch instead.
+              for agent_dir in /city/agents/*/; do
+                agent_toml="${agent_dir}agent.toml"
+                [ -f "$agent_toml" ] || continue
+                # THIS LOOP CREATES [env] WHERE AN AGENT DELIBERATELY HAD NONE --
+                # the next line adds the table when it is missing. So omitting
+                # [env] from an agent.toml protects nothing, and the ONLY way to
+                # keep a value out of one particular agent is an explicit
+                # exclusion right here.
+                #
+                # There used to be one, skipping */control-dispatcher/: the
+                # providerless deterministic control lane, which runs gc and never
+                # calls a model, so a credential in its pod had no use and real
+                # blast radius. Both halves of that reason are now gone, so the
+                # exclusion went too. The agent no longer exists (ADR-007 deleted
+                # pack/agents/control-dispatcher/ with the graph-v2 formulas whose
+                # workflow-control beads it routed) and nothing can recreate it
+                # here: the bootstrap above runs gc init --preserve-existing
+                # against gonk's own pack.toml, so Gas City's core pack -- the
+                # only other source of that agent -- is never pulled in. And this
+                # block no longer injects a credential at all: the LiteLLM key
+                # stopped being written here under gonk-8gb, leaving four
+                # non-secret per-install values. IF A CREDENTIAL IS EVER ADDED
+                # BACK to the awk program below, read this paragraph again first.
+                grep -q '^\[env\]' "$agent_toml" || printf '\n[env]\n' >> "$agent_toml"
+                # GONK_RIG_BASE_URL is the per-INSTALL half of the checkout URL
+                # (pkg/rig, gonk-msz). It is static, which is exactly why it can
+                # ride this channel: the per-SESSION half is GC_ALIAS, which Gas
+                # City already puts in every agent pod's env. The pod composes
+                # the two itself, so no per-session channel is needed and the
+                # checkout does not wait on gonk-e9m's delivery redesign.
+                #
+                # Not a credential: it is an in-cluster Service address, and the
+                # GRANT is what authorizes a fetch (see pkg/rig).
+                awk -v url='http://litellm.litellm.svc:4000' \
+                    -v model='stub-local' \
+                    -v rigbase='http://gonk-intake-internal.gonk.svc:9090' \
+                    -v prompturl='http://gonk-meter.gonk.svc:8080' '
+                  /^\[env\]/ && !seen {
+                    print
+                    printf "GONK_LITELLM_URL = \"%s\"\n", url
+                    # GONK_LITELLM_KEY IS NO LONGER WRITTEN HERE (gonk-8gb).
+                    # This is a PER-INSTALL channel and the only key available to
+                    # it is the proxy ADMIN key, so writing it handed every agent
+                    # session the credential that can create, read and delete
+                    # every virtual key on the proxy. Because the static value
+                    # also used to win in the entrypoint, the per-project budget
+                    # the meter provisions was never the one being spent. A
+                    # per-project key now arrives per-session from dispatch,
+                    # which resolves it from the KeyRef the meter supplies and
+                    # fails closed if it cannot.
+                    #
+                    # NOTE FOR EDITORS: this comment lives INSIDE a single-quoted
+                    # awk program. An apostrophe here terminates it and the shell
+                    # then tries to parse awk syntax -- which is exactly how this
+                    # block crash-looped the controller. Keep it apostrophe-free.
+                    if (model != "") printf "GONK_MODEL = \"%s\"\n", model
+                    if (rigbase != "") printf "GONK_RIG_BASE_URL = \"%s\"\n", rigbase
+                    if (prompturl != "") printf "GONK_PROMPT_URL = \"%s\"\n", prompturl
+                    seen = 1
+                    next
+                  }
+                  { print }
+                ' "$agent_toml" > "${agent_toml}.new"
+                mv "${agent_toml}.new" "$agent_toml"
+                chmod 0600 "$agent_toml"
+              done
+              echo "bootstrap-city: injected LiteLLM config into $(ls -d /city/agents/*/ | wc -l) agent config(s)"
+
+              # NOTE: do NOT write ~/.gc/cities.toml here. Registering the city makes
+              # `gc start --foreground /city` refuse it ("run `gc unregister /city`
+              # before using --foreground") and crash-loop (gonk-fsl in-cluster
+              # re-smoke, blocker A). Foreground mode runs the city directly from the
+              # explicit /city path -- no registration is needed or wanted.
+          env:
+            - name: HOME
+              value: /home/gonk
+            - name: GC_DOLT_HOST
+              value: "gonk-dolt.gonk.svc"
+            - name: GC_DOLT_PORT
+              value: "3306"
+            # R-48/T-26: the controller connects to Dolt as the `gc` user (dolt.gcUser.
+            # username), never root -- GC_DOLT_USER is not a credential (just a name), so
+            # unlike GC_DOLT_PASSWORD it can be a plain value here. `gc init` picks up
+            # GC_DOLT_USER as its --dolt-user fallback and `gc start`'s bd bridge mirrors
+            # it into BEADS_DOLT_SERVER_USER (cmd/gc/bd_env.go's mirrorBeadsDoltServerEnv
+            # at GASCITY_REF) -- no --dolt-user flag is needed at either call site.
+            # GC_DOLT_PASSWORD is set separately by each caller's own command wrapper,
+            # `cat`ing the FILE-mounted secrets.dolt.keys.gcPassword Secret key -- it
+            # cannot live here because this helper is plain `env:` entries, and the
+            # password can never be a chart-visible value (see the same helper's callers).
+            - name: GC_DOLT_USER
+              value: "gc"
+            # GC_SESSION -- the REAL session-provider env override. cmd/gc's
+            # effectiveProviderName(cfg.Session.Provider) returns $GC_SESSION when set, so
+            # this is the documented way to force a provider from the environment. (The
+            # chart previously set GC_SESSION_PROVIDER, which EXISTS NOWHERE in Gas City;
+            # the runtime silently fell back to tmux and never created a pod.) Belt and
+            # braces with city.toml's [session] provider, written by the bootstrap: the
+            # TOML is the durable declaration, this is the override the supervisor reads.
+            - name: GC_SESSION
+              value: k8s
+          volumeMounts:
+            - name: city
+              mountPath: /city
+            - name: home
+              mountPath: /home/gonk
+            - name: tmp
+              mountPath: /tmp
+            # The bootstrap reads this to write the static LiteLLM config into the
+            # per-agent config in /city (see the inference-config block in args
+            # above). gonk-0y6: the gitlab-bot secret is NO LONGER mounted here --
+            # the agent pod holds no forge creds; only the controller container
+            # mounts the bot PAT (for the broker's own dispatch/sweep forge calls).
+            - name: secret-litellm
+              mountPath: /etc/gonk/secrets/litellm
+              readOnly: true
+            # R-48/T-26: the `gc` user's password (see the export above).
+            - name: secret-dolt-gc
+              mountPath: /etc/gonk/secrets/dolt-gc
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+      containers:
+        - name: controller
+          image: ghcr.io/gonk-factory/gonk/gonk-controller:v0.1.0
+          imagePullPolicy: IfNotPresent
+          # `gc start --foreground /city` as PID 1 via `exec` (gonk-fsl re-smoke).
+          # Foreground mode binds the per-city [api] on 0.0.0.0:9443 and serves the
+          # order-run route; `gc supervisor run` ignores 9443 and never binds it.
+          # `gc register` MUST NOT be used -- it daemonizes a second supervisor that
+          # then kills PID 1. The city dir is passed explicitly, so no registration
+          # is needed.
+          #
+          # R-48/T-26: same shell-wrapper pattern as the initContainer above --
+          # GC_DOLT_PASSWORD is read from the FILE-mounted Secret key and
+          # exported for only this process, never a secretKeyRef or a chart
+          # literal, right before the `exec` that becomes PID 1.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              export GC_DOLT_PASSWORD="$(cat /etc/gonk/secrets/dolt-gc/gc-password)"
+              # THE SAME CREDENTIAL, UNDER bd's OWN ENV NAMES. The exec orders
+              # (gonk-dispatch, gonk-sweep) shell out to the `bd` BINARY, and bd
+              # does not read GC_DOLT_* -- it reads BEADS_DOLT_*, and its MySQL
+              # user defaults to `root` when unset (`bd dolt set --help`).
+              #
+              # This is not belt-and-braces, it is the whole credential for the
+              # outcome path. gonk ran on a PASSWORDLESS root@'%' until R-48/T-26
+              # dropped that user: the server side moved to `gc`, the bd client
+              # never did, and nothing noticed because `dolt.user: gc` in
+              # .beads/config.yaml is not a key bd honours -- its effective
+              # config is .beads/metadata.json, which carries no user at all.
+              # Every `gonk-gate sweep` then failed on "Access denied for user
+              # 'root'", 30 seconds apart, forever. The sweep is the ONLY thing
+              # that reads a finished session's transcript and posts the triage
+              # comment, so agents ran, produced output, and had it discarded by
+              # the reaper as an ORPHANED session ten minutes later.
+              export BEADS_DOLT_SERVER_USER="$GC_DOLT_USER"
+              export BEADS_DOLT_PASSWORD="$GC_DOLT_PASSWORD"
+              exec gc start --foreground /city
+          env:
+            - name: HOME
+              value: /home/gonk
+            - name: GC_DOLT_HOST
+              value: "gonk-dolt.gonk.svc"
+            - name: GC_DOLT_PORT
+              value: "3306"
+            # R-48/T-26: the controller connects to Dolt as the `gc` user (dolt.gcUser.
+            # username), never root -- GC_DOLT_USER is not a credential (just a name), so
+            # unlike GC_DOLT_PASSWORD it can be a plain value here. `gc init` picks up
+            # GC_DOLT_USER as its --dolt-user fallback and `gc start`'s bd bridge mirrors
+            # it into BEADS_DOLT_SERVER_USER (cmd/gc/bd_env.go's mirrorBeadsDoltServerEnv
+            # at GASCITY_REF) -- no --dolt-user flag is needed at either call site.
+            # GC_DOLT_PASSWORD is set separately by each caller's own command wrapper,
+            # `cat`ing the FILE-mounted secrets.dolt.keys.gcPassword Secret key -- it
+            # cannot live here because this helper is plain `env:` entries, and the
+            # password can never be a chart-visible value (see the same helper's callers).
+            - name: GC_DOLT_USER
+              value: "gc"
+            # GC_SESSION -- the REAL session-provider env override. cmd/gc's
+            # effectiveProviderName(cfg.Session.Provider) returns $GC_SESSION when set, so
+            # this is the documented way to force a provider from the environment. (The
+            # chart previously set GC_SESSION_PROVIDER, which EXISTS NOWHERE in Gas City;
+            # the runtime silently fell back to tmux and never created a pod.) Belt and
+            # braces with city.toml's [session] provider, written by the bootstrap: the
+            # TOML is the durable declaration, this is the override the supervisor reads.
+            - name: GC_SESSION
+              value: k8s
+            # WRITE-AUTH (gonk-fsl / gonk-5we). GC_CITY_WRITE_PUBKEY turns on
+            # ed25519 grant verification on the [api] mutation plane (env overrides
+            # city.toml). It is the PUBLIC key -- not a secret. GONK_CITY + the
+            # GONK_GC_WRITE_* env below are for the in-pod gonk-gate (the exec
+            # orders: dispatch/sweep), which SIGNS its own loopback order-run POSTs
+            # with the matching PRIVATE key mounted below -- same keypair/kid as
+            # gonk-intake.
+            - name: GONK_CITY
+              value: gonk
+            # WHERE THE IN-POD gonk-gate REACHES THE CITY. gonk-dispatch runs
+            # inside THIS pod and, since ADR-007 deleted the formula layer, creates
+            # the agent session directly rather than pouring an order: POST
+            # /v0/city/gonk/sessions (pkg/gcapi/session.go, called from
+            # broker_inject.go) on the city [api] -- so it needs the supervisor URL
+            # exactly like gonk-intake does. Without it gcapi builds a URL with no
+            # scheme or host and the call dies on `unsupported protocol scheme ""`
+            # -- AFTER meter has already decided, so the budget decision is spent
+            # and no session is ever created.
+            # Same helper as intake's (the bundled controller Service on 9443), so
+            # the two can never disagree about where the city is.
+            - name: GONK_SUPERVISOR_URL
+              value: "http://gonk-controller.gonk.svc:9443"
+            - name: GC_CITY_WRITE_PUBKEY
+              value: "k1:1hcioE4eYD4PsM66wVJ8oBErEfCTyNPt9Q/+ZT0drmk="
+            - name: GONK_GC_WRITE_KEY_FILE
+              value: "/etc/gonk/secrets/gc-write-key/key"
+            - name: GONK_GC_WRITE_KEY_ID
+              value: "k1"
+            # K8S SESSION PROVIDER (gonk-aql). GC_SESSION_PROVIDER=k8s (controllerEnv)
+            # tells the supervisor to spawn agent SESSION pods, but the provider
+            # (internal/runtime/k8s/provider.go @ GASCITY_REF) needs to be told WHICH
+            # image, in WHICH namespace, under WHICH SA -- none of which the chart set
+            # before. GC_K8S_IMAGE is the one place componentImages.agent is consumed
+            # (it was dead config until now). PREBAKED=true skips the staging init
+            # container + workspace-ready wait: the agent image is self-contained
+            # (opencode + tools baked) and triage injects its context, so no rig
+            # clone is staged into the pod.
+            - name: GC_K8S_IMAGE
+              value: "ghcr.io/gonk-factory/gonk/gonk-agent:v0.1.0"
+            - name: GC_K8S_NAMESPACE
+              value: "gonk"
+            # The namespace the meter's KeySink writes per-project LiteLLM key
+            # Secrets into, which gonk-gate must read to inject the PROJECT key
+            # instead of the controller's own admin key (gonk-8gb).
+            #
+            # This must match the meter's GONK_KEYSINK_NAMESPACE exactly, and it
+            # is not optional: unset, client-go issues the Get with an EMPTY
+            # namespace, which Kubernetes treats as a CLUSTER-SCOPED read. Role
+            # gc-controller grants `secrets: [get]` in this namespace only, so a
+            # cluster-scoped read is denied and every dispatch fails closed with
+            # `cannot get resource "secrets" ... at the cluster scope` -- which
+            # reads like missing RBAC, and is not. Measured 2026-09-07 on issue
+            # 75/64: the Role was already correct; only this line was missing.
+            - name: GONK_KEYSINK_NAMESPACE
+              value: "gonk"
+            - name: GC_K8S_SERVICE_ACCOUNT
+              value: gc-agent
+            - name: GC_K8S_PREBAKED
+              value: "true"
+            # THE JOBS SESSION RUNTIME (gonk-t55, plan D5/D6/P5). gonk-gate's
+            # dispatch creates each agent session as a Kubernetes Job itself
+            # (pkg/runtime/jobs) instead of asking Gas City for one, so what the
+            # GC_K8S_* block above tells Gas City is told to gonk-gate here. The
+            # names live in internal/envname; internal/charttest/jobs_rbac_test.go
+            # holds this block against them.
+            #
+            # GONK_AGENT_IMAGE IS THE SAME VALUE AS GC_K8S_IMAGE, from the same
+            # componentImages.agent through the same gonk.releaseImage: its tag is
+            # releaseTag unless componentImages.agent.tag overrides it, so one
+            # release can never run two different agent images
+            # (TestReleaseTagDrivesBothAgentImageEnvs).
+            #
+            # Marker-free names, by the GONK_*_FILE rule below: the exec orders
+            # would otherwise lose them to execenv.FilterInherited.
+            #
+            # UNSET NAMESPACE IS NOT A DEFAULT: client-go reads "" as CLUSTER
+            # scope (gonk-8gb), which Role gonk-gate-jobs cannot authorize.
+            #
+            # CONTROLLER env only. None of these is copied onto the Job's pod;
+            # D5 lists the only env a session pod gets.
+            - name: GONK_AGENT_IMAGE
+              value: "ghcr.io/gonk-factory/gonk/gonk-agent:v0.1.0"
+            - name: GONK_SESSION_NAMESPACE
+              value: "gonk"
+            - name: GONK_SESSION_SERVICE_ACCOUNT
+              value: gc-agent
+            - name: GONK_SESSION_TTL_SECONDS
+              value: "3600"
+            - name: GONK_SESSION_CPU_REQUEST
+              value: "500m"
+            - name: GONK_SESSION_MEMORY_REQUEST
+              value: "1Gi"
+            - name: GONK_SESSION_CPU_LIMIT
+              value: "2"
+            - name: GONK_SESSION_MEMORY_LIMIT
+              value: "4Gi"
+            # Session-config delivery (gonk-aql). The in-controller gonk-gate
+            # `dispatch` reads these because Gas City mounts no gonk secrets into
+            # session pods and controller env does not flow to sessions.
+            #
+            # Delivery is NO LONGER the v1 order-vars map -- ADR-007 deleted it
+            # along with the formula pour that carried it. What reaches the pod now
+            # is the prompt envelope the pod fetches for itself (GET
+            # /v1/prompt/{alias} on gonk-meter), which carries the per-project
+            # LiteLLM key. The bot token is not in it at all: under the broker the
+            # controller does every forge call and the pod holds no forge creds
+            # (gonk-0y6).
+            #
+            # EVERY SECRET HERE IS A *PATH*, NOT A VALUE, AND THE ENV NAME CARRIES
+            # NO SECRET MARKER. Gas City's internal/execenv.IsSensitiveKey flags any
+            # key containing TOKEN/SECRET/PASSWORD/API_KEY/... and FilterInherited
+            # STRIPS those from the environment of an exec order -- gonk-dispatch IS
+            # an exec order, so a `GONK_LITELLM_KEY` / `GONK_BOT_TOKEN` /
+            # `GONK_METER_TOKEN_FILE` env arrives EMPTY in gonk-gate no matter what
+            # the chart sets. (`[order.env]` in the pack is not a workaround either:
+            # `gc init` drops that block when it copies the pack into /city.) So the
+            # names below are deliberately marker-free -- KEY_FILE, BOT_FILE,
+            # BEARER_FILE -- and gonk-gate reads the file at the path. Renaming any
+            # of them to *_TOKEN* silently breaks dispatch again.
+            #
+            # The v1 compromise this paragraph used to describe -- key material
+            # riding an order var as litellm_key/bot_token -- is gone. No bot token
+            # is sent at all, and the LiteLLM key the pod receives is the PROJECT's
+            # budgeted virtual key, which dispatch resolves from the Secret the
+            # meter keysinks (cmd/gonk-gate/keyread.go, gonk-8gb) and puts in the
+            # prompt envelope. The ADMIN key mounted below never leaves this pod.
+            # Where gonk-gate REGISTERS a per-session checkout, and the same base
+            # the agent pod fetches it from (pkg/rig, gonk-msz). Marker-free by
+            # the rule above -- it is a Service address, not a credential, and
+            # the GRANT is what authorizes a fetch. Empty when intake is
+            # disabled, which simply means no checkout is ever granted.
+            - name: GONK_RIG_BASE_URL
+              value: "http://gonk-intake-internal.gonk.svc:9090"
+            - name: GONK_LITELLM_URL
+              value: "http://litellm.litellm.svc:4000"
+            - name: GONK_LITELLM_KEY_FILE
+              value: "/etc/gonk/secrets/litellm/admin-key"
+            - name: GONK_BOT_FILE
+              value: "/etc/gonk/secrets/gitlab-bot/token"
+            # The v2 broker's OWN forge access: the in-controller gonk-gate
+            # dispatch (issue-context fetch) and sweep (apply the validated batch
+            # -- comment + labels -- under the bot PAT) build a glab client from
+            # cfg.gl(). It needs the forge URL and a token FILE. GONK_GITLAB_URL is
+            # marker-free, so it survives the exec-order env strip; the TOKEN-marked
+            # GONK_GITLAB_TOKEN_FILE would NOT, so gonk-gate falls back to the
+            # marker-free GONK_BOT_FILE above (same bot PAT). Without GONK_GITLAB_URL
+            # here, cfg.gl() has an empty base URL and every broker forge call fails.
+            - name: GONK_GITLAB_URL
+              value: "https://gitlab.example.internal"
+            # The in-controller gonk-gate exec orders (gonk-dispatch, gonk-sweep)
+            # call gonk-meter /v1/policy/decide -- they need the meter URL and a
+            # bearer-token FILE, exactly like gonk-intake. Without these,
+            # `gc: order exec gonk-dispatch failed ... GONK_METER_TOKEN_FILE unset`
+            # and NO broker session is ever created (nothing spawns).
+            # GONK_METER_BEARER_FILE is the marker-free alias gonk-gate falls back
+            # to (see above); GONK_METER_TOKEN_FILE is kept for the non-exec callers
+            # that do inherit it and for parity with gonk-intake.
+            # The bd store. Without GONK_WORKSTORE_DSN_FILE, gonk-gate keeps its
+            # state here; with it, gonk-gate reads bd only in the import
+            # (bootstrap-city) and writes it only in a rollback export, and finds
+            # the import's stamp here (/city is this pod's emptyDir). WITHOUT EITHER,
+            # gonk-gate falls back to an IN-MEMORY store that does not survive a
+            # single invocation. `bd` is on PATH in the controller image.
+            - name: GONK_BEAD_REPO_DIR
+              value: /city
+            # Where every gonk-sweep pass records whether the outcome path is
+            # alive. It MUST be on a writable volume the readinessProbe above
+            # can also read -- /city is the emptyDir both the exec order and the
+            # probe run inside. A probe reading a different file than the sweep
+            # writes is a probe that is always green.
+            - name: GONK_SWEEP_HEALTH_FILE
+              value: /city/gonk-sweep-health.json
+            - name: GONK_METER_URL
+              value: "http://gonk-meter:8080"
+            - name: GONK_METER_TOKEN_FILE
+              value: "/etc/gonk/secrets/meter-api/token"
+            - name: GONK_METER_BEARER_FILE
+              value: "/etc/gonk/secrets/meter-api/token"
+          ports:
+            # The per-city [api] listener (0.0.0.0:9443). This is what intake
+            # dispatches to and what the Service targets. Port 8372 (the machine-wide
+            # supervisor admin API) binds 127.0.0.1 LOOPBACK ONLY and MUST NEVER be
+            # exposed by a Service/Ingress/NetworkPolicy (smoke U1).
+            - name: supervisor
+              containerPort: 9443
+          # TCP probe on 9443: the unauthenticated HTTP health endpoints (/health,
+          # /v0/readiness) live on the 8372 LOOPBACK admin API, which a kubelet
+          # httpGet against the pod IP cannot reach (smoke U1). The only cross-pod
+          # liveness signal is the 9443 city-API socket. IMAGE-GATED (gonk-fsl):
+          # 9443 does not bind until the image can finish init -- the probe SHAPE is
+          # settled, the boot is not.
+          #
+          # STARTUP IS GUARDED SEPARATELY FROM LIVENESS (gonk-4za). The liveness
+          # probe alone gave `gc` roughly 75s to bind 9443 (15s delay + 3 x 20s)
+          # before the kubelet SIGKILLed it -- and a kill during startup does not
+          # make the next start any faster, so a slow boot became a crash loop.
+          # Observed 2026-09-01: four restarts in nine minutes with exit 137
+          # during a three-pod roll, while the SAME image started cleanly with
+          # zero restarts once the cluster was quiet. gc is byte-identical
+          # between those two runs, so this was never a code regression -- it was
+          # a probe that could not tell "slow" from "dead".
+          #
+          # A startupProbe is the primitive for exactly that: it suspends
+          # liveness until the socket first answers, then normal liveness takes
+          # over. 30 x 10s = 5 minutes of boot budget, which covers a cold image
+          # plus `gc init` plus a Dolt connection under contention, without
+          # loosening the steady-state check at all.
+          startupProbe:
+            tcpSocket: {port: supervisor}
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket: {port: supervisor}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            # timeoutSeconds defaults to 1, which is thin for a TCP accept on a
+            # loaded node; a probe that times out under load reads as "dead".
+            timeoutSeconds: 3
+          # READINESS IS THE DEAD-SWEEP ALARM (gonk-pop3 item 4 / gonk-p7qh).
+          #
+          # gonk-sweep could not reach its own database for DAYS, logging one
+          # ERROR every 30 seconds while the entire outcome path was dead:
+          # sessions completed, nothing was ever posted, and beads were left
+          # carrying an empty `gonk::` label that no sweep query will ever match
+          # again. Nothing anywhere said so louder than a log line nobody read.
+          #
+          # `gonk-gate sweep-health` reads the record every sweep pass writes
+          # (GONK_SWEEP_HEALTH_FILE, on the /city emptyDir) and fails when the
+          # last pass failed or when no pass has run for --max-age. An unready
+          # controller leaves this Service's endpoints, so intake's FireOrder
+          # fails and logs `fire_error` and the work is simply NOT DISPATCHED --
+          # rather than dispatched into a session whose outcome can never be
+          # written, which is how gonk-p7qh stranded beads permanently. Nothing
+          # kills the pod (livenessProbe above is untouched), the sweep keeps
+          # retrying, and readiness returns on its own once the store is back.
+          #
+          # IT ALSO DIALS THE SUPERVISOR PORT. A container gets exactly one
+          # readinessProbe, so replacing the tcpSocket probe has to keep doing
+          # what the tcpSocket probe did, or this trades one blind spot for
+          # another. --supervisor-addr is that half, in-process, no shell.
+          #
+          # A MISSING HEALTH RECORD IS READY, NOT FAILED: a fresh pod has not
+          # completed a pass yet, and failing on absence would hold a healthy
+          # controller out of its own Service until the first 30s tick.
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/gonk-gate
+                - sweep-health
+                - --supervisor-addr=127.0.0.1:9443
+                - --max-age=15m
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            limits:
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: city
+              mountPath: /city
+            - name: home
+              mountPath: /home/gonk
+            - name: tmp
+              mountPath: /tmp
+            # The ed25519 PRIVATE write-auth key, 0400, for the in-pod gonk-gate to
+            # sign order-run POSTs. Mounted on the SUPERVISOR only (the bootstrap
+            # initContainer runs `gc init` and never signs). Same Secret gonk-intake
+            # mounts; the chart creates none.
+            - name: secret-gc-write-key
+              mountPath: /etc/gonk/secrets/gc-write-key
+              readOnly: true
+            # The meter bearer token for the in-controller gonk-gate exec orders
+            # (GONK_METER_TOKEN_FILE above points here).
+            - name: secret-meter-api
+              mountPath: /etc/gonk/secrets/meter-api
+              readOnly: true
+            # The LiteLLM virtual key and the GitLab bot token, as FILES, for the
+            # gonk-dispatch exec order to read and forward to the session (gonk-aql).
+            # They are files rather than env because Gas City strips secret-marked
+            # env from exec orders -- see the GONK_*_FILE comment above.
+            - name: secret-litellm
+              mountPath: /etc/gonk/secrets/litellm
+              readOnly: true
+            - name: secret-gitlab-bot
+              mountPath: /etc/gonk/secrets/gitlab-bot
+              readOnly: true
+            # R-48/T-26: the `gc` user's password (see the export in `command` above).
+            - name: secret-dolt-gc
+              mountPath: /etc/gonk/secrets/dolt-gc
+              readOnly: true
+      volumes:
+        # /city and /home/gonk MUST be writable by uid 65532 (smoke U2): gc init
+        # writes the city into /city and gc writes ~/.gc under HOME. emptyDir, shared
+        # between the bootstrap initContainer and the supervisor. NEVER a read-only
+        # configMap at /city -- gc init cannot write into it.
+        - name: city
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        # The ed25519 PRIVATE write-auth signing key (gonk-fsl / gonk-5we), 0400,
+        # from a pre-provisioned Secret (the chart creates none). Used by the in-pod
+        # gonk-gate to sign order-run POSTs; G22 requires it when gascity.enabled.
+        - name: secret-gc-write-key
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-gc-write-key
+                  items:
+                    - key: key
+                      path: key
+        - name: secret-meter-api
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-meter-api
+                  items:
+                    - key: token
+                      path: token
+        # Session creds the gonk-dispatch exec order forwards to the agent pod
+        # (gonk-aql): the LiteLLM virtual key and the GitLab bot token, 0400.
+        - name: secret-litellm
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-litellm
+                  items:
+                    - key: admin-key
+                      path: admin-key
+        - name: secret-gitlab-bot
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-gitlab
+                  items:
+                    - key: token
+                      path: token
+        # R-48/T-26: the `gc` user's password. Only the gc-password key is
+        # projected here -- the controller never needs (and must never have)
+        # secrets.dolt.keys.rootPassword, mounted only into the dolt pod itself.
+        - name: secret-dolt-gc
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-dolt
+                  items:
+                    - key: gc-password
+                      path: gc-password
+---
+# Source: gonk/templates/statefulset-gonk-dolt.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gonk-dolt
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: dolt
+spec:
+  # ONE replica, ALWAYS. dolt sql-server is not clustered here; the Gas City
+  # beads store needs ONE writer with real transactions. RECONCILED, Task 0:
+  # this server hosts the beads database ONLY -- gonk-meter's reservation path
+  # (the ledger) is Postgres/CNPG, never a database on this server (ADR-004
+  # Decision 10; docs/spikes/dolt-reservation-isolation.md).
+  replicas: 1
+  serviceName: gonk-dolt
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gonk
+      app.kubernetes.io/instance: gonk
+      app.kubernetes.io/component: dolt
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: gonk-0.0.0-golden
+        app.kubernetes.io/name: gonk
+        app.kubernetes.io/instance: gonk
+        app.kubernetes.io/version: "0.2.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: gonk
+        app.kubernetes.io/component: dolt
+    spec:
+      securityContext:
+        fsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dolt
+          image: docker.io/dolthub/dolt-sql-server:2.1.7
+          imagePullPolicy: IfNotPresent
+          # R-48/T-26 (interim until T-56 deletes Dolt): root is no longer
+          # root-open. See the command wrapper below for how the two Secret
+          # keys (secrets.dolt) reach this container as env vars WITHOUT ever
+          # being a secretKeyRef or a chart literal.
+          env:
+            # HOME is LOAD-BEARING (gonk-fsl in-cluster re-smoke, blocker C). The
+            # dolthub image assumes it runs as root (HOME=/root) and sets no HOME
+            # env; under this chart's podSecurityContext (runAsUser 65532) HOME then
+            # resolves to `/`, and dolt dies on `mkdir /.dolt: permission denied`
+            # writing its global config. Point HOME at the PVC mount (writable by
+            # 65532 via fsGroup) so dolt writes .dolt alongside its data. The
+            # controller template solves the identical uid/HOME problem the same way.
+            - name: HOME
+              value: /var/lib/dolt
+            # R-48: root is bound to localhost ONLY -- the entrypoint's own
+            # default when DOLT_ROOT_HOST is unset, but pinned explicitly so a
+            # future edit cannot silently widen it back to "%" the way the
+            # blocker-B fix once did. Root is therefore reachable ONLY via a
+            # shell inside this pod (`kubectl exec` + `dolt sql-client`), never
+            # cross-pod -- closing the "any pod can `mysql -h gonk-dolt -u
+            # root`" finding. The controller's cross-pod login (the reason
+            # DOLT_ROOT_HOST was widened to "%" in the first place) now uses
+            # the `gc` user below instead, via DOLT_USER_HOST="%".
+            - name: DOLT_ROOT_HOST
+              value: "localhost"
+            # The user the controller connects as (dolt.gcUser.username),
+            # GRANT-scoped by the entrypoint's create_user_from_env to ONLY
+            # DOLT_DATABASE below (GRANT ALL ON `db`.* -- never GRANT ALL
+            # PRIVILEGES ON *.*, which is what root gets). Verified against
+            # dolthub/dolt docker/docker-entrypoint.sh's create_user_from_env.
+            - name: DOLT_USER
+              value: "gc"
+            # Reachable cross-pod (unlike root, above): this is the credential
+            # the controller (a different pod) dials in with.
+            - name: DOLT_USER_HOST
+              value: "%"
+            # Matches the --dolt-database flag `gc init` is passed
+            # (workload-gonk-controller.yaml: "bd_" + dolt.database) -- the
+            # ONE database DOLT_USER is granted on.
+            - name: DOLT_DATABASE
+              value: "bd_gonk"
+          # The dolthub image ENTRYPOINT (docker-entrypoint.sh) already runs
+          # `dolt sql-server --host=0.0.0.0 --port=3306 "$@"` AND does the
+          # DOLT_ROOT_HOST bootstrap (blocker B). Passing sql-server/--host/--port
+          # again collides -- `multiple values provided for 'host'` and a crash loop
+          # (gonk-fsl in-cluster re-smoke, blocker D). So pass ONLY the extra flags;
+          # the entrypoint supplies sql-server/--host/--port. The bundled server
+          # therefore LISTENS ON 3306 (entrypoint-fixed) -- dolt.port must stay 3306
+          # so the Service/containerPort/GC_DOLT_PORT match the real listener.
+          # NOTE: `dolt sql-server` in dolthub 2.1.7 has NO --no-tls flag (TLS is
+          # off by default unless tls_cert/tls_key is set) -- passing it is a fatal
+          # `unknown option 'no-tls'` crash (gonk-fsl re-smoke, blocker E). Pass only
+          # --data-dir (not injected by the entrypoint); host/port come from it.
+          #
+          # R-48/T-26: DOLT_ROOT_PASSWORD and DOLT_PASSWORD cannot be plain
+          # `env:` values (the chart never reads a Secret's content at render
+          # time, and a chart-generated/default password is exactly what this
+          # task closes) and cannot be a secretKeyRef (this chart's own rule --
+          # TestSecretsAreNeverEnvironmentVariables -- forbids it: that would
+          # put the credential in the Pod spec, visible to `kubectl get pod -o
+          # yaml` and every audit log). So `command` REPLACES the image's
+          # default ENTRYPOINT+CMD with an equivalent invocation
+          # (`tini -- docker-entrypoint.sh`, from the image's own Dockerfile)
+          # wrapped in a shell that `cat`s the two FILE-mounted Secret keys
+          # (secrets.dolt, mounted below exactly like every other secret in
+          # this chart) into env vars for JUST this process, right before
+          # exec-ing it. The value never appears in the rendered manifest.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              export DOLT_ROOT_PASSWORD="$(cat /etc/gonk/secrets/dolt/root-password)"
+              export DOLT_PASSWORD="$(cat /etc/gonk/secrets/dolt/gc-password)"
+              exec tini -- docker-entrypoint.sh --data-dir=/var/lib/dolt
+          ports:
+            - name: mysql
+              containerPort: 3306
+          # A TCP probe only: an authenticating probe would need a client AND a
+          # copy of the credential in the probe command (visible via `kubectl
+          # describe pod`) -- readiness is "the port accepts a connection",
+          # not "the gc user's grant is correct" (the charttest render suite
+          # covers the latter).
+          livenessProbe:
+            tcpSocket: {port: mysql}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            tcpSocket: {port: mysql}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            limits:
+              memory: 2Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/dolt
+            - name: secret-dolt
+              mountPath: /etc/gonk/secrets/dolt
+              readOnly: true
+      volumes:
+        - name: secret-dolt
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: gonk-dolt
+                  items:
+                    - key: root-password
+                      path: root-password
+                    - key: gc-password
+                      path: gc-password
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 20Gi
+---
+# Source: gonk/templates/cluster-gonk-ledger-postgres.yaml
+# RECONCILED, Task 0: this is no longer "the Task 0b fallback" -- it is THE
+# settled ledger backend (ADR-004 Decision 10). Task 0b's spike measured Dolt
+# failing the reservation-race isolation test decisively (32/32 concurrent
+# writers won a ceiling-of-2 race, 12.8x overspend, at every isolation level
+# including SELECT ... FOR UPDATE -- docs/spikes/dolt-reservation-isolation.md).
+# Postgres on the CNPG cluster the owner ALREADY RUNS is the answer, not a
+# contingency. Not a new stateful dependency -- CNPG's operator is already
+# there, and this chart does not install it.
+#
+# Why Postgres, not Dolt: SERIALIZABLE / SELECT ... FOR UPDATE is well-trodden
+# for exactly the concurrent-reservation race on Postgres (verified: it blocks,
+# where Dolt's identical-shaped lock was measured NOT to). A budget ceiling
+# defended by an unproven isolation guarantee is not defended. The cost is
+# Dolt's versioned audit history, which the append-only ledger tables mitigate.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: gonk-ledger-postgres
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: ledger
+spec:
+  instances: 1
+  bootstrap:
+    initdb:
+      database: gonk_ledger
+      owner: gonk
+  storage:
+    size: 20Gi
+# NOTE: CNPG generates its own app-user Secret (gonk-ledger-postgres-app). meter
+# still reads its DSN from secrets.ledger.existingSecret -- point that at CNPG's
+# generated Secret (with a `dsn`-shaped key), or synthesize the DSN into your own
+# Secret via ExternalSecret. The chart does NOT copy CNPG's secret, because copying
+# a credential from one Secret into another is exactly the kind of thing that ends
+# up in a git repo.
+---
+# Source: gonk/templates/test-netpol-probe.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gonk-netpol-probe
+  labels:
+    helm.sh/chart: gonk-0.0.0-golden
+    app.kubernetes.io/name: gonk
+    app.kubernetes.io/instance: gonk
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: gonk
+    app.kubernetes.io/component: netpol-probe
+    app: gc-agent
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  activeDeadlineSeconds: 180
+  serviceAccountName: default
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: "ghcr.io/gonk-factory/gonk/gonk-intake:v0.1.0"
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      args:
+        - netpol-probe
+        - -allow
+        - "gonk-meter:8080"
+        - -deny
+        - "gonk-intake:8080"
+        - -deny-l3
+        - "gonk-controller:9443"
+        - -settle-timeout
+        - "30s"
+        - -dial-timeout
+        - "3s"
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi

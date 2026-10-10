@@ -1,0 +1,11 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# merge_not_mapping: byte-identical sides. A merge key (<<) whose value is a
+# list of strings.
+.fragments:
+  steps: &steps
+    - ./tools/one.sh
+
+assemble:
+  <<: *steps
+  script:
+    - ./tools/assemble.sh

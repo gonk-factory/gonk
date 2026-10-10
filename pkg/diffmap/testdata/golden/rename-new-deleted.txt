@@ -1,0 +1,20 @@
+=== file 1 of 4: "docs/storage/shelves.md" (renamed from "docs/shelves.md"; cite OLD lines under "docs/shelves.md" and NEW lines under "docs/storage/shelves.md"; 1 added, 1 removed)
+@@ hunk 1 of 1: OLD lines 1-3, NEW lines 1-3
+[OLD:1,NEW:1]   |# Shelves
+[OLD:2]       - |Each shelf holds four crates.
+[NEW:2]       + |Each shelf holds six crates.
+[OLD:3,NEW:3]   |See the stock package.
+
+=== file 2 of 4: "pkg/stock/depth.go" (added; 3 added, 0 removed)
+@@ hunk 1 of 1: OLD (none), NEW lines 1-3
+[NEW:1] + |package stock
+[NEW:2] + |
+[NEW:3] + |const DefaultDepth = 2
+
+=== file 3 of 4: "legacy/notes.txt" (deleted; 0 added, 2 removed)
+@@ hunk 1 of 1: OLD lines 1-2, NEW (none)
+[OLD:1] - |old shelf notes
+[OLD:2] - |do not use
+\ the line above has no newline at its end
+
+=== file 4 of 4: "LICENSE" (renamed from "LICENSE.txt"; cite OLD lines under "LICENSE.txt" and NEW lines under "LICENSE"; no line changed, nothing to cite)

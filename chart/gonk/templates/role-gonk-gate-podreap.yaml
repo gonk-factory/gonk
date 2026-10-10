@@ -1,0 +1,34 @@
+{{- if and .Values.gascity.enabled .Values.podReap.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+# THE POD REAPER'S GRANT (gonk-mfsr). NAMESPACED Role, NEVER a ClusterRole: this
+# is the only thing in gonk that DELETES a Kubernetes object, and a ClusterRole
+# would let it delete pods in every namespace on the cluster.
+#
+# TWO VERBS, AND THEY ARE THE TWO CALLS. cmd/gonk-gate/reap_pods.go makes
+# exactly `Pods(ns).List` and `Pods(ns).Delete`; internal/charttest reads that
+# FILE and fails when this list stops matching it, so a future reaper that starts
+# calling Get or Watch fails a test here rather than a 403 on a live cluster.
+# No get, no watch, no create, no patch, no exec, no logs -- the reaper decides
+# from the list and acts with the delete.
+#
+# BE CLEAR ABOUT WHAT THIS ROLE IS NOT. The gc-controller ServiceAccount, which
+# is the one gonk-gate runs under (it is an exec order inside the controller
+# pod), ALREADY holds pods:[get,list,watch,create,update,patch,delete] -- Gas
+# City's k8s session provider creates and deletes these pods, so it must. This
+# Role therefore grants nothing new and cannot gate the capability. It exists so
+# the grant the reaper depends on is LEGIBLE and ASSERTED independently of
+# whatever gascity's own Role happens to carry next release. THE SECURITY
+# BOUNDARY IS podReap.enabled, which is false in values.yaml: with it off, no
+# GONK_POD_REAP_NAMESPACE reaches the controller and gonk-gate builds no pod
+# reaper at all.
+kind: Role
+metadata:
+  name: gonk-gate-podreap
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list, delete]
+{{- end }}

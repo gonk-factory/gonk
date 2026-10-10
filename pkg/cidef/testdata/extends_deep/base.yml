@@ -1,0 +1,34 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# extends_deep/base.yml: a chain of twelve templates under one job, one more
+# level than GitLab accepts.
+.l01:
+  script:
+    - echo bottom
+.l02:
+  extends: .l01
+.l03:
+  extends: .l02
+.l04:
+  extends: .l03
+.l05:
+  extends: .l04
+.l06:
+  extends: .l05
+.l07:
+  extends: .l06
+.l08:
+  extends: .l07
+.l09:
+  extends: .l08
+.l10:
+  extends: .l09
+.l11:
+  extends: .l10
+.l12:
+  extends: .l11
+
+too-deep:
+  extends: .l12
+
+deep-enough:
+  extends: .l11

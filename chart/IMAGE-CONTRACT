@@ -1,0 +1,25 @@
+# The chart-to-image contract (gonk-xsk3). Every invocation of a first-party gonk
+# binary that the rendered chart makes, one per line:
+#   <image> <argv0> [subcommand] [flag names, sorted]
+# Flag VALUES are not part of the contract; flag SPELLING is.
+#
+# internal/buildgate (TestTheChartImageContractMatchesTheGoldensAndTheFloors)
+# holds this file equal to what internal/charttest/testdata/golden invokes, and
+# fails when an image's lines differ from origin/main unless that image's floor
+# (chart/gonk/Chart.yaml gonk-factory.github.io/image-floor.<image>) went UP. A floor
+# that goes DOWN always fails: floors only climb, because lowering one re-arms
+# exactly the render G23 refuses today.
+#
+# Adding a line means the chart needs something the image may not have yet:
+# land the binary first, confirm its tag exists (hack/require_image_tags.py),
+# then raise the floor in the same change as this line.
+#
+# Binaries must keep accepting everything the previously released chart invokes
+# for at least one chart release (expand/contract, gonk-4cox). This is policy,
+# not a gate: see docs/plans/2026-09-13-chart-image-floor.md.
+controller /usr/local/bin/gonk-gate sweep-health --max-age --supervisor-addr
+controller gonk-gate capabilities
+controller gonk-gate workstore-import
+intake /usr/local/bin/gonk-intake
+intake /usr/local/bin/gonk-intake netpol-probe -allow -deny -deny-l3 -dial-timeout -settle-timeout
+meter /usr/local/bin/gonk-meter --listen --operator-config

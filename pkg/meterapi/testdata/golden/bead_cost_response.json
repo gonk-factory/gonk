@@ -1,0 +1,29 @@
+{
+  "bead_id": "gonk:42:issue:7",
+  "project": "group/repo",
+  "cost_usd": 1.23,
+  "synthetic_cost_usd": 0.5,
+  "prompt_tokens": 1000,
+  "completion_tokens": 500,
+  "total_tokens": 1500,
+  "by_rung": [
+    {
+      "rung": "qwen-local",
+      "kind": "local",
+      "cost_usd": 0,
+      "synthetic_cost_usd": 0.5,
+      "cost_synthetic": true,
+      "total_tokens": 1500,
+      "calls": 1
+    }
+  ],
+  "attempts": [
+    {
+      "attempt": 1,
+      "rung": "qwen-local",
+      "outcome": "success"
+    }
+  ],
+  "as_of": "2026-01-02T03:04:05Z",
+  "complete": true
+}

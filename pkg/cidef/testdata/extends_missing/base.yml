@@ -1,0 +1,8 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# extends_missing/base.yml
+.tmpl:
+  script:
+    - ./tools/assemble.sh
+
+assemble:
+  extends: .tmpl

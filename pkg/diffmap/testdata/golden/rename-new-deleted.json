@@ -1,0 +1,42 @@
+[
+  {
+    "old_path": "docs/shelves.md",
+    "new_path": "docs/storage/shelves.md",
+    "new_file": false,
+    "renamed_file": true,
+    "deleted_file": false,
+    "diff": "@@ -1,3 +1,3 @@\n # Shelves\n-Each shelf holds four crates.\n+Each shelf holds six crates.\n See the stock package.\n",
+    "too_large": false,
+    "collapsed": false
+  },
+  {
+    "old_path": "pkg/stock/depth.go",
+    "new_path": "pkg/stock/depth.go",
+    "new_file": true,
+    "renamed_file": false,
+    "deleted_file": false,
+    "diff": "@@ -0,0 +1,3 @@\n+package stock\n+\n+const DefaultDepth = 2\n",
+    "too_large": false,
+    "collapsed": false
+  },
+  {
+    "old_path": "legacy/notes.txt",
+    "new_path": "legacy/notes.txt",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": true,
+    "diff": "@@ -1,2 +0,0 @@\n-old shelf notes\n-do not use\n\\ No newline at end of file\n",
+    "too_large": false,
+    "collapsed": false
+  },
+  {
+    "old_path": "LICENSE.txt",
+    "new_path": "LICENSE",
+    "new_file": false,
+    "renamed_file": true,
+    "deleted_file": false,
+    "diff": "",
+    "too_large": false,
+    "collapsed": false
+  }
+]

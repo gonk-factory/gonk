@@ -1,0 +1,10 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# job_replaced/head.yml: `measure` is gone and a DIFFERENT job was added. That
+# is not a rename.
+assemble:
+  script:
+    - ./tools/assemble.sh
+
+survey:
+  script:
+    - ./tools/survey.sh

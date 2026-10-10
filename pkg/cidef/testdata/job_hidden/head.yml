@@ -1,0 +1,10 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# job_hidden/head.yml: `measure` was turned into a hidden job (a leading dot),
+# which GitLab never runs.
+assemble:
+  script:
+    - ./tools/assemble.sh
+
+.measure:
+  script:
+    - ./tools/measure.sh

@@ -1,0 +1,7 @@
+# PLAN.md carry-forward 3: a rung name carrying \n, \r and , -- tag injection
+# into a log line / CSV / header. The double-quoted scalar decodes to a string
+# with embedded newline/CR/comma, which fails the rung pattern.
+version: 1
+enabled: true
+ladder:
+  - "glm\ninjected,evil\rrow"

@@ -1,0 +1,9 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# broken/two_documents.yml: two YAML documents in one stream.
+assemble:
+  script:
+    - ./tools/assemble.sh
+---
+assemble:
+  script:
+    - "true"

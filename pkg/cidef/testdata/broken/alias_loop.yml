@@ -1,0 +1,6 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# broken/alias_loop.yml: an anchor that contains itself.
+assemble: &loop
+  script:
+    - ./tools/assemble.sh
+  again: *loop

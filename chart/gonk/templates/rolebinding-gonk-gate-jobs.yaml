@@ -1,0 +1,24 @@
+{{- if .Values.gascity.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gonk-gate-jobs
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gonk-gate-jobs
+subjects:
+  # gc-controller, and ONLY gc-controller. gonk-gate's dispatch and sweep are
+  # exec orders that run inside the controller pod, so they authenticate as that
+  # pod's ServiceAccount (the same one the pod reaper and the key read use).
+  #
+  # NEVER gc-agent. A session pod runs as gc-agent with its token NOT mounted
+  # (D6), and even so it must never hold a grant that could create a Job or read
+  # a sibling session's Secret -- that Secret holds the sibling's LiteLLM key.
+  - kind: ServiceAccount
+    name: gc-controller
+    namespace: {{ .Release.Namespace }}
+{{- end }}

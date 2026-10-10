@@ -1,0 +1,56 @@
+# Task 8.5 toggle-matrix profile: dolt.enabled stays true (beads is unaffected
+# -- it is a completely separate component from the ledger), and
+# ledger.postgres.mode moves from the "shared"-tenancy default to "cnpg": the
+# chart renders its OWN postgresql.cnpg.io/v1 Cluster for the ledger, instead
+# of consuming an existing CNPG tenancy. RECONCILED, Task 0: this is not "the
+# Task 0b fallback" any more -- Postgres is the ONLY ledger backend, so this
+# profile is just "stand up your own CNPG Cluster" mode, and proof that beads
+# stays on Dolt regardless of which Postgres mode the ledger uses.
+# release-unit: every gonk image (controller, intake, meter, and the agent
+# image the controller hands to session pods) deploys under ONE tag.
+releaseTag: v0.1.0
+
+intake:
+  webhookPublicURL: https://gonk.example.test/hook/gitlab
+
+gascity:
+  # G22: a TEST public verify key -- the repo golden vector's real ed25519
+  # pubkey (chart/gonk/smoke). Grant-gating on; the private half is the Secret
+  # gonk-gc-write-key (secrets.gcWriteKey default), provisioned out of band.
+  writeAuth:
+    verifyKey: "k1:1hcioE4eYD4PsM66wVJ8oBErEfCTyNPt9Q/+ZT0drmk="
+
+dolt:
+  image:
+    tag: 2.1.7
+
+# REQUIRED: the chart has no default GitLab.
+gitlab:
+  url: https://gitlab.example.internal
+
+litellm:
+  externalURL: http://litellm.litellm.svc:4000
+
+ledger:
+  postgres:
+    mode: cnpg
+
+operatorConfig:
+  instance:
+    ladder: [qwen-local]
+  rungs:
+    - name: qwen-local
+      kind: local
+      model: stub-local
+      est_cost_usd: 0
+      est_tokens: 200K
+      synthetic_usd_per_1m_tokens: 0.20
+
+onboarding:
+  defaultRung: qwen-local
+
+# A render profile, not a deployment: its tags (v0.1.0) carry no build number,
+# so the image-floor guard (G23, gonk-xsk3) cannot rank them and would refuse
+# the render. Saying so here is the explicit opt-in that guard requires.
+imageFloor:
+  acceptUnrankedTags: true

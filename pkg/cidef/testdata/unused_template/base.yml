@@ -1,0 +1,9 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# unused_template/base.yml
+.nobody-uses-this:
+  script:
+    - echo old
+
+assemble:
+  script:
+    - ./tools/assemble.sh

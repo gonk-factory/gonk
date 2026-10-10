@@ -1,0 +1,1 @@
+{"bead_id":"gk-wire-4","project":"wire/active","cost_usd":0,"synthetic_cost_usd":0,"prompt_tokens":0,"completion_tokens":0,"total_tokens":0,"by_rung":[],"attempts":[{"attempt":1,"rung":"qwen-local","outcome":"success"}],"as_of":"2026-07-13T10:00:00Z","complete":false}

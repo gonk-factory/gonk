@@ -1,0 +1,9 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# include_left: byte-identical sides. An `include:` survived into the merged
+# YAML, so part of the definition is somewhere this document does not show.
+include:
+  - local: ci/more-jobs.yml
+
+assemble:
+  script:
+    - ./tools/assemble.sh

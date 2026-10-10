@@ -1,0 +1,17 @@
+=== file 1 of 1: "pkg/stock/count.go" (modified; 3 added, 2 removed)
+@@ hunk 1 of 2: OLD lines 3-9, NEW lines 3-10
+[OLD:3,NEW:3]     |import "errors"
+[OLD:4,NEW:4]     |
+[OLD:5,NEW:5]     |// Count returns how many crates fit on a shelf.
+[OLD:6]         - |func Count(width int) int {
+[NEW:6]         + |func Count(width, depth int) int {
+[NEW:7]         + |	// depth is measured in crates, not metres
+[OLD:7,NEW:8]     |	if width < 0 {
+[OLD:8,NEW:9]     |		return 0
+[OLD:9,NEW:10]    |	}
+@@ hunk 2 of 2: OLD lines 20-23, NEW lines 21-24
+[OLD:20,NEW:21]   |	if n == 0 {
+[OLD:21,NEW:22]   |		return "empty"
+[OLD:22,NEW:23]   |	}
+[OLD:23]        - |	return "full"
+[NEW:24]        + |	return "stocked"

@@ -1,0 +1,36 @@
+/bin/
+*.out
+.idea/
+.vscode/
+
+# git worktrees for plan execution
+/.worktrees/
+
+# graphify knowledge-graph build output (regenerable: /graphify . --update)
+/graphify-out/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# Python bytecode from hack/ ops scripts.
+__pycache__/
+
+# Session worktrees are embedded git repos; never commit them.
+.claude/worktrees/
+
+# Scratch watcher output from interactive sessions.
+*.log
+
+# `go build ./cmd/<name>/` at the repo root drops the binary here. A 65 MB
+# gonk-gate ELF was committed that way once (gonk-alw review); never again.
+/gonk-gate
+/gonk-intake
+/gonk-meter
+/gonk-stubmodel
+
+# Test fixtures are source, whatever their extension: *.log above silently
+# dropped pkg/pipelinectx/testdata/*.log from the gonk-tios P1 commit, so the
+# tests passed in the author's tree and failed everywhere else.
+!**/testdata/**

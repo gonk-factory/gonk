@@ -1,0 +1,46 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# extends_chain/base.yml: a three-level chain, a list of two templates, a
+# nested hash that merges and an array that does not. head.yml is the same
+# definition expanded by hand.
+.root:
+  image: registry.invalid/tools/root:1
+  variables:
+    LANE: slow
+    DEPTH: "1"
+  script:
+    - echo root
+
+.middle:
+  extends: .root
+  variables:
+    DEPTH: "2"
+  tags:
+    - wide
+
+.leafish:
+  extends: .middle
+  script:
+    - echo leafish
+  tags:
+    - narrow
+
+.other:
+  image: registry.invalid/tools/other:7
+  variables:
+    COLOUR: teal
+
+deep:
+  extends: .leafish
+  variables:
+    EXTRA: "yes"
+
+both:
+  extends:
+    - .middle
+    - .other
+  script:
+    - echo both
+
+plain:
+  extends: deep
+  stage: deploy

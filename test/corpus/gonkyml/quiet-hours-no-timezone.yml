@@ -1,0 +1,9 @@
+# quiet_hours with NO timezone. An empty zone would silently mean UTC, so
+# rung.ParseQuietHours refuses it -- and meter turns that refusal into an
+# invalid registration, which DELETES the project's LiteLLM virtual key. The
+# schema's dependentRequired stops it at Load, where the project author can
+# still read the message. Disposition: Reject.
+version: 1
+enabled: true
+schedule:
+  quiet_hours: "22:00-07:00"

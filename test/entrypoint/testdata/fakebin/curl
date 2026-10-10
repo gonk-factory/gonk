@@ -1,0 +1,122 @@
+#!/bin/sh
+# Fake `curl` for the entrypoint fake-PATH test harness
+# (test/entrypoint/testdata/fakebin, see fakepath_harness_test.go in this
+# package).
+#
+# Reused across entrypoint tests -- T-02 only needs the script to exist on
+# PATH (its GC_ALIAS-unset scenario exits before curl is ever invoked), but
+# T-03 exercises the rig checkout fetch and the prompt-fetch retry loop, both
+# of which call curl as:
+#
+#   curl -fsS --max-time N -o <file> <url>                     (checkout)
+#   curl -sS -o <file> -w '%{http_code}' --max-time N <url>     (prompt)
+#
+# so this fake understands `-o <file>` and, when asked, prints an HTTP status
+# code the way `-w '%{http_code}'` would -- everything else is accepted and
+# ignored, since the entrypoint's flags are fixed and this only needs to
+# track them, not implement curl.
+#
+#   FAKE_CURL_EXIT    exit code to return (default 0)
+#   FAKE_CURL_BODY    bytes written to the -o destination file, if any
+#                      (default: a fixed placeholder body)
+#   FAKE_CURL_STATUS  printed to stdout verbatim if the caller passed
+#                      -w '%{http_code}' (default: 200); this is what the
+#                      entrypoint's prompt-fetch loop reads as _code
+#
+# SEQUENTIAL FAILURES (T-03, R-07 regression coverage). The prompt-fetch
+# retry loop calls curl repeatedly within ONE test process, and a transport
+# failure is only interesting as the first of several calls (e.g. "first
+# call refuses, second returns 200"). A single set of env vars can't express
+# "this invocation differs from the next one" on its own, so when
+# FAKE_CURL_COUNTER_FILE is set this fake counts its own invocations through
+# that file (each invocation is a separate process; the count has to live
+# outside it) and, for the leading FAKE_CURL_FAIL_COUNT calls, behaves like a
+# REAL curl transport failure rather than the FAKE_CURL_EXIT/STATUS/BODY
+# trio above:
+#
+#   FAKE_CURL_COUNTER_FILE  path to a file this fake uses to count its own
+#                            invocations (required to use FAIL_COUNT at all;
+#                            create it fresh per test, e.g. under t.TempDir())
+#   FAKE_CURL_FAIL_COUNT    how many leading invocations fail (default 0,
+#                            i.e. this whole block is inert and behavior is
+#                            exactly the FAKE_CURL_EXIT/STATUS/BODY trio)
+#   FAKE_CURL_FAIL_EXIT     curl's own exit code on those calls (default 7,
+#                            curl's code for "couldn't connect")
+#
+# On a failing call this prints "000" for -w -- matching REAL curl, which
+# writes that sentinel for %{http_code} even when no HTTP response was ever
+# received -- and writes no body. It does NOT append the second "000" that
+# entrypoint.sh's own `|| echo 000` contributes: that concatenation is the
+# entrypoint's shell doing `cmd1 || cmd2` in one command substitution, not
+# something this fake should simulate itself. A failing call here (exit
+# nonzero) is exactly what makes the entrypoint's `|| echo 000` fire, so the
+# "000000" concatenation shows up naturally in the caller's captured output.
+#
+# ATTEMPT LOG (gonk-4f0v). The counter says HOW MANY calls happened; it does
+# not say what each one did. When FAKE_CURL_LOG_FILE is set, every call
+# appends one line describing its own outcome, so a test can assert on the
+# exact SEQUENCE the retry loop drove (e.g. "1 transport-failure exit=7"
+# then "2 status=200") instead of inferring it from a count:
+#
+#   FAKE_CURL_LOG_FILE  append-only log, one line per invocation:
+#                        "<n> transport-failure exit=<code>" or
+#                        "<n> status=<FAKE_CURL_STATUS> exit=<FAKE_CURL_EXIT>"
+
+#
+# ARGV LOG (gonk-t55). The attempt log above records OUTCOMES; it cannot say
+# WHAT was fetched. The Jobs-runtime tests must prove the entrypoint never asks
+# for a prompt or a key at all (bead exit criterion 3), which is a statement
+# about URLs. When FAKE_CURL_ARGV_LOG is set, every call appends its full argv
+# on one line, arguments separated by single spaces:
+#
+#   FAKE_CURL_ARGV_LOG  append-only, one line per invocation: "curl <args...>"
+
+set -eu
+
+if [ -n "${FAKE_CURL_ARGV_LOG:-}" ]; then
+	printf 'curl %s\n' "$*" >>"${FAKE_CURL_ARGV_LOG}"
+fi
+
+out=""
+want_status=0
+prev=""
+for arg in "$@"; do
+	case "${prev}" in
+	-o) out="${arg}" ;;
+	esac
+	case "${arg}" in
+	*%{http_code}*) want_status=1 ;;
+	esac
+	prev="${arg}"
+done
+
+call_num=1
+if [ -n "${FAKE_CURL_COUNTER_FILE:-}" ]; then
+	[ -f "${FAKE_CURL_COUNTER_FILE}" ] || printf '0' >"${FAKE_CURL_COUNTER_FILE}"
+	call_num=$(($(cat "${FAKE_CURL_COUNTER_FILE}") + 1))
+	printf '%s' "${call_num}" >"${FAKE_CURL_COUNTER_FILE}"
+fi
+
+if [ "${call_num}" -le "${FAKE_CURL_FAIL_COUNT:-0}" ]; then
+	if [ -n "${FAKE_CURL_LOG_FILE:-}" ]; then
+		printf '%s transport-failure exit=%s\n' "${call_num}" "${FAKE_CURL_FAIL_EXIT:-7}" >>"${FAKE_CURL_LOG_FILE}"
+	fi
+	if [ "${want_status}" = "1" ]; then
+		printf '000'
+	fi
+	exit "${FAKE_CURL_FAIL_EXIT:-7}"
+fi
+
+if [ -n "${FAKE_CURL_LOG_FILE:-}" ]; then
+	printf '%s status=%s exit=%s\n' "${call_num}" "${FAKE_CURL_STATUS:-200}" "${FAKE_CURL_EXIT:-0}" >>"${FAKE_CURL_LOG_FILE}"
+fi
+
+if [ -n "${out}" ] && [ "${FAKE_CURL_EXIT:-0}" = "0" ]; then
+	printf '%s' "${FAKE_CURL_BODY:-fake curl body}" >"${out}"
+fi
+
+if [ "${want_status}" = "1" ]; then
+	printf '%s' "${FAKE_CURL_STATUS:-200}"
+fi
+
+exit "${FAKE_CURL_EXIT:-0}"

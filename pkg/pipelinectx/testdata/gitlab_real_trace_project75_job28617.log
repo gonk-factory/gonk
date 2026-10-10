@@ -1,0 +1,47 @@
+2026-10-04T21:25:21.984614Z 00O [0KRunning with gitlab-runner 19.4.0 (ac11717a)[0;m
+2026-10-04T21:25:21.984625Z 00O [0K  on gitlab-gitlab-runner-696fb7b645-rcfqb sgTN0Ede3, system ID: r_Wt9gEt407YWF[0;m
+2026-10-04T21:25:21.984627Z 00O [0K  UUID: 01a10391-112b-7dcd-a54d-f508f9100fd5[0;m
+2026-10-04T21:25:21.984646Z 00O section_start:1791149121:prepare_executor[0K
+2026-10-04T21:25:21.984648Z 00O+[0K[36;1mPreparing the "kubernetes" executor[0;m[0;m
+2026-10-04T21:25:21.984679Z 00O [32;1mUsing default image[0;m
+2026-10-04T21:25:21.984909Z 00O [0KUsing Kubernetes namespace: gitlab[0;m
+2026-10-04T21:25:21.984919Z 00O [0KUsing Kubernetes executor with image ubuntu:24.04 ...[0;m
+2026-10-04T21:25:21.984921Z 00O [0KUsing attach strategy to execute scripts...[0;m
+2026-10-04T21:25:21.984928Z 00O [0KUsing effective pull policy of [] for container build[0;m
+2026-10-04T21:25:21.984931Z 00O [0KUsing effective pull policy of [] for container helper[0;m
+2026-10-04T21:25:21.984933Z 00O [0KUsing effective pull policy of [] for container init-permissions[0;m
+2026-10-04T21:25:22.026975Z 00O section_end:1791149122:prepare_executor[0K
+2026-10-04T21:25:22.027086Z 00O+section_start:1791149122:prepare_script[0K
+2026-10-04T21:25:22.027091Z 00O+[0K[36;1mPreparing environment[0;m[0;m
+2026-10-04T21:25:22.046870Z 00O [0KUsing FF_USE_POD_ACTIVE_DEADLINE_SECONDS, the Pod activeDeadlineSeconds will be set to the job timeout: 1h0m0s...[0;m
+2026-10-04T21:25:22.158465Z 00E Waiting for pod gitlab/runner-sgtn0ede3-project-75-concurrent-0-z56dy5pc to be running on the node node-2, status is Pending
+2026-10-04T21:25:25.237334Z 00E Waiting for pod gitlab/runner-sgtn0ede3-project-75-concurrent-0-z56dy5pc to be running on the node node-2, status is Pending
+2026-10-04T21:25:25.237345Z 00E 	ContainersNotReady: "containers with unready status: [build helper]"
+2026-10-04T21:25:25.237347Z 00E 	ContainersNotReady: "containers with unready status: [build helper]"
+2026-10-04T21:25:29.523637Z 01O Running on runner-sgtn0ede3-project-75-concurrent-0-z56dy5pc via gitlab-gitlab-runner-696fb7b645-rcfqb...
+2026-10-04T21:25:29.523648Z 01O 
+2026-10-04T21:25:29.523678Z 00O section_end:1791149129:prepare_script[0K
+2026-10-04T21:25:29.524187Z 00O+section_start:1791149129:get_sources[0K
+2026-10-04T21:25:29.524192Z 00O+[0K[36;1mGetting source from Git repository[0;m[0;m
+2026-10-04T21:25:30.023778Z 01O [32;1mGitaly correlation ID: 01M44CX80V4RGQ785V8ZJ2KER3[0;m
+2026-10-04T21:25:30.023790Z 01O [32;1mFetching changes with git depth set to 20...[0;m
+2026-10-04T21:25:30.023796Z 01O Initialized empty Git repository in /builds/agentic/gonk-e2e-1784441480/.git/
+2026-10-04T21:25:30.023798Z 01O [32;1mCreated fresh repository.[0;m
+2026-10-04T21:25:31.025328Z 01O [32;1mChecking out 4520721a as detached HEAD (ref is refs/merge-requests/3/head)...[0;m
+2026-10-04T21:25:31.025343Z 01O 
+2026-10-04T21:25:31.025348Z 01O [32;1mSkipping Git submodules setup[0;m
+2026-10-04T21:25:31.025354Z 01O 
+2026-10-04T21:25:31.025402Z 00O section_end:1791149131:get_sources[0K
+2026-10-04T21:25:31.025961Z 00O+section_start:1791149131:step_script[0K
+2026-10-04T21:25:31.025964Z 00O+[0K[36;1mExecuting "step_script" stage of the job script[0;m[0;m
+2026-10-04T21:25:31.525449Z 01O [32;1m$ M=GONK_SMOKE_DELIBERATE[0;m
+2026-10-04T21:25:31.525459Z 01O [32;1m$ echo "${M}_FAILURE 20261004T212509Z"[0;m
+2026-10-04T21:25:31.525468Z 01O GONK_SMOKE_DELIBERATE_FAILURE 20261004T212509Z
+2026-10-04T21:25:31.525472Z 01O [32;1m$ exit 3[0;m
+2026-10-04T21:25:31.525477Z 01O 
+2026-10-04T21:25:31.579711Z 00O section_end:1791149131:step_script[0K
+2026-10-04T21:25:31.580349Z 00O+section_start:1791149131:cleanup_file_variables[0K
+2026-10-04T21:25:31.580353Z 00O+[0K[36;1mCleaning up project directory and file based variables[0;m[0;m
+2026-10-04T21:25:32.026569Z 01O 
+2026-10-04T21:25:32.026603Z 00O section_end:1791149132:cleanup_file_variables[0K
+2026-10-04T21:25:32.071309Z 00O [31;1mERROR: Job failed: command terminated with exit code 3[0;m

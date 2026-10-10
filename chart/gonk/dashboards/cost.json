@@ -1,0 +1,101 @@
+{
+  "uid": "gonk-cost",
+  "title": "gonk / Cost",
+  "description": "Spend by project/rung, local vs cloud. THE RULE: every money panel filters synthetic=\"false\" -- local inference is priced synthetically so LiteLLM's USD virtual-key ceiling can gate TOKENS, and those dollars were never billed to anyone.",
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {"from": "now-30d", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      },
+      {
+        "name": "project",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": "label_values(gonk_meter_project_state, project)",
+        "multi": true,
+        "includeAll": true,
+        "current": {}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Real spend by project (30d)",
+      "type": "barchart",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {"expr": "sum by (project) (increase(gonk_meter_spend_usd_total{synthetic=\"false\"}[30d]))", "legendFormat": "{{project}}"}
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Real spend by rung",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {"expr": "sum by (rung) (rate(gonk_meter_spend_usd_total{synthetic=\"false\"}[1h]))", "legendFormat": "{{rung}}"}
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Budget remaining (USD)",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "gonk_meter_budget_remaining_usd", "legendFormat": "{{project}}"}
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Budget remaining (tokens)",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "gonk_meter_budget_remaining_tokens", "legendFormat": "{{project}}"}
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Tokens by rung",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "sum by (rung) (rate(gonk_meter_tokens_total[1h]))", "legendFormat": "{{rung}}"}
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Local inference — synthetic pricing (NOT BILLED)",
+      "type": "timeseries",
+      "description": "SYNTHETIC dollars. Local rungs are priced synthetically so LiteLLM's USD virtual-key ceiling can gate TOKENS. These dollars were NEVER BILLED to anyone -- do not treat this panel as spend.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {"expr": "sum by (rung) (rate(gonk_meter_spend_usd_total{synthetic=\"true\"}[1h]))", "legendFormat": "{{rung}}"}
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Virtual keys",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "targets": [
+        {"expr": "gonk_meter_virtual_keys", "legendFormat": "{{state}}"}
+      ]
+    }
+  ]
+}

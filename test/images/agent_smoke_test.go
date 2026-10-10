@@ -1,0 +1,598 @@
+//go:build images
+
+// Package images holds container-build smoke tests (build tag `images`) --
+// house rule: "if an app runs in a container, test it in a container." These
+// tests shell out to a real container runtime (this dev box's `podman`;
+// docker/setup-buildx-action's genuine Docker daemon in CI --
+// docs/environment.md, containerBin below) and need the images already
+// built (`make images` locally; the `images` CI job builds them fresh).
+//
+// Run: go test ./test/images/ -tags images -run Agent -v
+package images
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/gonk-factory/gonk/pkg/atags"
+	"github.com/gonk-factory/gonk/test/harness"
+)
+
+// containerBin resolves the container runtime binary ONCE per process and
+// reuses it for every test in this package: harness.DetectRuntime() shells
+// out to probe for podman/docker, and running that probe once instead of
+// once per test/subtest keeps the suite from re-forking it dozens of times.
+//
+// This is the "abstract the runtime" half of T-16 (gonk-ak0): this box's
+// podman is what docs/environment.md calls "this box's docker" (a broken CNI
+// bridge means every call here also needs --network=host, T-15's
+// harness.Runtime.HostNetwork), but a GitHub Actions runner ships a genuine
+// Docker daemon and no podman binary at all. harness.DetectRuntime() (T-15,
+// test/component's TestMain) already resolves exactly this difference --
+// reusing it here means test/images needs no runtime-specific branch of its
+// own; `podman image inspect`/`docker image inspect`, `create`, `cp`, `run`
+// and `inspect --format` are the same subcommands and flags on both.
+var (
+	containerBinOnce sync.Once
+	containerBinPath string
+	containerBinErr  error
+)
+
+func containerBin(t *testing.T) string {
+	t.Helper()
+	containerBinOnce.Do(func() {
+		rt, err := harness.DetectRuntime()
+		if err != nil {
+			containerBinErr = err
+			return
+		}
+		containerBinPath = rt.Bin
+	})
+	if containerBinErr != nil {
+		t.Fatalf("no container runtime found (tried podman, docker): %v", containerBinErr)
+	}
+	return containerBinPath
+}
+
+// repoRoot walks up from this file's own directory (test/images/) to the
+// module root -- stable regardless of the caller's working directory.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	return filepath.Join(filepath.Dir(file), "..", "..")
+}
+
+// versionPins reads images/versions.env the same way the Makefile does: a
+// flat KEY=value file, `#`-comments allowed after a value. This is the SAME
+// file `make images` builds from -- if this parse and the Makefile's
+// `include` ever disagree, that is a bug in this file, not in versions.env.
+func versionPins(t *testing.T, root string) map[string]string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "images", "versions.env"))
+	if err != nil {
+		t.Fatalf("read images/versions.env: %v", err)
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		kv := strings.SplitN(line, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		val := kv[1]
+		if i := strings.Index(val, "#"); i >= 0 {
+			val = val[:i]
+		}
+		out[strings.TrimSpace(kv[0])] = strings.TrimSpace(val)
+	}
+	return out
+}
+
+// gonkTag reproduces the Makefile's `GONK_TAG ?= $(GONK_VERSION)-$(shell git
+// rev-parse --short=12 HEAD)` so this test targets the exact image `make
+// images` just built, without a second source of truth for the tag.
+func gonkTag(t *testing.T, root, gonkVersion string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--short=12", "HEAD")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse: %v", err)
+	}
+	return gonkVersion + "-" + strings.TrimSpace(string(out))
+}
+
+func agentImage(t *testing.T) (image string, pins map[string]string) {
+	t.Helper()
+	root := repoRoot(t)
+	pins = versionPins(t, root)
+	registry := pins["REGISTRY"]
+	if registry == "" {
+		t.Fatal("REGISTRY missing from images/versions.env")
+	}
+	tag := gonkTag(t, root, pins["GONK_VERSION"])
+	image = registry + "/gonk-agent:" + tag
+	// Confirm the image actually exists locally before running anything
+	// against it -- a clearer failure than the runtime's own `run` 125-ing
+	// on every subtest individually. `image inspect` (not podman's own
+	// `image exists` convenience command, which docker has no equivalent
+	// of) exits nonzero on both runtimes when the image is absent.
+	bin := containerBin(t)
+	present := exec.Command(bin, "image", "inspect", image).Run() == nil
+	harness.RequireInfra(t, "image "+image+" (run `make images` first)", present)
+	return image, pins
+}
+
+// runIn execs the given binary as the container's ENTRYPOINT override and
+// returns the CONTAINER's stdout (never the runtime's own stderr -- podman
+// prints noisy CNI-validation warnings on this box that would otherwise
+// corrupt an exact-match or JSON assertion on the container's real output)
+// and the exit code. --rm: this is a smoke test, not a fixture;
+// --network=host: the CNI bridge is broken on this box (docs/environment.md)
+// and, per harness.Runtime's own doc comment, load-bearing on a genuine
+// Docker daemon too for the container-backed harness suites.
+func runIn(t *testing.T, image, entrypoint string, args ...string) (string, int) {
+	t.Helper()
+	bin := containerBin(t)
+	full := append([]string{"run", "--rm", "--network=host", "--entrypoint", entrypoint, image}, args...)
+	cmd := exec.Command(bin, full...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else {
+			t.Fatalf("%s run %v: %v\nstderr:\n%s", bin, full, err, stderr.String())
+		}
+	}
+	if stdout.Len() == 0 && stderr.Len() > 0 {
+		// Nothing came back on stdout (e.g. the process crashed before
+		// printing anything) -- surface stderr so a failure is diagnosable.
+		return stderr.String(), code
+	}
+	return stdout.String(), code
+}
+
+func TestAgentImagePinsMatchVersionsEnv(t *testing.T) {
+	image, pins := agentImage(t)
+
+	cases := []struct {
+		name       string
+		entrypoint string
+		args       []string
+		want       string // substring the output must contain
+	}{
+		{"opencode", "/usr/local/bin/opencode", []string{"--version"}, pins["OPENCODE_VERSION"]},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.want == "" {
+				t.Fatalf("expected version for %s is empty -- check images/versions.env", c.name)
+			}
+			out, code := runIn(t, image, c.entrypoint, c.args...)
+			if code != 0 {
+				t.Fatalf("%s --version exited %d:\n%s", c.name, code, out)
+			}
+			if !strings.Contains(out, c.want) {
+				t.Fatalf("%s --version = %q, want it to contain pinned version %q (a floating agent is not an agent)", c.name, out, c.want)
+			}
+		})
+	}
+}
+
+// gonk-0de. glab and bd are NOT in this image, and their absence is a property
+// worth pinning rather than a detail that happens to be true today.
+//
+// They cost 19.5 MB and 52.8 MB of every build -- 72.3 MB per arch, a third of
+// the image -- while nothing invoked either. But size is the lesser reason. The
+// broker model strips this pod of forge credentials on purpose, so a forge CLI
+// in it is a standing invitation to re-credential the pod "just for this one
+// case" and quietly undo the whole zero-creds design (cf gonk-7oz). And spike S0
+// established the pod has no working beads store at all, so a bd here can only
+// mislead whoever finds it.
+//
+// If this test starts failing because someone added them back, the question to
+// answer first is not "how do we shrink the image" but "why does the agent need
+// a credentialed CLI" -- the answer is meant to be that it does not: writes
+// happen as effects the BROKER applies.
+func TestAgentImageShipsNoForgeOrBeadsCLI(t *testing.T) {
+	image, _ := agentImage(t)
+	for _, bin := range []string{"glab", "bd"} {
+		t.Run(bin, func(t *testing.T) {
+			out, code := runIn(t, image, "/bin/sh", "-c", "command -v "+bin+" || echo ABSENT")
+			if !strings.Contains(out, "ABSENT") {
+				t.Fatalf("%s is present in the agent image at %q -- the pod holds no forge "+
+					"credentials and no beads store, so this binary can only mislead or tempt "+
+					"(gonk-0de). exit=%d", bin, strings.TrimSpace(out), code)
+			}
+		})
+	}
+}
+
+func TestAgentImageGitWorks(t *testing.T) {
+	image, _ := agentImage(t)
+	out, code := runIn(t, image, "/usr/bin/git", "--version")
+	if code != 0 {
+		t.Fatalf("git --version exited %d:\n%s", code, out)
+	}
+}
+
+func TestAgentImageRunsAsNonRoot(t *testing.T) {
+	image, _ := agentImage(t)
+	out, code := runIn(t, image, "/usr/bin/id", "-u")
+	if code != 0 {
+		t.Fatalf("id -u exited %d:\n%s", code, out)
+	}
+	if got := strings.TrimSpace(out); got != "65532" {
+		t.Fatalf("id -u = %q, want 65532 (not root)", got)
+	}
+}
+
+// The agent pod must never be able to hang on something waiting for a keypress.
+// Two env vars carry that, and both are load-bearing for a reason the test
+// harness itself cannot reproduce:
+//
+//   - PAGER/GIT_PAGER: git pages only when stdout is a TTY. `podman run` here
+//     has no TTY, so `git log` would pass this suite whether or not a pager is
+//     configured. The AGENT runs under opencode's PTY, where git WILL page and
+//     then block forever on a keypress until the reservation TTL reaps it --
+//     a silent stall indistinguishable from a slow model.
+//   - GIT_TERMINAL_PROMPT: the pod holds no forge credential by design, so a
+//     git operation reaching for a remote must fail rather than sit on a
+//     username prompt. Failing closed turns a hang into a classifiable error.
+//
+// Asserting the environment (rather than trying to provoke a pager) is
+// deliberate: it is the property that actually has to hold, and it holds
+// regardless of whether this suite can allocate a TTY.
+func TestAgentImageCannotHangOnAPagerOrCredentialPrompt(t *testing.T) {
+	image, _ := agentImage(t)
+	want := map[string]string{
+		"PAGER":               "cat",
+		"GIT_PAGER":           "cat",
+		"GIT_TERMINAL_PROMPT": "0",
+	}
+	for _, k := range []string{"PAGER", "GIT_PAGER", "GIT_TERMINAL_PROMPT"} {
+		out, code := runIn(t, image, "/bin/sh", "-c", "printf %s \"$"+k+"\"")
+		if code != 0 {
+			t.Fatalf("reading $%s exited %d:\n%s", k, code, out)
+		}
+		if got := strings.TrimSpace(out); got != want[k] {
+			t.Errorf("$%s = %q, want %q -- without it the agent can hang "+
+				"silently under opencode's PTY until its reservation expires", k, got, want[k])
+		}
+	}
+}
+
+// gonk-ob5: opencode fails OPEN. Given no resolvable config it does not error
+// -- it silently falls back to a built-in cloud provider, answers correctly and
+// exits 0, so a model call happens off-meter and gonk cannot know. Worse, the
+// built-ins are present even when our overlay DOES load: the overlay adds a
+// provider, it never removed theirs.
+//
+// This is the A/B that proves the allowlist is what closes it, run against the
+// real pinned opencode rather than asserted from its docs. The control half
+// matters: without it, a future opencode that ignored `enabled_providers`
+// entirely would still pass the guarded half and this test would be decoration.
+//
+// AND AN EMPTY CONTROL IS A FAILURE, NOT A SKIP (gonk-vb4c). This used to
+// t.Skipf when the control listed no foreign provider, on the reasoning that
+// the guarded assertion below "would be vacuous" -- which is true, and is
+// exactly why skipping was the wrong direction. A control that cannot show
+// foreign providers reachable WITHOUT the allowlist has not shown that gonk-ob5
+// holds; it has shown that this instrument no longer sees what it guards, and
+// any change to how `opencode models` prints (a format change, a flag rename, a
+// different OPENCODE_DISABLE_MODELS_FETCH behaviour) produces exactly that
+// while leaving the `images` job green having asserted nothing. It is the same
+// rule test/harness/requireinfra.go applies to infra skips under CI=true: a
+// check that could not run must not report as a check that ran and passed.
+func TestAgentImageOpencodeResolvesOnlyTheGonkProvider(t *testing.T) {
+	image, pins := agentImage(t)
+
+	const overlay = `{
+  "$schema": "https://opencode.ai/config.json",
+  %s
+  "model": "gonk/qwen3-14b",
+  "provider": {"gonk": {"npm": "@ai-sdk/openai-compatible", "name": "gonk (LiteLLM)",
+    "options": {"baseURL": "http://127.0.0.1:1/v1", "apiKey": "unused"},
+    "models": {"qwen3-14b": {"name": "qwen3-14b"}}}}
+}`
+	script := func(cfg string) string {
+		return "set -e\n" +
+			"printf '%s' '" + cfg + "' > /workspace/oc.json\n" +
+			"export OPENCODE_CONFIG=/workspace/oc.json\n" +
+			"export OPENCODE_DISABLE_MODELS_FETCH=1\n" +
+			"opencode models 2>/dev/null || true\n"
+	}
+
+	// Control: no allowlist -> opencode's built-in providers are reachable.
+	ctrl, _ := runIn(t, image, "/bin/sh", "-c", script(fmt.Sprintf(overlay, "")))
+	ctrlForeign := foreignProviders(ctrl)
+	if len(ctrlForeign) == 0 {
+		t.Fatalf("THE CONTROL FAILED, WHICH IS AN INSTRUMENT PROBLEM AND NOT A "+
+			"GREEN RESULT. With no allowlist at all, `opencode models` listed no "+
+			"non-gonk provider, so the guarded assertion below could only pass "+
+			"vacuously -- it would confirm nothing about whether "+
+			"`enabled_providers` is what confines opencode to gonk/ (gonk-ob5). "+
+			"This is NOT evidence that this opencode build exposes no built-in "+
+			"cloud providers; the likeliest cause is that opencode %s changed how "+
+			"`models` prints, renamed a flag, or changed what "+
+			"OPENCODE_DISABLE_MODELS_FETCH suppresses. Fix the control (the script "+
+			"above and foreignProviders below) so it demonstrates foreign "+
+			"providers again -- do not skip, and do not delete the A/B. "+
+			"control output was:\n%s",
+			pins["OPENCODE_VERSION"], ctrl)
+	}
+
+	// Guarded: with the allowlist, nothing but gonk/ may appear.
+	got, _ := runIn(t, image, "/bin/sh", "-c",
+		script(fmt.Sprintf(overlay, `"enabled_providers": ["gonk"],`)))
+	foreign := foreignProviders(got)
+	if len(foreign) > 0 {
+		t.Errorf("enabled_providers did not confine opencode to gonk/.\n"+
+			"leaked: %v\nfull output:\n%s\n"+
+			"(control saw %d non-gonk provider(s), so the allowlist is the "+
+			"thing that failed, not the fixture)", foreign, got, len(ctrlForeign))
+	}
+}
+
+// foreignProviders is every non-blank line of `opencode models` output that
+// does not name the gonk provider -- i.e. every provider this pod is not
+// supposed to be able to reach. Shared by both halves of the A/B above so the
+// control and the guarded pass cannot drift into parsing the same output by two
+// different rules, which would make the A/B compare two different things.
+func foreignProviders(out string) []string {
+	var foreign []string
+	for _, ln := range strings.Split(strings.TrimSpace(out), "\n") {
+		if ln = strings.TrimSpace(ln); ln != "" && !strings.HasPrefix(ln, "gonk/") {
+			foreign = append(foreign, ln)
+		}
+	}
+	return foreign
+}
+
+// foreignProviders is the whole of what the A/B above measures, so pin it
+// directly: it needs no container, and it is the piece that decides whether the
+// control "found nothing" (gonk-vb4c). The last case is the one that matters --
+// output that is present but in a shape this parser no longer understands reads
+// as an empty control, which is now fatal rather than a skip.
+func TestForeignProvidersCountsEveryNonGonkLine(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want int
+	}{
+		{"mixed", "gonk/qwen3-14b\nanthropic/claude-sonnet-4\nopenai/gpt-5\n", 2},
+		{"gonk only", "gonk/qwen3-14b\n", 0},
+		{"blank lines are not providers", "\n  \n\ngonk/qwen3-14b\n\n", 0},
+		{"no output at all", "", 0},
+		{"leading whitespace is trimmed before the gonk/ test", "   gonk/qwen3-14b\n   openai/gpt-5\n", 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := foreignProviders(c.out); len(got) != c.want {
+				t.Fatalf("foreignProviders(%q) = %v (%d), want %d", c.out, got, len(got), c.want)
+			}
+		})
+	}
+}
+
+// gonk-5ka1. gonk-gate is NOT in this image, and -- exactly like glab and bd
+// above -- its absence is a property worth pinning rather than a detail that
+// happens to be true today.
+//
+// It used to ship here (images/Dockerfile.agent's `gate` build stage,
+// originally AD-3) to serve two subcommands, and both are gone: ADR-007 deleted
+// `check` with the formula layer, and `trailers` was deleted once it was shown
+// dead -- the checkout entrypoint.sh fetches is a GitLab repository-archive
+// tarball with no `.git/` (pkg/rig), so the prepare-commit-msg hook that would
+// have invoked it never installed in a real pod and the install guard always
+// took its "skip" branch. Nothing in the pod calls gonk-gate: the image ships
+// exactly one script, images/agent/entrypoint.sh, whose every gonk-gate mention
+// is a comment citing controller-side source, and the pack that does `exec
+// gonk-gate dispatch` (pack/scripts/) is COPYed into the CONTROLLER image only.
+//
+// Size was never the argument -- the trust boundary is. gonk-gate carries the
+// broker logic, the meter client and the effect-apply path, and this is the one
+// pod that deliberately runs untrusted model output with no forge credential
+// and no cloud key of its own. A dormant copy of the component that DOES hold
+// those powers is a ready-made tool for anything that achieves execution here,
+// and it cuts directly against what the agent NetworkPolicy and the per-project
+// key work are trying to establish.
+//
+// If this test starts failing because someone added it back, the question to
+// answer first is not "how big is it" but "what in this pod is supposed to call
+// broker code" -- the answer is meant to be nothing: the broker runs
+// controller-side and applies effects on the agent's behalf.
+func TestAgentImageShipsNoGonkGate(t *testing.T) {
+	image, _ := agentImage(t)
+
+	t.Run("not on PATH", func(t *testing.T) {
+		out, code := runIn(t, image, "/bin/sh", "-c", "command -v gonk-gate || echo ABSENT")
+		if !strings.Contains(out, "ABSENT") {
+			t.Fatalf("gonk-gate is on PATH in the agent image at %q -- nothing in this pod "+
+				"invokes it, and it carries the broker/meter/effect-apply code the pod is "+
+				"deliberately denied (gonk-5ka1). exit=%d", strings.TrimSpace(out), code)
+		}
+	})
+
+	// The PATH check alone would pass if the binary were merely moved, so
+	// pin the exact path the removed COPY used as well.
+	t.Run("not at /usr/local/bin/gonk-gate", func(t *testing.T) {
+		out, code := runIn(t, image, "/bin/sh", "-c", "test -e /usr/local/bin/gonk-gate && echo PRESENT || echo ABSENT")
+		if !strings.Contains(out, "ABSENT") {
+			t.Fatalf("/usr/local/bin/gonk-gate still exists in the agent image -- the `gate` "+
+				"build stage and its COPY are supposed to be gone (gonk-5ka1). exit=%d out=%q", code, strings.TrimSpace(out))
+		}
+	})
+}
+
+// NOTE: there is deliberately no TestAgentImageGonkGateVersionMatchesTag any
+// more. It asserted that `gonk-gate --version` in THIS image printed GONK_TAG,
+// which cannot mean anything once the binary is gone, and an absence test for
+// it would only restate the one above. The `-ldflags -X main.version=$(GONK_TAG)`
+// stamping mechanism itself is still covered, in the image that still ships the
+// binary and still runs it: test/images/controller_smoke_test.go.
+
+// *** THE ATTRIBUTION SEAM (OD-7), THE POINT OF THIS WHOLE IMAGE. ***
+//
+// Runs the REAL entrypoint script, inside the container, with a synthetic
+// meter Decide answer, and asserts the rendered overlay/opencode.json's
+// provider header carries all seven pkg/atags keys, round-tripped through
+// atags.FromMetadata itself -- not a hand-rolled key list that could drift
+// from the real contract.
+func TestAgentImageAttributionOverlayCarriesAllSevenAtags(t *testing.T) {
+	image, _ := agentImage(t)
+
+	want := atags.Tags{
+		Project: "group/repo", Rig: "repo", BeadID: "gk-1a2b",
+		SessionKey: "sess-9", Rung: "qwen-local", Attempt: 3,
+		Trigger: atags.TriggerIssueTriage,
+	}
+	metadataJSON, err := json.Marshal(want.Metadata())
+	if err != nil {
+		t.Fatalf("marshal atags metadata: %v", err)
+	}
+
+	// The render script backgrounds the entrypoint (its last step execs
+	// opencode, which would otherwise replace the shell and prevent the
+	// following `cat`), polls for the rendered file (bounded), then prints
+	// it. This is a test-only harness detail -- it does not change what the
+	// image ships or how it is invoked in production (Gas City execs the
+	// entrypoint directly as PID 1).
+	script := `
+set -eu
+/usr/local/bin/gonk-agent-entrypoint --version >/tmp/opencode.out 2>/tmp/entrypoint.log &
+for i in $(seq 1 50); do
+  [ -f /etc/gonk/overlay/opencode.json ] && break
+  sleep 0.1
+done
+cat /etc/gonk/overlay/opencode.json
+`
+	cmd := exec.Command(containerBin(t), "run", "--rm", "--network=host",
+		// GC_ALIAS: entrypoint.sh's own Step 0 refuses to start at all
+		// without a non-empty session alias ("no alias: GC_ALIAS is unset
+		// or empty -- refusing to start without a session identity") --
+		// added after this test was written, and this suite never ran
+		// anywhere to notice the gap (REAL FINDING, T-16: without this the
+		// container exits before ever reaching the overlay render, and
+		// stdout -- the file this test's json.Unmarshal below needs -- is
+		// simply empty). Any non-empty value satisfies the check; only its
+		// length is used (for the logged prefix), never its content.
+		"-e", "GC_ALIAS=testaliastestaliastestalias",
+		"-e", "GC_WEBHOOK_ARG_MODEL=qwen-local",
+		"-e", "GC_WEBHOOK_ARG_METADATA_JSON="+string(metadataJSON),
+		"-e", "GONK_LITELLM_URL=http://litellm.litellm.svc.cluster.local:4000",
+		"-e", "GONK_LITELLM_KEY_FILE=/run/secrets/litellm-key",
+		"-v", fakeKeyFile(t)+":/run/secrets/litellm-key:ro",
+		"--entrypoint", "sh",
+		image, "-c", script,
+	)
+	// stdout and stderr kept SEPARATE (not `2>&1`): podman prints noisy
+	// CNI-validation warnings on this box. stdout is NOT exactly the
+	// rendered file, though -- entrypoint.sh's own log() function ALSO
+	// writes every status line to /proc/1/fd/1 "NOT JUST THIS PROCESS'S
+	// STDERR" (its own comment, gonk-dot: a detached tmux session has no
+	// other way to reach `kubectl logs`), and PID 1 in THIS container is
+	// the `sh -c script` running `cat` -- so those lines land on this
+	// script's own stdout ahead of the JSON regardless of the `>
+	// /tmp/entrypoint.log` redirect on the backgrounded entrypoint
+	// process. REAL FINDING (T-16, first real run of this suite): find the
+	// JSON object rather than assume `cat`'s output is the whole stream,
+	// the same way packvalidate_test.go's decodeFirstJSONObject already
+	// has to for gc's combined stdout+stderr.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("render overlay in container: %v\nstderr:\n%s\nstdout:\n%s", err, stderr.String(), stdout.String())
+	}
+	stdoutRaw := stdout.String()
+	i := strings.IndexByte(stdoutRaw, '{')
+	if i < 0 {
+		t.Fatalf("no JSON object found in container stdout:\n%s", stdoutRaw)
+	}
+
+	var cfg struct {
+		Provider map[string]struct {
+			Options struct {
+				Headers map[string]string `json:"headers"`
+				APIKey  string            `json:"apiKey"`
+				BaseURL string            `json:"baseURL"`
+			} `json:"options"`
+		} `json:"provider"`
+	}
+	if err := json.Unmarshal([]byte(stdoutRaw[i:]), &cfg); err != nil {
+		t.Fatalf("rendered opencode.json is not valid JSON: %v\n--- raw ---\n%s", err, stdoutRaw)
+	}
+	gonk, ok := cfg.Provider["gonk"]
+	if !ok {
+		t.Fatalf("rendered config has no provider.gonk:\n%s", stdoutRaw)
+	}
+	if gonk.Options.BaseURL != "http://litellm.litellm.svc.cluster.local:4000/v1" {
+		t.Errorf("provider.gonk.options.baseURL = %q", gonk.Options.BaseURL)
+	}
+	if !strings.HasPrefix(gonk.Options.APIKey, "{file:") {
+		t.Errorf("provider.gonk.options.apiKey = %q, want opencode's own {file:...} substitution "+
+			"(the virtual key must be a FILE MOUNT, never an env value)", gonk.Options.APIKey)
+	}
+	header, ok := gonk.Options.Headers["x-litellm-spend-logs-metadata"]
+	if !ok {
+		t.Fatalf("provider.gonk.options.headers has no x-litellm-spend-logs-metadata key:\n%s", stdoutRaw)
+	}
+
+	// THE assertion: round-trip the header value through the REAL contract
+	// (pkg/atags.FromMetadata), not a hand-copied list of key names, so this
+	// test breaks the moment the two disagree.
+	var raw map[string]string
+	if err := json.Unmarshal([]byte(header), &raw); err != nil {
+		t.Fatalf("x-litellm-spend-logs-metadata is not valid JSON: %v\nvalue: %s", err, header)
+	}
+	got, err := atags.FromMetadata(raw)
+	if err != nil {
+		t.Fatalf("x-litellm-spend-logs-metadata failed atags.FromMetadata: %v\nvalue: %s", err, header)
+	}
+	if got != want {
+		t.Fatalf("attribution round-trip mismatch:\n got  %+v\n want %+v", got, want)
+	}
+
+	// Belt and braces: the exact seven `gonk_*` key strings, not just a
+	// struct that happens to compare equal.
+	for _, key := range []string{
+		atags.KeyProject, atags.KeyRig, atags.KeyBeadID, atags.KeySessionKey,
+		atags.KeyRung, atags.KeyAttempt, atags.KeyTrigger,
+	} {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("x-litellm-spend-logs-metadata missing key %q", key)
+		}
+	}
+	if len(raw) != 7 {
+		t.Errorf("x-litellm-spend-logs-metadata has %d keys, want exactly 7: %v", len(raw), raw)
+	}
+}
+
+func fakeKeyFile(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "litellm-key")
+	if err := os.WriteFile(path, []byte("sk-fake-test-key-never-a-real-secret\n"), 0o600); err != nil {
+		t.Fatalf("write fake key file: %v", err)
+	}
+	return path
+}

@@ -1,0 +1,45 @@
+# .gitleaks.toml -- the secret scanner's configuration for this repository.
+#
+# gitleaks loads this file by itself from the root of the tree it scans. It
+# EXTENDS the default rule set and adds ONE allowlist, for ONE rule, on TWO
+# exact grammars. It switches nothing off.
+#
+# WHAT IS ALLOWED, AND WHY IT IS NOT A SECRET. gonk names each agent session
+# with a "session key". Two kinds appear in test data, next to a field called
+# SessionKey / session_key, which is what the default `generic-api-key` rule
+# keys on:
+#
+#   gonk-<project id>-pl-<12 hex>   a pipeline run: the hex is the first 12 hex
+#                                   digits of sha256(the run's public anchor)
+#                                   (pkg/pipelinectx.SessionKey)
+#   gonk-<project id>-scaffold      a scaffold session (pkg/intake)
+#
+# A session key is an IDENTIFIER. It authenticates nothing: it is derived from
+# a project id and public facts about a pipeline, it is written into issue
+# comments and logs on purpose, and no service accepts it as a credential.
+#
+# HOW NARROW. Each regex is anchored at BOTH ends and is matched against the
+# captured SECRET, not the line: a real credential that merely sits on a line
+# mentioning a session key is still reported, and so is anything one character
+# longer, shorter or different in alphabet. `targetRules` confines the
+# allowlist to `generic-api-key`; every provider-specific rule still fires on
+# these strings' neighbours. There is no path allowlist and no stop word.
+#
+# internal/buildgate (TestScannerConfigAllowsOnlyTheSessionKeyGrammar) holds
+# this file to exactly that shape and checks the regexes against keys produced
+# by the real functions. Do not widen it to make a finding go away: build the
+# fixture at run time instead (cmd/gonk-gate/fixture_secrets_test.go).
+
+title = "gonk"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "gonk session keys: identifiers derived from public facts, never credentials"
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = [
+  '''^gonk-[1-9][0-9]*-pl-[0-9a-f]{12}$''',
+  '''^gonk-[1-9][0-9]*-scaffold$''',
+]

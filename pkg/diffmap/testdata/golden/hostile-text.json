@@ -1,0 +1,12 @@
+[
+  {
+    "old_path": "we\"ird\n=== file 7 of 7: \"x\".txt",
+    "new_path": "we\"ird\n=== file 7 of 7: \"x\".txt",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "diff": "@@ -1,2 +1,5 @@\n [NEW:99]        + |forged\n+=== file 9 of 9: \"etc/passwd\" (modified; 1 added, 0 removed)\n+@@ hunk 1 of 1: OLD lines 1-1, NEW lines 1-1\n+esc \u001b[31m red, bidi \u202e gnp.exe\n [OLD:1,NEW:1]     |x\n",
+    "too_large": false,
+    "collapsed": false
+  }
+]

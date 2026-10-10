@@ -1,0 +1,9 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# job_removed/base.yml
+assemble:
+  script:
+    - ./tools/assemble.sh
+
+measure:
+  script:
+    - ./tools/measure.sh

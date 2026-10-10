@@ -1,0 +1,57 @@
+# gonk configuration. https://github.com/gonk-factory/gonk
+# Schema: docs/schemas/gonk-config.v1.schema.json
+#
+# Removing this file, or removing the gonk bot from this project, de-onboards it.
+version: 1
+
+# Master switch for this project.
+enabled: true
+
+# What gonk is allowed to do here. features is not implemented yet.
+actions:
+  triage: true
+  pipelines: false        # true: gonk diagnoses failed pipelines (default
+                           # branch and merge requests) and posts one note per
+                           # failure. It changes nothing and retries nothing.
+  pipeline_fixes: false    # true (needs pipelines: true): a diagnosis may be
+                           # followed by one small fix merge request. Limits
+                           # go in a pipeline_fix: section; see the table in
+                           # this merge request. This version of gonk opens
+                           # the merge request and does not yet judge it.
+  features: false
+  scaffold: false          # let gonk spend tokens drafting .agent/ for you.
+                           # off by default: this merge request already adds a
+                           # .agent/ seed, and filling it in by hand costs
+                           # nothing and is more accurate.
+
+# Hard ceilings. These only ever tighten: the instance and group may impose a
+# lower limit, never a higher one.
+budget:
+  monthly_cost_usd: 0      # paid-model spend. 0 = no paid models, ever.
+  monthly_tokens: "50M"
+  per_task_tokens: "2M"
+
+# Models gonk may use here, cheapest first. This is an allow-list: a model that
+# is not listed cannot be used, whatever the budget says. Cloud rungs must be
+# added deliberately (and need a non-zero monthly_cost_usd to be reachable).
+# Seeded from the operator's instance ladder; trim or reorder as you like.
+ladder:
+  - qwen-local
+
+# resume: continue an interrupted session where it left off. fresh: start over.
+continuity: resume
+
+triage:
+  label_prefix: "gonk::"
+  respond_to_mentions: true
+
+# Which files gonk treats as source code, tests and documentation here, chosen
+# from the profiles gonk ships: go, python, node (JavaScript and TypeScript),
+# docs-md, docs-rst, docs-txt, docs-adoc. This list was filled in by this
+# merge request from files at the root of the default branch (the merge
+# request says which) and is NOT detected again: correct it here. It matters
+# only to workflows that write code, and nothing enabled above does.
+# Dependency manifests, lock files and test-runner configuration of every
+# listed AND unlisted ecosystem are off limits to an ordinary change either way.
+scope:
+  profiles: [go, docs-md]

@@ -1,0 +1,12 @@
+[
+  {
+    "old_path": "pkg/stock/count.go",
+    "new_path": "pkg/stock/count.go",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "diff": "@@ -3,7 +3,8 @@ package stock\n import \"errors\"\n \n // Count returns how many crates fit on a shelf.\n-func Count(width int) int {\n+func Count(width, depth int) int {\n+\t// depth is measured in crates, not metres\n \tif width < 0 {\n \t\treturn 0\n \t}\n@@ -20,4 +21,4 @@ func Shelf(n int) string {\n \tif n == 0 {\n \t\treturn \"empty\"\n \t}\n-\treturn \"full\"\n+\treturn \"stocked\"\n",
+    "too_large": false,
+    "collapsed": false
+  }
+]

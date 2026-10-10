@@ -1,0 +1,9 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# unused_template/head.yml: a template no job extends changed.
+.nobody-uses-this:
+  script:
+    - echo new
+
+assemble:
+  script:
+    - ./tools/assemble.sh

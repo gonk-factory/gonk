@@ -1,0 +1,17 @@
+{
+ "errors": [],
+ "includes": [
+  {
+   "blob": "https://gitlab.example.internal/agentic/gonk-e2e-1784441480/-/blob/4a774003b2e8f5c8c4497827273c1aaf6d28710b/ci/probe-common.yml",
+   "context_project": "agentic/gonk-e2e-1784441480",
+   "context_sha": "4a774003b2e8f5c8c4497827273c1aaf6d28710b",
+   "extra": {},
+   "location": "ci/probe-common.yml",
+   "raw": "https://gitlab.example.internal/agentic/gonk-e2e-1784441480/-/raw/4a774003b2e8f5c8c4497827273c1aaf6d28710b/ci/probe-common.yml",
+   "type": "local"
+  }
+ ],
+ "merged_yaml": "---\n\".probe-job\":\n  tags:\n  - cluster\n  before_script:\n  - echo \"probe job $CI_JOB_NAME\"\n  - echo \"one more line\"\nworkflow:\n  rules:\n  - if: $CI_PIPELINE_SOURCE == \"merge_request_event\"\n  - if: \"$CI_COMMIT_BRANCH =~ /^probe\\\\/pipefix-.*-(base|fixed|skipci)$/\"\nstages:\n- \".pre\"\n- check\n- report\n- \".post\"\ndefault:\n  interruptible: true\nvariables:\n  PROBE_WORD: crates\n\".probe-vars\":\n  PROBE_KIND: synthetic\nprobe-lint:\n  tags:\n  - cluster\n  before_script:\n  - echo \"probe job $CI_JOB_NAME\"\n  - echo \"one more line\"\n  extends: \".probe-job\"\n  stage: check\n  variables:\n    PROBE_KIND: synthetic\n  script:\n  - test -f status.sh\nprobe-status:\n  tags:\n  - cluster\n  before_script:\n  - echo \"probe job $CI_JOB_NAME\"\n  - echo \"one more line\"\n  extends: \".probe-job\"\n  stage: check\n  script:\n  - sh status.sh\nprobe-report:\n  tags:\n  - cluster\n  before_script:\n  - echo \"probe job $CI_JOB_NAME\"\n  - echo \"one more line\"\n  extends: \".probe-job\"\n  stage: report\n  script:\n  - echo \"report for $PROBE_WORD\"\n",
+ "valid": true,
+ "warnings": []
+}

@@ -1,0 +1,95 @@
+# =============================================================================
+# ci/values-cnpg.yaml -- bundled beads Dolt + a chart-MANAGED CNPG ledger.
+#
+# dolt.enabled stays TRUE (beads is unaffected -- it is a completely separate
+# component from the ledger), and ledger.postgres.mode moves from the "shared"
+# tenancy default to "cnpg": the chart renders its OWN postgresql.cnpg.io/v1
+# Cluster for the ledger, instead of consuming an existing CNPG tenancy.
+#
+# RECONCILED, Task 0: this is NOT "the Task 0b fallback". Postgres is the ONLY
+# ledger backend (ADR-004 Decision 10), so this profile is simply the "stand up
+# your own CNPG Cluster" mode for an operator with no existing tenancy -- and it
+# is the proof that beads stays on Dolt regardless of which Postgres mode the
+# ledger uses. Ingress and monitoring are turned on to keep this profile close
+# to a real, observable install.
+#
+# The CNPG operator is a prerequisite; the chart does NOT install it. And meter
+# still reads the ledger DSN from secrets.ledger.existingSecret -- point that at
+# CNPG's generated app Secret (or your own). The chart never copies a credential.
+#
+# NO SECRET VALUE APPEARS HERE.
+# =============================================================================
+# release-unit: every gonk image (controller, intake, meter, and the agent
+# image the controller hands to session pods) deploys under ONE tag.
+releaseTag: v0.1.0
+
+intake:
+  webhookPublicURL: https://gonk.example.internal/hook/gitlab
+
+gascity:
+  # G22: a TEST public verify key -- the repo golden vector's real ed25519
+  # pubkey (chart/gonk/smoke). Grant-gating on; the private half is the Secret
+  # gonk-gc-write-key (secrets.gcWriteKey default), provisioned out of band.
+  writeAuth:
+    verifyKey: "k1:1hcioE4eYD4PsM66wVJ8oBErEfCTyNPt9Q/+ZT0drmk="
+
+dolt:
+  image:
+    tag: 2.1.7
+
+# REQUIRED: the chart has no default GitLab.
+gitlab:
+  url: https://gitlab.example.internal
+  # A private CA: the bundle ConfigMap is mounted into intake, meter and the
+  # controller, and SSL_CERT_FILE names it.
+  caCert:
+    existingConfigMap: gitlab-ca
+    key: ca.crt
+
+litellm:
+  externalURL: http://litellm.litellm.svc.cluster.local:4000
+
+ledger:
+  backend: postgres
+  postgres:
+    mode: cnpg
+    database: gonk_ledger
+    cnpg:
+      instances: 1
+      storage:
+        size: 20Gi
+
+ingress:
+  enabled: true
+  className: traefik
+  host: gonk.example.internal
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true
+  dashboards:
+    enabled: true
+
+operatorConfig:
+  instance:
+    ladder: [qwen-local]
+    budget:
+      monthly_cost_usd: 0
+  rungs:
+    - name: qwen-local
+      kind: local
+      model: qwen3-14b
+      est_cost_usd: 0
+      est_tokens: 200K
+      synthetic_usd_per_1m_tokens: 0.20
+
+onboarding:
+  defaultRung: qwen-local
+
+# A render profile, not a deployment: its tags (v0.1.0) carry no build number,
+# so the image-floor guard (G23, gonk-xsk3) cannot rank them and would refuse
+# the render. Saying so here is the explicit opt-in that guard requires.
+imageFloor:
+  acceptUnrankedTags: true

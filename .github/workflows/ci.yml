@@ -1,0 +1,349 @@
+# The HERMETIC half of gonk's gate.
+#
+# gonk's full test suite has tiers that need the maintainers' cluster, a live GitLab, a
+# LiteLLM proxy and a GPU box. None of that exists on a GitHub runner and none of
+# it should: a red badge that means "our homelab was down" tells a reader
+# nothing. What runs here is everything that needs only this repository.
+#
+# WHAT THIS BUYS OVER THE GITLAB PIPELINE, concretely: the chart gate. On GitLab
+# `chart-test` is gated on $GONK_CHART_TOOLS_IMAGE, which is defined nowhere, so
+# it has NEVER run in CI -- the golden manifests are only ever checked when
+# somebody remembers to run them locally. Here it runs on every push.
+#
+# Everything is pinned, and pinned means BY DIGEST. Floating tags are banned
+# repo-wide (`make no-latest`), and an action pinned to a moving tag is the
+# same hazard as an image pinned to :latest: `@v4` is a third party's promise
+# not to change what that tag points at, and the point of pinning is to remove
+# that promise from the trust model. Every `uses:` below is a 40-hex commit,
+# with the version it corresponded to in a trailing comment; every downloaded
+# tarball is checked against a sha256 the step ASSERTS (T-18).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Supersede an in-flight run for the same ref rather than queueing behind it,
+  # the same reason gonk-7n2 added auto-cancel to the GitLab pipeline.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The standing local gate is exactly this. Setting them globally means no job
+  # can silently reach a module proxy, and that CI and a developer's machine run
+  # the same thing. vendor/ is committed.
+  GOFLAGS: -mod=vendor
+  GOPROXY: "off"
+
+jobs:
+  gate:
+    name: vet + test + lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # THE RELEASED STATE, for internal/buildgate's chart/IMAGE-CONTRACT check
+      # (gonk-xsk3): an image whose chart invocations changed against main must
+      # have a raised floor, and that comparison needs main. checkout makes a
+      # single-branch clone, so origin/main does not exist here by default and
+      # the test goes RED rather than quietly comparing against HEAD.
+      #
+      # The explicit refspec is REQUIRED. `git fetch --depth=1 origin main`
+      # updates FETCH_HEAD only and creates no refs/remotes/origin/main
+      # (measured 2026-09-17).
+      - name: fetch origin/main (image contract base)
+        run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          # Vendored: there is nothing to cache from a proxy, and a cache miss
+          # must never become a network fetch.
+          cache: false
+
+      - name: go vet
+        run: go vet ./...
+
+      # Every custom //go:build tag, type-checked. An untagged `go vet ./...`
+      # does not compile a single tagged file, so without this the tagged
+      # builds are checked by nothing until somebody runs `make vet` locally.
+      # It matters most for `testclock`, which guards no _test.go file at all
+      # (it swaps the meter's clock for e2e) -- a tagged vet is the ONLY
+      # coverage a modifier tag like that can honestly have, and
+      # internal/buildgate's TestEveryBuildTagRunsInCI requires exactly this
+      # line for it (gonk-0bvc).
+      #
+      # Written out one tag per line, not as a shell loop, so each tag is
+      # greppable as a real `go vet … -tags <tag>` command. Keep in sync with
+      # the Makefile's VET_BUILD_TAGS.
+      - name: go vet (every custom build tag)
+        run: |
+          set -euo pipefail
+          go vet -tags chart ./...
+          go vet -tags component ./...
+          go vet -tags images ./...
+          go vet -tags integration ./...
+          go vet -tags live ./...
+          go vet -tags testclock ./...
+
+      # -race matches the local gate. It is slower and it is the point: the
+      # dispatch path, the reconciler and the meter all run concurrently.
+      #
+      # NO -skip. This step used to exclude TestEveryBuildTagRunsInCI, which
+      # T-14 added deliberately red while `live` and `testclock` had no CI
+      # coverage. Both are covered now -- `live` by the nightly live.yml,
+      # `testclock` by the tagged vet above -- so the exclusion is gone. A
+      # red gate is never acceptable, and neither is a gate that is green
+      # only because it stopped asking (delivery plan rule 4b).
+      - name: go test -race
+        # -shuffle=on: see the Makefile's `test` target (gonk-5pyx). A failure
+        # prints `-test.shuffle <seed>`; -shuffle=<seed> reproduces the order.
+        run: go test ./... -race -count=1 -shuffle=on
+
+      - name: golangci-lint
+        # v7 or later: v6 refuses golangci-lint v2 outright ("golangci-lint v2 is
+        # not supported by golangci-lint-action v6"). The linter version is
+        # pinned to the same v2.12.2 the GitLab pipeline and `make lint` use, so
+        # all three run the identical checks.
+        uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7.0.1
+        with:
+          version: v2.12.2
+          # NO `run` HERE. The action supplies it, so `args: run ./...` becomes
+          # `golangci-lint run run ./...` and the second `run` is read as a path:
+          # "typechecking error: stat .../run: directory not found", exit 7. The
+          # effective command is `golangci-lint run ./...`, identical to
+          # `make lint` and to the GitLab pipeline.
+          args: ./...
+
+  chart:
+    name: chart gate (golden + kubeconform)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          cache: false
+
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.19.0
+
+      - name: install kubeconform
+        env:
+          KUBECONFORM_VERSION: v0.6.7
+          # Pinned by digest, not just tag: the tarball is fetched over the
+          # network on a runner we do not control.
+          #
+          # THIS VALUE WAS WRONG UNTIL 2026-09-10, AND NOTHING NOTICED, because
+          # the step only echoed the sha it downloaded for a human to compare
+          # and never asserted anything. The old pin
+          # (95cb62ee5d2ee39d95d0d4c0f2d0e9d9b3aa2a99e1de1e1d1a3b03aa4b3d0b45)
+          # matched no artefact that has ever existed -- it shared two
+          # characters with the real digest and was otherwise invented. A pin
+          # nobody asserts against is not a weak control, it is a decoration,
+          # and it will happily be a fabrication for months.
+          #
+          # The value below is the one upstream publishes for
+          # kubeconform-linux-amd64.tar.gz in the v0.6.7 CHECKSUMS asset, and
+          # it equals the sha256sum of a real download of that URL. Both were
+          # checked. `sha256sum -c -` below ENFORCES it -- the step fails on a
+          # mismatch -- exactly as secrets.yml does for the gitleaks tarball.
+          KUBECONFORM_SHA256: 95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
+        run: |
+          set -euo pipefail
+          url="https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          curl -fsSL "$url" -o kubeconform.tar.gz
+          # Assert, do not narrate. A mismatch fails the job here, before an
+          # unverified binary is installed and asked to validate the chart.
+          echo "${KUBECONFORM_SHA256}  kubeconform.tar.gz" | sha256sum -c -
+          tar xzf kubeconform.tar.gz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+
+      # Re-renders all eight ci/ profiles, diffs them against the golden
+      # manifests, helm-lints, and kubeconform -strict validates -- CRDs against
+      # chart/gonk/tests/crd-schemas, NOT -ignore-missing-schemas.
+      - name: chart gate
+        run: go test -tags chart ./internal/charttest/... -count=1
+
+  component:
+    name: component (real meter binary + real LiteLLM + real Postgres)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          cache: false
+
+      # test/component's TestMain manages its own Postgres and LiteLLM
+      # containers directly (test/harness: StartPostgres, StartLiteLLM) --
+      # it does not read a DSN or URL from the environment, so there is
+      # nothing for a `services:` block to plug into. All it needs is a
+      # working container runtime on PATH; GitHub's ubuntu-24.04 runner
+      # image ships Docker preinstalled and running. Fail here, clearly,
+      # rather than let a missing daemon surface as an opaque harness
+      # timeout three steps later.
+      - name: docker is available
+        run: docker version
+
+      # `-tags component` is the L2 suite (test/component/main_test.go):
+      # the real cmd/gonk-meter binary against a real LiteLLM
+      # (ghcr.io/berriai/litellm-database, pinned in main_test.go) and a real
+      # Postgres ledger, both booted by the test itself. This is the hard
+      # door, the meter-SIGKILL race and the rest of R-40's "proven only by
+      # hand" gap.
+      #
+      # internal/meter/litellm's OWN `component`-tagged suite
+      # (live_component_test.go) is deliberately NOT run here: unlike
+      # test/component it does not start its own LiteLLM, it reads
+      # GONK_LITELLM_URL / GONK_LITELLM_MASTER_KEY and (per
+      # test/harness.RequireInfra's CI=true contract) FATALs, not skips, if
+      # they are unset -- so wiring it in would mean standing up a second,
+      # independently-configured live LiteLLM (with its own "glm" model
+      # pointed at a reachable upstream) purely for this job, which is
+      # materially more than a CI-wiring change and isn't needed for either
+      # of T-15's exit criteria (neither names a test from that package).
+      # Tracked as follow-up work; go test -tags component still covers it
+      # everywhere else `-race` already does.
+      - name: go test -tags component (test/component)
+        run: hack/require_nonzero_go_tests.sh -tags component ./test/component/... -race -count=1
+
+  integration:
+    name: integration (Postgres ledger and work stores)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: gonk
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # internal/meter/store/postgres_test.go reads this (falling back to
+      # the same DSN if unset); set it explicitly so the job does not
+      # depend on that default staying in sync with the service above.
+      GONK_POSTGRES_DSN: postgres://postgres:gonk@127.0.0.1:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          cache: false
+
+      # `-tags integration` runs the SAME conformance suite Memory satisfies
+      # against a REAL Postgres (RECONCILIATION-06 D2: Postgres is the only
+      # accepted ledger backend), plus the reservation-race suite --
+      # TestReserveIfFitsRace and TestReserveIsIdempotentAcrossReplicas.
+      #
+      # ./pkg/beadstore/... is gonk-gate's work store in the same database
+      # (gonk-t41): the beadstore conformance suite including
+      # PutIfSuccessIsFinal, many concurrent writers, the state/record CHECK,
+      # and the killed-client tests, which SIGKILL a real writer process
+      # (the test binary re-executed) mid-write.
+      - name: go test -tags integration (postgres stores)
+        run: hack/require_nonzero_go_tests.sh -tags integration ./internal/meter/store/... ./pkg/beadstore/... -race -count=1
+
+  images:
+    name: images (build fresh + container smoke tests)
+    runs-on: ubuntu-24.04
+    env:
+      # Pin the build step and the test step to the SAME container-runtime
+      # store. GitHub's ubuntu-24.04 runner ships BOTH podman and a genuine
+      # Docker daemon. The build step below writes images into Docker's
+      # store (`make images PODMAN=docker`); without this override,
+      # test/images' containerBin() helper (test/images/agent_smoke_test.go)
+      # calls harness.DetectRuntime(), which scans PATH podman-first and
+      # picks up whichever runtime happens to be found there -- podman on
+      # this runner. `podman image inspect` cannot see anything in Docker's
+      # store, so every image-presence check failed and RequireInfra FATALed
+      # all 24 image-dependent tests (run 34446124973, commit 949a0792) even
+      # though the build step built every image with exactly the right tag.
+      # Setting GONK_CONTAINER_RUNTIME=docker here makes DetectRuntime probe
+      # Docker specifically -- the same store the build step wrote to -- and
+      # fail loudly (not silently fall back to podman) if that ever stops
+      # being true.
+      GONK_CONTAINER_RUNTIME: docker
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          cache: false
+
+      # GitHub's ubuntu-24.04 runner ships a genuine Docker daemon -- unlike
+      # this repo's dev box, whose `docker` is a podman shim under WSL with a
+      # broken CNI bridge (docs/environment.md). This step just fails fast
+      # and legibly if it is somehow not running, matching the `component`
+      # job's own preflight above.
+      - name: docker is available
+        run: docker version
+
+      # `make images` (no `push` target) builds every image test/images
+      # exercises: agent, controller (kept until T-56 deletes the Gas City
+      # surface -- see docs/reviews/2026-09-08-delivery-plan.md's T-56),
+      # intake, meter, and the meter's e2e-only testclock variant. The
+      # testclock image is NOT optional here even though T-16's own task
+      # text names only agent/intake/meter(/controller): if it is absent,
+      # test/images/servers_smoke_test.go's TestTestclockMeterImageHasTheSeam
+      # calls harness.RequireInfra with the image missing, which FATALs
+      # (not skips) under CI=true -- GitHub Actions sets CI=true for every
+      # job by default, so skipping this image here would just trade "CI
+      # never ran this test" for "CI's images job is always red", not fix
+      # the gap.
+      #
+      # PODMAN=docker overrides the Makefile's own `PODMAN := podman`
+      # default -- GNU make's command-line variable assignments win over a
+      # plain `:=` in the Makefile itself, so this is the SAME recipe a
+      # developer runs locally (`make images`), pointed at the real daemon
+      # this runner has instead of the dev box's podman.
+      - name: build images (agent, controller, intake, meter, meter-testclock; no push)
+        run: make images PODMAN=docker TARGETARCH=amd64
+
+      # `-tags images`: the container-level assertions that have never run
+      # in CI before this job (gonk-ak0) -- the opencode provider allowlist
+      # (TestAgentImageOpencodeResolvesOnlyTheGonkProvider), non-root
+      # (TestAgentImageRunsAsNonRoot / TestControllerImageRunsAsNonRoot /
+      # TestIntakeImageRunsAsNonRoot / TestMeterImageRunsAsNonRoot), the
+      # version pins baked into each image, the real Gas City pack loader
+      # (test/images/packvalidate_test.go, `gc lint`/`gc order list` against
+      # the actual baked pack), the attribution overlay (OD-7), and the
+      # meter testclock guard. Uses the SAME zero-test-count guard T-15
+      # added for `component`/`integration` (hack/require_nonzero_go_tests.sh)
+      # -- a `-run` typo or an empty package here would otherwise print "ok"
+      # and exit 0 having tested nothing, which is exactly the silent-skip
+      # failure this job exists to close.
+      - name: go test -tags images (test/images)
+        run: hack/require_nonzero_go_tests.sh -tags images ./test/images/... -race -count=1
+
+  build:
+    name: build every binary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          cache: false
+      # `go test` compiles packages, not commands. A binary that no longer
+      # builds would otherwise reach main with a green gate.
+      - name: go build ./...
+        run: go build ./...

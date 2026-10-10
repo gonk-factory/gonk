@@ -1,0 +1,53 @@
+=== ADR-008 Jobs prototype: L1 synthetic scenario in a Kubernetes Job ===
+date: 2026-09-23T18:37:03-07:00
+context: k3d-gonk-t45
+namespace/gonk-spike unchanged
+job.batch "gonk-session-l1" deleted from gonk-spike namespace
+secret/gonk-session-l1-prompt created
+secret/gonk-session-l1-checkout created
+secret/gonk-session-l1-key created
+job.batch/gonk-session-l1 created
+--- waiting on Job status (not an event stream) ---
+Job terminal status: succeeded
+{"completionTime":"2026-09-24T01:37:20Z"
+"conditions":[{"lastProbeTime":"2026-09-24T01:37:20Z"
+"lastTransitionTime":"2026-09-24T01:37:20Z"
+"message":"Reached expected number of succeeded pods"
+"reason":"CompletionsReached"
+"status":"True"
+"type":"SuccessCriteriaMet"}
+{"lastProbeTime":"2026-09-24T01:37:20Z"
+"lastTransitionTime":"2026-09-24T01:37:20Z"
+"message":"Reached expected number of succeeded pods"
+"reason":"CompletionsReached"
+"status":"True"
+"type":"Complete"}]
+"ready":0
+"startTime":"2026-09-24T01:37:05Z"
+"succeeded":1
+"terminating":0
+"uncountedTerminatedPods":{}}
+--- pod: gonk-session-l1-587rp ---
+--- pod labels (ADR-008 section 9 / T-27) ---
+{"app":"gc-agent"
+"app.kubernetes.io/component":"agent-session"
+"app.kubernetes.io/name":"gonk"
+"batch.kubernetes.io/controller-uid":"7909858e-1b89-4bd0-a76b-2d68df3cbcfa"
+"batch.kubernetes.io/job-name":"gonk-session-l1"
+"controller-uid":"7909858e-1b89-4bd0-a76b-2d68df3cbcfa"
+"job-name":"gonk-session-l1"}
+--- full pod log ---
+gonk-l1-agent: starting
+gonk-l1-agent: prompt mounted, 140 bytes
+gonk-l1-agent: virtual key mounted, 42 bytes (value not logged)
+gonk-l1-agent: checkout extracted, 1 files
+PASS
+gonk-l1-agent: L1 exit=0
+GONK_BATCH_START
+{"scenario":"L1-synthetic","outcome":"complete","l1_exit_code":0,"prompt_sha256":"4b732d5284bbc5aa862b51fdb3aa788cced6615b53f055f51fc76f09159c212a"}
+GONK_BATCH_END
+gonk-l1-agent: done
+--- batch extracted from the log ---
+{"scenario":"L1-synthetic","outcome":"complete","l1_exit_code":0,"prompt_sha256":"4b732d5284bbc5aa862b51fdb3aa788cced6615b53f055f51fc76f09159c212a"}
+RESULT: PASS -- L1 synthetic scenario ran to completion in a Job;
+               completion read from Job status; batch read from pod logs.

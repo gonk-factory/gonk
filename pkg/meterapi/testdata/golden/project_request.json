@@ -1,0 +1,8 @@
+{
+  "project": "group/repo",
+  "project_id": 42,
+  "rig": "gitlab",
+  "default_branch": "main",
+  "config_commit_sha": "abc123",
+  "gonk_yml": "version: 1\n"
+}

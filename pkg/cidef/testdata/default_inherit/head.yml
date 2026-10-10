@@ -1,0 +1,44 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# default_inherit/head.yml: base.yml with `default:` and the top-level
+# `before_script` written into each job that inherits them. The global
+# variables stay (they are compared as a document-level key too).
+variables:
+  LANE: slow
+  COLOUR: teal
+
+takes-all:
+  image: registry.invalid/tools/base:1
+  tags:
+    - wide
+  before_script:
+    - echo global-before
+  script:
+    - echo all
+
+own-image:
+  image: registry.invalid/tools/own:5
+  tags:
+    - wide
+  before_script:
+    - echo global-before
+  script:
+    - echo own
+  variables:
+    LANE: fast
+
+takes-none:
+  inherit:
+    default: false
+    variables: false
+  script:
+    - echo none
+
+takes-some:
+  image: registry.invalid/tools/base:1
+  inherit:
+    default:
+      - image
+    variables:
+      - COLOUR
+  script:
+    - echo some

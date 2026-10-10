@@ -1,0 +1,125 @@
+# pack/orders/gonk-dispatch.toml
+#
+# *** THIS IS GATE 2. IT IS THE ONLY PATH IN GONK THAT CREATES A BROKER AGENT
+# SESSION. ***
+#
+# It asks gonk-meter /v1/policy/decide immediately before dispatching -- on
+# the first dispatch, on a re-sling after a gate failure, on an unpark after
+# a defer, on every single dispatch without exception.
+#
+# WHY THIS EXISTS AT ALL: spec 6.2.3 said "the dispatch FORMULA asks meter for
+# the rung". A FORMULA CANNOT DO THAT -- per formula-spec-v2 a formula is a
+# DAG of steps handed to AGENTS, and the only code it could run was
+# [steps.check]. There is no HTTP verb in a formula. If the rung decision
+# lived in a formula it would be made by an LLM, which violates spec 6.3's
+# "no LLM judges" at the exact point where money is spent. So it lives HERE,
+# in an exec order, with no model in it. (ADR-007 §3 later deleted the
+# formula layer entirely -- formulas, [steps.check], the whole thing -- but
+# this order's reasoning for being an exec order rather than a step in
+# something else was never about that; it is unchanged.)
+#
+# A ladder escalation is CONTROLLER-INITIATED and never passes gonk-intake. If
+# this order ever trusts the rung in its vars instead of re-deciding,
+# escalations spend UNMETERED. See
+# TestDispatchAlwaysDecidesEvenWhenVarsCarryARung in cmd/gonk-gate.
+[order]
+description = "THE BUDGET GATE. Ask gonk-meter for a rung, then create the trigger's broker agent session -- or park, or stop."
+exec = "scripts/gonk-dispatch.sh"     # XOR `formula`. NEVER BOTH.
+trigger = "webhook"                   # fired by gonk-intake and by gonk-sweep, via
+                                       # POST /v0/city/{city}/order/gonk-dispatch/run --
+                                       # the /run endpoint fires ONLY webhook-trigger
+                                       # orders (a manual trigger is rejected 422).
+# 300s, NOT 120s. Dispatch does not merely fire and forget: it creates the agent
+# session and then WAITS for the pod to be running before delivering the prompt,
+# because a prompt submitted into a start_pending session is parked on the nudge
+# queue and never arrives (gonk-u1p.7, proven live 2026-08-01). Measured on the reference cluster:
+# ~90s from create to a commandable session, and the submit's own confirmation
+# event lagged 10-51s depending on load. 120s killed the order mid-delivery.
+# gonk-gate BUDGETS ITSELF AGAINST THIS VALUE (cmd/gonk-gate/order_budget.go,
+# dispatchOrderTimeout, pinned here by TestDispatchOrderTimeoutMatchesThePack):
+# the delivery wait, the session close and the release write are all sliced
+# from it, measured from process start. Changing it means changing that budget.
+timeout = "300s"
+# NO `pool` -- exec orders may not have one (internal/orders/order.go's
+# Validate rejects exec+pool together).
+
+[order.params]
+# internal/orders/order.go's OrderParam has exactly one field: `required`
+# (bool). There is no `description` field on the real struct -- comments
+# below carry the human-readable explanation instead of an invented TOML key.
+
+# GitLab path_with_namespace.
+project = { required = true }
+# GitLab numeric project id.
+project_id = { required = true }
+# Gas City rig name.
+rig = { required = true }
+# GitLab issue IID. Absent for triggers that are not issue-scoped.
+issue_iid = { required = false }
+# IDEMPOTENCY KEY. The controller must dedupe on it: a duplicate bead is
+# duplicate spend.
+bead_anchor = { required = true }
+# The Gas City-internal bead id, used for the comment/MR marker and the bead
+# store record. Never sent to meter -- meter keys /decide on bead_anchor
+# above, not this value (see dispatchArgs.BeadID's comment in
+# cmd/gonk-gate/dispatch.go for why the two must stay separate).
+bead_id = { required = true }
+# Stable across triage and every follow-up on the same issue.
+session_key = { required = true }
+# issue-triage | scaffold | mention-reply | pipeline-diagnosis | pipeline-fix.
+trigger = { required = true }
+# The .gonk.yml that authorized this work.
+config_hash = { required = false }
+# For mention-reply: the thread to answer in.
+discussion_id = { required = false }
+# rung / model / reservation_id may arrive from gonk-intake's own /decide
+# (Gate 1). THEY ARE A HINT FOR LOGS. This order RE-DECIDES and uses meter's
+# live answer -- never trusted.
+rung = { required = false }
+model = { required = false }
+reservation_id = { required = false }
+# fire_by: RFC 3339. Set only by gonk-sweep's re-sling: the latest instant this
+# dispatch may START. A later start exits before doing anything, which is what
+# lets the sweep know when every dispatch a re-sling fired is dead (gonk-p8w8;
+# cmd/gonk-gate refuseLateFire and reslingWindowEnd).
+fire_by = { required = false }
+# pipeline-diagnosis only (gonk-tios D12; gonk-intake's OrderRequest, all
+# omitempty, so issue orders never carry them). pipeline_id: the GitLab
+# pipeline the event was about. pipeline_target: "mr:<iid>" or "ref:<name>".
+# pipeline_fingerprint / pipeline_last_success: the run identity bead_anchor
+# was built from (absent pipeline_last_success means 0: no green pipeline).
+pipeline_id = { required = false }
+pipeline_target = { required = false }
+pipeline_fingerprint = { required = false }
+pipeline_last_success = { required = false }
+# pipeline_fix_epoch (gonk-2usw 3.3): the iid of the merged gonk pipeline-fix
+# MR the run follows -- the ":f<iid>" suffix of bead_anchor. Absent means 0:
+# the run follows no merged fix and its anchor has no suffix.
+pipeline_fix_epoch = { required = false }
+
+#
+# pipeline-fix (gonk-2usw 3.2; fired by gonk-sweep only, never by gonk-intake)
+# reuses the five vars above with NO new var. bead_anchor is the FIX anchor
+# (the run anchor with ":pipefix:" for ":pipeline:"), session_key the fix
+# session key, pipeline_target / pipeline_fingerprint / pipeline_last_success /
+# pipeline_fix_epoch the DIAGNOSED RUN's identity (the fix anchor is rebuilt
+# from them and must match), and pipeline_id the pipeline the fix is written
+# against. None of them carries a decision: the scope envelope, the lift, the
+# cited files and the caps are on the fix record gonk-sweep wrote before it
+# fired the order, and gonk-dispatch refuses an order with no such record.
+# Schema: docs/reference/gonk-state-record.md, "Pipeline fix".
+
+# NO [order.env] HERE -- IT DOES NOT WORK, DO NOT ADD ONE BACK.
+#
+# Gas City STRIPS inherited env whose key contains a secret marker
+# (internal/execenv.IsSensitiveKey: PASSWORD/TOKEN/SECRET/API_KEY/...) before it
+# runs an exec order, so `GONK_METER_TOKEN_FILE` (contains "TOKEN") arrives EMPTY
+# no matter what the controller container sets. An [order.env] override reads like
+# the fix and is NOT one: `gc init` DROPS the whole [order.env] block when it
+# copies the pack from /opt/gonk/pack into /city -- verified live, the /city copy
+# of this file has no such block.
+#
+# The real fix is in the CHART: every secret gonk-gate needs is delivered as a
+# marker-free PATH env (GONK_METER_BEARER_FILE, GONK_LITELLM_KEY_FILE,
+# GONK_BOT_FILE) pointing at a mounted file, which survives the filter untouched.
+# See chart/gonk/templates/workload-gonk-controller.yaml.

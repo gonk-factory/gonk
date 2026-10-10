@@ -1,0 +1,18 @@
+{{- if .Values.dolt.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-dolt
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dolt
+spec:
+  # Headless: a StatefulSet's stable network identity (gonk-dolt-0.gonk-dolt).
+  clusterIP: None
+  ports:
+    - name: mysql
+      port: {{ .Values.dolt.port }}
+      targetPort: mysql
+  selector:
+    {{- include "gonk.selectorLabels" (dict "ctx" . "component" "dolt") | nindent 4 }}
+{{- end }}

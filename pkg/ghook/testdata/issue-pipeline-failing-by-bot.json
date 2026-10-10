@@ -1,0 +1,25 @@
+{
+  "object_kind": "issue",
+  "event_type": "issue",
+  "user": { "id": 7, "username": "gonk", "name": "gonk" },
+  "project": {
+    "id": 42,
+    "name": "repo",
+    "path_with_namespace": "group/repo",
+    "default_branch": "main",
+    "web_url": "https://gitlab.example.invalid/group/repo"
+  },
+  "object_attributes": {
+    "id": 1777,
+    "iid": 21,
+    "title": "gonk: pipeline failing on main",
+    "description": "<!-- gonk:pipeline-ref:main -->\nsynthetic status table",
+    "state": "opened",
+    "action": "open",
+    "updated_at": "2026-07-13 10:06:00 UTC"
+  },
+  "labels": [
+    { "id": 1, "title": "gonk::pipeline-failing" }
+  ],
+  "changes": {}
+}

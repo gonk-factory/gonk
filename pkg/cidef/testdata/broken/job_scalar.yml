@@ -1,0 +1,4 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# broken/job_scalar.yml: a top-level key that is neither a keyword nor a
+# mapping.
+assemble: just-a-string

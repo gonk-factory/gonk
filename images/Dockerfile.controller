@@ -1,0 +1,154 @@
+# gonk controller image: Gas City's `gc` (built from the MIT source at a pinned
+# SHA) + `bd` + gonk's pack + `gonk-gate`.
+#
+# gonk-gate ships HERE because the pack's exec orders (gonk-dispatch, gonk-sweep)
+# run on the orchestrator. THEY ARE THE BUDGET GATE, and they have no model call
+# in them.
+#
+# Derived from gascity's contrib/k8s/Dockerfile.controller (MIT). NOTHING here is
+# derived from gascity-packs, which carries no licence.
+#
+# Build: see `make controller-image` (Makefile). Every ARG below is read from
+# images/versions.env; there is no default and no `latest` anywhere.
+
+ARG GO_VERSION
+ARG DEBIAN_BASE
+
+# ---- build gc (MIT gascity, pinned SHA -- NEVER a floating branch/tag) ------
+FROM golang:${GO_VERSION} AS gc
+ARG GASCITY_REF
+RUN test -n "${GASCITY_REF}" || (echo "GASCITY_REF is unset -- refusing to build against a moving upstream" && exit 1)
+WORKDIR /src
+RUN git clone https://github.com/gastownhall/gascity . && git checkout "${GASCITY_REF}"
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/gc ./cmd/gc
+
+# ---- build gonk-gate (static; vendor/ is committed -- docs/environment.md: --
+# CI cannot reach proxy.golang.org, so this stage is fully offline, -mod=vendor,
+# no `go mod download` anywhere, same as images/Dockerfile.agent's gate stage) --
+FROM golang:${GO_VERSION} AS gate
+WORKDIR /src
+ARG GONK_TAG
+COPY go.mod go.sum ./
+COPY vendor/ vendor/
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY pkg/ pkg/
+RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags="-s -w -X main.version=${GONK_TAG}" \
+    -o /out/gonk-gate ./cmd/gonk-gate
+
+# ---- fetch bd (pinned; checksum-verified) -----------------------------------
+# A separate stage so `curl`/`tar` never ship in the runtime image, and so a
+# checksum mismatch fails the BUILD, not a running pod (mirrors
+# images/Dockerfile.agent's fetch stage).
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS fetch
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tar \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /fetch
+
+# Target architecture for the fetched binaries. podman/BuildKit auto-populate
+# TARGETARCH from the build host (verified locally); kaniko's behaviour here is
+# deliberately NOT relied upon -- CI passes it explicitly as
+# --build-arg TARGETARCH=$BUILD_ARCH. The guard below fails the build rather
+# than silently fetching amd64 binaries into an arm64 image, a mistake that
+# otherwise only surfaces as "exec format error" in a running pod (gonk-owi).
+ARG TARGETARCH
+RUN test -n "${TARGETARCH}" || (echo "TARGETARCH is unset -- refusing to guess the fetch architecture (gonk-owi)" && exit 1)
+
+ARG BD_VERSION
+RUN test -n "${BD_VERSION}" || (echo "BD_VERSION is unset" && exit 1)
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) BD_SHA=b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34 ;; \
+      arm64) BD_SHA=e64eb6f5f998c9eae3ef9ec786f5f1c907ab3ed04fe220ebf265ca9952e21b2f ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o bd.tar.gz \
+      "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_${TARGETARCH}.tar.gz"; \
+    echo "${BD_SHA}  bd.tar.gz" | sha256sum -c -; \
+    tar xzf bd.tar.gz bd; \
+    chmod +x bd
+
+# dolt: the CLI the embedded exec:gc-beads-bd provider drives to inspect and
+# initialize the city's beads store (gonk-fsl). Fetched + checksum-verified here
+# (same pattern as bd) so curl/tar never reach the runtime image and a bad
+# download fails the BUILD. Version + sha256 come from gascity's own
+# deps.env / install-dolt-archive.sh at GASCITY_REF (re-verified by download).
+ARG DOLT_VERSION
+RUN test -n "${DOLT_VERSION}" || (echo "DOLT_VERSION is unset" && exit 1)
+# NOTE dolt's tarball has an ARCH-SPECIFIC top-level directory
+# (dolt-linux-arm64/bin/dolt vs dolt-linux-amd64/bin/dolt), so the extract path
+# is parameterized too -- not just the download URL.
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) DOLT_SHA=15983e811341ed94e5d47fbfc41d2f57d8c7aa65eee511d25a3c3fd5477e28e7 ;; \
+      arm64) DOLT_SHA=3edb3e5d05889f654dca548a8b6eb367551d4418ee0be5a79d94ea1c0f40ae8d ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o dolt.tar.gz \
+      "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-${TARGETARCH}.tar.gz"; \
+    echo "${DOLT_SHA}  dolt.tar.gz" | sha256sum -c -; \
+    tar xzf dolt.tar.gz "dolt-linux-${TARGETARCH}/bin/dolt"; \
+    mv "dolt-linux-${TARGETARCH}/bin/dolt" dolt; \
+    chmod +x dolt
+
+# ---- runtime -----------------------------------------------------------------
+FROM ${DEBIAN_BASE}
+
+# The runtime deps `gc` and its embedded exec:gc-beads-bd provider shell out to.
+# gc materializes gc-beads-bd.sh into the city at init (.gc/system/packs/bd/...);
+# the SCRIPT ships inside the `gc` binary, but the BINARIES it calls do not, and
+# their absence is exactly why the Plan 04 controller could not boot a city
+# (gonk-fsl -- see chart/gonk/smoke/gc-controller-smoke.md). Each below is a hard
+# runtime dep, mirroring gascity's own contrib/k8s/Dockerfile.base apt list at
+# GASCITY_REF:
+#   git            - the beads store and `gc`'s worktree machinery shell out to it.
+#   ca-certificates- the public roots, for TLS to GitLab, the Dolt server and
+#                    gonk-meter (a private CA is added at run time, see below;
+#                    never skip-verify).
+#   jq             - gc-beads-bd parses dolt/JSON output with it (8x in the script).
+#   lsof           - gc-beads-bd's TCP-LISTEN / port discovery (upstream: "runtime
+#                    hard dep (gc doctor), not optional diagnostics").
+#   procps         - pgrep, for gc's supervisor process discovery.
+#   tmux           - gc's supervisor runs the managed Dolt server / sessions under it.
+#   util-linux     - flock(1) for the bd/Dolt beads lock (gc-beads-bd uses it 16x;
+#                    upstream: "runtime hard dep, not optional diagnostics").
+#   tini           - PID-1 reaper (ENTRYPOINT below); `gc` does not harvest SIGCHLD.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates jq lsof procps tmux util-linux tini \
+    && rm -rf /var/lib/apt/lists/*
+# Fail the build now if tini is not where the ENTRYPOINT below execs it, rather
+# than shipping an image that only crashes at container start (mirrors upstream).
+RUN test -x /usr/bin/tini
+
+COPY --from=gc    /out/gc        /usr/local/bin/gc
+COPY --from=gate  /out/gonk-gate /usr/local/bin/gonk-gate
+COPY --from=fetch /fetch/bd      /usr/local/bin/bd
+COPY --from=fetch /fetch/dolt    /usr/local/bin/dolt
+COPY pack/ /opt/gonk/pack/
+
+# NO TRUST SETTING IS BAKED IN. This image trusts the public roots of its base
+# (the ca-certificates package above) and nothing else: no CA file, and no ENV
+# that points trust at a private path -- a variable naming a private bundle
+# here would put a site's PKI layout into every user's image. A private CA
+# is added at RUN TIME by the chart (gitlab.caCert: the bundle is mounted and
+# SSL_CERT_DIR lists the system directory AND the mounted one, so public roots
+# stay trusted), or by extending this image. Both routes: chart/gonk/README.md,
+# "Trusting a private CA". Pinned by internal/buildgate/image_trust_test.go.
+
+# No /etc/passwd entry for 65532 (this base image is plain debian, not
+# distroless) -- HOME must be explicit or `gc`/git fall back to "/" and fail to
+# write state as a non-root uid with no home directory.
+RUN mkdir -p /city /home/gonk && chown -R 65532:65532 /city /home/gonk /opt/gonk
+ENV HOME=/home/gonk
+USER 65532:65532
+
+# tini as PID 1. `gc` does not reap SIGCHLD, so the bd/dolt/git children that
+# reparent to it (the managed Dolt server, git subprocesses, tmux panes) would
+# pile up as <defunct> zombies. tini reaps orphans and forwards signals to its
+# child. We set only the ENTRYPOINT and NO CMD: the chart supplies the command
+# (`command: ["/bin/sh","-c","exec gc supervisor run"]`), which becomes tini's
+# direct child (`tini -- /bin/sh -c 'exec gc supervisor run'`), and the smoke
+# tests / `make pack-validate` override argv the same way (`tini -- gc lint ...`).
+# This mirrors gascity's own contrib/k8s/Dockerfile.controller, which likewise
+# runs `ENTRYPOINT ["/usr/bin/tini","--"]` and leaves the command to the caller.
+ENTRYPOINT ["/usr/bin/tini", "--"]

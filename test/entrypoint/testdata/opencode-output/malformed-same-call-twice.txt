@@ -1,0 +1,11 @@
+[0m
+> build · component-stub-model
+[0m
+[0m✗ [0mInvalid Tool
+The arguments provided to the tool are invalid: Invalid input for tool glob: JSON parsing failed: Text: {"pattern": "README*"}}.
+Error message: JSON Parse error: Unable to parse JSON string
+[0m
+[0m✗ [0mInvalid Tool
+The arguments provided to the tool are invalid: Invalid input for tool glob: JSON parsing failed: Text: {"pattern": "README*"}}.
+Error message: JSON Parse error: Unable to parse JSON string
+[0m

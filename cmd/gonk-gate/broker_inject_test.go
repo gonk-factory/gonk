@@ -1,0 +1,407 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+	"testing"
+
+	"github.com/gonk-factory/gonk/pkg/beadstore"
+	"github.com/gonk-factory/gonk/pkg/glab"
+	"github.com/gonk-factory/gonk/pkg/intake"
+	"github.com/gonk-factory/gonk/pkg/meterapi"
+)
+
+// stubForge is a minimal issueReader: it returns a canned issue (or error) so
+// the broker's context-fetch can be exercised without a live GitLab.
+type stubForge struct {
+	iss *glab.Issue
+	err error
+	// proj/files/repoErr back the repoReader half (scaffold's controller-side
+	// repository read). Zero values mean "no repository readable", which is the
+	// case buildRepoContext must report as an error rather than as thin-but-ok
+	// material -- see TestScaffoldPromptRefusesWithoutRepoContext.
+	proj    *glab.Project
+	files   map[string]string
+	repoErr error
+	// resolve backs ResolveRef: nil means "main resolves to testHeadSHA".
+	resolve func(ref string) (string, error)
+}
+
+// testHeadSHA is the commit stubForge's branch head resolves to by default.
+const testHeadSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func (s stubForge) ResolveRef(_ context.Context, _ int64, ref string) (string, error) {
+	if s.resolve != nil {
+		return s.resolve(ref)
+	}
+	return testHeadSHA, nil
+}
+
+func (s stubForge) GetIssue(_ context.Context, _, _ int64) (*glab.Issue, error) {
+	return s.iss, s.err
+}
+
+func (s stubForge) GetProject(_ context.Context, _ int64) (*glab.Project, error) {
+	if s.repoErr != nil {
+		return nil, s.repoErr
+	}
+	if s.proj == nil {
+		return &glab.Project{PathWithNamespace: "acme/widget", DefaultBranch: "main"}, nil
+	}
+	return s.proj, nil
+}
+
+func (s stubForge) GetRawFile(_ context.Context, _ int64, path, _ string, _ int64) ([]byte, error) {
+	if body, ok := s.files[path]; ok {
+		return []byte(body), nil
+	}
+	return nil, fmt.Errorf("404 %s", path)
+}
+
+// With a forge configured, the broker fetches the issue controller-side and
+// splices its title/labels/body into the prompt -- the agent pod cannot fetch
+// it (no creds), so the context MUST come pre-fetched in the prompt.
+func TestDispatchInjectsIssueContext(t *testing.T) {
+	rt := newTestRuntime()
+	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		Decision: meterapi.DecisionRun,
+		// Without a KeyRef there is no project key to put on the prompt row.
+		KeyRef: meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"}, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
+	}}
+	forge := stubForge{iss: &glab.Issue{
+		IID: 3, Title: "Login button does nothing on Safari", State: "opened",
+		Labels:      []string{"needs-triage"},
+		Description: "Steps: click login in Safari 17. Nothing happens. Works in Chrome.",
+	}}
+
+	code := runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row now, and injection
+		// fails closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
+		Meter: meterClient(fm.server(t)), Runtime: rt, Store: beadstore.NewMemory(),
+		Forge: forge, Args: baseDispatchArgs(),
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	starts := rt.Starts()
+	if len(starts) != 1 {
+		t.Fatalf("starts = %+v, want one", starts)
+	}
+	// The prompt is MOUNTED into the session (gonk-t55 plan D3), not stored
+	// for the pod to fetch and not typed at it.
+	msg := string(starts[0].Prompt)
+	for _, want := range []string{
+		"fetched for you",
+		"Login button does nothing on Safari", // title
+		"needs-triage",                        // current label
+		"Nothing happens. Works in Chrome.",   // body
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, msg)
+		}
+	}
+}
+
+// A forge fetch failure must NOT fail the dispatch: the session is still
+// started (a re-sling can retry context), with the degraded reference-only
+// prompt marker.
+func TestDispatchProceedsWhenContextFetchFails(t *testing.T) {
+	rt := newTestRuntime()
+	fm := &fakeMeter{resp: meterapi.DecideResponse{
+		Decision: meterapi.DecisionRun,
+		// Without a KeyRef there is no project key to put on the prompt row.
+		KeyRef: meterapi.KeyRef{SecretName: "gonk-key-abc", SecretKey: "LITELLM_API_KEY"}, Rung: "cheap", Model: "m", Attempt: 1, ReservationID: "rsv-1",
+	}}
+	forge := stubForge{err: context.DeadlineExceeded}
+
+	code := runDispatch(context.Background(), dispatchDeps{
+		// The session's project key rides the prompt row now, and injection
+		// fails closed without it (gonk-8gb).
+		Keys:  readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")),
+		Meter: meterClient(fm.server(t)), Runtime: rt, Store: beadstore.NewMemory(),
+		Forge: forge, Args: baseDispatchArgs(),
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (a context-fetch failure must not fail the run)", code)
+	}
+	starts := rt.Starts()
+	if len(starts) != 1 {
+		t.Fatalf("starts = %+v, want one even on a context miss", starts)
+	}
+	if got := string(starts[0].Prompt); !strings.Contains(got, "issue context unavailable") {
+		t.Fatalf("prompt should carry the degraded marker:\n%s", got)
+	}
+}
+
+func TestCapBody(t *testing.T) {
+	// Under cap: unchanged.
+	if got := capBody("short", 100); got != "short" {
+		t.Fatalf("under-cap body changed: %q", got)
+	}
+	// Over cap: truncated to <= max bytes of original + a visible marker.
+	big := strings.Repeat("a", 50)
+	got := capBody(big, 10)
+	if !strings.Contains(got, "truncated by gonk") {
+		t.Fatalf("over-cap body lacks truncation marker: %q", got)
+	}
+	if !strings.HasPrefix(got, strings.Repeat("a", 10)) {
+		t.Fatalf("kept the wrong prefix: %q", got)
+	}
+	// Multibyte safety: cutting mid-rune must not leave an invalid trailing byte.
+	multi := strings.Repeat("é", 20) // 2 bytes each
+	if got := capBody(multi, 5); strings.ContainsRune(got, '\uFFFD') {
+		t.Fatalf("truncation split a rune: %q", got)
+	}
+}
+
+// THE POINT OF gonk-msz. The old scaffold prompt asserted the repository "is
+// checked out in your working directory" and encouraged reading it, while the
+// pod's /workspace is empty and nothing ever clones into it. Combined with that
+// prompt's "an honest gap is a SUCCESS", the model would find nothing, invent
+// plausible context, and gonk-sweep would commit it and open an MR -- durable
+// wrong .agent/ content that every later session reads as ground truth.
+//
+// So with no material the prompt must REFUSE, and it must not hand the model a
+// batch template to fill in.
+func TestScaffoldPromptRefusesWithoutRepoContext(t *testing.T) {
+	got := renderScaffoldPrompt("acme/widget", "")
+
+	if strings.Contains(got, batchStartSentinel) {
+		t.Errorf("refusal prompt must NOT include the %s template; with nothing to\n"+
+			"describe, offering the fence is an invitation to invent one:\n%s",
+			batchStartSentinel, got)
+	}
+	if !strings.Contains(got, "Emit NO batch") {
+		t.Errorf("refusal prompt must tell the agent to emit no batch, got:\n%s", got)
+	}
+	for _, banned := range []string{"checked out in your working directory", "Reading the working directory"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("prompt still claims a checkout exists (%q); nothing clones one:\n%s", banned, got)
+		}
+	}
+}
+
+// With real material the prompt carries it verbatim, tells the agent it has no
+// checkout, and only THEN offers the batch fence.
+func TestScaffoldPromptCarriesRepoContext(t *testing.T) {
+	got := renderScaffoldPrompt("acme/widget", "Repository: acme/widget\n\n--- go.mod ---\nmodule acme/widget\n")
+
+	for _, want := range []string{
+		"module acme/widget",             // the material itself
+		"You do NOT have the repository", // the correction to the old lie
+		"Base EVERY claim on the material above",
+		batchStartSentinel,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("scaffold prompt missing %q, got:\n%s", want, got)
+		}
+	}
+}
+
+// buildRepoContext must treat "project metadata resolved but not one file could
+// be read" as a FAILURE. Returning the two header lines would look like success
+// to the caller and license a fabricated .agent/ -- the exact outcome this
+// change exists to prevent.
+func TestBuildRepoContextFailsWhenNoFilesReadable(t *testing.T) {
+	_, err := buildRepoContext(context.Background(), stubForge{}, 42)
+	if err == nil {
+		t.Fatal("expected an error when no probed file is readable; a repo we cannot read at all must not look like thin-but-valid material")
+	}
+}
+
+// The happy path: files that exist are spliced in, files that 404 are simply
+// absent (their absence is itself a fact about the project), and one unreadable
+// file does not fail the whole fetch.
+func TestBuildRepoContextSplicesFoundFilesOnly(t *testing.T) {
+	f := stubForge{files: map[string]string{
+		"README.md": "# Widget\nDoes widget things.",
+		"go.mod":    "module acme/widget",
+	}}
+	got, err := buildRepoContext(context.Background(), f, 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"acme/widget", "--- README.md ---", "Does widget things.", "--- go.mod ---"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("repo context missing %q, got:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "package.json") {
+		t.Errorf("repo context names a file that does not exist; absence must stay absent:\n%s", got)
+	}
+}
+
+// THE OWNER'S POINT: the checkout decision belongs at the decision point, and it
+// is per EVENT SHAPE. Most shapes need a working copy; some (an MR approval,
+// which acts on forge state and reads no files) do not, and granting one there
+// would be pure cost.
+func TestCheckoutIsDecidedPerEventShape(t *testing.T) {
+	if !needsCheckout["scaffold"] {
+		t.Error("scaffold MUST get a checkout: describing a repository it cannot read is exactly the failure this exists to stop")
+	}
+	if !needsCheckout["triage"] {
+		t.Error("triage needs a checkout too: .agent/ is what makes a judgement specific to THIS repo, and it is exactly what scaffold writes")
+	}
+	if needsCheckout["mr-approval"] {
+		t.Error("an unknown/no-read shape must default to NO checkout")
+	}
+}
+
+// grantCheckout must be silent and harmless for a shape that needs no checkout,
+// and must never fail a dispatch when the rig is simply not configured.
+func TestGrantCheckoutIsANoOpWhenNotNeededOrNotConfigured(t *testing.T) {
+	d := dispatchDeps{
+		// The session's project key rides the prompt row, and dispatch fails
+		// closed without it (gonk-8gb).
+		Keys: readerWith(secret("gonk-key-abc", "LITELLM_API_KEY", "sk-project-abc")), Log: testLogger(io.Discard), Args: baseDispatchArgs(), Forge: stubForge{}}
+
+	if url, _, err := grantCheckout(context.Background(), d, "triage", "alias-a"); url != "" || err != nil {
+		t.Errorf("triage: got (%q, %v), want no checkout and no error", url, err)
+	}
+	// scaffold NEEDS one, but with no rig configured this must still be a clean
+	// no-op that lets the caller fall back rather than failing the run.
+	if url, _, err := grantCheckout(context.Background(), d, "scaffold", "alias-a"); url != "" || err != nil {
+		t.Errorf("scaffold with no rig configured: got (%q, %v), want a clean no-op", url, err)
+	}
+}
+
+// The checkout prompt must tell the agent the repository IS present -- the exact
+// claim the no-checkout prompt is forbidden from making.
+func TestScaffoldCheckoutPromptSaysTheRepoIsPresent(t *testing.T) {
+	got := renderScaffoldCheckoutPrompt("acme/widget", "http://gonk-intake-internal.gonk.svc:9090/rig/a.tar.gz")
+	for _, want := range []string{
+		"checked out in your working directory",
+		"you hold no credentials",
+		batchStartSentinel,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("checkout prompt missing %q:\n%s", want, got)
+		}
+	}
+	// It must NOT tell the agent to go fetch anything itself.
+	if strings.Contains(got, "git clone") {
+		t.Errorf("the prompt tells the agent to clone; the entrypoint does that before opencode starts:\n%s", got)
+	}
+}
+
+// The triage prompt may mention a working copy ONLY when one was granted.
+// Claiming a checkout that is not there is the precise gonk-msz failure: the
+// model goes looking, finds an empty directory, and fills the gap itself.
+func TestTriagePromptMentionsTheRepoOnlyWhenGranted(t *testing.T) {
+	without := renderTriagePrompt("acme/widget", 3, "", "Title: x", "", "")
+	if strings.Contains(without, "checked out in your working directory") {
+		t.Errorf("triage claims a checkout with none granted:\n%s", without)
+	}
+	if !strings.Contains(without, "fetched for you") {
+		t.Error("the no-checkout prompt must still carry the injected issue")
+	}
+
+	with := renderTriagePrompt("acme/widget", 3, "", "Title: x", "http://intake:9090/rig/a.tar.gz", "")
+	for _, want := range []string{"checked out in your working directory", ".agent/", "hold no credentials"} {
+		if !strings.Contains(with, want) {
+			t.Errorf("granted-checkout triage prompt missing %q:\n%s", want, with)
+		}
+	}
+}
+
+// *** CRITERION 4 OF T-08. ***
+// The project's own `.agent/` context is spliced in AHEAD of the issue, and a
+// project with no `.agent/` gets the prompt it got before -- byte for byte.
+//
+// The suffix assertion is the load-bearing half. Checking only "the agent block
+// appears somewhere" would pass a rewrite that also reshuffled the issue block
+// for every project on earth; requiring the no-agent prompt to survive VERBATIM
+// as the tail of the with-agent prompt is what makes "optional" mean optional.
+func TestTriagePromptPutsAgentContextBeforeTheIssue(t *testing.T) {
+	const agentCtx = "--- .agent/overview.md ---\nWidget is a sandwich toaster."
+	const issueCtx = "Title: the toast is cold\n\nBody: it is cold"
+
+	without := renderTriagePrompt("acme/widget", 3, "", issueCtx, "", "")
+	if strings.Contains(without, ".agent/ directory. IT OVERRIDES") {
+		t.Errorf("a project with no .agent/ was told it has one:\n%s", without)
+	}
+	if !strings.Contains(without, issueCtx) {
+		t.Fatal("the no-context prompt must still carry the injected issue")
+	}
+
+	with := renderTriagePrompt("acme/widget", 3, agentCtx, issueCtx, "", "")
+	if !strings.HasSuffix(with, without) {
+		t.Fatalf("adding .agent/ context changed the rest of the prompt; the no-agent "+
+			"prompt must survive verbatim as the tail.\n--- with ---\n%s\n--- without ---\n%s",
+			with, without)
+	}
+	iAgent := strings.Index(with, "sandwich toaster")
+	iIssue := strings.Index(with, "the toast is cold")
+	if iAgent < 0 || iIssue < 0 {
+		t.Fatalf("prompt lost one of its two contexts:\n%s", with)
+	}
+	if iAgent > iIssue {
+		t.Errorf(".agent/ context (at %d) must precede the issue body (at %d)", iAgent, iIssue)
+	}
+	// The seed's own placeholder marker must be called out, or an unedited
+	// skeleton reads as a set of assertions about the project.
+	if !strings.Contains(with, "NOT FILLED IN") {
+		t.Error("the prompt must tell the agent how to read an unfilled seed section")
+	}
+}
+
+// buildAgentContext reads the seeded paths and reports ABSENCE AS EMPTY, not as
+// an error: `.agent/` is optional context (T-08), so a project without one must
+// not produce a warning-worthy failure.
+func TestBuildAgentContextReadsTheSeedAndToleratesAbsence(t *testing.T) {
+	ctx := context.Background()
+
+	empty, err := buildAgentContext(ctx, stubForge{}, 1)
+	if err != nil {
+		t.Fatalf("a project with no .agent/ must not be an error: %v", err)
+	}
+	if empty != "" {
+		t.Fatalf("want empty context for a project with no .agent/, got %q", empty)
+	}
+
+	got, err := buildAgentContext(ctx, stubForge{files: map[string]string{
+		".agent/README.md":      "readme body",
+		".agent/conventions.md": "conventions body",
+		"README.md":             "the repo readme, which is NOT .agent/ context",
+	}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{".agent/README.md", "readme body", ".agent/conventions.md", "conventions body"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("context missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "NOT .agent/ context") {
+		t.Errorf("the loader read a file outside .agent/:\n%s", got)
+	}
+	// Order follows agentContextFiles, not map iteration.
+	if strings.Index(got, "readme body") > strings.Index(got, "conventions body") {
+		t.Errorf("files are not spliced in agentContextFiles order:\n%s", got)
+	}
+
+	// A forge that cannot be reached at all IS an error -- that is the case an
+	// operator can act on, and it must not be confused with "no .agent/".
+	if _, err := buildAgentContext(ctx, stubForge{repoErr: fmt.Errorf("boom")}, 1); err == nil {
+		t.Error("an unreachable forge must be reported, not silently read as an absent .agent/")
+	}
+}
+
+// The prompt loader and the onboarding seed are two hand-written lists in two
+// packages. Seeding a file nothing reads is a silent waste; this fails when
+// that happens.
+func TestAgentContextFilesCoverTheOnboardingSeed(t *testing.T) {
+	read := make(map[string]bool, len(agentContextFiles))
+	for _, p := range agentContextFiles {
+		read[p] = true
+	}
+	for _, p := range intake.AgentSeedPaths {
+		if !read[p] {
+			t.Errorf("the onboarding merge request seeds %q but the triage prompt never reads it "+
+				"(add it to agentContextFiles)", p)
+		}
+	}
+}

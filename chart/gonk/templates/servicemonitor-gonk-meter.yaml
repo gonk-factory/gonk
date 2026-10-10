@@ -1,0 +1,24 @@
+{{- if and .Values.monitoring.serviceMonitor.enabled .Values.meter.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gonk-meter
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: meter
+    {{- with .Values.monitoring.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # meter has ONE listener; /healthz, /readyz and /metrics are unauthenticated on
+  # it, every other path requires the bearer token (Task 5). No internal/public
+  # split like intake, so there is only one Service to select.
+  selector:
+    matchLabels:
+      {{- include "gonk.selectorLabels" (dict "ctx" . "component" "meter") | nindent 6 }}
+  endpoints:
+    - port: http-api
+      path: /metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout }}
+{{- end }}

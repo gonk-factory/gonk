@@ -1,0 +1,6 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# unknown_key/head.yml: a key section 6.2 has no rule for changed.
+assemble:
+  script:
+    - ./tools/assemble.sh
+  mystery_knob: high

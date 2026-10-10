@@ -1,0 +1,4 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# broken/root_list.yml: the document is a list, not a mapping.
+- assemble
+- measure

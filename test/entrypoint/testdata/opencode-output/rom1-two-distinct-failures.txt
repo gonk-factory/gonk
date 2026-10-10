@@ -1,0 +1,14 @@
+[0m
+> build · qwen3-14b
+[0m
+[0m✱ [0mGlob "**/*.go"[90m 9 matches[0m
+[0m→ [0mRead internal/widget/handlers.go[90m [limit=2000][0m
+[0m→ [0mRead internal/widget/store.go[90m [limit=2000][0m
+[0m→ [0mRead internal/widget/memory.go[90m [limit=2000][0m
+[0m→ [0mRead internal/widget/widget_test.go[90m [limit=2000][0m
+[0m→ [0mRead internal/widget/handlers_test.go[90m [limit=2000][0m
+[0m→ [0mRead internal/widget/handlers.go[90m [limit=2000][0m
+[0m✗ [0mRead internal/widget/adapter.go failed[90m [limit=2000][0m
+[91m[1mError: [0mFile not found: /workspace/internal/widget/adapter.go
+[0m✗ [0mRead internal/widget/adapter_test.go failed[90m [limit=2000][0m
+[91m[1mError: [0mFile not found: /workspace/internal/widget/adapter_test.go

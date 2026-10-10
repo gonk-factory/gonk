@@ -1,0 +1,34 @@
+{{- if .Values.meter.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gonk-meter
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: meter
+rules:
+  # The KeySink (internal/meter/keysink/k8s.go): one Secret per project, holding
+  # that project's LiteLLM virtual key. NAMESPACED (this Role, not a
+  # ClusterRole), and no `get`/`list`/`watch` on Secrets -- meter creates,
+  # updates and deletes the keys IT provisions, and has no business reading
+  # anyone else's (its own credentials arrive as FILE MOUNTS, Task 3, never as
+  # an API read).
+  #
+  # The verbs below are EXACTLY the client-go calls k8s.go makes on Secrets:
+  # Create (new project), Update (rotation / idempotent re-Put -- the sink
+  # falls back to Update on an AlreadyExists from Create), and Delete
+  # (de-onboarding). No `patch`: the sink never calls Patch. This is asserted
+  # against the source, not just this comment
+  # (internal/charttest/secrets_test.go, TestKeySinkRoleVerbsMatchK8sSink) --
+  # a future keysink change that starts calling a new verb fails THAT test
+  # until this Role is updated to match, instead of failing silently as a 403
+  # on a real cluster.
+  #
+  # resourceNames cannot be used here: the names are derived from project paths
+  # that do not exist at install time (keysink.Slug). This is a
+  # namespace-scoped write grant on Secrets, and it is the reason gonk-meter's
+  # namespace (GONK_KEYSINK_NAMESPACE, Task 3) should hold nothing else.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, update, delete]
+{{- end }}

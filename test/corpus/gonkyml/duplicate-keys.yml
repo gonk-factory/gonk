@@ -1,0 +1,5 @@
+# enabled defined twice: which wins, and does anything crash? yaml.v3 rejects
+# a duplicate mapping key outright.
+version: 1
+enabled: true
+enabled: false

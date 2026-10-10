@@ -1,0 +1,4 @@
+# The uniqueItems amendment: a repeated rung must be rejected.
+version: 1
+enabled: true
+ladder: [glm, glm]

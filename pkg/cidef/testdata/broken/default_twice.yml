@@ -1,0 +1,10 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# broken/default_twice.yml: `image` both at the top level and in `default:`.
+image: registry.invalid/tools/a:1
+
+default:
+  image: registry.invalid/tools/b:2
+
+assemble:
+  script:
+    - ./tools/assemble.sh

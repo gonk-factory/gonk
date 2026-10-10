@@ -1,0 +1,147 @@
+{
+ "now": "2026-10-07T12:40:59.185428827-07:00",
+ "facts": {
+  "Fix": {
+   "Recorded": true,
+   "Targets": [
+    {
+     "Key": {
+      "Stage": "check",
+      "Name": "probe-status",
+      "FailureReason": "script_failure",
+      "ErrorSignature": "es1-5ac92e6b6d614ab5"
+     },
+     "Generic": false
+    }
+   ],
+   "BasePipelineID": 3336,
+   "BaseJobs": [
+    {
+     "Name": "probe-lint",
+     "Status": "success",
+     "AllowFailure": false
+    },
+    {
+     "Name": "probe-report",
+     "Status": "skipped",
+     "AllowFailure": false
+    },
+    {
+     "Name": "probe-status",
+     "Status": "failed",
+     "AllowFailure": false
+    }
+   ],
+   "FixBaseSHA": "c4312f86b4fd7bed495fb05e7f7216ba45084fa5",
+   "FixCommitSHA": "4c9fe84ed88fd565bc4787ec304141789015d5e2",
+   "MRIID": 55,
+   "ExcerptVersion": 2,
+   "SignatureVersion": 1,
+   "Lift": null,
+   "CIExecChanges": "deny",
+   "VerifyDeadline": "2026-10-07T13:40:59.185428827-07:00"
+  },
+  "MR": {
+   "Read": true,
+   "IID": 55,
+   "State": "opened",
+   "SHA": "4c9fe84ed88fd565bc4787ec304141789015d5e2"
+  },
+  "Pipelines": {
+   "Read": true,
+   "Pipelines": [
+    {
+     "ID": 3346,
+     "SHA": "4c9fe84ed88fd565bc4787ec304141789015d5e2",
+     "Source": "merge_request_event",
+     "Status": "failed",
+     "JobsRead": true,
+     "IncludeRetried": true,
+     "Jobs": [
+      {
+       "ID": 29212,
+       "Name": "probe-status",
+       "Stage": "check",
+       "Status": "created",
+       "FailureReason": "",
+       "AllowFailure": false,
+       "Trace": {
+        "Read": false,
+        "FirstError": ""
+       }
+      },
+      {
+       "ID": 29205,
+       "Name": "probe-report",
+       "Stage": "report",
+       "Status": "created",
+       "FailureReason": "",
+       "AllowFailure": false,
+       "Trace": {
+        "Read": false,
+        "FirstError": ""
+       }
+      },
+      {
+       "ID": 29204,
+       "Name": "probe-status",
+       "Stage": "check",
+       "Status": "failed",
+       "FailureReason": "script_failure",
+       "AllowFailure": false,
+       "Trace": {
+        "Read": true,
+        "FirstError": "status check failed: the unit word is misspelled (crats)"
+       }
+      },
+      {
+       "ID": 29203,
+       "Name": "probe-lint",
+       "Stage": "check",
+       "Status": "success",
+       "FailureReason": "",
+       "AllowFailure": false,
+       "Trace": {
+        "Read": false,
+        "FirstError": ""
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "Definition": {
+   "Read": true,
+   "Delta": {
+    "Kind": "violation",
+    "Jobs": [
+     {
+      "Job": "probe-status",
+      "Diagnosed": true,
+      "Changes": [
+       {
+        "Key": "retry",
+        "Class": "gating",
+        "BasePresent": false,
+        "HeadPresent": true
+       }
+      ]
+     }
+    ],
+    "Removed": null,
+    "Added": null,
+    "Renamed": null,
+    "Globals": null,
+    "Violations": [
+     {
+      "Rule": "D2",
+      "Job": "probe-status",
+      "Key": "retry",
+      "Detail": "a GATING key differs from the base"
+     }
+    ],
+    "Unresolvable": null
+   }
+  }
+ }
+}

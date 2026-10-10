@@ -1,0 +1,20 @@
+{{- if .Values.meter.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: gonk-meter
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: meter
+spec:
+  type: ClusterIP
+  # One port. /healthz, /readyz and /metrics are unauthenticated on it; every
+  # other path requires the bearer token. This service is NEVER ingressed --
+  # spec 9: the webhook is the only ingress.
+  ports:
+    - name: http-api
+      port: {{ .Values.meter.port }}
+      targetPort: http-api
+  selector:
+    {{- include "gonk.selectorLabels" (dict "ctx" . "component" "meter") | nindent 4 }}
+{{- end }}

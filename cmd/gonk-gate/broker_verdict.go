@@ -1,0 +1,188 @@
+package main
+
+import (
+	"context"
+
+	"github.com/gonk-factory/gonk/pkg/beadstore"
+	"github.com/gonk-factory/gonk/pkg/effects"
+)
+
+// Labels the broker applies to record what a verdict MEANT. They are written by
+// the controller, not proposed by the agent, so they are trustworthy in a way an
+// agent-proposed label is not: a human filtering on gonk::needs-maintainer is
+// reading gonk's own decision, not a model's suggestion.
+const (
+	labelNeedsMaintainer = "gonk::needs-maintainer"
+	labelFixQueued       = "gonk::fix-queued"
+)
+
+// verdictLabels is the audit trail for what gonk concluded, and the ONE place
+// that trail is defined (T-05, closes R-02). verdictLabel looks a verdict up
+// here rather than switching on it, and buildReservedLabels
+// (broker_label.go) ranges over this SAME map to build ReservedLabels -- so
+// the switch and the reserved set cannot drift apart the way a mirrored
+// switch statement could: adding a verdict means adding one entry here, and
+// both verdictLabel's output and ReservedLabels's coverage of it follow from
+// that one entry automatically. There is no second place to remember.
+var verdictLabels = map[effects.Verdict]string{
+	effects.VerdictCodeChange: "gonk::verdict-code-change",
+	effects.VerdictClose:      "gonk::verdict-close",
+	effects.VerdictReplyOnly:  "gonk::verdict-reply-only",
+	// gonk-2usw: the two verdicts of a pipeline-fix session. They are never
+	// written to an issue by applyVerdict -- a fix has no issue of its own --
+	// but by the fix apply (broker_pipefix_apply.go): `fix` is the label of
+	// the fix MERGE REQUEST, `needs-scope` the label put on the diagnosis
+	// landing when the fix needs a person (plan 8.1; 066 Q5: needs-scope is a
+	// success, labelled for a human).
+	effects.VerdictFix:        "gonk::pipeline-fix",
+	effects.VerdictNeedsScope: labelNeedsHuman,
+}
+
+// verdictLabel is the audit trail label for a verdict. An unrecognised
+// verdict (there should be none -- ParseBatch rejects an unknown one before
+// a batch ever reaches here) falls back to the reply-only label rather than
+// panicking or minting something unreserved.
+func verdictLabel(v effects.Verdict) string {
+	if label, ok := verdictLabels[v]; ok {
+		return label
+	}
+	return verdictLabels[effects.VerdictReplyOnly]
+}
+
+// applyVerdict performs the deterministic action a validated verdict names.
+//
+// THE SPLIT MATTERS: the model states a CONCLUSION and this function decides
+// what that conclusion is allowed to DO (ADR-007). No model closes an issue or
+// opens a merge request; it says "close" or "code-change" and the broker, which
+// holds the credentials and the policy, acts. That is why the verdict is
+// validated against a closed set before it ever reaches here.
+//
+// Called AFTER comments and labels are applied, so the reporter always has the
+// explanation in hand before the issue changes state underneath them.
+//
+// Errors are returned only for things worth retrying. A verdict action that
+// fails after the comment is already posted must not re-run the whole batch --
+// that would double-post -- so those are logged and swallowed, and the comment,
+// which is the part the human reads, stands.
+func applyVerdict(ctx context.Context, d sweepDeps, rec beadstore.Record, batch effects.Batch) {
+	v := batch.EffectiveVerdict()
+	if v == effects.VerdictFix || v == effects.VerdictNeedsScope {
+		// A pipeline-fix verdict is acted on by applyPipefixBatch alone: the
+		// commit, the merge request and its label for `fix`; the note and
+		// the landing's label for `needs-scope`. Nothing here may act on
+		// one -- there is no issue of the bead's to label or close, and
+		// effects.Validate refuses the vocabulary for every other agent, so
+		// reaching this line means a caller skipped a gate.
+		d.Log.Error("sweep: a pipeline-fix verdict reached the issue verdict path; doing nothing",
+			"bead", rec.BeadAnchor, "verdict", string(v))
+		return
+	}
+	// RECORD THE ROUTING DECISION WHERE HUMANS LOOK (gonk-kxg: "the
+	// classification must be recorded ... so the routing decision is auditable
+	// after the fact"). A label is the cheapest durable record that survives log
+	// rotation and is filterable in the GitLab UI, and it is written by the
+	// BROKER, so it states what gonk actually did rather than what a model
+	// suggested.
+	label(ctx, d, rec, verdictLabel(v))
+	switch v {
+	case effects.VerdictReplyOnly:
+		// The comment IS the action. Nothing further, and nothing to log beyond
+		// the batch-applied line the caller already writes.
+		return
+
+	case effects.VerdictClose:
+		if err := d.Apply.CloseIssue(ctx, rec.ProjectID, rec.IssueIID); err != nil {
+			// The reporter has the reasoning; the issue merely stayed open. Worth
+			// a warning, not worth re-running the batch and double-posting.
+			d.Log.Warn("sweep: verdict close, but the issue would not close (comment already posted)",
+				"bead", rec.BeadAnchor, "err", err)
+			return
+		}
+		d.Log.Info("sweep: verdict close applied", "bead", rec.BeadAnchor)
+
+	case effects.VerdictCodeChange:
+		applyCodeChangeVerdict(ctx, d, rec)
+
+	default:
+		// Unreachable: ParseBatch rejects unknown verdicts. Kept so that adding a
+		// verdict without teaching the broker what it means is loud rather than
+		// silent.
+		d.Log.Error("sweep: no action defined for verdict -- the batch was applied but its conclusion was ignored",
+			"bead", rec.BeadAnchor, "verdict", string(v))
+	}
+}
+
+// applyCodeChangeVerdict routes an identified defect according to the PROJECT'S
+// POLICY, not the model's preference.
+//
+// actions.features is the existing knob for "may gonk propose code here". When
+// it is off, the agent's finding must still reach a human: an identified fix
+// that nobody is told about is worse than no triage at all, because the project
+// now believes it was triaged. So the finding is labelled for a maintainer
+// queue rather than dropped.
+func applyCodeChangeVerdict(ctx context.Context, d sweepDeps, rec beadstore.Record) {
+	allowed, known := codeChangesAllowed(ctx, d, rec)
+	if !known {
+		// FAIL CLOSED. Not knowing the policy is not permission to act on the
+		// repository; route it to a human exactly as a "no" would.
+		d.Log.Warn("sweep: could not read actions.features; treating code-change as maintainer-only",
+			"bead", rec.BeadAnchor)
+		label(ctx, d, rec, labelNeedsMaintainer)
+		return
+	}
+	if !allowed {
+		d.Log.Info("sweep: verdict code-change, but actions.features is off -- routed to a maintainer",
+			"bead", rec.BeadAnchor)
+		label(ctx, d, rec, labelNeedsMaintainer)
+		return
+	}
+	// features=true: the project has opted in to gonk proposing code. The fix
+	// run is a SEPARATE metered dispatch -- it needs its own prompt, its own
+	// rung and its own budget decision, and doing it inline here would spend
+	// tokens the meter never authorised.
+	d.Log.Info("sweep: verdict code-change with actions.features on -- queued for a fix run",
+		"bead", rec.BeadAnchor)
+	label(ctx, d, rec, labelFixQueued)
+}
+
+// codeChangesAllowed asks the meter for the project's resolved policy. The
+// second return distinguishes "policy says no" from "we could not find out",
+// which must not be conflated: one is a decision, the other is ignorance, and
+// only the first is safe to treat as final.
+func codeChangesAllowed(ctx context.Context, d sweepDeps, rec beadstore.Record) (allowed, known bool) {
+	if d.Meter == nil || rec.Project == "" {
+		return false, false
+	}
+	resp, err := d.Meter.Project(ctx, rec.Project)
+	if err != nil || resp == nil || resp.Effective == nil {
+		return false, false
+	}
+	return resp.Effective.Actions.Features, true
+}
+
+// label applies one broker-authored label, logging rather than failing: by the
+// time verdict actions run the comment is already posted, and a missing label
+// is not worth re-running a batch over.
+func label(ctx context.Context, d sweepDeps, rec beadstore.Record, name string) {
+	if err := d.Apply.AddIssueLabel(ctx, rec.ProjectID, rec.IssueIID, name); err != nil {
+		d.Log.Warn("sweep: verdict label apply failed", "bead", rec.BeadAnchor, "label", name, "err", err)
+	}
+}
+
+// labelPrefix is the project's configured label namespace, or the shipped
+// default when the meter cannot tell us.
+//
+// Falling back to the default rather than to "" matters: an empty prefix
+// disables normalisation entirely, so a meter blip would silently let a run's
+// labels escape the namespace -- the exact defect being fixed.
+func labelPrefix(ctx context.Context, d sweepDeps, rec beadstore.Record) string {
+	const shippedDefault = "gonk::"
+	if d.Meter == nil || rec.Project == "" {
+		return shippedDefault
+	}
+	resp, err := d.Meter.Project(ctx, rec.Project)
+	if err != nil || resp == nil || resp.Effective == nil || resp.Effective.Triage.LabelPrefix == "" {
+		return shippedDefault
+	}
+	return resp.Effective.Triage.LabelPrefix
+}

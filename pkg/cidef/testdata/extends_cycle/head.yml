@@ -1,0 +1,13 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# extends_cycle: byte-identical sides. .a extends .b extends .a.
+.a:
+  extends: .b
+  script:
+    - echo a
+
+.b:
+  extends: .a
+  image: registry.invalid/tools/b:1
+
+assemble:
+  extends: .a

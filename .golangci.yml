@@ -1,0 +1,80 @@
+version: "2"
+run:
+  timeout: 15m
+  # Every custom //go:build tag under cmd/ pkg/ internal/ test/ (T-14,
+  # internal/buildgate's TestRepoBuildTagsFindsTheKnownSixMatchesTheTaskList
+  # pins the same six). Without this, golangci-lint only ever sees the
+  # DEFAULT (untagged) build -- every file behind one of these tags (the
+  # component/integration/images/live/chart/testclock suites) is invisible
+  # to it, tag or no tag in any CI job that runs it.
+  build-tags:
+    - component
+    - integration
+    - images
+    - live
+    - chart
+    - testclock
+linters:
+  enable:
+    - staticcheck
+    - govet
+    - errcheck
+    - ineffassign
+    - unused
+    - misspell
+    # forbidigo + nolintlint: time.Sleep in a _test.go file needs a
+    # `//nolint:forbidigo // <reason>` on its line (gonk-5pyx). See the
+    # forbidigo settings below for what this does and does NOT catch.
+    - forbidigo
+    - nolintlint
+  settings:
+    # time.Sleep in tests (docs/testing-time.md; flaky-gate review 2026-09-21,
+    # section D item 4). Sleeping and then counting what happened in the window
+    # is the pattern behind gonk-oxb8 (6/100 red under load), and a fixed
+    # sleep that must land inside someone else's budget is the one the
+    # dispatch idempotency test used to have. A sleep is allowed only with a
+    # nolint directive that says why it is safe -- a poll interval of a
+    # wait-until, a helper process idling until it is killed, a negative wait
+    # that load can only make pass vacuously, a server-side timer the test
+    # cannot inject. There is deliberately NO path exclusion for existing
+    # files: every existing use carries its own reason.
+    #
+    # THIS ONLY PARTLY HELPS. It catches sleep-then-count. It does NOT catch
+    # `time.Since(start) > someConstant` used as the assertion, nor a
+    # real-clock budget handed to the code under test -- gonk-fzxb, gonk-47l6,
+    # gonk-tj86, gonk-te7x/gonk-zk25 and gonk-4f0v are all that shape and none
+    # contains a time.Sleep. Those need a reviewer who has read
+    # docs/testing-time.md, and `make hunt` to measure them.
+    forbidigo:
+      forbid:
+        - pattern: '^time\.Sleep$'
+          msg: >-
+            time.Sleep in a test is how wall-clock flakes are written
+            (docs/testing-time.md): wait on a signal, inject a clock or ticker,
+            or poll with a deadline. If the sleep is genuinely safe, say why:
+            //nolint:forbidigo // <reason>
+      # Match on the resolved object, so an aliased import of "time" is caught.
+      analyze-types: true
+    # Every //nolint must name its linter and give a reason after `//`. That is
+    # what makes the forbidigo escape hatch above cost a sentence.
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    misspell:
+      # "noteable_type" is GitLab's actual webhook JSON field name (not a typo);
+      # pkg/ghook must decode it verbatim to parse real payloads.
+      ignore-rules:
+        - noteable
+  exclusions:
+    rules:
+      # The time.Sleep rule is about TESTS. Production code sleeps for real
+      # reasons (backoff, pacing) and is reviewed as production code.
+      - path-except: '_test\.go$'
+        linters:
+          - forbidigo
+# golangci-lint v2 moved formatters out of `linters`. Without this block the
+# lint gate is blind to gofmt drift, which is how unformatted code reached the
+# branch in the first place.
+formatters:
+  enable:
+    - gofmt

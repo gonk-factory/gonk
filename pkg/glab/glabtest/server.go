@@ -1,0 +1,1080 @@
+// Package glabtest is an in-memory GitLab REST API: enough of it to drive
+// gonk-intake's tests with no network, no containers, and no live GitLab.
+// Fidelity notes that matter:
+//   - the private token is required on every request (401 otherwise);
+//   - hook tokens are stored but never returned (GitLab does not return them);
+//   - files are per-branch, so an onboarding MR does not make main look onboarded;
+//   - CreateBranch on an existing branch is a 400, like the real API.
+package glabtest
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gonk-factory/gonk/internal/testnet"
+	"github.com/gonk-factory/gonk/pkg/glab"
+)
+
+// failure is one entry in the FailNext queue: the next `times` requests whose
+// method and path match are answered with `status` instead of being routed.
+// always makes the failure permanent (FailAlways), ignoring times.
+type failure struct {
+	method     string
+	pathPrefix string
+	status     int
+	times      int
+	always     bool
+}
+
+// Server is an in-memory GitLab. Zero value is not usable; construct with New.
+type Server struct {
+	Me glab.User
+
+	t   *testing.T
+	srv *httptest.Server
+	mu  sync.Mutex
+	// TraceIgnoresRange makes GET .../jobs/:id/trace answer 200 with the whole
+	// trace even when a Range header is sent, like a server that does not
+	// implement it. Default false: a suffix Range is honoured with a 206.
+	TraceIgnoresRange bool
+	// IgnoreMRListFilters makes GET .../merge_requests ignore `state`,
+	// `target_branch` and `author_id`, like a proxy or an older server that
+	// does not implement them. Default false: all are honoured. It exists so
+	// a caller's own re-check of what it was sent can be tested.
+	IgnoreMRListFilters bool
+	token               string
+	projects            map[int64]*Project
+	nextID              int64
+	fails               []failure // FailNext queue
+	requests            []string  // "METHOD /path" log, in request order
+	writes              []Write   // every non-GET request, in request order
+}
+
+// Write is one non-GET request the fake received: the WRITE LOG. It is
+// recorded for EVERY such request, before authentication, failure injection
+// and routing -- a write that was refused, or that matched no route, was
+// still attempted, and a test asserting "nothing was written" must see it.
+type Write struct {
+	Method string
+	// Path is the escaped request path; Query its raw query string ("" when
+	// none): CreateBranch carries its branch and ref there.
+	Path  string
+	Query string
+	// Body is the request body as sent.
+	Body string
+}
+
+// String renders a write on one line: "POST /path?query body".
+func (w Write) String() string {
+	out := w.Method + " " + w.Path
+	if w.Query != "" {
+		out += "?" + w.Query
+	}
+	if w.Body != "" {
+		out += " " + w.Body
+	}
+	return out
+}
+
+// Writes is the write log, in request order.
+func (s *Server) Writes() []Write {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Write(nil), s.writes...)
+}
+
+// Project is a fake GitLab project plus every sub-resource pkg/glab touches.
+type Project struct {
+	glab.Project
+	Files map[string]map[string][]byte // branch -> path -> content
+	// Modes overrides the git mode of a path on a ref (ref -> path -> mode):
+	// glab.ModeSymlink, glab.ModeSubmodule, glab.ModeExecutable. A path with
+	// no entry is a regular file (100644). Seed with SetFileMode.
+	Modes    map[string]map[string]string
+	Branches map[string]bool
+	Hooks    []glab.Hook
+	MRs      []glab.MergeRequest
+	Issues   []glab.Issue
+	Members  []glab.Member
+	// Notes is keyed by issue IID. gonk-gate's check/sweep read these to find
+	// the bot's marker comment; tests seed them with AddNote, and the
+	// create/edit routes (pipelines.go) serve gonk-tios's run notes.
+	Notes map[int64][]glab.Note
+	// MRNotes is keyed by MR IID (same shape as Notes, for merge requests).
+	MRNotes map[int64][]glab.Note
+
+	// Pipelines is every pipeline of the project in creation order; the list
+	// routes return them newest (highest id) first, like GitLab.
+	Pipelines []glab.Pipeline
+	// Jobs is keyed by pipeline id.
+	Jobs map[int64][]glab.Job
+	// Traces is keyed by job id.
+	Traces map[int64][]byte
+	// Commits is keyed by full SHA.
+	Commits map[string]glab.Commit
+	// BranchHeads maps a branch name to the full SHA GET
+	// .../repository/commits/:branch answers with (glab.Client.ResolveRef).
+	// Seed with SetBranchHead; a branch with no entry is a 404 there.
+	BranchHeads map[string]string
+	// CommitMRs maps a commit SHA to the IIDs of the MRs that contain it (GET
+	// .../commits/:sha/merge_requests).
+	CommitMRs map[string][]int64
+	// CILints is keyed by the content_ref SHA.
+	CILints map[string]glab.CILint
+	// CILintsDryRun, when it has the SHA, is what a lint with dry_run=true
+	// answers instead (SetCILintDryRun).
+	CILintsDryRun map[string]glab.CILint
+	// CILintQueries: the query of every ci/lint request, in order
+	// (Server.CILintQueries).
+	CILintQueries []url.Values
+	// MRPipelines maps an MR IID to the ids of its pipelines.
+	MRPipelines map[int64][]int64
+	// MRApprovals maps an MR IID to the users who approved it; MRDiffs maps an
+	// MR IID to its current diff. Seed with SetMRApprovals / SetMRDiffs.
+	MRApprovals map[int64][]glab.User
+	MRDiffs     map[int64][]glab.MRDiff
+
+	hookTokens map[int64]string
+	srv        *Server
+	ciLintFile string // SetCILintFromFile
+	// nextMRIID/nextIssueIID: MR and Issue "IID" (internal ID) is scoped to the
+	// PROJECT in real GitLab, unlike every other ID here (project, commit, hook),
+	// which is instance-global. Numbering these from the shared s.nextID would
+	// make the first MR/issue in a project land on whatever id the counter had
+	// reached -- not 1 -- which would not match real GitLab and would make
+	// glabtest a bad double for tests that assert on a specific IID.
+	nextMRIID    int64
+	nextIssueIID int64
+}
+
+// New starts an httptest.Server backing a fresh, empty fake GitLab.
+// t.Cleanup closes it. Its URL is always "http://127.0.0.1:<port>"
+// (internal/testnet.NewServer), whatever the kernel has to spare.
+func New(t *testing.T) *Server {
+	t.Helper()
+	s := &Server{
+		t:        t,
+		token:    "glabtest-token",
+		projects: map[int64]*Project{},
+		nextID:   1,
+	}
+	// testnet.NewServer, never httptest.NewServer: the fake's URL is what the
+	// code under test reads back as a project's web_url, and httptest moves to
+	// "http://[::1]:<port>" when it cannot bind an IPv4 port (gonk-ltep).
+	s.srv = testnet.NewServer(t, http.HandlerFunc(s.handle))
+	return s
+}
+
+// URL is the fake's base URL, suitable for glab.New.
+func (s *Server) URL() string { return s.srv.URL }
+
+// Client returns a real glab.Client pointed at the fake, with no retry
+// backoff (tests should not sleep) and the token the fake accepts.
+func (s *Server) Client() *glab.Client {
+	c := glab.New(s.URL(), s.token)
+	c.RetryBackoff = func(int) time.Duration { return 0 }
+	return c
+}
+
+// RemoveProject deletes a project from the fake, as if the bot had been
+// removed from it (or the project deleted). The next ListMemberProjects call
+// will no longer return it, which is exactly the de-onboarding signal the
+// reconciler watches for.
+func (s *Server) RemoveProject(id int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.projects, id)
+}
+
+// AddProject registers a project with default_branch "main" and a bot member
+// (s.Me) at access. access of 0 means no membership at all (used to test the
+// "bot invited but no access" path).
+func (s *Server) AddProject(path string, access int) *Project {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id := s.nextID
+	s.nextID++
+	p := &Project{
+		Project: glab.Project{
+			ID:                id,
+			PathWithNamespace: path,
+			DefaultBranch:     "main",
+			WebURL:            fmt.Sprintf("%s/%s", s.srv.URL, path),
+		},
+		Files:      map[string]map[string][]byte{"main": {}},
+		Branches:   map[string]bool{"main": true},
+		hookTokens: map[int64]string{},
+		srv:        s,
+	}
+	if access > 0 {
+		p.Permissions.ProjectAccess = &glab.Access{AccessLevel: access}
+		p.Members = append(p.Members, glab.Member{ID: s.Me.ID, Username: s.Me.Username, AccessLevel: access})
+	}
+	s.projects[id] = p
+	return p
+}
+
+// PutFile seeds a file on the project's default branch.
+func (p *Project) PutFile(path string, content []byte) {
+	p.PutFileOn(p.DefaultBranch, path, content)
+}
+
+// PutFileOn seeds a file on the given branch, creating the branch if absent.
+func (p *Project) PutFileOn(branch, path string, content []byte) {
+	p.srv.mu.Lock()
+	defer p.srv.mu.Unlock()
+	if p.Files[branch] == nil {
+		p.Files[branch] = map[string][]byte{}
+	}
+	p.Files[branch][path] = content
+	p.Branches[branch] = true
+}
+
+// SetFileMode gives a path on a ref a git mode other than a regular file's
+// (glab.ModeSymlink, glab.ModeSubmodule, glab.ModeExecutable). The path must
+// have been seeded with PutFileOn: a symlink's blob is its target as text.
+func (p *Project) SetFileMode(ref, path, mode string) {
+	p.srv.mu.Lock()
+	defer p.srv.mu.Unlock()
+	if p.Modes == nil {
+		p.Modes = map[string]map[string]string{}
+	}
+	if p.Modes[ref] == nil {
+		p.Modes[ref] = map[string]string{}
+	}
+	p.Modes[ref][path] = mode
+}
+
+// copyModes copies every mode override of ref `from` onto ref `to`. The
+// caller holds the server's lock.
+func (p *Project) copyModes(from, to string) {
+	if len(p.Modes[from]) == 0 || from == to {
+		return
+	}
+	if p.Modes[to] == nil {
+		p.Modes[to] = map[string]string{}
+	}
+	for path, mode := range p.Modes[from] {
+		p.Modes[to][path] = mode
+	}
+}
+
+// HookToken is test-only introspection: GitLab never returns a hook's token
+// over the API, so the only way to assert one was stored is to ask the fake
+// directly.
+func (s *Server) HookToken(projectID, hookID int64) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[projectID]
+	if !ok {
+		s.t.Fatalf("glabtest: HookToken: unknown project %d", projectID)
+		return ""
+	}
+	return p.hookTokens[hookID]
+}
+
+// FailNext queues `times` responses of `status` for the next requests whose
+// method and path (query string excluded) start with pathPrefix.
+func (s *Server) FailNext(method, pathPrefix string, status, times int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fails = append(s.fails, failure{method: method, pathPrefix: pathPrefix, status: status, times: times})
+}
+
+// FailAlways queues a permanent failure of `status` for every future request
+// whose method and path (query string excluded) start with pathPrefix. Unlike
+// FailNext it never expires -- for a project that is durably broken (e.g. a
+// GitLab-side permission error) across an entire test.
+func (s *Server) FailAlways(method, pathPrefix string, status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fails = append(s.fails, failure{method: method, pathPrefix: pathPrefix, status: status, always: true})
+}
+
+// ClearFailures drops every injected failure (FailNext and FailAlways): the
+// outage is over.
+func (s *Server) ClearFailures() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fails = nil
+}
+
+// AddMember appends a member to a project's member list (GET
+// /members/all), independent of the bot's own access set by AddProject.
+func (s *Server) AddMember(projectID int64, m glab.Member) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[projectID]
+	if !ok {
+		s.t.Fatalf("glabtest: AddMember: unknown project %d", projectID)
+		return
+	}
+	p.Members = append(p.Members, m)
+}
+
+// SetMRState moves a merge request to "merged" or "closed" at the given time,
+// for reconciler tests that need to observe an MR's terminal state.
+func (s *Server) SetMRState(projectID, iid int64, state string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[projectID]
+	if !ok {
+		s.t.Fatalf("glabtest: SetMRState: unknown project %d", projectID)
+		return
+	}
+	for i := range p.MRs {
+		if p.MRs[i].IID != iid {
+			continue
+		}
+		atCopy := at
+		p.MRs[i].State = state
+		p.MRs[i].UpdatedAt = &atCopy
+		switch state {
+		case "merged":
+			p.MRs[i].MergedAt = &atCopy
+		case "closed":
+			p.MRs[i].ClosedAt = &atCopy
+		}
+		return
+	}
+	s.t.Fatalf("glabtest: SetMRState: no MR iid=%d in project %d", iid, projectID)
+}
+
+// AddIssue seeds an issue at a caller-chosen IID (gonk-gate's tests need
+// specific IIDs to match a bead's IssueIID; state is normally "opened").
+func (s *Server) AddIssue(projectID, iid int64, state string, labels ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[projectID]
+	if !ok {
+		s.t.Fatalf("glabtest: AddIssue: unknown project %d", projectID)
+		return
+	}
+	p.Issues = append(p.Issues, glab.Issue{
+		IID: iid, State: state, Labels: labels,
+		WebURL: fmt.Sprintf("%s/-/issues/%d", p.WebURL, iid),
+	})
+}
+
+// SetIssueState moves an issue to "opened" or "closed" -- gonk-gate's
+// sweeper reads this for gate.Signals.Aborted (a human closed the bead).
+func (s *Server) SetIssueState(projectID, iid int64, state string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[projectID]
+	if !ok {
+		s.t.Fatalf("glabtest: SetIssueState: unknown project %d", projectID)
+		return
+	}
+	for i := range p.Issues {
+		if p.Issues[i].IID == iid {
+			p.Issues[i].State = state
+			return
+		}
+	}
+	s.t.Fatalf("glabtest: SetIssueState: no issue iid=%d in project %d", iid, projectID)
+}
+
+// SetArchived flips a project's archived flag, as GitLab reports it on the
+// next ListMemberProjects call -- the reconciler's only signal that a
+// project was archived (it stays a membership, unlike RemoveProject).
+func (s *Server) SetArchived(projectID int64, archived bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[projectID]
+	if !ok {
+		s.t.Fatalf("glabtest: SetArchived: unknown project %d", projectID)
+		return
+	}
+	p.Archived = archived
+}
+
+// AddNote appends a note to an issue. system marks a GitLab-generated audit
+// note (label changes, etc.) rather than authored text -- the gate must
+// never mistake one for the bot's marker comment.
+func (s *Server) AddNote(projectID, issueIID int64, author glab.User, body string, system bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[projectID]
+	if !ok {
+		s.t.Fatalf("glabtest: AddNote: unknown project %d", projectID)
+		return
+	}
+	if p.Notes == nil {
+		p.Notes = map[int64][]glab.Note{}
+	}
+	id := s.nextID
+	s.nextID++
+	p.Notes[issueIID] = append(p.Notes[issueIID], glab.Note{ID: id, Body: body, Author: author, System: system})
+}
+
+// Requests is the "METHOD /path" log in request order, for asserting
+// idempotency: several later tasks run reconcile twice and require zero
+// writes on the second pass.
+func (s *Server) Requests() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.requests))
+	copy(out, s.requests)
+	return out
+}
+
+// handle is the single entry point: (1) check PRIVATE-TOKEN, (2) consult the
+// FailNext queue, (3) match METHOD /api/v4/... by splitting the escaped
+// path, (4) write JSON. EscapedPath, not Path, so a %2F-encoded nested file
+// path (see GetRawFile) survives as one segment instead of being split by
+// its decoded literal slash.
+func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.EscapedPath()
+
+	s.mu.Lock()
+	s.requests = append(s.requests, r.Method+" "+path)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		s.writes = append(s.writes, Write{Method: r.Method, Path: path, Query: r.URL.RawQuery, Body: string(body)})
+	}
+	s.mu.Unlock()
+
+	if r.Header.Get("PRIVATE-TOKEN") != s.token {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"message": "401 Unauthorized"})
+		return
+	}
+	if status, ok := s.consumeFailure(r.Method, path); ok {
+		writeJSON(w, status, map[string]string{"message": "glabtest: injected failure"})
+		return
+	}
+
+	segs := strings.Split(strings.Trim(path, "/"), "/")
+	if len(segs) < 3 || segs[0] != "api" || segs[1] != "v4" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "glabtest: no route"})
+		return
+	}
+
+	switch {
+	case r.Method == http.MethodGet && len(segs) == 3 && segs[2] == "user":
+		writeJSON(w, http.StatusOK, s.currentUser())
+	case r.Method == http.MethodGet && len(segs) == 3 && segs[2] == "projects":
+		s.handleListProjects(w, r)
+	case r.Method == http.MethodGet && len(segs) == 4 && segs[2] == "projects":
+		s.handleGetProject(w, segs[3])
+	case r.Method == http.MethodGet && len(segs) == 8 && segs[2] == "projects" &&
+		segs[4] == "repository" && segs[5] == "files" && segs[7] == "raw":
+		s.handleGetRawFile(w, r, segs[3], segs[6])
+	case r.Method == http.MethodGet && len(segs) == 6 && segs[2] == "projects" &&
+		segs[4] == "repository" && segs[5] == "tree":
+		s.handleDirExists(w, r, segs[3])
+	case r.Method == http.MethodGet && len(segs) == 6 && segs[2] == "projects" &&
+		segs[4] == "members" && segs[5] == "all":
+		s.handleListMembers(w, r, segs[3])
+	case r.Method == http.MethodGet && len(segs) == 5 && segs[2] == "projects" && segs[4] == "hooks":
+		s.handleListHooks(w, r, segs[3])
+	case r.Method == http.MethodPost && len(segs) == 5 && segs[2] == "projects" && segs[4] == "hooks":
+		s.handleCreateHook(w, r, segs[3])
+	case r.Method == http.MethodPut && len(segs) == 6 && segs[2] == "projects" && segs[4] == "hooks":
+		s.handleEditHook(w, r, segs[3], segs[5])
+	case r.Method == http.MethodPost && len(segs) == 6 && segs[2] == "projects" &&
+		segs[4] == "repository" && segs[5] == "branches":
+		s.handleCreateBranch(w, r, segs[3])
+	case r.Method == http.MethodDelete && len(segs) == 7 && segs[2] == "projects" &&
+		segs[4] == "repository" && segs[5] == "branches":
+		s.handleDeleteBranch(w, segs[3], segs[6])
+	case r.Method == http.MethodPost && len(segs) == 6 && segs[2] == "projects" &&
+		segs[4] == "repository" && segs[5] == "commits":
+		s.handleCreateCommit(w, r, segs[3])
+	case r.Method == http.MethodGet && len(segs) == 5 && segs[2] == "projects" && segs[4] == "merge_requests":
+		s.handleListMRs(w, r, segs[3])
+	case r.Method == http.MethodPost && len(segs) == 5 && segs[2] == "projects" && segs[4] == "merge_requests":
+		s.handleCreateMR(w, r, segs[3])
+	case r.Method == http.MethodGet && len(segs) == 5 && segs[2] == "projects" && segs[4] == "issues":
+		s.handleListIssues(w, r, segs[3])
+	case r.Method == http.MethodPost && len(segs) == 5 && segs[2] == "projects" && segs[4] == "issues":
+		s.handleCreateIssue(w, r, segs[3])
+	case r.Method == http.MethodGet && len(segs) == 7 && segs[2] == "projects" && segs[4] == "issues" && segs[6] == "notes":
+		s.handleListIssueNotes(w, r, segs[3], segs[5])
+	case r.Method == http.MethodGet && len(segs) == 6 && segs[2] == "projects" && segs[4] == "issues":
+		s.handleGetIssue(w, r, segs[3], segs[5])
+	default:
+		if s.handlePipelineRoutes(w, r, segs) {
+			return
+		}
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "glabtest: no route"})
+	}
+}
+
+func (s *Server) currentUser() glab.User {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Me
+}
+
+func (s *Server) consumeFailure(method, path string) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.fails {
+		f := &s.fails[i]
+		if f.method != method || !strings.HasPrefix(path, f.pathPrefix) {
+			continue
+		}
+		if f.always {
+			return f.status, true
+		}
+		if f.times > 0 {
+			f.times--
+			return f.status, true
+		}
+	}
+	return 0, false
+}
+
+// project looks up a project by its string ID from the URL, locking for the
+// duration of the call. Callers that need to mutate the project take s.mu
+// themselves afterward.
+func (s *Server) project(idStr string) (*Project, bool) {
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[id]
+	return p, ok
+}
+
+func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	ids := make([]int64, 0, len(s.projects))
+	for id := range s.projects {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	ps := make([]glab.Project, 0, len(ids))
+	for _, id := range ids {
+		ps = append(ps, s.projects[id].Project)
+	}
+	s.mu.Unlock()
+	paginateWrite(w, r, ps)
+}
+
+// handleGetProject serves GET /projects/:id (glab.Client.GetProject).
+func (s *Server) handleGetProject(w http.ResponseWriter, idStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	s.mu.Lock()
+	out := p.Project
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleGetRawFile(w http.ResponseWriter, r *http.Request, idStr, encPath string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	filePath, err := url.PathUnescape(encPath)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "bad path encoding"})
+		return
+	}
+	ref := r.URL.Query().Get("ref")
+
+	s.mu.Lock()
+	content, ok := p.Files[ref][filePath]
+	s.mu.Unlock()
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 File Not Found"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(content)
+}
+
+// handleDirExists serves GET .../repository/tree: the entries DIRECTLY under
+// `path` ("" is the root) at `ref`, each with its type and git mode, as
+// glab.ListTree asserts on them. A directory with no entry is a 404, as is the
+// root of a ref the project has no files on.
+func (s *Server) handleDirExists(w http.ResponseWriter, r *http.Request, idStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	dirPath := r.URL.Query().Get("path")
+	ref := r.URL.Query().Get("ref")
+
+	s.mu.Lock()
+	files, known := p.Files[ref]
+	prefix := ""
+	if dirPath != "" {
+		prefix = dirPath + "/"
+	}
+	seen := map[string]bool{}
+	entries := []glab.TreeEntry{}
+	for name := range files {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(name, prefix)
+		first, _, nested := strings.Cut(rest, "/")
+		if first == "" || seen[first] {
+			continue
+		}
+		seen[first] = true
+		e := glab.TreeEntry{ID: fmt.Sprintf("%040x", len(entries)+1), Name: first, Path: prefix + first}
+		switch mode := p.Modes[ref][prefix+first]; {
+		case nested:
+			e.Type, e.Mode = "tree", glab.ModeTree
+		case mode == glab.ModeSubmodule:
+			e.Type, e.Mode = "commit", mode
+		case mode != "":
+			e.Type, e.Mode = "blob", mode
+		default:
+			e.Type, e.Mode = "blob", glab.ModeRegular
+		}
+		entries = append(entries, e)
+	}
+	s.mu.Unlock()
+	if len(entries) == 0 && (dirPath != "" || !known) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Tree Not Found"})
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	paginateWrite(w, r, entries)
+}
+
+func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request, idStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	s.mu.Lock()
+	members := append([]glab.Member{}, p.Members...)
+	s.mu.Unlock()
+	paginateWrite(w, r, members)
+}
+
+func (s *Server) handleListHooks(w http.ResponseWriter, r *http.Request, idStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	s.mu.Lock()
+	hooks := append([]glab.Hook{}, p.Hooks...)
+	s.mu.Unlock()
+	paginateWrite(w, r, hooks)
+}
+
+func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request, idStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	var opts glab.HookOptions
+	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "bad request body"})
+		return
+	}
+
+	s.mu.Lock()
+	id := s.nextID
+	s.nextID++
+	h := glab.Hook{
+		ID: id, URL: opts.URL, IssuesEvents: opts.IssuesEvents, NoteEvents: opts.NoteEvents,
+		MergeRequestsEvents: opts.MergeRequestsEvents, PushEvents: opts.PushEvents,
+		PipelineEvents: opts.PipelineEvents, EnableSSLVerification: opts.EnableSSLVerification,
+	}
+	p.Hooks = append(p.Hooks, h)
+	p.hookTokens[id] = opts.Token
+	s.mu.Unlock()
+	writeJSON(w, http.StatusCreated, h)
+}
+
+func (s *Server) handleEditHook(w http.ResponseWriter, r *http.Request, idStr, hookIDStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	hookID, err := strconv.ParseInt(hookIDStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Hook Not Found"})
+		return
+	}
+	var opts glab.HookOptions
+	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "bad request body"})
+		return
+	}
+
+	s.mu.Lock()
+	var updated *glab.Hook
+	for i := range p.Hooks {
+		if p.Hooks[i].ID != hookID {
+			continue
+		}
+		p.Hooks[i] = glab.Hook{
+			ID: hookID, URL: opts.URL, IssuesEvents: opts.IssuesEvents, NoteEvents: opts.NoteEvents,
+			MergeRequestsEvents: opts.MergeRequestsEvents, PushEvents: opts.PushEvents,
+			PipelineEvents: opts.PipelineEvents, EnableSSLVerification: opts.EnableSSLVerification,
+		}
+		p.hookTokens[hookID] = opts.Token
+		updated = &p.Hooks[i]
+		break
+	}
+	s.mu.Unlock()
+	if updated == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Hook Not Found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, *updated)
+}
+
+func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request, idStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	branch := r.URL.Query().Get("branch")
+	ref := r.URL.Query().Get("ref")
+
+	s.mu.Lock()
+	if p.Branches[branch] {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "Branch already exists"})
+		return
+	}
+	p.Branches[branch] = true
+	if p.Files[branch] == nil {
+		p.Files[branch] = map[string][]byte{}
+	}
+	for path, content := range p.Files[ref] {
+		p.Files[branch][path] = content
+	}
+	p.copyModes(ref, branch)
+	// The new branch's head is the commit `ref` names: a full SHA, or the
+	// head of the branch it names when one is known.
+	head := ref
+	if h, isBranch := p.BranchHeads[ref]; isBranch {
+		head = h
+	}
+	if glab.IsCommitSHA(head) {
+		if p.BranchHeads == nil {
+			p.BranchHeads = map[string]string{}
+		}
+		p.BranchHeads[branch] = head
+	}
+	s.mu.Unlock()
+	writeJSON(w, http.StatusCreated, glab.Branch{Name: branch})
+}
+
+func (s *Server) handleCreateCommit(w http.ResponseWriter, r *http.Request, idStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	var opts glab.CommitOptions
+	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "bad request body"})
+		return
+	}
+
+	s.mu.Lock()
+	if p.Files[opts.Branch] == nil {
+		p.Files[opts.Branch] = map[string][]byte{}
+	}
+	p.Branches[opts.Branch] = true
+	for _, act := range opts.Actions {
+		p.Files[opts.Branch][act.FilePath] = []byte(act.Content)
+	}
+	id := s.nextID
+	s.nextID++
+	// The commit is a real object of the fake: it has an id, its message, the
+	// bot as author and the branch's previous head as its one parent; the
+	// branch head moves to it; and the tree it leaves is readable AT ITS SHA
+	// (raw file and tree reads by ref), as on GitLab.
+	sha := fmt.Sprintf("%040x", id)
+	c := glab.Commit{ID: sha, ShortID: sha[:8], Message: opts.CommitMessage, AuthorName: s.Me.Username}
+	c.Title, _, _ = strings.Cut(opts.CommitMessage, "\n")
+	if parent, ok := p.BranchHeads[opts.Branch]; ok {
+		c.ParentIDs = []string{parent}
+	}
+	if p.Commits == nil {
+		p.Commits = map[string]glab.Commit{}
+	}
+	p.Commits[sha] = c
+	if p.BranchHeads == nil {
+		p.BranchHeads = map[string]string{}
+	}
+	p.BranchHeads[opts.Branch] = sha
+	snap := make(map[string][]byte, len(p.Files[opts.Branch]))
+	for path, content := range p.Files[opts.Branch] {
+		snap[path] = content
+	}
+	p.Files[sha] = snap
+	p.copyModes(opts.Branch, sha)
+	// An OPEN merge request's head follows its source branch, as on GitLab:
+	// `sha` is the source branch's head, so a second commit moves it. (A
+	// merged or closed one keeps the head it ended with.)
+	for i := range p.MRs {
+		if p.MRs[i].SourceBranch == opts.Branch && (p.MRs[i].State == "opened" || p.MRs[i].State == "") {
+			p.MRs[i].SHA = sha
+		}
+	}
+	s.mu.Unlock()
+	writeJSON(w, http.StatusCreated, glab.Commit{ID: sha})
+}
+
+func (s *Server) handleListMRs(w http.ResponseWriter, r *http.Request, idStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	q := r.URL.Query()
+	srcFilter := q.Get("source_branch")
+	stateFilter := q.Get("state")
+	tgtFilter := q.Get("target_branch")
+	authorFilter := q.Get("author_id")
+	var updatedAfter time.Time
+	if v := q.Get("updated_after"); v != "" {
+		updatedAfter, _ = time.Parse(time.RFC3339, v)
+	}
+
+	s.mu.Lock()
+	ignore := s.IgnoreMRListFilters
+	out := make([]glab.MergeRequest, 0, len(p.MRs))
+	for _, mr := range p.MRs {
+		if srcFilter != "" && mr.SourceBranch != srcFilter {
+			continue
+		}
+		if !ignore && tgtFilter != "" && mr.TargetBranch != tgtFilter {
+			continue
+		}
+		if !ignore && authorFilter != "" && strconv.FormatInt(mr.Author.ID, 10) != authorFilter {
+			continue
+		}
+		if !ignore && stateFilter != "" && stateFilter != "all" && mr.State != stateFilter {
+			continue
+		}
+		if !updatedAfter.IsZero() && (mr.UpdatedAt == nil || !mr.UpdatedAt.After(updatedAfter)) {
+			continue
+		}
+		out = append(out, mr)
+	}
+	s.mu.Unlock()
+	paginateWrite(w, r, out)
+}
+
+func (s *Server) handleCreateMR(w http.ResponseWriter, r *http.Request, idStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	var opts glab.MROptions
+	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "bad request body"})
+		return
+	}
+
+	s.mu.Lock()
+	p.nextMRIID++
+	iid := p.nextMRIID
+	mr := glab.MergeRequest{
+		IID: iid, Title: opts.Title, Description: opts.Description, State: "opened",
+		SourceBranch: opts.SourceBranch, TargetBranch: opts.TargetBranch,
+		Labels: append([]string{}, opts.Labels...),
+		WebURL: fmt.Sprintf("%s/-/merge_requests/%d", p.WebURL, iid),
+		// As GitLab answers: the caller is the author, both ends are this
+		// project, and the head is the source branch's.
+		Author: s.Me, ProjectID: p.ID, SourceProjectID: p.ID, TargetProjectID: p.ID,
+		SHA: p.BranchHeads[opts.SourceBranch],
+	}
+	p.MRs = append(p.MRs, mr)
+	s.mu.Unlock()
+	writeJSON(w, http.StatusCreated, mr)
+}
+
+func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request, idStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	q := r.URL.Query()
+	stateFilter := q.Get("state")
+	labelsFilter := q.Get("labels")
+	authorFilter := q.Get("author_id")
+
+	s.mu.Lock()
+	out := make([]glab.Issue, 0, len(p.Issues))
+	for _, is := range p.Issues {
+		if authorFilter != "" && strconv.FormatInt(is.Author.ID, 10) != authorFilter {
+			continue
+		}
+		if stateFilter != "" && stateFilter != "all" && is.State != stateFilter {
+			continue
+		}
+		if labelsFilter != "" && !hasAllLabels(is.Labels, strings.Split(labelsFilter, ",")) {
+			continue
+		}
+		out = append(out, is)
+	}
+	s.mu.Unlock()
+	paginateWrite(w, r, out)
+}
+
+func hasAllLabels(have, want []string) bool {
+	for _, w := range want {
+		var found bool
+		for _, h := range have {
+			if h == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request, idStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	var opts glab.IssueOptions
+	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "bad request body"})
+		return
+	}
+
+	s.mu.Lock()
+	p.nextIssueIID++
+	iid := p.nextIssueIID
+	var labels []string
+	if opts.Labels != "" {
+		labels = strings.Split(opts.Labels, ",")
+	}
+	// The issue is authored by the token's user, as in GitLab, and keeps its
+	// description: gonk-tios finds its own tracking issue by both.
+	is := glab.Issue{
+		IID: iid, Title: opts.Title, Description: opts.Description, State: "opened", Labels: labels,
+		Author: s.Me, WebURL: fmt.Sprintf("%s/-/issues/%d", p.WebURL, iid),
+	}
+	p.Issues = append(p.Issues, is)
+	s.mu.Unlock()
+	writeJSON(w, http.StatusCreated, is)
+}
+
+func (s *Server) handleGetIssue(w http.ResponseWriter, r *http.Request, idStr, iidStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	iid, err := strconv.ParseInt(iidStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Issue Not Found"})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, is := range p.Issues {
+		if is.IID == iid {
+			writeJSON(w, http.StatusOK, is)
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Issue Not Found"})
+}
+
+func (s *Server) handleListIssueNotes(w http.ResponseWriter, r *http.Request, idStr, iidStr string) {
+	p, ok := s.project(idStr)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Project Not Found"})
+		return
+	}
+	iid, err := strconv.ParseInt(iidStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "404 Issue Not Found"})
+		return
+	}
+	s.mu.Lock()
+	notes := append([]glab.Note{}, p.Notes[iid]...)
+	s.mu.Unlock()
+	paginateWrite(w, r, notes)
+}
+
+// paginateWrite slices items per the page/per_page query params (default
+// page 1, per_page 100, matching glab's paginate) and sets X-Next-Page when
+// more remain.
+func paginateWrite[T any](w http.ResponseWriter, r *http.Request, items []T) {
+	page := queryIntDefault(r, "page", 1)
+	perPage := queryIntDefault(r, "per_page", 100)
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 {
+		perPage = 100
+	}
+
+	start := (page - 1) * perPage
+	if start > len(items) {
+		start = len(items)
+	}
+	end := start + perPage
+	if end > len(items) {
+		end = len(items)
+	}
+	if end < len(items) {
+		w.Header().Set("X-Next-Page", strconv.Itoa(page+1))
+	}
+
+	out := make([]T, end-start)
+	copy(out, items[start:end])
+	writeJSON(w, http.StatusOK, out)
+}
+
+func queryIntDefault(r *http.Request, key string, def int) int {
+	v := r.URL.Query().Get(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}

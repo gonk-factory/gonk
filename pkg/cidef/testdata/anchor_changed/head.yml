@@ -1,0 +1,13 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# anchor_changed/head.yml: one line of the anchored block changed. No job's own
+# text changed; both jobs' effective script did.
+.fragments:
+  steps: &steps
+    - ./tools/one.sh
+    - ./tools/two.sh --quick
+
+first:
+  script: *steps
+
+second:
+  script: *steps

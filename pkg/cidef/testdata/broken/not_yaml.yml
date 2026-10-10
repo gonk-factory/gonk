@@ -1,0 +1,5 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# broken/not_yaml.yml: does not parse.
+assemble:
+  script: [./tools/assemble.sh
+   nope: : :

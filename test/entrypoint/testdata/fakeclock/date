@@ -1,0 +1,37 @@
+#!/bin/sh
+# Fake `date` -- an INJECTED CLOCK for the prompt-fetch retry tests
+# (test/entrypoint/prompt_fetch_retry_test.go, gonk-4f0v).
+#
+# WHY IT EXISTS. entrypoint.sh's prompt-fetch loop decides "retry or give up"
+# by comparing `date +%s` against a deadline. Against the real clock, WHICH
+# attempt the deadline lands on depends on how fast the box is scheduling the
+# shell's forks (curl, date, sleep) -- so a test that counts attempts inside a
+# real GONK_PROMPT_WAIT_SECS window is measuring the scheduler, not the loop.
+# This fake makes time advance by exactly FAKE_DATE_STEP seconds per `date +%s`
+# CALL, so the loop's decisions are a pure function of how many times it
+# asked for the time: deterministic under any load.
+#
+# NOT on the shared fakePATH (testdata/fakebin): only the tests that opt in
+# prepend this directory, so nothing else in the package loses its real date.
+#
+#   FAKE_DATE_FILE   counter file (required; create fresh per test). Holds the
+#                    number of `date +%s` calls answered so far.
+#   FAKE_DATE_START  epoch seconds returned by the FIRST call (default 1000000)
+#   FAKE_DATE_STEP   seconds added per subsequent call (default 1)
+#
+# ONLY `date +%s` is implemented. entrypoint.sh uses date for nothing else
+# today; if that changes, this fails LOUDLY (exit 1, message on stderr) rather
+# than returning something plausible and wrong.
+
+set -eu
+
+if [ "$#" -ne 1 ] || [ "$1" != "+%s" ]; then
+	printf 'fake date: only "date +%%s" is implemented, got: %s\n' "$*" >&2
+	exit 1
+fi
+: "${FAKE_DATE_FILE:?fake date: FAKE_DATE_FILE is unset}"
+
+[ -f "${FAKE_DATE_FILE}" ] || printf '0' >"${FAKE_DATE_FILE}"
+n=$(cat "${FAKE_DATE_FILE}")
+printf '%s' "$((n + 1))" >"${FAKE_DATE_FILE}"
+printf '%s\n' "$(( ${FAKE_DATE_START:-1000000} + n * ${FAKE_DATE_STEP:-1} ))"

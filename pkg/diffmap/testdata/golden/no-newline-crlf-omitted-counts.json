@@ -1,0 +1,22 @@
+[
+  {
+    "old_path": "VERSION",
+    "new_path": "VERSION",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "diff": "@@ -1 +1 @@\n-1.4.0\n\\ No newline at end of file\n+1.5.0\n\\ No newline at end of file\n",
+    "too_large": false,
+    "collapsed": false
+  },
+  {
+    "old_path": "win/setup.bat",
+    "new_path": "win/setup.bat",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "diff": "@@ -1,2 +1,2 @@\r\n echo off\r\n-set SHELVES=4\r\n+set SHELVES=6\r\n",
+    "too_large": false,
+    "collapsed": false
+  }
+]

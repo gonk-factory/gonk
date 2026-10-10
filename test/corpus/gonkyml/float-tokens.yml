@@ -1,0 +1,7 @@
+# The reason token quantities are strings. A bare 1.5 must NOT silently
+# truncate to a 1-token budget (Plan 01 !!float landmine). Schema rejects a
+# non-integer number; the UnmarshalYAML tag-dispatch is the second guard.
+version: 1
+enabled: true
+budget:
+  monthly_tokens: 1.5

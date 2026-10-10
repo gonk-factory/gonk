@@ -1,0 +1,5 @@
+# A negative ceiling is not a small ceiling. Schema minimum:0 must reject it.
+version: 1
+enabled: true
+budget:
+  monthly_cost_usd: -1

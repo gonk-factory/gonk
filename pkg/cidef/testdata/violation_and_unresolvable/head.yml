@@ -1,0 +1,15 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# violation_and_unresolvable/head.yml: `measure` may now fail (a GATING
+# change), and `assemble` still holds a !reference. Both are reported.
+.setup:
+  script:
+    - ./tools/setup.sh
+
+assemble:
+  script:
+    - !reference [.setup, script]
+
+measure:
+  script:
+    - ./tools/measure.sh
+  allow_failure: true

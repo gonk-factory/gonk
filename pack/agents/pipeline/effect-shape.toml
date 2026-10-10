@@ -1,0 +1,29 @@
+# Expected-effect-shape for the pipeline agent (gonk-tios D6/D8).
+#
+# Broker data, NOT Gas City pack data: the broker reads this from the baked pack
+# (/opt/gonk/pack/agents/pipeline/), never agent.toml. Per-kind cardinality
+# {min,max}; a kind absent here is forbidden ({0,0}).
+#
+# pipeline -> diagnosis {1,1}, everything else {0,0}.
+#
+# What is absent and must stay absent: `comment`, `label`, `file`. Where the
+# answer LANDS (an MR note, the ref's tracking issue) and which labels it gets
+# are chosen by the controller from the diagnosis (D9), never by the agent; and
+# a diagnosis names files only as citations -- nothing here writes to the
+# repository. internal/packtest pins this exact set.
+
+[diagnosis]
+min = 1
+max = 1
+
+# WHAT THE AGENT MUST HAVE DONE TO BE ALLOWED TO SAY IT (gonk-hsb, as for
+# triage). The three classes listed make a claim about repository CONTENT --
+# the product code, the tests, or the pipeline definition is wrong -- so a
+# session asserting one of them without opening a single file has not looked.
+# flaky, infrastructure and unknown can be honest from the injected facts and
+# logs alone. Observing-only until GONK_ENFORCE_TRAJECTORY=1. NOTE (for P7):
+# pkg/trace matches these strings against the batch's verdict today; D8 step 9
+# keys this agent's check on the diagnosis classification instead.
+[trajectory]
+read_tools = ["read", "Read"]
+require_any_read_for = ["code", "test", "configuration"]

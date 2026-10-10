@@ -1,0 +1,18 @@
+# The control. Every other file here is rejected; this one MUST load, or the
+# corpus would be satisfied by an opercfg.Load that refuses everything. It uses
+# the shapes the chart documents: a nested group key with a slash INSIDE it, and
+# a schedule carrying both quiet_hours and its timezone.
+# Disposition: AcceptByLoader.
+version: 1
+instance:
+  ladder: [a]
+  schedule:
+    quiet_hours: "22:00-07:00"
+    timezone: "America/New_York"
+groups:
+  agentic:
+    budget: { monthly_cost_usd: 50 }
+  agentic/experiments:
+    enabled: false
+rungs:
+  - { name: a, kind: local, model: m, est_tokens: "200K", synthetic_usd_per_1m_tokens: 0.2 }

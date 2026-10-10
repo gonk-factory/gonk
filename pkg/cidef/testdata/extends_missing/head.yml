@@ -1,0 +1,8 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# extends_missing/head.yml: the job now extends a template that does not exist.
+.tmpl:
+  script:
+    - ./tools/assemble.sh
+
+assemble:
+  extends: .tmpl-gone

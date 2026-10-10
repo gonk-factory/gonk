@@ -1,0 +1,12 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# reference_identical: base.yml and head.yml are byte-identical. The job's
+# script holds a !reference tag, so the comparison CANNOT be made.
+.setup:
+  script:
+    - ./tools/setup.sh
+
+assemble:
+  stage: build
+  script:
+    - !reference [.setup, script]
+    - ./tools/assemble.sh

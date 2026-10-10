@@ -1,0 +1,17 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# reference_overridden: byte-identical sides. The template's before_script is a
+# !reference, but the only job that extends it sets its own before_script, so
+# no effective value holds the tag.
+.setup:
+  script:
+    - ./tools/setup.sh
+
+.tmpl:
+  before_script: !reference [.setup, script]
+  script:
+    - ./tools/assemble.sh
+
+assemble:
+  extends: .tmpl
+  before_script:
+    - echo own

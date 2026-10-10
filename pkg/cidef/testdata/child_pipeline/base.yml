@@ -1,0 +1,11 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# child_pipeline: byte-identical sides. `trigger: include` starts a child
+# pipeline whose definition is not in this document.
+assemble:
+  script:
+    - ./tools/assemble.sh
+
+fan-out:
+  trigger:
+    include: ci/child.yml
+    strategy: depend

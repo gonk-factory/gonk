@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/gonk-factory/gonk/main/docs/schemas/gonk-operator.v1.schema.json",
+  "title": "gonk operator configuration (instance defaults, group overrides, rung catalog), schema version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "rungs"],
+  "properties": {
+    "version": { "const": 1 },
+    "instance": { "$ref": "#/$defs/policy" },
+    "groups": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/policy" }
+    },
+    "rungs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "kind", "model", "est_tokens"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "kind": { "enum": ["local", "cloud"] },
+          "model": { "type": "string", "minLength": 1 },
+          "est_cost_usd": { "type": "number", "minimum": 0 },
+          "est_tokens": { "$ref": "#/$defs/tokenQuantity" },
+          "synthetic_usd_per_1m_tokens": { "type": "number", "exclusiveMinimum": 0 },
+          "max_turns": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "cloud_allowance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "meter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_spend_staleness": { "$ref": "#/$defs/duration" },
+        "reservation_ttl": { "$ref": "#/$defs/duration" },
+        "max_clock_skew": { "$ref": "#/$defs/duration" },
+        "key_retry_backoff": { "$ref": "#/$defs/duration" },
+        "max_infra_retries": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "enforce_ladder_order": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "scopePatterns": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^/\\[\\]\\\\][^\\[\\]\\\\]*$" },
+      "description": "Repository path patterns, relative to the repository root. `*` and `?` match inside one path segment; `**` as a whole segment matches any number of segments (as the last segment, at least one). No character classes, no escapes, no `.` or `..` segments. See docs/reference/gonk-scope.md."
+    },
+    "scopeCaps": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Size ceilings for a code-writing workflow's change. Each is MINIMISED against the workflow's pack row and every other layer: a value above the pack row's has no effect, a value below it tightens. An absent key says nothing.",
+      "properties": {
+        "max_files": { "type": "integer", "minimum": 0, "description": "Maximum number of files one change may touch." },
+        "max_lines": { "type": "integer", "minimum": 0, "description": "Maximum added plus removed lines, counted on the diff the broker computes." },
+        "max_deletes": { "type": "integer", "minimum": 0, "description": "Maximum number of files one change may delete." },
+        "max_file_bytes": { "type": "integer", "minimum": 0, "description": "Maximum size, in bytes, of a file that may be changed." },
+        "max_patch_bytes": { "type": "integer", "minimum": 0, "description": "Maximum bytes of proposed content across the whole change." }
+      }
+    },
+    "duration": { "type": "string", "pattern": "^[0-9]+(ns|us|ms|s|m|h)$" },
+    "tokenQuantity": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "string", "pattern": "^[0-9]+[KMG]?$" }
+      ]
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "actions": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "triage": { "type": "boolean" },
+            "pipelines": { "type": "boolean" },
+            "pipeline_fixes": { "type": "boolean", "description": "Operator VETO of pipeline-fix merge requests (gonk-2usw). `false` switches them off for every project under this layer, whatever their .gonk.yml says. `true` grants nothing: only a project can opt in." },
+            "features": { "type": "boolean" },
+            "reviews": { "type": "boolean", "description": "Operator VETO of independent review (gonk-cuwn). `false` switches reviews off for every project under this layer, whatever their .gonk.yml says. `true` grants nothing: only a project can opt in. NOT ACTIVE YET: this version of gonk validates and resolves the key and nothing dispatches the workflow." }
+          }
+        },
+        "schedule": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "quiet_hours": {
+              "type": "string",
+              "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$"
+            },
+            "timezone": { "type": "string", "minLength": 1 }
+          }
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "monthly_cost_usd": { "type": "number", "minimum": 0 },
+            "monthly_tokens": { "$ref": "#/$defs/tokenQuantity" },
+            "per_task_tokens": { "$ref": "#/$defs/tokenQuantity" }
+          }
+        },
+        "ladder": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" }
+        },
+        "continuity": { "enum": ["resume", "fresh"] },
+        "triage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "label_prefix": { "type": "string", "minLength": 1 },
+            "respond_to_mentions": { "type": "boolean" }
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "commit_trailers": { "type": "boolean" },
+            "include_usage": { "type": "boolean" }
+          }
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Workflow scope (gonk-066) for this operator layer: tightens every project it applies to. Folded with the workflow's pack row and the project's .gonk.yml `scope:`; no layer can widen past the pack row. An invalid section stops gonk-meter starting. Reference: docs/reference/gonk-scope.md.",
+          "properties": {
+            "classes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["deploy", "test-config", "deps", "agent-context", "generated", "test", "docs", "source", "other"] },
+              "description": "Path classes a code-writing workflow may write in this scope. INTERSECTED with the workflow's pack row and every other layer, so it can only remove classes; a class the pack row does not list is ignored. An empty list allows none. The protected classes (control, secret, ci) cannot be listed: control and secret are the floor, and ci is reached only through a per-dispatch lift the controller grants."
+            },
+            "caps": { "$ref": "#/$defs/scopeCaps" },
+            "protected_paths": { "$ref": "#/$defs/scopePatterns", "description": "Extra protected paths. A matching path becomes class `control`: no agent may write it and no dispatch can lift it. Unioned across all layers." },
+            "ci_paths": { "$ref": "#/$defs/scopePatterns", "description": "Extra pipeline-definition paths. A matching path whose built-in class is source, other, test or docs becomes class `ci` (protected; writable only by a dispatch holding the ci lift). A path in any other class is not moved." },
+            "test_paths": { "$ref": "#/$defs/scopePatterns", "description": "Paths to treat as test code. A matching path whose built-in class is `source` or `other` becomes class `test`; nothing else is moved (gonk-066 Q3: downward reclassification only). Every reclassification is logged." },
+            "docs_paths": { "$ref": "#/$defs/scopePatterns", "description": "Paths to treat as documentation. A matching path whose built-in class is `source` or `other` becomes class `docs`; nothing else is moved (gonk-066 Q3). Every reclassification is logged." },
+            "source_paths": { "$ref": "#/$defs/scopePatterns", "description": "OPERATOR ONLY. Paths to treat as source code. A matching path whose built-in class is `other` becomes class `source`. For a language gonk ships a profile for, prefer the project selecting that profile (`scope.profiles`); this key is for what no profile covers. A project's .gonk.yml may not set this." },
+            "deny_lift": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["ci"] },
+              "description": "OPERATOR ONLY. Protected classes no dispatch may be granted a lift of, whatever the pack row and the project say. Only `ci` is liftable, so only `ci` can be listed."
+            },
+            "allowed_profiles": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["go", "python", "node", "docs-md", "docs-rst", "docs-txt", "docs-adoc"] },
+              "description": "OPERATOR ONLY. The ecosystem profiles (gonk-wj14) projects under this layer may select with `scope.profiles` in their .gonk.yml. ABSENT means the whole shipped menu. INTERSECTED across operator layers (instance, then every matching group), so a layer can only shrink the menu; an empty list allows no profile. A project that names a profile outside the menu has an invalid configuration (no dispatch, no spend) for as long as it does, including a project that was valid before this key changed. A project with no `scope.profiles` key gets the default [go, docs-md] with any disallowed profile removed. This restricts only which profiles' source, test and docs rows a project can turn on: the dependency, test-configuration and generated-file rows of every shipped profile apply to every project and are not on this menu. `scope.profiles` itself is project-only and is refused here. Patterns per profile: docs/reference/gonk-scope.md."
+            }
+          }
+        },
+        "pipeline_fix": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Pipeline-fix merge requests (gonk-2usw) for this operator layer: tightens every project it applies to. Every key can only TIGHTEN; none can opt a project in to anything, and a value wider than the project's has no effect. Folded onto the project's .gonk.yml `pipeline_fix:`. Reference: docs/reference/gonk-pipeline-fix.md.",
+          "properties": {
+            "classes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["code", "test", "configuration"] },
+              "description": "Diagnosis classes that may be followed by a fix. Default [code, test]. INTERSECTED across layers: an operator list can only remove classes from the project's (or from the default). An empty list allows none. `configuration` additionally needs `allow_ci: true`. A diagnosis classified flaky, infrastructure or unknown is never fixed, and cannot be listed."
+            },
+            "targets": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["ref", "mr"] },
+              "description": "Which failed pipelines may get a fix: `ref` is a pipeline on the default branch, `mr` a merge request pipeline. Default [ref]; `mr` is a per-project opt-in. INTERSECTED across layers. An empty list allows none."
+            },
+            "allow_ci": { "type": "boolean", "description": "Operator VETO of the CI-definition lift. `false` forbids the lift for every project under this layer, whatever their .gonk.yml says. `true` grants nothing: only a project can opt in. (An operator can also veto it with scope.deny_lift.)" },
+            "ci_exec_changes": { "enum": ["deny", "manual-run", "auto"], "description": "What happens to a CI fix that changes what a job EXECUTES (script, image, variables, rules). Default manual-run: the commit carries [skip ci] and a maintainer starts the pipeline. `deny`: such a fix is refused. `auto`: its pipeline runs without a human. The STRICTEST value across layers wins (deny, then manual-run, then auto). Such a fix is never merged automatically under any value. Only meaningful with allow_ci." },
+            "max_attempts": { "type": "integer", "minimum": 1, "maximum": 3, "description": "Attempts at one fix before gonk stops and asks for a human. Default 2, ceiling 3. Each attempt also costs the project a pipeline run. MINIMUM across layers." },
+            "max_chain": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Fix merge requests per red streak, counted since the target was last green. Default 5, ceiling 10. MINIMUM across layers." },
+            "verify_timeout": { "type": "string", "pattern": "^[0-9]+(s|m|h)$", "description": "How long gonk waits for the fix merge request's pipeline before it reports the fix as unverifiable. A whole number with a unit: s, m or h. Default 2h, ceiling 6h, more than 0. MINIMUM across layers. The meter holds an attempt's budget reservation for this long on top of its usual reservation time." },
+            "max_files": { "type": "integer", "minimum": 1, "maximum": 3, "description": "Files one fix may change. Default and ceiling 3. MINIMUM across layers, and against scope.caps.max_files." },
+            "max_changed_lines": { "type": "integer", "minimum": 1, "maximum": 40, "description": "Added plus removed lines of one fix, counted on the diff gonk computes. Default and ceiling 40. MINIMUM across layers, and against scope.caps.max_lines." },
+            "auto_merge": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Automatic merge of a fix that met its exit criterion. Absent means off: a human merges every fix. gonk never approves and never assigns itself.",
+              "properties": {
+                "mode": { "enum": ["off", "after-human-approval", "after-agentic-review"], "description": "`off` vetoes automatic merges for every project under this layer. Naming another mode allows ONLY that mode: a project that names a different one gets off. It never switches automatic merging on for a project that did not ask. YAML 1.1 tools read a bare off as false; write \"off\"." },
+                "classes": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": { "enum": ["docs", "ci"] },
+                  "description": "Which OBSERVED diffs may be merged automatically, by path class: `docs` (a documentation-only change) and `ci` (a pipeline-definition change that leaves every job's execution unchanged). Default [docs]. INTERSECTED across layers. A diff touching source or test files, and a CI change that alters what a job executes, are never merged automatically and cannot be listed."
+                },
+                "max_per_day": { "type": "integer", "minimum": 1, "maximum": 3, "description": "Automatic merges of fix merge requests gonk may make on a project in any 24 hours. Default and ceiling 3. MINIMUM across layers; a value above the ceiling is refused." }
+              }
+            }
+          }
+        },
+        "change": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The issue-to-merge-request workflow (gonk-cuwn) for this operator layer: tightens every project it applies to. Every key can only TIGHTEN; none can opt a project in to anything, and a value wider than the project's has no effect. Folded onto the project's .gonk.yml `change:`. NOT ACTIVE YET: this version of gonk validates and resolves the key and nothing dispatches the workflow. Reference: docs/reference/gonk-change.md.",
+          "properties": {
+            "triggers": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["label", "command", "mention"] },
+              "description": "Which forms of an explicit request start the workflow: `label` (the implement label applied to the issue), `command` (a slash-style command in an issue note), `mention` (an at-mention of the bot asking for implementation). Default: all three. Whatever the form, the request counts only when it was made by a project member with the Maintainer or Owner role; that level is fixed and is not a setting. INTERSECTED across layers. An empty list means nothing starts it. A triage verdict never starts this workflow: `triage-verdict` cannot be listed."
+            },
+            "create_classes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["source", "test", "docs"] },
+              "description": "Path classes (see scope:) in which a change may CREATE a new file. Default [test, docs]: a new test or documentation file. `source` is an opt-in, and the list can never go beyond [source, test, docs]. INTERSECTED across layers. An empty list means a change may only edit files that already exist. Dependency manifests, test-runner configuration, CI definitions and dotfiles cannot be created under any setting."
+            },
+            "require_docs": { "enum": ["never", "when-labelled", "always"], "description": "When a change to source code must also change documentation. Default when-labelled: required when the issue carries one of `docs_labels`. `always`: for every change that touches source. `never`: not required. The STRICTEST value across layers wins (always, then when-labelled, then never)." },
+            "docs_labels": {
+              "type": "array",
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^\\S(.*\\S)?$" },
+              "description": "Issue labels that make documentation required when `require_docs` is when-labelled. Default [feature, enhancement, \"type::feature\"]. A project list REPLACES the default; an operator layer ADDS labels (union). A label can only add the requirement, never remove it. At most 16 labels of 1 to 255 characters."
+            },
+            "require_test_report": { "type": "boolean", "description": "Default false. `true`: the workflow does not start unless the default branch pipeline publishes a JUnit test report, and a change whose pipeline publishes none is reported as unverifiable instead of verified. `true` in ANY layer applies; `false` in an operator layer grants nothing." },
+            "max_attempts": { "type": "integer", "minimum": 1, "maximum": 3, "description": "Attempts at one issue before gonk stops and asks for a human. Default 2, ceiling 3. Each attempt costs the project a pipeline run. MINIMUM across layers; a value above the ceiling is refused." },
+            "max_open": { "type": "integer", "minimum": 1, "maximum": 3, "description": "Open change merge requests gonk may have on this project at once. Default 1, ceiling 3. Further requests wait. MINIMUM across layers; a value above the ceiling is refused." },
+            "verify_timeout": { "type": "string", "pattern": "^[0-9]+(s|m|h)$", "description": "How long gonk waits for the change merge request's pipeline before it reports the change as unverifiable. A whole number with a unit: s, m or h. Default 2h, ceiling 6h, more than 0. MINIMUM across layers. The meter holds an attempt's budget reservation for this long on top of its usual reservation time." },
+            "max_files": { "type": "integer", "minimum": 1, "maximum": 8, "description": "Files one change may touch, edited plus created. Default 6, ceiling 8. MINIMUM across layers, and against scope.caps.max_files; a value above the ceiling is refused." },
+            "max_changed_lines": { "type": "integer", "minimum": 1, "maximum": 300, "description": "Added plus removed lines of one change, counted on the diff gonk computes; every line of a created file counts. Default 200, ceiling 300. MINIMUM across layers, and against scope.caps.max_lines; a value above the ceiling is refused." },
+            "auto_merge": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Automatic merge of a change that met its exit criterion. Absent means off: a human merges every change. gonk never approves and never assigns itself. NOT ACTIVE YET: this version of gonk validates and resolves the key and nothing dispatches the workflow.",
+              "properties": {
+                "mode": { "enum": ["off", "after-human-approval", "after-agentic-review"], "description": "`off` vetoes automatic merges of change merge requests for every project under this layer. Naming another mode allows ONLY that mode: a project that names a different one gets off. It never switches automatic merging on for a project that did not ask. YAML 1.1 tools read a bare off as false; write \"off\"." },
+                "classes": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": { "enum": ["docs"] },
+                  "description": "Which OBSERVED diffs may be merged automatically. For this workflow the only class is `docs`, and it means PROSE ONLY: every changed file is a documentation text file (.md, .rst, .txt, .adoc); a script or configuration file under docs/ does not qualify. Default [docs]; an empty list allows none. A change touching source or test files is never merged automatically and cannot be listed."
+                },
+                "max_per_day": { "type": "integer", "minimum": 1, "maximum": 3, "description": "Automatic merges gonk may make on this project in any 24 hours. Default and ceiling 3. MINIMUM across layers; a value above the ceiling is refused." }
+              }
+            }
+          }
+        },
+        "review": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Independent review of gonk-authored merge requests (gonk-cuwn) for this operator layer. `rung` is set HERE and only here: it is the operator's statement of which model is adequate for review. Every other key can only TIGHTEN. NOT ACTIVE YET: this version of gonk validates and resolves the key and nothing dispatches the workflow. Reference: docs/reference/gonk-review.md.",
+          "properties": {
+            "targets": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["gonk"] },
+              "description": "Which merge requests are reviewed. `gonk`: merge requests gonk itself authored (pipeline fixes and issue changes) that passed their own exit check. It is the only value: merge requests written by people are not reviewed in this version, and `human` cannot be listed. Default [gonk]. An empty list means nothing is reviewed."
+            },
+            "rung": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$", "description": "OPERATOR ONLY. The ONE rung of the rung catalog every review runs on: the operator's statement of which model is adequate for review. A review never climbs the ladder. Unset means no review can run and `after-agentic-review` is unavailable. It must name a rung in `rungs`. Two layers that apply to a project and name DIFFERENT rungs fold to none. A project's .gonk.yml may not set this." },
+            "max_notes": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Findings one review may report. Default and ceiling 20. A review with more is refused as a whole. MINIMUM across layers; a value above the ceiling is refused." },
+            "max_reviews_per_mr": { "type": "integer", "minimum": 1, "maximum": 3, "description": "Reviews of one merge request, one per head commit. Default and ceiling 3. After that a new head is not reviewed. MINIMUM across layers; a value above the ceiling is refused." }
+          }
+        }
+      }
+    }
+  }
+}

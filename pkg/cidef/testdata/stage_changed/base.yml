@@ -1,0 +1,10 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# stage_changed/base.yml
+assemble:
+  stage: build
+  script:
+    - ./tools/assemble.sh
+
+measure:
+  script:
+    - ./tools/measure.sh

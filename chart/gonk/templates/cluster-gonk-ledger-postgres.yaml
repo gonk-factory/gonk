@@ -1,0 +1,47 @@
+{{- if and (eq .Values.ledger.backend "postgres") (eq .Values.ledger.postgres.mode "cnpg") }}
+{{- /* .Values.ledger.backend is a single-value enum ("postgres" only --
+       RECONCILED, Task 0), so the first half of this `and` is always true
+       today. It stays in the condition defensively, in case a future backend
+       is ever added, and because it costs nothing. */ -}}
+# RECONCILED, Task 0: this is no longer "the Task 0b fallback" -- it is THE
+# settled ledger backend (ADR-004 Decision 10). Task 0b's spike measured Dolt
+# failing the reservation-race isolation test decisively (32/32 concurrent
+# writers won a ceiling-of-2 race, 12.8x overspend, at every isolation level
+# including SELECT ... FOR UPDATE -- docs/spikes/dolt-reservation-isolation.md).
+# Postgres on the CNPG cluster the owner ALREADY RUNS is the answer, not a
+# contingency. Not a new stateful dependency -- CNPG's operator is already
+# there, and this chart does not install it.
+#
+# Why Postgres, not Dolt: SERIALIZABLE / SELECT ... FOR UPDATE is well-trodden
+# for exactly the concurrent-reservation race on Postgres (verified: it blocks,
+# where Dolt's identical-shaped lock was measured NOT to). A budget ceiling
+# defended by an unproven isolation guarantee is not defended. The cost is
+# Dolt's versioned audit history, which the append-only ledger tables mitigate.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: gonk-ledger-postgres
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ledger
+spec:
+  instances: {{ .Values.ledger.postgres.cnpg.instances }}
+  {{- if .Values.ledger.postgres.cnpg.imageName }}
+  imageName: {{ .Values.ledger.postgres.cnpg.imageName }}
+  {{- end }}
+  bootstrap:
+    initdb:
+      database: {{ .Values.ledger.postgres.database }}
+      owner: gonk
+  storage:
+    size: {{ .Values.ledger.postgres.cnpg.storage.size }}
+    {{- if .Values.ledger.postgres.cnpg.storage.storageClass }}
+    storageClass: {{ .Values.ledger.postgres.cnpg.storage.storageClass }}
+    {{- end }}
+# NOTE: CNPG generates its own app-user Secret (gonk-ledger-postgres-app). meter
+# still reads its DSN from secrets.ledger.existingSecret -- point that at CNPG's
+# generated Secret (with a `dsn`-shaped key), or synthesize the DSN into your own
+# Secret via ExternalSecret. The chart does NOT copy CNPG's secret, because copying
+# a credential from one Secret into another is exactly the kind of thing that ends
+# up in a git repo.
+{{- end }}

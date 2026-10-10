@@ -1,0 +1,3 @@
+# An unknown schema version must not be accepted (const 1).
+version: 2
+enabled: true

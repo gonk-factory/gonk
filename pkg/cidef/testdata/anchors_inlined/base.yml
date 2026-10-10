@@ -1,0 +1,32 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# anchors_inlined/base.yml: anchors, aliases and merge keys. head.yml is the
+# same definition written out by hand with none of them.
+.fragments:
+  common: &common
+    image: registry.invalid/tools/a:1
+    variables:
+      LANE: slow
+      DEPTH: "1"
+  extra: &extra
+    image: registry.invalid/tools/b:2
+    tags:
+      - wide
+  steps: &steps
+    - ./tools/one.sh
+    - ./tools/two.sh
+
+first:
+  <<: *common
+  script: *steps
+
+second:
+  <<: [*common, *extra]
+  script:
+    - ./tools/three.sh
+  variables:
+    LANE: fast
+
+third:
+  <<: *extra
+  image: registry.invalid/tools/c:3
+  script: *steps

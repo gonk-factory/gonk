@@ -1,0 +1,18 @@
+[0KRunning with gitlab-runner 17.0.0 (abcdef12)[0;m
+[0K[36;1mPreparing the "docker" executor[0;m[0;m
+section_start:1700000000:prepare_script[0K[0K[36;1mPreparing environment[0;m[0;m
+Running on runner-synthetic-project-1-concurrent-0 via synthetic-host...
+section_end:1700000001:prepare_script[0K
+section_start:1700000002:step_script[collapsed=true][0K[0K[36;1mExecuting "step_script" stage of the job script[0;m[0;m
+[32;1m$ make build[0;m
+fetching deps   0%fetching deps  50%fetching deps 100%
+compiling widget
+compiling widget
+compiling widget
+compiling widget
+compiling widget
+]0;title\./src/widget.go:12:3: undefined: FrobnicateAll   
+make: *** [Makefile:7: build] Error 1
+section_end:1700000003:step_script[0K
+[31;1mERROR: Job failed: exit code 2
+[0;m

@@ -1,0 +1,62 @@
+[
+  {
+    "old_path": "pkg/stock/depth.go",
+    "new_path": "pkg/stock/depth.go",
+    "new_file": true,
+    "renamed_file": false,
+    "deleted_file": false,
+    "diff": "@@ -0,0 +1,3 @@\n+package stock\n+\n+const DefaultDepth = 2\n",
+    "too_large": false,
+    "collapsed": false
+  },
+  {
+    "old_path": "img/shelf.png",
+    "new_path": "img/shelf.png",
+    "new_file": true,
+    "renamed_file": false,
+    "deleted_file": false,
+    "diff": "Binary files /dev/null and b/img/shelf.png differ\n",
+    "too_large": false,
+    "collapsed": false
+  },
+  {
+    "old_path": "data/crates.csv",
+    "new_path": "data/crates.csv",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "diff": "",
+    "too_large": true,
+    "collapsed": false
+  },
+  {
+    "old_path": "data/shelves.csv",
+    "new_path": "data/shelves.csv",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "diff": "",
+    "too_large": false,
+    "collapsed": true
+  },
+  {
+    "old_path": "run.sh",
+    "new_path": "run.sh",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "diff": "",
+    "too_large": false,
+    "collapsed": false
+  },
+  {
+    "old_path": "broken.txt",
+    "new_path": "broken.txt",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "diff": "@@ -1,2 +1,2 @@\n a\n-b\n",
+    "too_large": false,
+    "collapsed": false
+  }
+]

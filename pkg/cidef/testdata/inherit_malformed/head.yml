@@ -1,0 +1,11 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# inherit_malformed: byte-identical sides. `inherit.default` is a string, so
+# which defaults the job takes cannot be decided.
+default:
+  image: registry.invalid/tools/base:1
+
+assemble:
+  inherit:
+    default: sometimes
+  script:
+    - ./tools/assemble.sh

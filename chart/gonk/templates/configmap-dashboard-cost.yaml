@@ -1,0 +1,12 @@
+{{- if .Values.monitoring.dashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gonk-dashboard-cost
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    {{ .Values.monitoring.dashboards.label }}: {{ .Values.monitoring.dashboards.labelValue | quote }}
+data:
+  cost.json: |
+    {{- .Files.Get "dashboards/cost.json" | nindent 4 }}
+{{- end }}

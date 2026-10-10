@@ -1,0 +1,45 @@
+{
+  "project": "group/repo",
+  "window": {
+    "start": "2026-01-02T03:04:05Z",
+    "end": "2026-01-03T03:04:05Z"
+  },
+  "cost_usd": 10,
+  "synthetic_cost_usd": 2,
+  "prompt_tokens": 10000,
+  "completion_tokens": 5000,
+  "total_tokens": 15000,
+  "by_rung": [
+    {
+      "rung": "qwen-local",
+      "kind": "local",
+      "cost_usd": 0,
+      "synthetic_cost_usd": 0.5,
+      "cost_synthetic": true,
+      "total_tokens": 1500,
+      "calls": 1
+    }
+  ],
+  "by_trigger": [
+    {
+      "trigger": "issue-triage",
+      "cost_usd": 10,
+      "synthetic_cost_usd": 2,
+      "total_tokens": 15000,
+      "calls": 5
+    }
+  ],
+  "budget": {
+    "monthly_cost_usd": 100,
+    "monthly_tokens": 5000000,
+    "per_task_tokens": 50000
+  },
+  "remaining": {
+    "monthly_cost_usd": 80.5,
+    "monthly_tokens": 4500000,
+    "per_task_tokens": 49000
+  },
+  "as_of": "2026-01-02T03:04:05Z",
+  "complete": true,
+  "stale": false
+}

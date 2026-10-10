@@ -1,0 +1,19 @@
+{
+  "bead_anchor": "gonk:42:pipeline:ref-0d6e4079:0123456789abcdef:s880",
+  "bead_id": "gonk:42:pipeline:ref-0d6e4079:0123456789abcdef:s880",
+  "config_hash": "sha256:abc",
+  "key_ref": "{\"secret_name\":\"gonk-key-x\",\"secret_key\":\"LITELLM_API_KEY\"}",
+  "metadata_json": "{\"gonk_attempt\":\"1\"}",
+  "model": "qwen-local",
+  "pipeline_fingerprint": "0123456789abcdef",
+  "pipeline_id": "900",
+  "pipeline_last_success": "880",
+  "pipeline_target": "ref:main",
+  "project": "group/repo",
+  "project_id": "42",
+  "reservation_id": "res-1",
+  "rig": "group-repo",
+  "rung": "local-1",
+  "session_key": "gonk-42-pl-0123456789ab",
+  "trigger": "pipeline-diagnosis"
+}

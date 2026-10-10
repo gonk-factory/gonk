@@ -1,0 +1,9 @@
+{
+ "errors": [
+  "Local file `ci/probe-common.yml` does not exist!"
+ ],
+ "includes": null,
+ "merged_yaml": null,
+ "valid": false,
+ "warnings": []
+}

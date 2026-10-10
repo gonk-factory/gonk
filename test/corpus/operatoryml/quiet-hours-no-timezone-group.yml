@@ -1,0 +1,12 @@
+# The same defect one layer down. Resolve folds instance, group and project, so
+# a guard that only watched `instance` would leave the identical brick reachable
+# through `groups` -- for every project under that group. Disposition: Reject.
+version: 1
+instance:
+  ladder: [a]
+groups:
+  agentic:
+    schedule:
+      quiet_hours: "22:00-07:00"
+rungs:
+  - { name: a, kind: local, model: m, est_tokens: "200K", synthetic_usd_per_1m_tokens: 0.2 }

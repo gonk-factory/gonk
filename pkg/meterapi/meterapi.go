@@ -1,0 +1,947 @@
+// Package meterapi is the wire contract between gonk-meter (the server),
+// gitlab-intake (the config client), and the Gas City pack (the policy client).
+// All three import it; NONE of them re-derives the JSON shape.
+//
+// Ownership: gonk-meter (Plan 03) owns this contract. gitlab-intake conforms to
+// it. If a client needs a field that is not here, that is a change to the METER
+// contract and must be made here first, with the sha256 drift gate updated in
+// the same commit.
+//
+// Endpoints (see docs/api/gonk-meter-v1.md):
+//
+//	PUT    /v1/projects/{project}            ProjectRequest  -> ProjectResponse   (intake)
+//	GET    /v1/projects/{project}                            -> ProjectResponse   (intake)
+//	DELETE /v1/projects/{project}                            -> 204               (intake)
+//	POST   /v1/projects/{project}/key/rotate                 -> ProjectResponse   (operator)
+//	POST   /v1/policy/decide                 DecideRequest   -> DecideResponse    (intake Gate 1 + pack Gate 2; idempotent on an open reservation)
+//	POST   /v1/policy/outcome                OutcomeRequest  -> OutcomeResponse    (pack)
+//	GET    /v1/cost/bead/{bead_id}                           -> BeadCostResponse
+//	GET    /v1/cost/session/{session_key}                    -> SessionCostResponse
+//	GET    /v1/cost/project/{project}                        -> ProjectCostResponse
+//	GET    /v1/cost/instance                                 -> InstanceCostResponse
+//	POST   /admin/spend/sync                                 -> SpendSyncResponse (Plan 06's e2e harness only)
+//	GET    /healthz | /readyz | /metrics                     (unauthenticated)
+//
+// Everything except the health/metrics endpoints requires
+// `Authorization: Bearer <token>`. /admin/spend/sync IS authenticated -- it
+// is on the same listener and requires the same bearer token as every other
+// non-health route.
+package meterapi
+
+import (
+	"fmt"
+	"math"
+	"net/url"
+	"time"
+
+	"github.com/gonk-factory/gonk/pkg/gonkcfg"
+	"github.com/gonk-factory/gonk/pkg/scope"
+)
+
+// ---------------------------------------------------------------- paths
+
+// ProjectPath builds the project path. {project} is the GitLab
+// path_with_namespace, URL-path-escaped: "group/repo" -> "group%2Frepo".
+// Never hand-build this: an unescaped "/" silently routes to a different (or no)
+// handler.
+func ProjectPath(project string) string {
+	return "/v1/projects/" + url.PathEscape(project)
+}
+
+func ProjectKeyRotatePath(project string) string { return ProjectPath(project) + "/key/rotate" }
+
+func CostBeadPath(beadID string) string { return "/v1/cost/bead/" + url.PathEscape(beadID) }
+func CostSessionPath(sessionKey string) string {
+	return "/v1/cost/session/" + url.PathEscape(sessionKey)
+}
+func CostProjectPath(project string) string { return "/v1/cost/project/" + url.PathEscape(project) }
+
+const (
+	DecidePath         = "/v1/policy/decide"
+	OutcomePath        = "/v1/policy/outcome"
+	CostInstancePath   = "/v1/cost/instance"
+	AdminSpendSyncPath = "/admin/spend/sync"
+	HealthzPath        = "/healthz"
+	ReadyzPath         = "/readyz"
+	MetricsPath        = "/metrics"
+
+	// PromptPathPrefix is prompt-by-reference (gonk-mzd). The agent pod fetches
+	// its own prompt at PromptPathPrefix+<alias> instead of having it typed
+	// into a TUI.
+	//
+	// GET on this path is the ONE unauthenticated route on this service: the
+	// alias carries 128 bits of entropy and IS the capability, so there is no
+	// token to distribute to a pod that deliberately holds no credentials.
+	// PUT and DELETE on the same path still require the admin bearer.
+	PromptPathPrefix = "/v1/prompt/"
+
+	// TracePath is trajectory-evidence ingest (gonk-p8j). The LiteLLM proxy
+	// callback POSTs here with what it observed a session request.
+	//
+	// IT IS BEARER-AUTHENTICATED AND MUST STAY THAT WAY. The agent pod can
+	// already reach this meter -- that is how it fetches its own prompt -- so an
+	// unauthenticated trace endpoint would let the subject of the evidence write
+	// the evidence. That is the precise failure the design note rejects the
+	// pod-local transcript for; reproducing it here would be worse, because it
+	// would look like a control while being a field the agent fills in.
+	TracePath = "/v1/trace"
+
+	// TraceReadPathPrefix is the READ side, TraceReadPathPrefix+<session_key>,
+	// with the attempt as a query parameter. The broker fetches evidence here
+	// to classify it; like every other route but the prompt GET it is
+	// bearer-authenticated.
+	TraceReadPathPrefix = "/v1/trace/"
+)
+
+// PromptRequest is what the controller PUTs before creating the session.
+// Model and Metadata travel with the prompt so the pod can render its own
+// opencode overlay per session -- that is what restores per-bead attribution
+// (gonk-m6t) rather than attributing spend per install.
+type PromptRequest struct {
+	Prompt   string `json:"prompt"`
+	Model    string `json:"model"`
+	Metadata string `json:"metadata,omitempty"`
+	// LiteLLMKey is the PROJECT'S virtual key for this session (gonk-8gb).
+	//
+	// IT RIDES THE PROMPT ROW BECAUSE THAT IS THE ONLY PER-SESSION CHANNEL THAT
+	// REACHES A POD. Order vars are env for the dispatch exec, not for the
+	// session; a session pod's env comes from resolved.Env, which Gas City
+	// builds from city/agent config -- so agent.toml is the only other route and
+	// it is per-INSTALL, which a per-PROJECT key cannot use. Proven by the env of
+	// a live agent pod: GONK_LITELLM_URL arrives from agent.toml and no
+	// per-session key arrives at all.
+	//
+	// This row is already the right shape for it: one-shot (a second GET is 410),
+	// short-TTL, and addressed by a 128-bit alias capability. Carrying the key
+	// here is strictly better than the alternative it replaces, which was the
+	// LiteLLM ADMIN key written into every agent.toml on the install.
+	LiteLLMKey string `json:"litellm_key,omitempty"`
+}
+
+// TraceRequest is one observation report from the proxy callback, for one
+// (session, attempt). Reports are INCREMENTAL and additive: the meter appends
+// calls and turns rather than replacing them, so a long session may produce
+// several of these.
+//
+// Deliberately carries NO prompt or response text. Tool names and a normalised
+// argument shape only -- bodies hold untrusted issue content and, on cloud
+// rungs, left our premises to begin with.
+type TraceRequest struct {
+	SessionKey string `json:"session_key"`
+	Attempt    int    `json:"attempt"`
+	BeadID     string `json:"bead_id,omitempty"`
+	Project    string `json:"project,omitempty"`
+	// Completeness is REQUIRED and must be one of complete|partial|absent. A
+	// collector that does not know must say "partial" or "absent"; there is no
+	// permitted silence, because a missing value would read as complete to any
+	// consumer that defaults.
+	Completeness string      `json:"completeness"`
+	Calls        []TraceCall `json:"calls,omitempty"`
+	Turns        int         `json:"turns,omitempty"`
+}
+
+// TraceCall is one observed tool invocation.
+type TraceCall struct {
+	Tool   string `json:"tool"`
+	Target string `json:"target,omitempty"`
+}
+
+// TraceView is the evidence recorded for one (session, attempt), as the broker
+// reads it back. A session with no row comes back with Completeness "absent"
+// and no calls -- never a 404 -- so a caller can tell "we observed nothing"
+// from "we could not ask".
+type TraceView struct {
+	SessionKey   string      `json:"session_key"`
+	Attempt      int         `json:"attempt"`
+	BeadID       string      `json:"bead_id,omitempty"`
+	Project      string      `json:"project,omitempty"`
+	Completeness string      `json:"completeness"`
+	Calls        []TraceCall `json:"calls,omitempty"`
+	Turns        int         `json:"turns,omitempty"`
+}
+
+// TraceResponse acknowledges an accepted report.
+type TraceResponse struct {
+	SessionKey string `json:"session_key"`
+	Attempt    int    `json:"attempt"`
+	// Completeness as STORED after folding this report into what was already
+	// there, which may be worse than what was sent: completeness only degrades.
+	Completeness string `json:"completeness"`
+	Calls        int    `json:"calls"`
+	Turns        int    `json:"turns"`
+}
+
+// PromptResponse is what the agent pod GETs, once.
+type PromptResponse struct {
+	Prompt   string `json:"prompt"`
+	Model    string `json:"model"`
+	Metadata string `json:"metadata,omitempty"`
+	// LiteLLMKey is this session's project key. See PromptRequest.
+	LiteLLMKey string `json:"litellm_key,omitempty"`
+}
+
+// PromptStatusResponse lets dispatch confirm the entrypoint actually fetched,
+// which is strictly better evidence than "we submitted it" -- the claim the old
+// keystroke path made even when the composer was empty.
+type PromptStatusResponse struct {
+	Fetched   bool      `json:"fetched"`
+	FetchedAt time.Time `json:"fetched_at,omitzero"`
+}
+
+// ---------------------------------------------------------------- budget
+
+// Budget is an EffectiveBudget, wire-shaped. NULL MEANS UNLIMITED.
+//
+// gonkcfg encodes "unlimited" as math.Inf(1) (cost) and math.MaxInt64 (tokens)
+// -- ADR-002. Neither survives contact with JSON: encoding/json REFUSES to
+// marshal +Inf (it returns an error, not a number), so an unlimited project
+// would fail to serialize AT ALL; and MaxInt64 loses precision in any
+// float64-based parser, which is every JavaScript client, so a "limit" silently
+// becomes a DIFFERENT limit. `null` is unambiguous, symmetric across both types,
+// and round-trips.
+//
+// NOBODY may marshal gonkcfg.EffectiveBudget directly. This type is the only
+// correct way across the wire.
+type Budget struct {
+	MonthlyCostUSD *float64 `json:"monthly_cost_usd"`
+	MonthlyTokens  *int64   `json:"monthly_tokens"`
+	PerTaskTokens  *int64   `json:"per_task_tokens"`
+}
+
+const unlimitedTokens = gonkcfg.TokenQuantity(math.MaxInt64)
+
+// BudgetFrom converts a resolved budget for the wire. It errors on a non-finite
+// cost ceiling: Resolve pins those to 0 and disables the project, so this is
+// unreachable in practice -- but the seam does not trust that, because an
+// unvalidated operator policy is exactly the gap ADR-002 leaves open.
+func BudgetFrom(b gonkcfg.EffectiveBudget) (Budget, error) {
+	var out Budget
+	switch {
+	case math.IsInf(b.MonthlyCostUSD, 1):
+		// unlimited -> null
+	case math.IsNaN(b.MonthlyCostUSD) || math.IsInf(b.MonthlyCostUSD, -1):
+		return Budget{}, fmt.Errorf("meterapi: monthly_cost_usd is not a finite number (%v)", b.MonthlyCostUSD)
+	default:
+		v := b.MonthlyCostUSD
+		out.MonthlyCostUSD = &v
+	}
+	if b.MonthlyTokens != unlimitedTokens {
+		v := int64(b.MonthlyTokens)
+		out.MonthlyTokens = &v
+	}
+	if b.PerTaskTokens != unlimitedTokens {
+		v := int64(b.PerTaskTokens)
+		out.PerTaskTokens = &v
+	}
+	return out, nil
+}
+
+// Effective is the inverse: null becomes the unlimited sentinels again.
+func (b Budget) Effective() gonkcfg.EffectiveBudget {
+	out := gonkcfg.EffectiveBudget{
+		MonthlyCostUSD: math.Inf(1),
+		MonthlyTokens:  unlimitedTokens,
+		PerTaskTokens:  unlimitedTokens,
+	}
+	if b.MonthlyCostUSD != nil {
+		out.MonthlyCostUSD = *b.MonthlyCostUSD
+	}
+	if b.MonthlyTokens != nil {
+		out.MonthlyTokens = gonkcfg.TokenQuantity(*b.MonthlyTokens)
+	}
+	if b.PerTaskTokens != nil {
+		out.PerTaskTokens = gonkcfg.TokenQuantity(*b.PerTaskTokens)
+	}
+	return out
+}
+
+// ZeroBudget is the fail-closed budget: nothing is affordable. It is what an
+// INVALID project gets. Never send an empty Budget{} for a project you are
+// disabling -- an empty Budget{} is all-nil, and nil means UNLIMITED.
+func ZeroBudget() Budget {
+	zero, zeroTokens := 0.0, int64(0)
+	return Budget{MonthlyCostUSD: &zero, MonthlyTokens: &zeroTokens, PerTaskTokens: &zeroTokens}
+}
+
+// ---------------------------------------------------------------- project state
+
+// State is a project's registration state AS DETERMINED BY METER. Intake
+// records it; intake cannot compute it (only meter resolves config).
+type State string
+
+const (
+	StateActive     State = "active"      // resolved, enabled, virtual key provisioned
+	StateDisabled   State = "disabled"    // resolved, Effective.Enabled == false
+	StateInvalid    State = "invalid"     // .gonk.yml would not load; there is NO Effective
+	StateKeyMissing State = "key-missing" // resolved and enabled, but LiteLLM key not provisioned yet
+)
+
+// KeyRef points at WHERE a LiteLLM virtual key lives. It NEVER contains the key
+// itself: a token in an API response ends up in the event bus and in every log
+// line that echoes it.
+type KeyRef struct {
+	SecretName string `json:"secret_name"`
+	SecretKey  string `json:"secret_key"`
+}
+
+type Actions struct {
+	Triage    bool `json:"triage"`
+	Pipelines bool `json:"pipelines"`
+	// PipelineFixes: a diagnosis may be followed by a fix merge request
+	// (gonk-2usw). Like Scaffold, never `omitempty`: a meter that predates the
+	// field omits it and it decodes to false, the fail-closed direction.
+	PipelineFixes bool `json:"pipeline_fixes"`
+	Features      bool `json:"features"`
+	// Scaffold: the metered `.agent/` scaffold session is opt-in (spec 5.3).
+	// A meter that predates this field simply omits it, and `omitempty` is
+	// deliberately ABSENT so the wire always states the answer -- an absent
+	// key decodes to false, which is the fail-closed direction.
+	Scaffold bool `json:"scaffold"`
+	// Reviews: a merge request gonk authored may get an independent review
+	// (gonk-cuwn). Never `omitempty`; a meter that predates it omits it and it
+	// decodes to false.
+	Reviews bool `json:"reviews"`
+}
+
+// PipelineFix is gonkcfg.EffectivePipelineFix, wire-shaped: the folded
+// `pipeline_fix:` section (gonk-2usw 3.1), operator tightening included. It is
+// always present, with the defaults for a project that never opted in --
+// Actions.PipelineFixes is what says whether a fix may be made at all.
+//
+// A meter that predates the field omits it, and the zero value allows nothing:
+// no class, no target, zero attempts.
+type PipelineFix struct {
+	Classes              []string  `json:"classes"`
+	Targets              []string  `json:"targets"`
+	AllowCI              bool      `json:"allow_ci"`
+	CIExecChanges        string    `json:"ci_exec_changes"`
+	MaxAttempts          int       `json:"max_attempts"`
+	MaxChain             int       `json:"max_chain"`
+	VerifyTimeoutSeconds int64     `json:"verify_timeout_seconds"`
+	MaxFiles             int       `json:"max_files"`
+	MaxChangedLines      int       `json:"max_changed_lines"`
+	Paths                []string  `json:"paths"`
+	AutoMerge            AutoMerge `json:"auto_merge"`
+}
+
+// AutoMerge is gonkcfg.EffectiveAutoMerge, wire-shaped.
+type AutoMerge struct {
+	Mode    string   `json:"mode"`
+	Classes []string `json:"classes"`
+	// MaxPerDay: automatic merges allowed on the project per 24 hours
+	// (gonk-cuwn). A meter that predates it omits it: zero, no merge.
+	MaxPerDay int `json:"max_per_day"`
+}
+
+// Change is gonkcfg.EffectiveChange, wire-shaped: the folded `change:` section
+// (gonk-cuwn / gonk-3so), operator tightening included. Always present, with
+// the defaults for a project that never opted in -- Actions.Features is what
+// says whether an issue may be implemented at all.
+//
+// A meter that predates the field omits it, and the zero value allows nothing:
+// no trigger form, no created file, zero attempts, zero open merge requests.
+type Change struct {
+	Triggers             []string  `json:"triggers"`
+	CreateClasses        []string  `json:"create_classes"`
+	RequireDocs          string    `json:"require_docs"`
+	DocsLabels           []string  `json:"docs_labels"`
+	RequireTestReport    bool      `json:"require_test_report"`
+	MaxAttempts          int       `json:"max_attempts"`
+	MaxOpen              int       `json:"max_open"`
+	VerifyTimeoutSeconds int64     `json:"verify_timeout_seconds"`
+	MaxFiles             int       `json:"max_files"`
+	MaxChangedLines      int       `json:"max_changed_lines"`
+	Paths                []string  `json:"paths"`
+	AutoMerge            AutoMerge `json:"auto_merge"`
+}
+
+// ReviewMergeStatus is gonkcfg.ReviewMergeStatus, wire-shaped: whether
+// `auto_merge.mode: after-agentic-review` can be satisfied for one author
+// workflow. The zero value is "unavailable".
+type ReviewMergeStatus struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason"`
+}
+
+// ReviewMerge carries one status per author workflow.
+type ReviewMerge struct {
+	PipelineFix ReviewMergeStatus `json:"pipeline_fix"`
+	Change      ReviewMergeStatus `json:"change"`
+}
+
+// Review is gonkcfg.EffectiveReview, wire-shaped: the folded `review:` section
+// (gonk-cuwn / gonk-td7). Always present; Actions.Reviews and a non-empty Rung
+// are what say whether a review may run at all.
+//
+// A same-model review authorises no merge under any configuration, so there is
+// no field for waiving that; agentic_merge says whether a distinct-model review
+// can exist at all.
+type Review struct {
+	Targets         []string    `json:"targets"`
+	Rung            string      `json:"rung"`
+	MaxNotes        int         `json:"max_notes"`
+	MaxReviewsPerMR int         `json:"max_reviews_per_mr"`
+	AgenticMerge    ReviewMerge `json:"agentic_merge"`
+}
+
+type Triage struct {
+	LabelPrefix       string `json:"label_prefix"`
+	RespondToMentions bool   `json:"respond_to_mentions"`
+}
+
+type Provenance struct {
+	CommitTrailers bool `json:"commit_trailers"`
+	IncludeUsage   bool `json:"include_usage"`
+}
+
+type Schedule struct {
+	QuietHours string `json:"quiet_hours"`
+	Timezone   string `json:"timezone"`
+}
+
+// Effective is gonkcfg.Effective, wire-shaped. It is produced by exactly ONE
+// call site in the entire system: gonk-meter's service.Register, which calls
+// gonkcfg.Resolve. Per ADR-002, Resolve's return value is the only legitimate
+// way to produce an Effective -- so intake reads this off the wire and NEVER
+// computes it.
+//
+// Note the ABSENCE of Budget: the budget lives on ProjectResponse, because a
+// disabled or invalid project has a budget (zero) but no meaningful Effective.
+type Effective struct {
+	Enabled    bool       `json:"enabled"`
+	Actions    Actions    `json:"actions"`
+	Ladder     []string   `json:"ladder"`
+	Continuity string     `json:"continuity"`
+	Triage     Triage     `json:"triage"`
+	Provenance Provenance `json:"provenance"`
+	Schedule   *Schedule  `json:"schedule"`
+	// PipelineFix: see the type. Additive (gonk-2usw).
+	PipelineFix PipelineFix `json:"pipeline_fix"`
+	// Change and Review: see the types. Additive (gonk-cuwn).
+	Change Change `json:"change"`
+	Review Review `json:"review"`
+}
+
+// EffectiveFrom is meter-side only: it projects a resolved gonkcfg.Effective
+// onto the wire type.
+func EffectiveFrom(e gonkcfg.Effective) Effective {
+	out := Effective{
+		Enabled: e.Enabled,
+		Actions: Actions{Triage: e.Actions.Triage, Pipelines: e.Actions.Pipelines, PipelineFixes: e.Actions.PipelineFixes,
+			Features: e.Actions.Features, Scaffold: e.Actions.Scaffold},
+		Ladder:     append([]string(nil), e.Ladder...),
+		Continuity: e.Continuity,
+		Triage:     Triage{LabelPrefix: e.Triage.LabelPrefix, RespondToMentions: e.Triage.RespondToMentions},
+		Provenance: Provenance{CommitTrailers: e.Provenance.CommitTrailers, IncludeUsage: e.Provenance.IncludeUsage},
+		PipelineFix: PipelineFix{
+			// Never nil: the wire says [] for "none", not null.
+			Classes:              append([]string{}, e.PipelineFix.Classes...),
+			Targets:              append([]string{}, e.PipelineFix.Targets...),
+			AllowCI:              e.PipelineFix.AllowCI,
+			CIExecChanges:        e.PipelineFix.CIExecChanges,
+			MaxAttempts:          e.PipelineFix.MaxAttempts,
+			MaxChain:             e.PipelineFix.MaxChain,
+			VerifyTimeoutSeconds: int64(e.PipelineFix.VerifyTimeout / time.Second),
+			MaxFiles:             e.PipelineFix.MaxFiles,
+			MaxChangedLines:      e.PipelineFix.MaxChangedLines,
+			Paths:                append([]string{}, e.PipelineFix.Paths...),
+			AutoMerge: AutoMerge{
+				Mode:    e.PipelineFix.AutoMerge.Mode,
+				Classes: append([]string{}, e.PipelineFix.AutoMerge.Classes...),
+			},
+		},
+	}
+	if e.Schedule != nil {
+		out.Schedule = &Schedule{QuietHours: e.Schedule.QuietHours, Timezone: e.Schedule.Timezone}
+	}
+	out.Actions.Reviews = e.Actions.Reviews
+	out.PipelineFix.AutoMerge.MaxPerDay = e.PipelineFix.AutoMerge.MaxPerDay
+	out.Change = Change{
+		Triggers:             append([]string{}, e.Change.Triggers...),
+		CreateClasses:        append([]string{}, e.Change.CreateClasses...),
+		RequireDocs:          e.Change.RequireDocs,
+		DocsLabels:           append([]string{}, e.Change.DocsLabels...),
+		RequireTestReport:    e.Change.RequireTestReport,
+		MaxAttempts:          e.Change.MaxAttempts,
+		MaxOpen:              e.Change.MaxOpen,
+		VerifyTimeoutSeconds: int64(e.Change.VerifyTimeout / time.Second),
+		MaxFiles:             e.Change.MaxFiles,
+		MaxChangedLines:      e.Change.MaxChangedLines,
+		Paths:                append([]string{}, e.Change.Paths...),
+		AutoMerge: AutoMerge{
+			Mode:      e.Change.AutoMerge.Mode,
+			Classes:   append([]string{}, e.Change.AutoMerge.Classes...),
+			MaxPerDay: e.Change.AutoMerge.MaxPerDay,
+		},
+	}
+	out.Review = Review{
+		Targets:         append([]string{}, e.Review.Targets...),
+		Rung:            e.Review.Rung,
+		MaxNotes:        e.Review.MaxNotes,
+		MaxReviewsPerMR: e.Review.MaxReviewsPerMR,
+		AgenticMerge: ReviewMerge{
+			PipelineFix: ReviewMergeStatus{Available: e.Review.PipelineFixMerge.Available, Reason: e.Review.PipelineFixMerge.Reason},
+			Change:      ReviewMergeStatus{Available: e.Review.ChangeMerge.Available, Reason: e.Review.ChangeMerge.Reason},
+		},
+	}
+	return out
+}
+
+// ScopeCaps is scope.CapsPolicy, wire-shaped. null means the layer states no
+// cap, exactly as an absent key does in the operator config.
+type ScopeCaps struct {
+	MaxFiles      *int64 `json:"max_files"`
+	MaxLines      *int64 `json:"max_lines"`
+	MaxDeletes    *int64 `json:"max_deletes"`
+	MaxFileBytes  *int64 `json:"max_file_bytes"`
+	MaxPatchBytes *int64 `json:"max_patch_bytes"`
+}
+
+// ScopePolicy is one layer's `scope:` section (scope.Policy), wire-shaped.
+//
+// null AND [] ARE DIFFERENT VALUES for Classes, Profiles and AllowedProfiles,
+// as they are in scope.Policy: null says nothing, [] allows none. The
+// conversions below keep the difference in both directions
+// (TestScopePolicyRoundTripsNilAndEmpty).
+type ScopePolicy struct {
+	Classes         []string  `json:"classes"`
+	Caps            ScopeCaps `json:"caps"`
+	ProtectedPaths  []string  `json:"protected_paths"`
+	CIPaths         []string  `json:"ci_paths"`
+	TestPaths       []string  `json:"test_paths"`
+	DocsPaths       []string  `json:"docs_paths"`
+	SourcePaths     []string  `json:"source_paths"`
+	DenyLift        []string  `json:"deny_lift"`
+	Profiles        []string  `json:"profiles"`
+	AllowedProfiles []string  `json:"allowed_profiles"`
+}
+
+// OperatorScope is the OPERATOR half of a project's scope fold (gonk-2usw
+// plan 4.2, 066 section 3.2): the instance layer's `scope:` and the one
+// group layer that applies to the project (nested groups already folded).
+//
+// It is on the project response because gonk-meter is the only component
+// that holds the operator config, and gonk-gate -- which folds a dispatch's
+// scope envelope (pack row AND operator AND the project's `.gonk.yml` read at
+// a commit it pinned) -- must not carry a second copy of that config. It is
+// policy, never a secret: the same text an operator publishes in the chart's
+// values.
+//
+// On ProjectResponse it is a POINTER, and nil means "not stated": a meter
+// that predates the field omits it, and a reader must then treat the operator
+// layers as UNKNOWN (no fold, no dispatch), never as "the operator restricts
+// nothing".
+type OperatorScope struct {
+	Instance ScopePolicy `json:"instance"`
+	Group    ScopePolicy `json:"group"`
+}
+
+func classNames(in []scope.Class) []string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, c := range in {
+		out = append(out, string(c))
+	}
+	return out
+}
+
+func classValues(in []string) []scope.Class {
+	if in == nil {
+		return nil
+	}
+	out := make([]scope.Class, 0, len(in))
+	for _, c := range in {
+		out = append(out, scope.Class(c))
+	}
+	return out
+}
+
+func cloneStrings(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	return append([]string{}, in...)
+}
+
+// ScopePolicyFrom is meter-side: it projects one operator layer onto the wire.
+func ScopePolicyFrom(p scope.Policy) ScopePolicy {
+	return ScopePolicy{
+		Classes: classNames(p.Classes),
+		Caps: ScopeCaps{MaxFiles: p.Caps.MaxFiles, MaxLines: p.Caps.MaxLines, MaxDeletes: p.Caps.MaxDeletes,
+			MaxFileBytes: p.Caps.MaxFileBytes, MaxPatchBytes: p.Caps.MaxPatchBytes},
+		ProtectedPaths: cloneStrings(p.ProtectedPaths), CIPaths: cloneStrings(p.CIPaths),
+		TestPaths: cloneStrings(p.TestPaths), DocsPaths: cloneStrings(p.DocsPaths),
+		SourcePaths: cloneStrings(p.SourcePaths), DenyLift: classNames(p.DenyLift),
+		Profiles: cloneStrings(p.Profiles), AllowedProfiles: cloneStrings(p.AllowedProfiles),
+	}
+}
+
+// Policy is the reader's side: the layer as pkg/scope takes it. It does NOT
+// validate; scope.Fold validates every layer it is given.
+func (p ScopePolicy) Policy() scope.Policy {
+	return scope.Policy{
+		Classes: classValues(p.Classes),
+		Caps: scope.CapsPolicy{MaxFiles: p.Caps.MaxFiles, MaxLines: p.Caps.MaxLines, MaxDeletes: p.Caps.MaxDeletes,
+			MaxFileBytes: p.Caps.MaxFileBytes, MaxPatchBytes: p.Caps.MaxPatchBytes},
+		ProtectedPaths: cloneStrings(p.ProtectedPaths), CIPaths: cloneStrings(p.CIPaths),
+		TestPaths: cloneStrings(p.TestPaths), DocsPaths: cloneStrings(p.DocsPaths),
+		SourcePaths: cloneStrings(p.SourcePaths), DenyLift: classValues(p.DenyLift),
+		Profiles: cloneStrings(p.Profiles), AllowedProfiles: cloneStrings(p.AllowedProfiles),
+	}
+}
+
+// EffectivePipelineFix is the reader's side of PipelineFix: the folded
+// section as pkg/gonkcfg types it, so a consumer can call LiftOptIn and
+// TightenScope on what meter resolved instead of re-deriving either.
+func (p PipelineFix) EffectivePipelineFix() gonkcfg.EffectivePipelineFix {
+	return gonkcfg.EffectivePipelineFix{
+		Classes: append([]string{}, p.Classes...), Targets: append([]string{}, p.Targets...),
+		AllowCI: p.AllowCI, CIExecChanges: p.CIExecChanges, MaxAttempts: p.MaxAttempts, MaxChain: p.MaxChain,
+		VerifyTimeout: time.Duration(p.VerifyTimeoutSeconds) * time.Second,
+		MaxFiles:      p.MaxFiles, MaxChangedLines: p.MaxChangedLines, Paths: append([]string{}, p.Paths...),
+		AutoMerge: gonkcfg.EffectiveAutoMerge{Mode: p.AutoMerge.Mode, Classes: append([]string{}, p.AutoMerge.Classes...),
+			MaxPerDay: p.AutoMerge.MaxPerDay},
+	}
+}
+
+// EffectiveChange is the reader's side of Change: the folded section as
+// pkg/gonkcfg types it, so a consumer can call AllowsTrigger, DocsRequired and
+// TightenScope on what meter resolved instead of re-deriving them.
+func (c Change) EffectiveChange() gonkcfg.EffectiveChange {
+	return gonkcfg.EffectiveChange{
+		Triggers: append([]string{}, c.Triggers...), CreateClasses: append([]string{}, c.CreateClasses...),
+		RequireDocs: c.RequireDocs, DocsLabels: append([]string{}, c.DocsLabels...),
+		RequireTestReport: c.RequireTestReport, MaxAttempts: c.MaxAttempts, MaxOpen: c.MaxOpen,
+		VerifyTimeout: time.Duration(c.VerifyTimeoutSeconds) * time.Second,
+		MaxFiles:      c.MaxFiles, MaxChangedLines: c.MaxChangedLines, Paths: append([]string{}, c.Paths...),
+		AutoMerge: gonkcfg.EffectiveAutoMerge{Mode: c.AutoMerge.Mode, Classes: append([]string{}, c.AutoMerge.Classes...),
+			MaxPerDay: c.AutoMerge.MaxPerDay},
+	}
+}
+
+// EffectiveReview is the reader's side of Review.
+func (r Review) EffectiveReview() gonkcfg.EffectiveReview {
+	return gonkcfg.EffectiveReview{
+		Targets: append([]string{}, r.Targets...), Rung: r.Rung,
+		MaxNotes: r.MaxNotes, MaxReviewsPerMR: r.MaxReviewsPerMR,
+		PipelineFixMerge: gonkcfg.ReviewMergeStatus{Available: r.AgenticMerge.PipelineFix.Available, Reason: r.AgenticMerge.PipelineFix.Reason},
+		ChangeMerge:      gonkcfg.ReviewMergeStatus{Available: r.AgenticMerge.Change.Available, Reason: r.AgenticMerge.Change.Reason},
+	}
+}
+
+// ---------------------------------------------------------------- PUT/GET/DELETE /v1/projects/{project}
+
+// ProjectRequest is an idempotent upsert of one project, FROM ITS RAW .gonk.yml.
+//
+// Intake sends the BYTES IT READ FROM GITLAB, verbatim. It does NOT resolve them
+// -- meter is the only component that holds operator (instance/group) policy, and
+// two independent resolvers would mean two sources of truth for a budget ceiling.
+// Meter validates, folds the nested-group-aware group policy over the instance
+// policy, calls gonkcfg.Resolve, and owns the resulting Effective.
+type ProjectRequest struct {
+	Project         string `json:"project"` // GitLab path_with_namespace
+	ProjectID       int64  `json:"project_id"`
+	Rig             string `json:"rig"`
+	DefaultBranch   string `json:"default_branch"`
+	ConfigCommitSHA string `json:"config_commit_sha"` // commit .gonk.yml was read at; "" if unknown
+	GonkYML         string `json:"gonk_yml"`          // RAW .gonk.yml bytes. Meter is the validator.
+}
+
+// ProjectResponse is meter's answer, and the ONLY legitimate source of a
+// project's effective policy for any other component.
+//
+// Invariants (asserted by the golden tests, and relied on by intake):
+//   - Effective is nil IF AND ONLY IF State == StateInvalid. An invalid config
+//     has no Effective; per ADR-002 a zero-value Effective must never be treated
+//     as a resolved one.
+//   - Error is non-empty IF AND ONLY IF State == StateInvalid.
+//   - DisabledReason is non-empty IF AND ONLY IF State == StateDisabled
+//     (ADR-002's invariant, carried onto the wire).
+//   - KeyRef is populated IF AND ONLY IF State == StateActive.
+//   - Budget is ZeroBudget() when State is Invalid or Disabled. NEVER an empty
+//     Budget{} -- that is all-nil, and nil means UNLIMITED.
+type ProjectResponse struct {
+	Project        string     `json:"project"`
+	Rig            string     `json:"rig"`
+	State          State      `json:"state"`
+	DisabledReason string     `json:"disabled_reason"`
+	Error          string     `json:"error,omitempty"`
+	Effective      *Effective `json:"effective"`
+	Budget         Budget     `json:"budget"`
+	KeyRef         KeyRef     `json:"key_ref"`
+	ConfigHash     string     `json:"config_hash"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	// OperatorScope: see the type. Additive (gonk-2usw). nil IF AND ONLY IF
+	// Effective is nil (an invalid config has no fold), or the meter predates
+	// the field.
+	OperatorScope *OperatorScope `json:"operator_scope"`
+}
+
+// ---------------------------------------------------------------- POST /v1/policy/decide
+
+// Decision kinds. defer and deny are HTTP 200: they are normal answers.
+const (
+	DecisionRun   = "run"
+	DecisionDefer = "defer"
+	DecisionDeny  = "deny"
+)
+
+// Machine-readable decision reasons. A BOUNDED set on purpose: they are
+// Prometheus label values and part of this contract.
+const (
+	ReasonNotRegistered          = "project-not-registered"
+	ReasonDisabled               = "disabled"
+	ReasonInvalidConfig          = "invalid-config"
+	ReasonActionNotAllowed       = "action-not-allowed"
+	ReasonKeyMissing             = "virtual-key-missing"
+	ReasonQuietHours             = "quiet-hours"
+	ReasonSpendStale             = "spend-data-stale"
+	ReasonLadderExhausted        = "ladder-exhausted"
+	ReasonInfraRetriesExhausted  = "infra-retries-exhausted"
+	ReasonPerTaskTokensExhausted = "per-task-tokens-exhausted"
+	ReasonMonthlyTokensExhausted = "monthly-tokens-exhausted"
+	ReasonMonthlyCostExhausted   = "monthly-cost-exhausted"
+	// ReasonCloudNotAllowed: the next rung is a PAID cloud rung and no cloud
+	// allowance is granted for this scope, so meter denies rather than spend real
+	// money on a model's say-so (spec 7.1). It rides the existing deny->needs-human
+	// path; a human (or a pre-approved allowance) is what unblocks it.
+	ReasonCloudNotAllowed = "cloud-not-allowed"
+)
+
+// DecideRequest asks meter which rung the next attempt runs at.
+//
+// THERE IS DELIBERATELY NO ATTEMPT COUNT AND NO PRIOR-OUTCOME LIST, and there
+// never will be. Meter owns ladder state, reading it from its own store. A
+// caller-supplied attempt number is a forgery vector: raise it and you skip
+// straight to the most expensive rung. Any client that tries to send one is
+// wrong; any server that reads one is a bug.
+type DecideRequest struct {
+	Project string `json:"project"`
+	Rig     string `json:"rig"`
+	// BeadID is the deterministic BeadAnchor -- the stable identifier derived from
+	// the GitLab artifact (`gonk:{project_id}:issue:{iid}`), IDENTICAL at intake's
+	// Gate 1 and the pack's Gate 2 and stable across every re-sling. It is NOT the
+	// Gas City internal bead id: that id does not even exist at Gate 1 (the first
+	// dispatch is what creates it), and it is an execution detail, not a budget
+	// key. /decide IDEMPOTENCY, ladder state, and reservation binding all key on
+	// this value -- so both gates MUST send the same one, or meter mints two
+	// reservations for one attempt (double headroom, a leaked reservation). If
+	// per-session tracing ever needs the Gas City bead id, that is a separate
+	// future field (YAGNI -- do not add it now).
+	BeadID     string `json:"bead_id"`
+	SessionKey string `json:"session_key"`
+	Trigger    string `json:"trigger"` // an atags.Trigger* value
+}
+
+// DecideResponse. On a defer or a deny, Metadata is empty, KeyRef is zero, and
+// ReservationID is empty: a decision that is not going to run hands out neither
+// an attribution identity nor a route to a credential.
+type DecideResponse struct {
+	Decision string `json:"decision"` // run | defer | deny
+	Rung     string `json:"rung"`
+	Model    string `json:"model,omitempty"`
+	Attempt  int    `json:"attempt"`
+	Reason   string `json:"reason"`
+	Detail   string `json:"detail"`
+	// RetryAfter is set on EVERY defer. A defer with no retry_after is an
+	// infinite park.
+	RetryAfter time.Time `json:"retry_after,omitzero"`
+	// Metadata is atags.Metadata(). METER mints it, so meter is the single
+	// boundary where tag values are charset-validated. The pack stamps it
+	// verbatim onto every LiteLLM request.
+	Metadata             map[string]string `json:"metadata"`
+	KeyRef               KeyRef            `json:"key_ref"`
+	ReservationID        string            `json:"reservation_id,omitempty"`
+	ReservationExpiresAt time.Time         `json:"reservation_expires_at,omitzero"`
+	Budget               Budget            `json:"budget"`
+	// Remaining is REAL dollars and real tokens. Synthetic local-model dollars
+	// are not spend and never appear here.
+	Remaining Budget    `json:"remaining"`
+	SpendAsOf time.Time `json:"spend_as_of"`
+}
+
+// ---------------------------------------------------------------- POST /v1/policy/outcome
+
+// Outcome values. Only OutcomeGateFailed escalates the ladder.
+const (
+	OutcomeSuccess     = "success"
+	OutcomeGateFailed  = "gate-failed"
+	OutcomeInfraFailed = "infra-failed"
+	OutcomeAborted     = "aborted"
+)
+
+// OutcomeRequest reports how one attempt ended. ReservationID binds the outcome
+// to a reservation METER minted: without it, `gate-failed` is a forgery vector
+// (repeat it and a project walks itself up to its most expensive rung).
+type OutcomeRequest struct {
+	Project string `json:"project"`
+	// BeadID is the SAME deterministic BeadAnchor the two /decide gates sent (see
+	// DecideRequest.BeadID) -- NOT the Gas City bead id. The outcome must settle the
+	// reservation that the matching /decide opened, so it has to key on the same
+	// identifier or the reservation it names does not exist.
+	BeadID        string `json:"bead_id"`
+	SessionKey    string `json:"session_key"`
+	Attempt       int    `json:"attempt"`
+	Rung          string `json:"rung"`
+	ReservationID string `json:"reservation_id"`
+	Outcome       string `json:"outcome"`
+	// Trigger is the atags.Trigger* value the attempt ran under -- the same one
+	// its /decide sent. OPTIONAL and ADVISORY: meter does not store a
+	// reservation's trigger, and the ladder position after a gate failure
+	// depends on it (a trigger may have a ladder floor and floor retries), so
+	// without it the Next/NextRung preview is computed as for a trigger with
+	// neither. It feeds ONLY that preview and the escalation metric derived
+	// from it; it never chooses a rung -- the next /decide does, from the
+	// trigger IT is sent. Omitted when empty, so a client that predates the
+	// field sends the request it always sent.
+	Trigger string `json:"trigger,omitempty"`
+}
+
+// OutcomeResponse. Next/NextRung are ADVISORY -- a preview for logs and
+// dashboards. The authoritative answer is always the next /decide.
+type OutcomeResponse struct {
+	OK              bool `json:"ok"`
+	RecordedAttempt int  `json:"recorded_attempt"`
+	// Next is escalate | retry | done. "retry" means the next attempt runs the
+	// SAME rung again: after an infra failure, or after a gate failure that a
+	// floor retry absorbs. "escalate" means it moves up a rung.
+	Next     string `json:"next"`
+	NextRung string `json:"next_rung"`
+}
+
+// ---------------------------------------------------------------- cost
+
+// RungCost is one rung's slice of a total.
+//
+// CostUSD and SyntheticCostUSD are DIFFERENT CURRENCIES and a client must never
+// add them. Local rungs cost no real money; they are priced synthetically in
+// LiteLLM so that the USD virtual-key ceiling is a hard door for tokens too. A
+// synthetic dollar is an accounting unit, NOT SPEND. Present it labelled or not
+// at all.
+type RungCost struct {
+	Rung             string  `json:"rung"`
+	Kind             string  `json:"kind"` // local | cloud
+	CostUSD          float64 `json:"cost_usd"`
+	SyntheticCostUSD float64 `json:"synthetic_cost_usd"`
+	CostSynthetic    bool    `json:"cost_synthetic"` // true iff Kind == "local"
+	TotalTokens      int64   `json:"total_tokens"`
+	Calls            int     `json:"calls"`
+}
+
+type TriggerCost struct {
+	Trigger          string  `json:"trigger"`
+	CostUSD          float64 `json:"cost_usd"`
+	SyntheticCostUSD float64 `json:"synthetic_cost_usd"`
+	TotalTokens      int64   `json:"total_tokens"`
+	Calls            int     `json:"calls"`
+}
+
+type AttemptView struct {
+	Attempt int    `json:"attempt"`
+	Rung    string `json:"rung"`
+	Outcome string `json:"outcome"`
+}
+
+type Window struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+}
+
+// BeadCostResponse: lifetime, not windowed. The per-task ceiling is a property
+// of the WORK ITEM, so a bead that straddles a month boundary keeps the same
+// per-task budget.
+type BeadCostResponse struct {
+	BeadID           string        `json:"bead_id"`
+	Project          string        `json:"project"`
+	CostUSD          float64       `json:"cost_usd"`
+	SyntheticCostUSD float64       `json:"synthetic_cost_usd"`
+	PromptTokens     int64         `json:"prompt_tokens"`
+	CompletionTokens int64         `json:"completion_tokens"`
+	TotalTokens      int64         `json:"total_tokens"`
+	ByRung           []RungCost    `json:"by_rung"`
+	Attempts         []AttemptView `json:"attempts"`
+	AsOf             time.Time     `json:"as_of"`
+	// Complete is false iff an open reservation exists for this scope: spend
+	// rows for it may not have landed. A client that publishes a cost (a commit
+	// trailer!) MUST NOT publish one when Complete is false.
+	Complete bool `json:"complete"`
+}
+
+type SessionCostResponse struct {
+	SessionKey       string     `json:"session_key"`
+	Project          string     `json:"project"`
+	BeadID           string     `json:"bead_id"`
+	CostUSD          float64    `json:"cost_usd"`
+	SyntheticCostUSD float64    `json:"synthetic_cost_usd"`
+	PromptTokens     int64      `json:"prompt_tokens"`
+	CompletionTokens int64      `json:"completion_tokens"`
+	TotalTokens      int64      `json:"total_tokens"`
+	ByRung           []RungCost `json:"by_rung"`
+	AsOf             time.Time  `json:"as_of"`
+	Complete         bool       `json:"complete"`
+}
+
+type ProjectCostResponse struct {
+	Project          string        `json:"project"`
+	Window           Window        `json:"window"`
+	CostUSD          float64       `json:"cost_usd"`
+	SyntheticCostUSD float64       `json:"synthetic_cost_usd"`
+	PromptTokens     int64         `json:"prompt_tokens"`
+	CompletionTokens int64         `json:"completion_tokens"`
+	TotalTokens      int64         `json:"total_tokens"`
+	ByRung           []RungCost    `json:"by_rung"`
+	ByTrigger        []TriggerCost `json:"by_trigger"`
+	Budget           Budget        `json:"budget"`
+	Remaining        Budget        `json:"remaining"`
+	AsOf             time.Time     `json:"as_of"`
+	Complete         bool          `json:"complete"`
+	Stale            bool          `json:"stale"`
+}
+
+type InstanceCostResponse struct {
+	Window           Window                `json:"window"`
+	CostUSD          float64               `json:"cost_usd"`
+	SyntheticCostUSD float64               `json:"synthetic_cost_usd"`
+	TotalTokens      int64                 `json:"total_tokens"`
+	ByProject        []ProjectCostResponse `json:"by_project"`
+	AsOf             time.Time             `json:"as_of"`
+	Complete         bool                  `json:"complete"`
+}
+
+// ---------------------------------------------------------------- POST /admin/spend/sync
+
+// SpendSyncResponse is POST /admin/spend/sync's body: the forced-sync
+// endpoint (Plan 06 hand-back HB-2) that runs one spend-log poll and blocks
+// until it has completed and its rows are committed, so a test harness has a
+// predicate to wait on instead of a sleep.
+//
+// It forces a poll; it does not fabricate one -- SpendAsOf is always
+// LiteLLM's truth (the last successful sync's spend_as_of, whether or not
+// THIS call is the one that produced it), and a poll failure is reported
+// here, not swallowed: the HTTP status is always 200 (the endpoint itself
+// did its job -- it ran a sync attempt and is honestly reporting the
+// result), and Synced/Error carry the outcome.
+//
+// RowsIngested and Unattributed are pointers so they are OMITTED (not
+// present as 0) when a poll fails: "we do not know" and "we know it was
+// zero" are different facts, and only a completed pass can tell them apart.
+type SpendSyncResponse struct {
+	SpendAsOf    time.Time `json:"spend_as_of"`
+	RowsIngested *int      `json:"rows_ingested,omitempty"`
+	Unattributed *int      `json:"unattributed,omitempty"`
+	Synced       bool      `json:"synced"`
+	Error        string    `json:"error,omitempty"`
+}
+
+// ---------------------------------------------------------------- errors
+
+// ErrorResponse is the body of a 400 (a malformed REQUEST) and of a 500.
+//
+// It is NOT the body of a 422: a 422 means the project's .gonk.yml would not
+// load, which is a successful, idempotent registration of an invalid config, and
+// it returns a full ProjectResponse with State == StateInvalid and Error set.
+type ErrorResponse struct {
+	Error string `json:"error"`
+}

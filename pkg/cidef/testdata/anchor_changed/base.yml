@@ -1,0 +1,12 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# anchor_changed/base.yml
+.fragments:
+  steps: &steps
+    - ./tools/one.sh
+    - ./tools/two.sh
+
+first:
+  script: *steps
+
+second:
+  script: *steps

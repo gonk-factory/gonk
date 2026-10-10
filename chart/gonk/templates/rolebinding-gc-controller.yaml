@@ -1,0 +1,18 @@
+{{- if .Values.gascity.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gc-controller
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gc-controller
+subjects:
+  # Bound in .Release.Namespace -- the controller acts only in its own namespace.
+  - kind: ServiceAccount
+    name: gc-controller
+    namespace: {{ .Release.Namespace }}
+{{- end }}

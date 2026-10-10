@@ -1,0 +1,21 @@
+# Expected-effect-shape for the scaffold agent (spec 5.3).
+#
+# Broker data, NOT Gas City pack data: the broker reads this from the baked pack
+# (/opt/gonk/pack/agents/scaffold/), never agent.toml. Per-kind cardinality
+# {min,max}; a kind absent here is forbidden ({0,0}). max = -1 means unbounded.
+#
+# scaffold -> file {1,N}, everything else {0,0}.
+#
+# NOTE what is absent and must stay absent: `comment` and `label`. A scaffold
+# run has no issue to comment on -- it is project-scoped, dispatched with no
+# issue_iid -- so an agent emitting one is confused about what it is doing, and
+# the deterministic answer is to reject the batch rather than apply half of it.
+#
+# The min of 1 is deliberate: an empty batch from a scaffold run is a run that
+# produced nothing, and the prompt explicitly says an honest "here is what I
+# could not determine" written into .agent/ IS a success. There is no shape in
+# which zero files is the right answer.
+
+[file]
+min = 1
+max = -1  # unbounded (N)

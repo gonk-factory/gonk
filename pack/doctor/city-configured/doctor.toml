@@ -1,0 +1,4 @@
+# Optional metadata for the city-configured doctor check (pack-spec.md
+# 1.2.10).
+description = "GONK_CITY is set. There is no default (OD-1): a wrong city name 404s every dispatch."
+warmup = true

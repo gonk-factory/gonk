@@ -1,0 +1,24 @@
+{{- if and .Values.gascity.enabled .Values.podReap.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gonk-gate-podreap
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gonk-gate-podreap
+subjects:
+  # gc-controller, and ONLY gc-controller. gonk-gate's sweep is an exec order
+  # that runs inside the controller pod, so it authenticates as that pod's
+  # ServiceAccount -- the same one cmd/gonk-gate/keyread.go's Secret read uses.
+  #
+  # NOT gc-agent. An agent pod holds pods:[get] and must never be able to delete
+  # a pod, least of all a sibling agent's (chart/gonk/templates/role-gc-agent.yaml
+  # and internal/charttest/controller_test.go both hold that line).
+  - kind: ServiceAccount
+    name: gc-controller
+    namespace: {{ .Release.Namespace }}
+{{- end }}

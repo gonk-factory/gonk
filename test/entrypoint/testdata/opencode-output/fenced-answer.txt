@@ -1,0 +1,15 @@
+[0m
+> build · qwen3-14b
+[0m
+[0m✱ [0mGlob "**/*.go"[90m 9 matches[0m
+[0m→ [0mRead internal/widget/handlers.go[90m [limit=2000][0m
+[0m→ [0mRead internal/widget/store.go[90m [limit=2000][0m
+[0m→ [0mRead internal/widget/memory.go[90m [limit=2000][0m
+[0m→ [0mRead internal/widget/widget_test.go[90m [limit=2000][0m
+[0m→ [0mRead internal/widget/handlers_test.go[90m [limit=2000][0m
+[0m→ [0mRead internal/widget/handlers.go[90m [limit=2000][0m
+Triage complete.
+
+GONK_BATCH_START
+{"verdict":"reply-only","effects":[{"kind":"comment","body":"fence passes through the watchdog untouched"}]}
+GONK_BATCH_END

@@ -1,0 +1,6 @@
+# Integer overflow in the suffix grammar: 999999999999 * 1e9 overflows int64.
+# Passes the schema pattern; ParseTokenQuantity must reject at Load.
+version: 1
+enabled: true
+budget:
+  monthly_tokens: "999999999999G"

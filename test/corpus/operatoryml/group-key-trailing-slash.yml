@@ -1,0 +1,12 @@
+# R-24: a group key with a trailing slash. GroupFor matches a group exactly or
+# as a prefix on a segment boundary, so "agentic/" matches NO project: the
+# operator writes a $10 ceiling and gets no ceiling at all, silently.
+# Disposition: Reject.
+version: 1
+instance:
+  ladder: [a]
+groups:
+  "agentic/":
+    budget: { monthly_cost_usd: 10 }
+rungs:
+  - { name: a, kind: local, model: m, est_tokens: "200K", synthetic_usd_per_1m_tokens: 0.2 }

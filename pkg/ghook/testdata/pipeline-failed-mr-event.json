@@ -1,0 +1,68 @@
+{
+  "object_kind": "pipeline",
+  "object_attributes": {
+    "id": 5002,
+    "iid": 12,
+    "ref": "refs/merge-requests/8/head",
+    "tag": false,
+    "sha": "2222222222222222222222222222222222222222",
+    "before_sha": "0000000000000000000000000000000000000000",
+    "source": "merge_request_event",
+    "status": "failed",
+    "detailed_status": "failed",
+    "stages": [
+      "build",
+      "test"
+    ],
+    "created_at": "2026-07-13 10:00:00 UTC",
+    "finished_at": "2026-07-13 10:05:00 UTC",
+    "duration": 300,
+    "queued_duration": 2,
+    "variables": [],
+    "url": "https://gitlab.example.invalid/group/repo/-/pipelines/5002"
+  },
+  "merge_request": {
+    "id": 908,
+    "iid": 8,
+    "title": "synthetic change",
+    "source_branch": "feature-x",
+    "source_project_id": 42,
+    "target_branch": "main",
+    "target_project_id": 42,
+    "state": "opened",
+    "merge_status": "can_be_merged",
+    "url": "https://gitlab.example.invalid/group/repo/-/merge_requests/8"
+  },
+  "user": {
+    "id": 9,
+    "name": "Someone",
+    "username": "human"
+  },
+  "project": {
+    "id": 42,
+    "name": "repo",
+    "path_with_namespace": "group/repo",
+    "default_branch": "main",
+    "web_url": "https://gitlab.example.invalid/group/repo"
+  },
+  "commit": {
+    "id": "2222222222222222222222222222222222222222",
+    "message": "synthetic commit\n",
+    "title": "synthetic commit",
+    "timestamp": "2026-07-13T09:59:00+00:00",
+    "author": {
+      "name": "A Human",
+      "email": "human@example.invalid"
+    }
+  },
+  "builds": [
+    {
+      "id": 50021,
+      "stage": "test",
+      "name": "unit",
+      "status": "failed",
+      "allow_failure": false,
+      "failure_reason": "script_failure"
+    }
+  ]
+}

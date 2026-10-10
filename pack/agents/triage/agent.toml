@@ -1,0 +1,394 @@
+# agents/triage/agent.toml -- THE DIRECTORY NAME ("triage") IS THE AGENT NAME.
+# A `name` field in this file would be ignored by the loader (pack-spec.md
+# 1.2.4: "If agent.toml contains a name field, the loader ignores it for
+# identity and uses the directory name"). Do not add one and believe it.
+
+description = "Reads a GitLab issue and posts exactly one triage comment plus labels."
+
+# The model is NOT named here, anywhere in this pack, or on any agent. The
+# model arrives per-session from gonk-meter's /v1/policy/decide response,
+# which reads the OPERATOR's rung catalog (pkg/opercfg). The pack is
+# model-agnostic BY CONSTRUCTION: naming a model here would hardcode one
+# site's inference topology into an open-source pack and would silently
+# disagree with the rung the budget was checked against.
+
+# Pools scale to zero (spec 4.2): an idle gonk installation runs no agent
+# pods. min_active_sessions is an AGENT-level field (internal/config's Agent
+# struct) -- there is no such field on [agent_defaults], so it is set here,
+# per agent, rather than once at the pack level.
+min_active_sessions = 0
+
+# --- The opencode harness (gonk-aql / minimal opencode leg) --------------------
+# start_command is Gas City's escape hatch (internal/config/resolve.go step 1):
+# it sets the session command DIRECTLY, bypassing the provider catalog -- so we
+# do NOT depend on an "opencode" entry existing in the city's [providers]. The
+# command is gonk's own entrypoint (baked at /usr/local/bin/gonk-agent-entrypoint),
+# which renders overlay/opencode.json (the LiteLLM provider + attribution header)
+# from the session's GC_WEBHOOK_ARG_* env and then `exec opencode "$@"`.
+#
+# The escape hatch does NOT inherit the builtin opencode provider's settings, so
+# the two that matter are set explicitly here:
+#   - prompt_mode/prompt_flag: deliver the rendered prompt as
+#     `--prompt "<text>"`, appended after the command -> entrypoint forwards it
+#     to opencode ("exec opencode \"$@\"").
+#   - env OPENCODE_PERMISSION: keep the catch-all on "allow" so a
+#     non-interactive session never blocks on a permission prompt, and DENY
+#     the tools no gonk agent has any business holding. See the block at the
+#     bottom of this file for the per-entry justification.
+start_command = "gonk-agent-entrypoint"
+prompt_mode = "flag"
+prompt_flag = "--prompt"
+
+[env]
+# HOME MUST BE OVERRIDDEN HERE. Gas City's session passthrough allow-list
+# (internal/processenv/provider.go) copies the CONTROLLER's HOME into every
+# session pod -- and the controller's HOME is /home/gonk, an emptyDir that
+# exists only in the controller pod. In an agent pod that path is not writable,
+# so the session died instantly on
+#     mkdir: cannot create directory '/home/gonk': Permission denied
+# and the reconciler respawned it in a loop. Agent [env] beats the passthrough
+# baseline (cityAnchoredSessionEnv applies providerEnv over it), so this is the
+# place to fix it. /tmp is writable in the agent image for any uid.
+HOME = "/tmp/gonk-home"
+# ...AND THE XDG VARS, for the same reason and from the same leak. Overriding
+# HOME alone is NOT enough: internal/processenv's allow-list also copies
+# XDG_CONFIG_HOME (and friends) from the controller, where they point under
+# /home/gonk. opencode is XDG-aware, so it ignored the corrected HOME and died on
+#     EACCES: permission denied, mkdir '/home/gonk'
+# from inside Bun -- with the overlay already rendered correctly, which made it
+# look like a config problem when it was a home-directory problem. All four are
+# pinned under the writable HOME so no XDG-aware tool in the image can be sent
+# back to a path that does not exist in this pod.
+XDG_CONFIG_HOME = "/tmp/gonk-home/.config"
+XDG_DATA_HOME = "/tmp/gonk-home/.local/share"
+XDG_CACHE_HOME = "/tmp/gonk-home/.cache"
+XDG_STATE_HOME = "/tmp/gonk-home/.local/state"
+# opencode's permission gate. THIS IS THE CANONICAL COPY: mention/ and
+# scaffold/ carry the identical value and point here for the reasoning.
+#
+# WHAT THIS USED TO SAY, AND WHY IT WAS WRONG (gonk-7b79). It was
+# '{"*":"allow"}', commented "so the session can run glab". glab has not
+# shipped in the agent image since gonk-0de, and -- far more important -- the
+# comment mis-stated what the setting DOES. opencode's own defaults are
+# already permissive: packages/opencode/src/agent/agent.ts at v1.18.3 (the
+# OPENCODE_VERSION pinned in images/versions.env) builds every agent from a
+# base ruleset whose first entry is literally `"*": "allow"`. So a bare
+# '{"*":"allow"}' bought us NOTHING against the hang it was written for, and
+# instead SILENTLY REMOVED the three guards upstream leaves on by default:
+#   doom_loop            "ask"  -> the same tool call repeated 3x with identical
+#                                 input keeps going instead of stopping
+#   external_directory   "ask"  -> tools may touch paths outside /workspace
+#   read "*.env"         "ask"  -> dotenv files read without a prompt
+# It removed them because OPENCODE_PERMISSION is merged in as the LAST ruleset
+# (agent.ts: `Permission.merge(defaults, ..., user)`) and evaluation is
+# `findLast` over the flattened rules (packages/opencode/src/permission/
+# index.ts, `evaluate`). One trailing `{permission:"*", pattern:"*",
+# action:"allow"}` therefore outranks every default that came before it.
+#
+# READ THE NEXT SENTENCE BEFORE CONCLUDING THE NARROWING FIXED THAT. IT DID
+# NOT, and for a while ALL THREE OF THOSE GUARDS STAYED GONE, by the same
+# mechanism: the value below STILL BEGINS with "*":"allow", it is still the
+# last ruleset merged, and `evaluate` still takes the last match. So for any
+# permission this line does not name explicitly, our catch-all is the findLast
+# and upstream's "ask" never applies.
+#
+# ONE OF THE THREE IS NOW BACK, and it is back because the hole it left was
+# DEMONSTRATED rather than argued (gonk-blxu). `external_directory` is spelled
+# out below, after the catch-all, in the shape opencode itself ships -- an
+# ask map with a whitelist. See EXTERNAL_DIRECTORY IS RESTORED below for the
+# upstream citation, the whitelist, and the live Job run that observed the
+# before and the after. The other two are still gone: `read`'s "*.env" rule and
+# `doom_loop`, both still discussed under WHAT IS DELIBERATELY NOT HERE.
+#
+# THE MECHANISM THAT MAKES A DENY SAFE HERE, and the reason this is a narrowing
+# rather than a hazard: a permission whose last matching rule is pattern "*"
+# with action "deny" causes the TOOL TO BE REMOVED FROM THE LIST THE MODEL IS
+# SENT AT ALL -- packages/opencode/src/permission/index.ts `disabled()`, used
+# by `resolveTools` in packages/opencode/src/session/llm/request.ts. The model
+# never sees the tool, so it cannot call it, cannot be refused, and cannot loop
+# retrying it. A deny here costs a capability; it cannot cost a hang.
+#
+# THE CONVERSE IS NOT "nothing below is spelled ask" (gonk-46gy). `ask` in
+# permission/index.ts has no default case -- "deny" returns, "allow" continues,
+# ANYTHING ELSE sets needsAsk and awaits a Deferred with no timeout -- and
+# nothing validates this string, because OPENCODE_PERMISSION is merged into the
+# config AFTER the schema decode (config/config.ts) and invalid JSON here is
+# logged and SKIPPED rather than fatal. So `"read":"alow"` hangs the session and
+# leaves read in the model's tool list at the same time. Every TOP-LEVEL value
+# below must be exactly "allow" or "deny"; internal/packtest's
+# TestAgentPermissionsAreNarrowed is what enforces it.
+#
+# THERE IS EXACTLY ONE "ask" BELOW AND IT IS DELIBERATE, so read this before
+# deleting it as a typo. It is the "*" inside the `external_directory` map, and
+# it is upstream's own action for that rule. The "an ask has no timeout" reading
+# above is correct about `Permission.ask` and INCOMPLETE about `opencode run`,
+# which is the only way gonk ever starts opencode (images/agent/entrypoint.sh
+# execs `opencode run -- <message>`). The non-interactive branch of
+# packages/opencode/src/cli/cmd/run.ts subscribes to the event stream and
+# answers every `permission.asked` itself:
+#     if (auto) { ...reply "once"... } else {
+#       UI.println("permission requested: ... ; auto-rejecting")
+#       await client.permission.reply({ requestID, reply: "reject" }) }
+# (run.ts around line 800; `auto` is --auto/--yolo/--dangerously-skip-
+# permissions, none of which gonk passes, and `interactive` is `args.mini`,
+# which gonk also does not pass -- run.ts line 273-274). The Deferred IS
+# awaited and it IS resolved, immediately, by the runner. Observed as well as
+# read: with OPENCODE_PERMISSION unset, a pod printed exactly that line and the
+# whole session finished in about eight seconds (gonk-blxu, gonk-i120,
+# docs/spikes/adr-008-t55-gate/runs/runB-pod.log).
+#
+# THAT EXCEPTION IS NARROW ON PURPOSE. It holds for `opencode run` and for
+# nothing else. If gonk ever starts opencode in `--mini`/interactive mode, or
+# drives the server API directly, that loop is not there and this "ask" becomes
+# the hang the paragraph above describes. internal/packtest's
+# TestExternalDirectoryIsRestoredAfterTheCatchAll pins the whole map, so the
+# exception cannot spread by copy-paste: every OTHER value stays allow/deny.
+#
+# KEY ORDER IS LOAD-BEARING. `fromConfig` iterates the object in insertion
+# order and `evaluate` takes the LAST match, so the catch-all must come FIRST
+# and the specific denials after it. Reversed, the "*" would re-allow
+# everything. opencode's own docs say the same (packages/web/src/content/docs/
+# permissions.mdx, "Granular Rules"), and its config parser deliberately
+# preserves user key order (packages/core/src/v1/config/permission.ts).
+#
+# AND ONLY THE LEADING KEY MAY CARRY A METACHARACTER. Keys are matched with
+# Wildcard.match (packages/core/src/util/wildcard.ts: "*" -> ".*", "?" -> "."),
+# so a later pattern key is a second catch-all wherever it matches --
+# `"bas*":"allow"` placed after `"bash":"deny"` becomes the findLast for
+# permission "bash" and re-allows the shell, in a line that still reads as
+# though it denied it. Name each denied permission exactly (gonk-46gy).
+#
+# WHY THE CATCH-ALL STAYS "allow": it is the no-hang property, and it is the
+# whole reason this env var exists. Anything not named below -- read, glob,
+# grep, todowrite, skill, a tool a future opencode adds -- resolves to allow
+# and runs unattended. Narrowing to an allow-LIST would mean any unlisted
+# permission fell through to opencode's `?? {action: "ask"}` fallback
+# (permission/index.ts) and blocked a session with nobody to answer it, which
+# burns the reservation and reads as an infra failure.
+#
+# WHAT THE EVIDENCE FOR THIS SET ACTUALLY IS, stated at its real strength and
+# no higher, because the next person to touch this line deserves to know how
+# much it rests on.
+#
+# IT IS DESIGN EVIDENCE, NOT A MEASURED TOOL-FREQUENCY SAMPLE. There is no
+# such sample available, and the reason is structural: tool NAMES exist only as
+# rows in the meter's trace store, reachable at GET /v1/trace/{session_key}
+# behind a bearer token. Nothing logs them. contrib/litellm/gonk_trace.py POSTs
+# them and prints nothing; internal/meter/service/http.go's putTrace logs
+# nothing on ingest; and cmd/gonk-gate/broker_trajectory.go holds view.Calls and
+# logs only len(view.Calls). A 14-day sweep of every namespace in Loki
+# (2026-09-23) found 17 agent session pods, 8 `trajectory: judged` lines
+# carrying counts only -- 39 calls over 8 sessions, 3 to 8 each, all
+# completeness=complete -- and ZERO named tool invocations anywhere.
+#
+# The two NAMED traces that exist are both second-hand, from someone reading
+# trace rows by hand, and both show the same shape: gonk-p8j's notes record
+# [glob, glob, glob, glob, read, read] over 8 turns, and effect-shape.toml's
+# own comment records a run that "globbed five times" on issue !49. Glob and
+# read. That is consistent with this set and it is not a sample.
+#
+# WHAT CARRIES THE WEIGHT INSTEAD is that the failure mode of being WRONG here
+# is bounded. A denial cannot hang a session (see the mechanism note above); it
+# can only take away a tool. If some triage run really did shell out to `ls`
+# for step 1 of the SEARCH PROCEDURE, removing bash costs it nothing it cannot
+# do with glob, which is still allowed and is what the observed runs used. The
+# entry with the least observational backing is `bash`, and the check that
+# would settle it is reading those 8 traces out of the meter -- worth doing,
+# but not a reason to leave a shell in front of untrusted issue text meanwhile.
+#
+# PER-ENTRY JUSTIFICATION. Every denial is a capability the agent's OWN PROMPT
+# already forbids, and the tool-name-to-permission mapping is opencode's
+# (`disabled()`: edit/write/apply_patch all map to "edit"; every other tool
+# maps to its own name; the shell tool's id is "bash", packages/opencode/src/
+# tool/shell/id.ts).
+#
+#   bash       cmd/gonk-gate/broker_inject.go's renderTriagePrompt says "Do NOT
+#              run glab, git, bd, or any external API". The image ships neither
+#              glab nor bd (gonk-0de) and the pod holds no forge credential.
+#              This is the entry that matters: the issue body is spliced into
+#              the prompt verbatim (capBody, whose own doc comment calls it
+#              "truncates an UNTRUSTED issue body"), and without this a shell
+#              is one tool call away from anything that text asks for.
+#   edit       covers edit, write AND apply_patch. No agent in this pack
+#              returns work by writing a file: triage returns comment+label
+#              effects and scaffold returns `file` effects carrying complete
+#              content, both inside the GONK_BATCH fence, and gonk-sweep is
+#              what commits them (see each agent's effect-shape.toml). A write
+#              into the pod's ephemeral checkout reaches nobody.
+#   webfetch   the prompts pre-fetch everything the agent is allowed to see
+#              ("do NOT fetch anything yourself") because the pod cannot reach
+#              the forge. This is also the agent's only first-class egress
+#              primitive, and the NetworkPolicy that was supposed to bound
+#              egress is inert on this cluster (flannel does not implement
+#              NetworkPolicy -- gonk-dku). Denying the tool is the control that
+#              does not depend on the CNI decision.
+#   websearch  same class as webfetch. Probably already absent, because
+#              registry.ts only offers it for providers `webSearchEnabled()`
+#              recognises and this overlay exposes exactly one provider
+#              ("gonk", the LiteLLM shim) -- so this entry is defence in depth,
+#              not the load-bearing one. It is named anyway so that a provider
+#              change cannot quietly hand the agent a search tool.
+#   task       spawns a subagent, i.e. a second model loop. No prompt in this
+#              pack asks for one and no observed session has used one. Note it
+#              is NOT a permission escape either way: a subagent inherits the
+#              parent's deny rules (packages/opencode/src/agent/
+#              subagent-permissions.ts) and this same `user` ruleset is merged
+#              into every agent. It is denied for cost and for keeping one
+#              session to one loop, not because it would widen the envelope.
+#   question   the tool that asks the OPERATOR something mid-run. It IS
+#              registered here -- registry.ts enables it whenever `flags.client`
+#              is "cli", and "cli" is the default (packages/opencode/src/effect/
+#              runtime-flags.ts) -- and a gonk pod has no operator attached, so
+#              a call to it waits until the reservation TTL reaps the session.
+#              Denying it removes a latent hang that predates this change.
+#
+# EXTERNAL_DIRECTORY IS RESTORED, AND WHY IT IS SPELLED THE WAY IT IS.
+#
+# THE HOLE WAS OBSERVED, NOT REASONED ABOUT (gonk-blxu). The real agent image
+# was run under a Kubernetes Job against a stub model that RETURNED the tool
+# call itself -- read(filePath="/tmp/gonk/llkey"), the LiteLLM virtual key the
+# entrypoint materializes -- so the result does not depend on a model taking
+# bait. Two runs, identical but for this variable:
+#   OPENCODE_PERMISSION unset (opencode's own defaults):
+#       ! permission requested: external_directory (/tmp/gonk/*); auto-rejecting
+#       x Read /tmp/gonk/llkey failed
+#   OPENCODE_PERMISSION as it was (catch-all, six denials, no external_directory):
+#       -> Read /tmp/gonk/llkey
+#   and the key's PLAINTEXT came back in the next request's tool result.
+# Raw logs: docs/spikes/adr-008-t55-gate/runs/runB-pod.log, runC-pod.log,
+# blxu-evidence.txt. The key file is mode 0600 owned by 65532, which is the uid
+# the agent runs as, so file permissions were never a barrier here.
+#
+# SO THE CAUSE WAS THE CATCH-ALL, NOT A MISSING RULE. opencode already ships
+# the control; our own last-merged "*":"allow" was disabling it.
+#
+# THE FIX MIRRORS UPSTREAM RATHER THAN INVENTING A RULE. At the pinned version
+# (images/versions.env OPENCODE_VERSION=1.18.3) the default is built in
+# packages/opencode/src/agent/agent.ts lines 108-135:
+#     const whitelistedDirs = [ Truncate.GLOB,
+#                               path.join(Global.Path.tmp, "*"),
+#                               ...skillDirs, ...referenceDirs ]
+#     external_directory: { "*": "ask",
+#                           ...Object.fromEntries(whitelistedDirs.map(d => [d, "allow"])) }
+# -- and the same pair appears again in packages/core/src/plugin/agent.ts:105.
+# The map below is that, with the two STATIC whitelist entries resolved for
+# this pod's environment.
+#
+# WHY A `read` PATTERN WOULD HAVE BEEN THE WRONG INSTRUMENT, kept because the
+# wrong fix is the tempting one: `read` matches patterns RELATIVE to the
+# worktree (packages/core/src/tool/read.ts resolves through LocationMutation),
+# so `"read": {"/tmp/gonk/*": "deny"}` would never match anything. It would sit
+# here looking like a control and enforce nothing -- the same class as the
+# NetworkPolicy this cluster's CNI does not implement (gonk-dku). The gate
+# opencode actually applies to an ABSOLUTE path is external_directory, and
+# opencode generalizes the path to a directory glob itself:
+# packages/core/src/location-mutation.ts builds `resource = <realpath dir>/*`
+# and asks with that, which is why the run above shows "/tmp/gonk/*" and not
+# "/tmp/gonk/llkey".
+#
+# THE WHITELIST ENTRIES, and how each was established rather than guessed:
+#
+#   /tmp/gonk-home/.local/share/opencode/tool-output/*
+#       opencode's TRUNCATED-TOOL-OUTPUT directory. When a tool's output exceeds
+#       MAX_LINES/MAX_BYTES, truncate.ts writes the full text to a file and
+#       tells the model "Full output saved to: <path> ... Use Grep to search
+#       the full content or Read with offset/limit" -- opencode INVITES the
+#       model to open that path. Derived from source, not guessed:
+#         tool/truncate.ts:18       GLOB = path.join(TRUNCATION_DIR, "*")
+#         tool/truncation-dir.ts:4  TRUNCATION_DIR = path.join(Global.Path.data, "tool-output")
+#         core/src/global.ts:11     data = path.join(xdgData, "opencode")
+#       and xdgData is XDG_DATA_HOME, which THIS FILE sets a few lines above to
+#       /tmp/gonk-home/.local/share. internal/packtest joins the two: the test
+#       recomputes this pattern from the XDG_DATA_HOME in this same [env] block
+#       and fails if they drift, because a whitelist entry that no longer
+#       matches is a dead rule, which is the defect this bead already rejected
+#       once.
+#
+#       AND NOW THE PART THAT CORRECTS THIS BEAD'S OWN PREMISE, because it was
+#       measured and it came out the other way. THIS ENTRY IS BELT-AND-BRACES,
+#       NOT THE THING THAT KEEPS TRUNCATED OUTPUT READABLE. opencode re-appends
+#       `external_directory: {Truncate.GLOB: "allow"}` to EVERY agent's ruleset
+#       as the last rule, unless the user's own config contains an explicit
+#       DENY whose pattern is exactly Truncate.GLOB -- agent/agent.ts lines
+#       296-311, "Ensure Truncate.GLOB is allowed unless explicitly
+#       configured", with upstream's own tests at test/agent/agent.test.ts:527
+#       and :555 named "Truncate.GLOB is allowed even when user denies
+#       external_directory globally". Measured in the Job harness, not inferred:
+#       with this entry deleted the truncated-output read still succeeded, and
+#       with the whole map replaced by {"*":"deny"} it STILL succeeded, while a
+#       sibling path one level up (.../opencode/log) was auto-rejected in the
+#       same configuration (docs/spikes/adr-008-t55-gate/runs/trunc-nowhitelist-*,
+#       trunc-deny-*, homeprobe-*). So the trade-off gonk-blxu was weighing --
+#       "a deny would also block the truncate directory" -- DOES NOT EXIST at
+#       v1.18.3. The entry stays because it is upstream's own shape, it states
+#       the intent where a reader looks for it, and it is the thing that would
+#       still work if that safety net ever went away. It is not load-bearing
+#       today, and saying otherwise would overstate it.
+#
+#       THE CONVERSE IS WORTH KNOWING BEFORE ANYONE "TIGHTENS" THIS: writing
+#       "deny" here, with this exact pattern string, is the ONE thing that DOES
+#       switch upstream's protection off (that is precisely what the `explicit`
+#       check looks for). A deny here would therefore break truncated-output
+#       reads for real.
+#
+#   /tmp/opencode/*
+#       upstream's `path.join(Global.Path.tmp, "*")`, i.e. os.tmpdir()/opencode
+#       (core/src/global.ts:15). Copied for fidelity with upstream and stated
+#       plainly as INERT HERE: at v1.18.3 Global.Path.tmp is referenced only by
+#       the shell tool's prompt (tool/shell/prompt.ts:280, "scratch space"), and
+#       `bash` is denied above, so nothing in a gonk session writes there or is
+#       told to read there. It is whitelisted, not needed.
+#
+#   skillDirs / referenceDirs
+#       upstream's other two whitelist sources, and BOTH ARE EMPTY IN GONK, so
+#       they contribute no entry. Skill dirs come only from a remote skill index
+#       pulled over HTTP into XDG_CACHE_HOME/opencode/skills
+#       (opencode/src/skill/discovery.ts); gonk configures no skill registry and
+#       the pod has no egress to one. Reference dirs come from `references` in
+#       the opencode config; the overlay this entrypoint renders has no such
+#       key. IF EITHER IS EVER CONFIGURED, this map must grow to match, because
+#       upstream would have whitelisted them and we no longer inherit upstream's
+#       map -- our external_directory key replaces it wholesale.
+#
+# THE CATCH-ALL IS STILL FIRST AND STILL "allow" (see gonk-i120): removing it
+# entirely is the cleaner end state and is NOT done here, because it rests on
+# how `ask` behaves for every OTHER permission, which is a live-config change
+# with a wider blast radius than this one.
+#
+# WHAT IS DELIBERATELY NOT HERE, so that nobody reads its absence as a
+# judgement that it is safe: a path rule on `read`, and `doom_loop`. Those are
+# the two upstream defaults the catch-all above still overrides.
+#
+# WHAT THIS CHANGE COSTS, since it is not free and the cost is observable. A
+# session whose model is talked into reading an external path does not get a
+# tool error it can recover from: `opencode run` prints "The user rejected
+# permission to use this specific tool call" and the SESSION ENDS THERE, with
+# NO GONK_BATCH fence emitted -- and it still exits 0, so the Job reports
+# success. gonk-gate keys on the batch, not the exit status, so this surfaces
+# as a session that produced no effects rather than as a silent pass; that is
+# the right failure direction, but it is a real behaviour change and it is
+# observed, not predicted (docs/spikes/adr-008-t55-gate/runs/blxu-after-pod.log).
+#
+# read: upstream's default asks before reading "*.env"/"*.env.*". Not restored
+# here, and NOT because it would be dead -- those patterns are worktree-relative
+# and would match a checkout's .env fine -- but because it is a different hole
+# from the one this change closes (a secret INSIDE the checkout, not outside
+# it), it wants its own evidence, and the "ask"-in-run-mode exception above should
+# not be spent on a rule nobody has measured. Recorded as a gap.
+#
+# doom_loop: upstream's default is "ask", and an "ask" is the one action that
+# can hang a pod with no operator (see THE MECHANISM above), so it cannot be
+# copied back into this line as-is. "deny" is not the same control either -- it
+# would remove the loop-detection prompt rather than stop the loop. The repeat
+# ceiling this guard was doing has NO replacement in gonk today; the session's
+# only remaining bound is the reservation TTL. Named here so its absence is a
+# recorded gap and not an oversight.
+OPENCODE_PERMISSION = '{"*":"allow","bash":"deny","edit":"deny","webfetch":"deny","websearch":"deny","task":"deny","question":"deny","external_directory":{"*":"ask","/tmp/gonk-home/.local/share/opencode/tool-output/*":"allow","/tmp/opencode/*":"allow"}}'
+
+# NOTE ON TURN/TOKEN CAPS: there is no [limits]/max_turns table on Gas City's
+# Agent (verified against internal/config/config.go -- no such field exists,
+# and inventing one here would be silently ignored by the loader, which is
+# worse than not writing it: a cap nobody enforces). The deterministic caps
+# the gate signal (spec 6.3) depends on -- "completed and posted required
+# artifacts WITHIN TURN/TOKEN CAPS" -- are gonk-meter's PerTaskTokens budget
+# (pkg/budget, Plan 03), enforced independently of this pack.

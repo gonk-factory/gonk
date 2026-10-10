@@ -1,0 +1,12 @@
+=== file 1 of 2: "VERSION" (modified; 1 added, 1 removed)
+@@ hunk 1 of 1: OLD lines 1-1, NEW lines 1-1
+[OLD:1] - |1.4.0
+\ the line above has no newline at its end
+[NEW:1] + |1.5.0
+\ the line above has no newline at its end
+
+=== file 2 of 2: "win/setup.bat" (modified; 1 added, 1 removed)
+@@ hunk 1 of 1: OLD lines 1-2, NEW lines 1-2
+[OLD:1,NEW:1]   |echo off
+[OLD:2]       - |set SHELVES=4
+[NEW:2]       + |set SHELVES=6

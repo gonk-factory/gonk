@@ -1,0 +1,79 @@
+# agents/scaffold/agent.toml -- THE DIRECTORY NAME ("scaffold") IS THE AGENT
+# NAME. A `name` field here would be ignored by the loader (pack-spec.md
+# 1.2.4). Do not add one and believe it.
+
+description = "Reads a repository and opens a post-merge MR that scaffolds .agent/."
+
+# No model name here -- see agents/triage/agent.toml's comment; the same
+# reasoning applies verbatim to every agent in this pack.
+
+min_active_sessions = 0
+
+# --- The opencode harness -------------------------------------------------
+# IDENTICAL to pack/agents/triage/agent.toml, and it must be. Without
+# start_command the loader falls through to the catalog's DEFAULT provider,
+# whose binary this image does not ship, and the controller logs
+#     pool "scaffold": agent "scaffold": provider not found in PATH ... (skipping)
+# and NO SESSION IS EVER CREATED. Observed live 2026-08-02 on the first real
+# scaffold dispatch: the order fired, the meter reserved, and nothing ran.
+#
+# Every line below is load-bearing and was established the hard way on triage --
+# read that file's comments before changing any of it. In brief: start_command
+# is Gas City's escape hatch (bypasses the provider catalog, so no "opencode"
+# entry is required in [providers]); HOME and all four XDG vars must be
+# overridden because the session passthrough copies the CONTROLLER's HOME into
+# the pod, where it does not exist and is not writable, which crash-loops the
+# session; and OPENCODE_PERMISSION keeps the catch-all on "allow" so a
+# non-interactive run never blocks on a permission prompt, while denying the
+# tools no gonk agent needs.
+start_command = "gonk-agent-entrypoint"
+prompt_mode = "flag"
+prompt_flag = "--prompt"
+
+[env]
+HOME = "/tmp/gonk-home"
+XDG_CONFIG_HOME = "/tmp/gonk-home/.config"
+XDG_DATA_HOME = "/tmp/gonk-home/.local/share"
+XDG_CACHE_HOME = "/tmp/gonk-home/.cache"
+XDG_STATE_HOME = "/tmp/gonk-home/.local/state"
+# IDENTICAL to agents/triage/agent.toml, which carries the whole argument and
+# the opencode source citations for it (gonk-7b79, gonk-blxu). Read that block
+# before changing one character of this line: the "*" MUST stay first (last
+# match wins) and every TOP-LEVEL value must be "allow" or "deny" -- any value
+# opencode does not recognise is treated as an ask, because permission/index.ts
+# `ask` treats everything that is not exactly "deny" or "allow" as one
+# (gonk-46gy). internal/packtest enforces it.
+#
+# THE ONE "ask" IN THIS LINE IS THE "*" INSIDE `external_directory`, and it is
+# upstream's own action for that rule, not a slip. It does not hang, because
+# gonk only ever runs `opencode run`, whose non-interactive loop answers every
+# permission request with a reject itself (packages/opencode/src/cli/cmd/
+# run.ts, "auto-rejecting"). The triage block has the citation, the whitelist
+# derivation and the live Job run that observed it.
+#
+# WHAT THIS LINE DOES NOT DO, since the triage comment's history section can
+# read as though it did: it does NOT restore the other two guards upstream
+# leaves on by default (doom_loop "ask", read "*.env" "ask"). The leading
+# "*":"allow" is still the last matching rule for every permission not named
+# after it, so those two remain overridden. `external_directory` IS restored
+# (gonk-blxu): it closes a DEMONSTRATED exposure -- a live agent read
+# /tmp/gonk/llkey and the LiteLLM virtual key's plaintext came back in the tool
+# result. Its allow-list names opencode's truncated-tool-output directory; read
+# the triage block for why that entry is belt-and-braces rather than the thing
+# that keeps truncated output readable, and for what this change costs (a
+# refused external read ENDS the session with no GONK_BATCH fence).
+#
+# WHY THE SAME SET FITS A DIFFERENT JOB, rather than being copied because
+# copying was easy. scaffold has two prompts and neither needs more than
+# triage does. renderScaffoldPrompt (no checkout) hands the agent probed file
+# contents inline and tells it not to read a working directory at all, so it
+# needs NO tools. renderScaffoldCheckoutPrompt does have a working copy and
+# invites reading it -- read/glob/grep, all still "allow" under the catch-all.
+# What scaffold emits is `file` effects carrying complete content inside the
+# GONK_BATCH fence (effect-shape.toml: file {1,N}); gonk-sweep commits them and
+# opens the MR. The agent writing a file in its own pod would accomplish
+# nothing, which is why denying `edit` costs this agent nothing. Both prompts
+# already say "Do NOT run git, glab, bd, or any external API" and "do NOT fetch
+# anything yourself" -- `bash` and `webfetch` are denials of things the prompt
+# forbids in prose, now enforced by the harness instead of by persuasion.
+OPENCODE_PERMISSION = '{"*":"allow","bash":"deny","edit":"deny","webfetch":"deny","websearch":"deny","task":"deny","question":"deny","external_directory":{"*":"ask","/tmp/gonk-home/.local/share/opencode/tool-output/*":"allow","/tmp/opencode/*":"allow"}}'

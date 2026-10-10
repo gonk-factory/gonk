@@ -1,0 +1,80 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# keys/free_dependencies.yml: differs from keys/base.yml in ONE thing --
+# lint-widgets: dependencies added.
+stages:
+  - prepare
+  - check
+  - pack
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+variables:
+  WIDGET_MODE: strict
+
+default:
+  image: registry.invalid/tools/base:1
+  retry: 1
+  before_script:
+    - echo default-before
+
+.tmpl-check:
+  stage: check
+  image: registry.invalid/tools/check:2
+  variables:
+    CHECK_LEVEL: "3"
+  rules:
+    - if: $WIDGET_MODE == "strict"
+  script:
+    - echo template-script
+
+.shared:
+  cache_spec: &cache_spec
+    key: widgets
+    paths:
+      - .cache/
+
+fetch-parts:
+  stage: prepare
+  script:
+    - ./tools/fetch.sh
+  cache: *cache_spec
+
+lint-widgets:
+  extends: .tmpl-check
+  script:
+    - ./tools/lint.sh widgets
+  dependencies: []
+  allow_failure: false
+  when: on_success
+
+test-widgets:
+  extends: .tmpl-check
+  script:
+    - ./tools/test.sh widgets
+  retry: 0
+  parallel: 2
+  timeout: 20m
+
+bundle:
+  stage: pack
+  script:
+    - ./tools/bundle.sh
+  only:
+    - main
+  except:
+    - tags
+
+ship-later:
+  stage: pack
+  when: delayed
+  start_in: 10 minutes
+  script:
+    - ./tools/ship.sh
+
+downstream:
+  stage: pack
+  trigger:
+    project: group/other

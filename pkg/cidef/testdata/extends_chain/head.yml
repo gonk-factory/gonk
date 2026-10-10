@@ -1,0 +1,37 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# extends_chain/head.yml: base.yml with every `extends` expanded by hand.
+# Hashes merge key by key (the nearer definition wins); arrays are replaced
+# whole; with a LIST of templates the later one wins.
+deep:
+  image: registry.invalid/tools/root:1
+  variables:
+    LANE: slow
+    DEPTH: "2"
+    EXTRA: "yes"
+  script:
+    - echo leafish
+  tags:
+    - narrow
+
+both:
+  image: registry.invalid/tools/other:7
+  variables:
+    LANE: slow
+    DEPTH: "2"
+    COLOUR: teal
+  tags:
+    - wide
+  script:
+    - echo both
+
+plain:
+  stage: deploy
+  image: registry.invalid/tools/root:1
+  variables:
+    LANE: slow
+    DEPTH: "2"
+    EXTRA: "yes"
+  script:
+    - echo leafish
+  tags:
+    - narrow

@@ -1,0 +1,115 @@
+{{- if and .Values.networkPolicy.enabled .Values.gascity.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gonk-controller
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+  annotations:
+    {{- include "gonk.networkPolicyBanner" . | nindent 4 }}
+spec:
+  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
+  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
+  # (gitops:clusters/<cluster>/foundation/kustomization.yaml). This object blocks
+  # nothing today; it is documentation-as-code that starts enforcing the day
+  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  podSelector:
+    matchLabels:
+      {{- include "gonk.selectorLabels" (dict "ctx" . "component" "controller") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "intake") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.gascity.supervisorPort }}
+  egress:
+    # DNS, GitLab, Dolt (beads), gonk-meter, gonk-intake's private listener, the
+    # work store's Postgres, and the API server
+    # (spawn agent pods). The API
+    # server cannot be named by a NetworkPolicy selector -- left to the cluster's
+    # own allowance; if your CNI blocks it, NO SESSION SPAWNS. Plan 06 confirms.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 14 }}
+      ports:
+        {{- range .Values.networkPolicy.dns.ports }}
+        - protocol: UDP
+          port: {{ . }}
+        {{- end }}
+    {{- if .Values.dolt.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "dolt") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.dolt.port }}
+    {{- end }}
+    {{- if .Values.meter.enabled }}
+    # gonk-meter, at GONK_METER_URL -- which this chart sets on THIS pod. Three
+    # callers live here, not one: the in-controller gonk-gate exec orders
+    # (gonk-dispatch POST /v1/policy/decide, gonk-sweep POST /v1/policy/outcome
+    # and its spend gathering) and the `meter-reachable` warm-up doctor check
+    # (GET /healthz). gonk-meter's OWN policy has admitted `component:
+    # controller` on this port since it was written; this is the outbound half
+    # that was never written with it, so the permission was one-sided and every
+    # one of those calls was dropped on the way OUT (gonk-zjk7). A component
+    # that is configured to call a Service it may not reach is the class
+    # TestInClusterDialsHaveEgress now fails the build on.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "meter") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.meter.port }}
+    {{- end }}
+    {{- if .Values.intake.enabled }}
+    # gonk-intake's PRIVATE listener, at GONK_RIG_BASE_URL. gonk-gate REGISTERS
+    # the per-session checkout there (pkg/rig, gonk-msz) before it creates the
+    # session; without this rule the grant POST is dropped and every session
+    # runs with no working copy -- and scaffold falls back quietly rather than
+    # failing, so nothing would go red. Same one-sided permission as the meter
+    # rule above (gonk-zjk7).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "intake") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.intake.ports.private }}
+    {{- end }}
+    {{- if .Values.workstore.enabled }}
+    # The work store (gonk-t41): the in-pod gonk-gate keeps its state in
+    # Postgres, on the same server as the meter's ledger (its own role and
+    # schema). The same rule as gonk-meter's ledger egress.
+    {{- if eq .Values.ledger.postgres.mode "cnpg" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: gonk-ledger-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- else }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ledgerPostgres.namespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.ledger.postgres.port | default 5432 }}
+    {{- end }}
+    {{- end }}
+    {{- if .Values.networkPolicy.gitlabInCluster.enabled }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.gitlabInCluster.namespaceSelector | nindent 14 }}
+    {{- end }}
+{{- end }}

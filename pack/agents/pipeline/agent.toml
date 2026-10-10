@@ -1,0 +1,52 @@
+# agents/pipeline/agent.toml -- THE DIRECTORY NAME ("pipeline") IS THE AGENT
+# NAME. A `name` field here would be ignored by the loader (pack-spec.md
+# 1.2.4). Do not add one and believe it.
+#
+# gonk-tios D6: diagnoses ONE failed GitLab pipeline and returns exactly one
+# typed `diagnosis` effect (effect-shape.toml). It reads; it changes nothing.
+# gonk-gate fetches every fact and log excerpt controller-side and renders the
+# prompt (cmd/gonk-gate/broker_pipeline_prompt.go); the pod holds no forge
+# credential and gets a checkout pinned to the pipeline's commit.
+
+description = "Diagnoses a failed GitLab pipeline: one typed diagnosis grounded in its job logs; changes nothing."
+
+# No model name here -- see agents/triage/agent.toml's comment; the same
+# reasoning applies verbatim to every agent in this pack. Which rung this agent
+# starts on is meter's business (pkg/rung LadderFloors), not the pack's.
+
+min_active_sessions = 0
+
+# --- The opencode harness -------------------------------------------------
+# IDENTICAL to pack/agents/triage/agent.toml, and it must be:
+# internal/packtest's TestPipelineAgentHarnessIsTriagesByteForByte fails on any
+# drift. Every line is load-bearing and was established the hard way on triage
+# -- read that file's comments before changing any of it.
+start_command = "gonk-agent-entrypoint"
+prompt_mode = "flag"
+prompt_flag = "--prompt"
+
+[env]
+HOME = "/tmp/gonk-home"
+XDG_CONFIG_HOME = "/tmp/gonk-home/.config"
+XDG_DATA_HOME = "/tmp/gonk-home/.local/share"
+XDG_CACHE_HOME = "/tmp/gonk-home/.cache"
+XDG_STATE_HOME = "/tmp/gonk-home/.local/state"
+# IDENTICAL to agents/triage/agent.toml, which carries the whole argument and
+# the opencode source citations for it (gonk-7b79, gonk-46gy, gonk-blxu): the
+# "*" stays first (last match wins), every TOP-LEVEL value is exactly "allow"
+# or "deny", and the one "ask" is upstream's own `external_directory` default.
+# read/glob/grep stay allowed (the catch-all); bash, edit, webfetch, websearch,
+# task and question are denied.
+#
+# WHY THE SAME SET FITS THIS AGENT. Its job has triage's shape: read material
+# gonk already fetched, read the checkout, return one effect, post nothing. Its
+# untrusted input is WORSE than an issue body -- a job log is written by
+# whatever the pipeline ran -- so a shell or a fetch tool one call away from it
+# would be the larger hole, not the smaller. `edit` matters doubly here: a
+# diagnosis's `files` are CITATIONS, never writes (gonk-tios P5), and the
+# agent has no tool that could make them anything else.
+#
+# Like mention, this set is reached by analogy with triage, not measured on a
+# pipeline session: none has run yet. Re-check it against the first real
+# traces.
+OPENCODE_PERMISSION = '{"*":"allow","bash":"deny","edit":"deny","webfetch":"deny","websearch":"deny","task":"deny","question":"deny","external_directory":{"*":"ask","/tmp/gonk-home/.local/share/opencode/tool-output/*":"allow","/tmp/opencode/*":"allow"}}'

@@ -1,0 +1,97 @@
+#!/bin/sh
+# Fake `opencode` for the entrypoint fake-PATH test harness
+# (test/entrypoint/testdata/fakebin, see fakepath_harness_test.go in this
+# package).
+#
+# Reused across entrypoint tests -- T-02 only needs the script to exist on
+# PATH (its GC_ALIAS-unset scenario exits before opencode is ever invoked),
+# but T-03 exercises the provider check (`opencode models`) and the
+# non-interactive run (`opencode run -- <prompt>`), so both subcommands are
+# implemented here, generically, controlled by env vars rather than hardcoded
+# to one test's expectations.
+#
+#   opencode models
+#     Prints FAKE_OPENCODE_MODELS_OUTPUT (default: one "gonk/" model, so the
+#     entrypoint's provider check passes by default) and exits
+#     FAKE_OPENCODE_MODELS_EXIT (default 0).
+#
+#   opencode run -- <prompt>
+#     Exits FAKE_OPENCODE_RUN_EXIT (default 0) immediately. Never hangs --
+#     the entrypoint holds the shell open itself after this returns
+#     (gonk-2tb), so a fake that blocked here would wedge every test run.
+#
+#   FAKE_OPENCODE_ENV_FILE (any subcommand)
+#     When set, this script dumps ITS OWN environment to
+#     "${FAKE_OPENCODE_ENV_FILE}.<subcommand>" before doing anything else.
+#     That is the only way to assert what the entrypoint actually EXPORTS:
+#     reading entrypoint.sh as text would prove a line exists, not that the
+#     variable reached the process opencode runs as (gonk-le3g). One file per
+#     subcommand because the provider check and the run are separate execs and
+#     a test may care about either.
+
+#
+#   FAKE_OPENCODE_ARGV_FILE (any subcommand)
+#     When set, this script writes its argv, each argument followed by a NUL
+#     byte, to "${FAKE_OPENCODE_ARGV_FILE}.<subcommand>". NUL-separated
+#     because a prompt is multi-line text; this is how a test asserts the
+#     exact prompt `opencode run` received (gonk-t55: the Jobs runtime reads
+#     it from a mounted file).
+#
+#   FAKE_OPENCODE_RUN_OUTPUT (run)
+#     A file whose bytes `run` copies to its stdout, verbatim, before anything
+#     else it does -- how a test makes this fake print opencode's real tool-call
+#     lines (ANSI and all) for the loop watchdog to read (gonk-un7z).
+#
+#   FAKE_OPENCODE_RUN_HANG_SECS (run)
+#     After the output, sleep this long before exiting -- a model still
+#     looping, which only the watchdog's kill ends. It also starts one CHILD
+#     process that lives as long, standing in for opencode's own tool
+#     processes: the kill must reach it too. Both sleeps write nowhere near
+#     opencode's stdout, so a kill that missed them cannot be masked by the
+#     entrypoint waiting for the output pipe to close.
+#
+#   FAKE_OPENCODE_PID_FILE (run)
+#     When set, `run` writes "<its pid> <its pgid> <child pid or ->" to it,
+#     first thing -- how a test names the processes that must be dead
+#     afterwards, and asserts which process group opencode ran in.
+
+set -eu
+
+if [ -n "${FAKE_OPENCODE_ENV_FILE:-}" ]; then
+	env >"${FAKE_OPENCODE_ENV_FILE}.${1:-none}"
+fi
+if [ -n "${FAKE_OPENCODE_ARGV_FILE:-}" ]; then
+	printf '%s\0' "$@" >"${FAKE_OPENCODE_ARGV_FILE}.${1:-none}"
+fi
+
+case "${1:-}" in
+models)
+	printf '%s\n' "${FAKE_OPENCODE_MODELS_OUTPUT:-gonk/default}"
+	exit "${FAKE_OPENCODE_MODELS_EXIT:-0}"
+	;;
+run)
+	_hang="${FAKE_OPENCODE_RUN_HANG_SECS:-0}"
+	_child=-
+	if [ "${_hang}" != 0 ]; then
+		sleep "${_hang}" </dev/null >/dev/null 2>&1 &
+		_child=$!
+	fi
+	if [ -n "${FAKE_OPENCODE_PID_FILE:-}" ]; then
+		# Field 5 of /proc/<pid>/stat is the pgrp ($$ never contains a ')'
+		# -- comm is "opencode" -- so a plain split is safe here).
+		_pgid=$(cut -d' ' -f5 "/proc/$$/stat")
+		printf '%s %s %s\n' "$$" "${_pgid}" "${_child}" >"${FAKE_OPENCODE_PID_FILE}"
+	fi
+	if [ -n "${FAKE_OPENCODE_RUN_OUTPUT:-}" ]; then
+		cat "${FAKE_OPENCODE_RUN_OUTPUT}"
+	fi
+	if [ "${_hang}" != 0 ]; then
+		sleep "${_hang}" </dev/null >/dev/null 2>&1
+	fi
+	exit "${FAKE_OPENCODE_RUN_EXIT:-0}"
+	;;
+*)
+	printf 'fake opencode: unhandled subcommand: %s\n' "${1:-<none>}" >&2
+	exit 1
+	;;
+esac

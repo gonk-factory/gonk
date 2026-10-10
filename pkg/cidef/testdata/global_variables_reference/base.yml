@@ -1,0 +1,18 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# global_variables_reference: byte-identical sides. One GLOBAL variable is a
+# !reference. `assemble` inherits it; `measure` inherits no variables at all.
+.values:
+  lane: slow
+
+variables:
+  LANE: !reference [.values, lane]
+
+assemble:
+  script:
+    - ./tools/assemble.sh
+
+measure:
+  inherit:
+    variables: false
+  script:
+    - ./tools/measure.sh

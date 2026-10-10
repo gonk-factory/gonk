@@ -1,0 +1,12 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# stage_changed/head.yml: `assemble` moved to another stage. `measure` gained
+# an explicit `stage: test`, which is what it already had by default.
+assemble:
+  stage: deploy
+  script:
+    - ./tools/assemble.sh
+
+measure:
+  stage: test
+  script:
+    - ./tools/measure.sh

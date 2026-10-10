@@ -1,0 +1,1596 @@
+{
+  "plain-operator / disabled": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / empty-ladder-intersection": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / features-on": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / fixes-agentic-review-mode": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / fixes-defaults": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / fixes-everything-set": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / fixes-everything-set-under-a-vetoing-group": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / fixes-under-a-group-naming-a-merge-mode": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / fixes-under-a-nested-group": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / invalid: fixes without pipelines": {},
+  "plain-operator / invalid: unknown top-level key": {},
+  "plain-operator / nothing-opted-in": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / onboarding-default": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / pipelines-only": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / staged-fix-section": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / triage-only": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "plain-operator / unlimited-budget": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / disabled": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / empty-ladder-intersection": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / features-on": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / fixes-agentic-review-mode": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / fixes-defaults": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / fixes-everything-set": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / fixes-everything-set-under-a-vetoing-group": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / fixes-under-a-group-naming-a-merge-mode": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / fixes-under-a-nested-group": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / invalid: fixes without pipelines": {},
+  "tight-operator / invalid: unknown top-level key": {},
+  "tight-operator / nothing-opted-in": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / onboarding-default": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / pipelines-only": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / staged-fix-section": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / triage-only": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  },
+  "tight-operator / unlimited-budget": {
+    "effective.actions.reviews": false,
+    "effective.change": {
+      "auto_merge": {
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 3,
+        "mode": "off"
+      },
+      "create_classes": [
+        "test",
+        "docs"
+      ],
+      "docs_labels": [
+        "feature",
+        "enhancement",
+        "type::feature"
+      ],
+      "max_attempts": 2,
+      "max_changed_lines": 200,
+      "max_files": 6,
+      "max_open": 1,
+      "paths": [],
+      "require_docs": "when-labelled",
+      "require_test_report": false,
+      "triggers": [
+        "label",
+        "command",
+        "mention"
+      ],
+      "verify_timeout_seconds": 7200
+    },
+    "effective.pipeline_fix.auto_merge.max_per_day": 3,
+    "effective.review": {
+      "agentic_merge": {
+        "change": {
+          "available": false,
+          "reason": "reviews-off"
+        },
+        "pipeline_fix": {
+          "available": false,
+          "reason": "reviews-off"
+        }
+      },
+      "max_notes": 20,
+      "max_reviews_per_mr": 3,
+      "rung": "",
+      "targets": [
+        "gonk"
+      ]
+    }
+  }
+}

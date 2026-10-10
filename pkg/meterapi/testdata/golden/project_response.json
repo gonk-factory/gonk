@@ -1,0 +1,185 @@
+{
+  "project": "group/repo",
+  "rig": "gitlab",
+  "state": "active",
+  "disabled_reason": "",
+  "effective": {
+    "enabled": true,
+    "actions": {
+      "triage": true,
+      "pipelines": true,
+      "pipeline_fixes": true,
+      "features": false,
+      "scaffold": true,
+      "reviews": true
+    },
+    "ladder": [
+      "qwen-local",
+      "gpt-4o"
+    ],
+    "continuity": "resume",
+    "triage": {
+      "label_prefix": "gonk::",
+      "respond_to_mentions": true
+    },
+    "provenance": {
+      "commit_trailers": true,
+      "include_usage": false
+    },
+    "schedule": {
+      "quiet_hours": "22:00-06:00",
+      "timezone": "UTC"
+    },
+    "pipeline_fix": {
+      "classes": [
+        "code",
+        "test",
+        "configuration"
+      ],
+      "targets": [
+        "ref",
+        "mr"
+      ],
+      "allow_ci": true,
+      "ci_exec_changes": "deny",
+      "max_attempts": 3,
+      "max_chain": 7,
+      "verify_timeout_seconds": 5400,
+      "max_files": 2,
+      "max_changed_lines": 25,
+      "paths": [
+        "internal/**"
+      ],
+      "auto_merge": {
+        "mode": "after-human-approval",
+        "classes": [
+          "docs",
+          "ci"
+        ],
+        "max_per_day": 2
+      }
+    },
+    "change": {
+      "triggers": [
+        "label",
+        "command"
+      ],
+      "create_classes": [
+        "source",
+        "test"
+      ],
+      "require_docs": "always",
+      "docs_labels": [
+        "api",
+        "needs docs"
+      ],
+      "require_test_report": true,
+      "max_attempts": 3,
+      "max_open": 2,
+      "verify_timeout_seconds": 2700,
+      "max_files": 4,
+      "max_changed_lines": 120,
+      "paths": [
+        "internal/**"
+      ],
+      "auto_merge": {
+        "mode": "after-agentic-review",
+        "classes": [
+          "docs"
+        ],
+        "max_per_day": 1
+      }
+    },
+    "review": {
+      "targets": [
+        "gonk"
+      ],
+      "rung": "gpt-4o",
+      "max_notes": 7,
+      "max_reviews_per_mr": 2,
+      "agentic_merge": {
+        "pipeline_fix": {
+          "available": true,
+          "reason": ""
+        },
+        "change": {
+          "available": false,
+          "reason": "no-distinct-model"
+        }
+      }
+    }
+  },
+  "budget": {
+    "monthly_cost_usd": 100,
+    "monthly_tokens": 5000000,
+    "per_task_tokens": 50000
+  },
+  "key_ref": {
+    "secret_name": "gonk-group-repo",
+    "secret_key": "litellm-key"
+  },
+  "config_hash": "sha256:deadbeef",
+  "updated_at": "2026-01-02T03:04:05Z",
+  "operator_scope": {
+    "instance": {
+      "classes": [
+        "source",
+        "test",
+        "docs"
+      ],
+      "caps": {
+        "max_files": 3,
+        "max_lines": 40,
+        "max_deletes": 0,
+        "max_file_bytes": 262144,
+        "max_patch_bytes": 16384
+      },
+      "protected_paths": [
+        "infra/**"
+      ],
+      "ci_paths": [
+        "ci/**"
+      ],
+      "test_paths": [
+        "spec/**"
+      ],
+      "docs_paths": [
+        "handbook/**"
+      ],
+      "source_paths": [
+        "lib/**"
+      ],
+      "deny_lift": [
+        "ci"
+      ],
+      "profiles": [],
+      "allowed_profiles": [
+        "go",
+        "python",
+        "docs-md"
+      ]
+    },
+    "group": {
+      "classes": [
+        "source"
+      ],
+      "caps": {
+        "max_files": null,
+        "max_lines": null,
+        "max_deletes": null,
+        "max_file_bytes": null,
+        "max_patch_bytes": null
+      },
+      "protected_paths": null,
+      "ci_paths": null,
+      "test_paths": null,
+      "docs_paths": null,
+      "source_paths": null,
+      "deny_lift": null,
+      "profiles": null,
+      "allowed_profiles": [
+        "python"
+      ]
+    }
+  }
+}

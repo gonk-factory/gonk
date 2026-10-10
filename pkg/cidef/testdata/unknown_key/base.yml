@@ -1,0 +1,6 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# unknown_key/base.yml
+assemble:
+  script:
+    - ./tools/assemble.sh
+  mystery_knob: low

@@ -1,0 +1,57 @@
+{
+  "object_kind": "pipeline",
+  "object_attributes": {
+    "id": 5001,
+    "iid": 11,
+    "ref": "main",
+    "tag": false,
+    "sha": "1111111111111111111111111111111111111111",
+    "before_sha": "0000000000000000000000000000000000000000",
+    "source": "push",
+    "status": "failed",
+    "detailed_status": "failed",
+    "stages": [
+      "build",
+      "test"
+    ],
+    "created_at": "2026-07-13 10:00:00 UTC",
+    "finished_at": "2026-07-13 10:05:00 UTC",
+    "duration": 300,
+    "queued_duration": 2,
+    "variables": [],
+    "url": "https://gitlab.example.invalid/group/repo/-/pipelines/5001"
+  },
+  "merge_request": null,
+  "user": {
+    "id": 9,
+    "name": "Someone",
+    "username": "human"
+  },
+  "project": {
+    "id": 42,
+    "name": "repo",
+    "path_with_namespace": "group/repo",
+    "default_branch": "main",
+    "web_url": "https://gitlab.example.invalid/group/repo"
+  },
+  "commit": {
+    "id": "1111111111111111111111111111111111111111",
+    "message": "synthetic commit\n",
+    "title": "synthetic commit",
+    "timestamp": "2026-07-13T09:59:00+00:00",
+    "author": {
+      "name": "A Human",
+      "email": "human@example.invalid"
+    }
+  },
+  "builds": [
+    {
+      "id": 50011,
+      "stage": "test",
+      "name": "unit",
+      "status": "failed",
+      "allow_failure": false,
+      "failure_reason": "script_failure"
+    }
+  ]
+}

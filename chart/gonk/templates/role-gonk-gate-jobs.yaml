@@ -1,0 +1,63 @@
+{{- if .Values.gascity.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+# THE SESSION RUNTIME'S GRANT (gonk-t55, plan D6/P5). NAMESPACED Role, NEVER a
+# ClusterRole: gonk-gate creates every agent session as a Kubernetes Job in the
+# release namespace, and nowhere else.
+#
+# WHAT EACH RULE IS FOR -- one line per pkg/runtime/jobs call (jobs.go):
+#   batch/jobs  create        Start: the session Job
+#               get           Start's AlreadyExists path (D2: the name is the
+#                             idempotency key; the existing Job is read to check
+#                             it is a gonk session and not being deleted);
+#                             Status; Output; Stop (the Job's UID for the
+#                             delete precondition)
+#               list          List (label gonk-factory.github.io/component=agent-session),
+#                             which the sweep's stale-session pass uses (D7)
+#               delete        Stop, and Start's rollback when the Secret fails (D3)
+#   secrets     create        Start: the per-Job Secret carrying prompt,
+#                             litellm-key, metadata.json and rig-url (D3)
+#               get           Stop: read the Secret to delete it only if the
+#                             stopped Job owns it
+#               delete        Stop, so the prompt and key do not outlive it by
+#                             however long garbage collection takes; normally
+#                             the Secret also goes with the Job through its
+#                             ownerReference
+#   pods        list          Status and Output: find the Job's pod by the
+#                             gonk-factory.github.io/session label (kept only if the
+#                             Job's UID controls it)
+#   pods/log    get           Output: the full container log the sweep judges
+#
+# No watch (nothing watches: the sweep polls) and no pods get (the pod is only
+# ever found by list). Both were in the first version of this Role and were
+# dropped once the runtime existed to check against (t55 verify round 1).
+#
+# NOTHING ELSE. No update or patch on anything, no pods/exec, no create on pods
+# (the Job controller creates the pod, not gonk-gate), no jobs/status. The rule
+# list is asserted exactly by internal/charttest/jobs_rbac_test.go.
+#
+# BE CLEAR ABOUT WHAT THIS ROLE ADDS. gc-controller already holds pods and
+# pods/log and secrets:[get] through Role gc-controller (Gas City's session
+# provider needs them). What is NEW is batch/jobs, and secrets create/delete.
+# secrets:[delete] cannot be narrowed with resourceNames because Job Secret
+# names are minted per session; it is scoped to this namespace and to the one
+# ServiceAccount the binding names, which is the whole of the blast radius.
+kind: Role
+metadata:
+  name: gonk-gate-jobs
+  labels:
+    {{- include "gonk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, get, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+{{- end }}

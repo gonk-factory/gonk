@@ -1,0 +1,29 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# anchors_inlined/head.yml: base.yml with every anchor, alias and merge key
+# written out by hand. An explicit key beats a merged one; in a merge LIST the
+# earlier entry wins; a merge is shallow (second's variables are its own).
+first:
+  image: registry.invalid/tools/a:1
+  variables:
+    LANE: slow
+    DEPTH: "1"
+  script:
+    - ./tools/one.sh
+    - ./tools/two.sh
+
+second:
+  image: registry.invalid/tools/a:1
+  tags:
+    - wide
+  script:
+    - ./tools/three.sh
+  variables:
+    LANE: fast
+
+third:
+  tags:
+    - wide
+  image: registry.invalid/tools/c:3
+  script:
+    - ./tools/one.sh
+    - ./tools/two.sh

@@ -1,0 +1,10 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# broken/duplicate_job.yml: the same job key twice. Which one wins is the
+# parser's business, so this package does not pick.
+assemble:
+  script:
+    - ./tools/assemble.sh
+
+assemble:
+  script:
+    - "true"

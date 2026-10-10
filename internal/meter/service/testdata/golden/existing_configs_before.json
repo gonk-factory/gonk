@@ -1,0 +1,3317 @@
+{
+  "plain-operator / disabled": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 0,
+        "monthly_tokens": 0,
+        "per_task_tokens": 0
+      },
+      "config_hash": "sha256:ce493ea4fb323a4e829754e10bfbb3e03e4eb72020c850ad5b280d4d20052522",
+      "disabled_reason": "disabled by project .gonk.yml",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": true,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": false,
+        "ladder": [
+          "qwen-local"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code",
+            "test"
+          ],
+          "max_attempts": 2,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "",
+        "secret_name": ""
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "disabled",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / empty-ladder-intersection": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 0,
+        "monthly_tokens": 0,
+        "per_task_tokens": 0
+      },
+      "config_hash": "sha256:181d1bf86c159b6b6e20ebd19950ffd6d7d3d507d74bdcd85ca3b40b1bd2e44d",
+      "disabled_reason": "ladder empty: no rung allowed by all layers (project [nope], instance [qwen-local glm sonnet])",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": false,
+        "ladder": null,
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code",
+            "test"
+          ],
+          "max_attempts": 2,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "",
+        "secret_name": ""
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "disabled",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / features-on": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": null,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:3c1d9f16f0fd26a9ad8854897a691c46f4254ab0ec8eaefac8575803bb3262c6",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": true,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code",
+            "test"
+          ],
+          "max_attempts": 2,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / fixes-agentic-review-mode": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": null,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:dfb07ab9287aa1258c9a1964d333de291092c4443ac80055cef30ca0eb7c1f11",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": true,
+          "pipelines": true,
+          "scaffold": false,
+          "triage": false
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "after-agentic-review"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code",
+            "test"
+          ],
+          "max_attempts": 2,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-other-repo-a811ea4c"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "other/repo",
+      "rig": "other-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / fixes-defaults": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": null,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:31354eb9fa45bc0252c79912ff2559570cf6d5970815cf6a85a2bfea64bf2773",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": true,
+          "pipelines": true,
+          "scaffold": false,
+          "triage": false
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code",
+            "test"
+          ],
+          "max_attempts": 2,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / fixes-everything-set": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": null,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:ce0ea67edc0c5b2b69b3e121f8d3a2666b2d8664ea2b19924773ffd1a5a4407b",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": true,
+          "pipeline_fixes": true,
+          "pipelines": true,
+          "scaffold": true,
+          "triage": true
+        },
+        "continuity": "fresh",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": true,
+          "auto_merge": {
+            "classes": [
+              "docs",
+              "ci"
+            ],
+            "mode": "after-human-approval"
+          },
+          "ci_exec_changes": "auto",
+          "classes": [
+            "code",
+            "test",
+            "configuration"
+          ],
+          "max_attempts": 3,
+          "max_chain": 9,
+          "max_changed_lines": 12,
+          "max_files": 2,
+          "paths": [
+            "internal/**"
+          ],
+          "targets": [
+            "ref",
+            "mr"
+          ],
+          "verify_timeout_seconds": 2700
+        },
+        "provenance": {
+          "commit_trailers": false,
+          "include_usage": true
+        },
+        "schedule": {
+          "quiet_hours": "22:00-06:00",
+          "timezone": "UTC"
+        },
+        "triage": {
+          "label_prefix": "bot::",
+          "respond_to_mentions": false
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / fixes-everything-set-under-a-vetoing-group": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": null,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:ce0ea67edc0c5b2b69b3e121f8d3a2666b2d8664ea2b19924773ffd1a5a4407b",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": true,
+          "pipeline_fixes": true,
+          "pipelines": true,
+          "scaffold": true,
+          "triage": true
+        },
+        "continuity": "fresh",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": true,
+          "auto_merge": {
+            "classes": [
+              "docs",
+              "ci"
+            ],
+            "mode": "after-human-approval"
+          },
+          "ci_exec_changes": "auto",
+          "classes": [
+            "code",
+            "test",
+            "configuration"
+          ],
+          "max_attempts": 3,
+          "max_chain": 9,
+          "max_changed_lines": 12,
+          "max_files": 2,
+          "paths": [
+            "internal/**"
+          ],
+          "targets": [
+            "ref",
+            "mr"
+          ],
+          "verify_timeout_seconds": 2700
+        },
+        "provenance": {
+          "commit_trailers": false,
+          "include_usage": true
+        },
+        "schedule": {
+          "quiet_hours": "22:00-06:00",
+          "timezone": "UTC"
+        },
+        "triage": {
+          "label_prefix": "bot::",
+          "respond_to_mentions": false
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-agentic-repo-337901b9"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "agentic/repo",
+      "rig": "agentic-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / fixes-under-a-group-naming-a-merge-mode": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": null,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:ce0ea67edc0c5b2b69b3e121f8d3a2666b2d8664ea2b19924773ffd1a5a4407b",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": true,
+          "pipeline_fixes": true,
+          "pipelines": true,
+          "scaffold": true,
+          "triage": true
+        },
+        "continuity": "fresh",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": true,
+          "auto_merge": {
+            "classes": [
+              "docs",
+              "ci"
+            ],
+            "mode": "after-human-approval"
+          },
+          "ci_exec_changes": "auto",
+          "classes": [
+            "code",
+            "test",
+            "configuration"
+          ],
+          "max_attempts": 3,
+          "max_chain": 9,
+          "max_changed_lines": 12,
+          "max_files": 2,
+          "paths": [
+            "internal/**"
+          ],
+          "targets": [
+            "ref",
+            "mr"
+          ],
+          "verify_timeout_seconds": 2700
+        },
+        "provenance": {
+          "commit_trailers": false,
+          "include_usage": true
+        },
+        "schedule": {
+          "quiet_hours": "22:00-06:00",
+          "timezone": "UTC"
+        },
+        "triage": {
+          "label_prefix": "bot::",
+          "respond_to_mentions": false
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-other-repo-a811ea4c"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "other/repo",
+      "rig": "other-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / fixes-under-a-nested-group": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": null,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:ce0ea67edc0c5b2b69b3e121f8d3a2666b2d8664ea2b19924773ffd1a5a4407b",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": true,
+          "pipeline_fixes": true,
+          "pipelines": true,
+          "scaffold": true,
+          "triage": true
+        },
+        "continuity": "fresh",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": true,
+          "auto_merge": {
+            "classes": [
+              "docs",
+              "ci"
+            ],
+            "mode": "after-human-approval"
+          },
+          "ci_exec_changes": "auto",
+          "classes": [
+            "code",
+            "test",
+            "configuration"
+          ],
+          "max_attempts": 3,
+          "max_chain": 9,
+          "max_changed_lines": 12,
+          "max_files": 2,
+          "paths": [
+            "internal/**"
+          ],
+          "targets": [
+            "ref",
+            "mr"
+          ],
+          "verify_timeout_seconds": 2700
+        },
+        "provenance": {
+          "commit_trailers": false,
+          "include_usage": true
+        },
+        "schedule": {
+          "quiet_hours": "22:00-06:00",
+          "timezone": "UTC"
+        },
+        "triage": {
+          "label_prefix": "bot::",
+          "respond_to_mentions": false
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-agentic-experiments-repo-677ea59d"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "agentic/experiments/repo",
+      "rig": "agentic-experiments-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / invalid: fixes without pipelines": {
+    "http_status": 422,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 0,
+        "monthly_tokens": 0,
+        "per_task_tokens": 0
+      },
+      "config_hash": "sha256:a4f0a93674442ee2d1d43fffd5aa70062ebd9c7a65a88921e641f099a57e5b58",
+      "disabled_reason": "",
+      "effective": null,
+      "error": ".gonk.yml: jsonschema validation failed with 'https://raw.githubusercontent.com/gonk-factory/gonk/main/docs/schemas/gonk-config.v1.schema.json#'\n- at '/actions': missing property 'pipelines'",
+      "key_ref": {
+        "secret_key": "",
+        "secret_name": ""
+      },
+      "operator_scope": null,
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "invalid",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / invalid: unknown top-level key": {
+    "http_status": 422,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 0,
+        "monthly_tokens": 0,
+        "per_task_tokens": 0
+      },
+      "config_hash": "sha256:47a5e04fef5dc36b79f83345943b8d8a0e43f6ec6f4eee0ffcc243d68f9730c7",
+      "disabled_reason": "",
+      "effective": null,
+      "error": ".gonk.yml: jsonschema validation failed with 'https://raw.githubusercontent.com/gonk-factory/gonk/main/docs/schemas/gonk-config.v1.schema.json#'\n- at '': additional properties 'banana' not allowed",
+      "key_ref": {
+        "secret_key": "",
+        "secret_name": ""
+      },
+      "operator_scope": null,
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "invalid",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / nothing-opted-in": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": null,
+        "monthly_tokens": null,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:d5d36b85bb8657c37c74d4031243fe1c3f76bb057fdaa496a135b5710dffc4b1",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": false
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code",
+            "test"
+          ],
+          "max_attempts": 2,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / onboarding-default": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 0,
+        "monthly_tokens": 50000000,
+        "per_task_tokens": 2000000
+      },
+      "config_hash": "sha256:4c5735ea46603e82e364b7597349825cf8e4d46acc02da12d8549eff88b79c25",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code",
+            "test"
+          ],
+          "max_attempts": 2,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / pipelines-only": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": null,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:5d25401886196d93514ae95131eecd8c489311c32020d2a197f98c5a4bb11a33",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": true,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code",
+            "test"
+          ],
+          "max_attempts": 2,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-agentic-repo-337901b9"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "agentic/repo",
+      "rig": "agentic-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / staged-fix-section": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": null,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:0b49ae6c8b314646322ccc90bc0a557a58c62bb986412d1c7e50c7d2dc83cb99",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "after-human-approval"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [],
+          "max_attempts": 2,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 1,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / triage-only": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 10,
+        "monthly_tokens": null,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:0a2c43ff5c90c194aee75aad4f523240be672acacd1a3bd87c83c550fff5c7fa",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code",
+            "test"
+          ],
+          "max_attempts": 2,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "plain-operator / unlimited-budget": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": null,
+        "monthly_tokens": null,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:50dc842dd08a226b98695197b00bd6e3415344a4c38e80e21641f7c90483d0c8",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code",
+            "test"
+          ],
+          "max_attempts": 2,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / disabled": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 0,
+        "monthly_tokens": 0,
+        "per_task_tokens": 0
+      },
+      "config_hash": "sha256:ce493ea4fb323a4e829754e10bfbb3e03e4eb72020c850ad5b280d4d20052522",
+      "disabled_reason": "disabled by project .gonk.yml",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": true,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": false,
+        "ladder": [
+          "qwen-local"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "",
+        "secret_name": ""
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "disabled",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / empty-ladder-intersection": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 0,
+        "monthly_tokens": 0,
+        "per_task_tokens": 0
+      },
+      "config_hash": "sha256:181d1bf86c159b6b6e20ebd19950ffd6d7d3d507d74bdcd85ca3b40b1bd2e44d",
+      "disabled_reason": "ladder empty: no rung allowed by all layers (project [nope], instance [qwen-local glm sonnet])",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": false,
+        "ladder": null,
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "",
+        "secret_name": ""
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "disabled",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / features-on": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": 80000000,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:3c1d9f16f0fd26a9ad8854897a691c46f4254ab0ec8eaefac8575803bb3262c6",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / fixes-agentic-review-mode": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": 80000000,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:dfb07ab9287aa1258c9a1964d333de291092c4443ac80055cef30ca0eb7c1f11",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": true,
+          "pipelines": true,
+          "scaffold": false,
+          "triage": false
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 1800
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-other-repo-a811ea4c"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "other/repo",
+      "rig": "other-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / fixes-defaults": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": 80000000,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:31354eb9fa45bc0252c79912ff2559570cf6d5970815cf6a85a2bfea64bf2773",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": true,
+          "pipelines": true,
+          "scaffold": false,
+          "triage": false
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / fixes-everything-set": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": 80000000,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:ce0ea67edc0c5b2b69b3e121f8d3a2666b2d8664ea2b19924773ffd1a5a4407b",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": true,
+          "pipelines": true,
+          "scaffold": true,
+          "triage": true
+        },
+        "continuity": "fresh",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": true,
+          "auto_merge": {
+            "classes": [
+              "docs",
+              "ci"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "auto",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 9,
+          "max_changed_lines": 12,
+          "max_files": 2,
+          "paths": [
+            "internal/**"
+          ],
+          "targets": [
+            "ref",
+            "mr"
+          ],
+          "verify_timeout_seconds": 2700
+        },
+        "provenance": {
+          "commit_trailers": false,
+          "include_usage": true
+        },
+        "schedule": {
+          "quiet_hours": "22:00-06:00",
+          "timezone": "UTC"
+        },
+        "triage": {
+          "label_prefix": "bot::",
+          "respond_to_mentions": false
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / fixes-everything-set-under-a-vetoing-group": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": 80000000,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:ce0ea67edc0c5b2b69b3e121f8d3a2666b2d8664ea2b19924773ffd1a5a4407b",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": true,
+          "scaffold": true,
+          "triage": true
+        },
+        "continuity": "fresh",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": true,
+          "auto_merge": {
+            "classes": [
+              "docs",
+              "ci"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "auto",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 9,
+          "max_changed_lines": 12,
+          "max_files": 2,
+          "paths": [
+            "internal/**"
+          ],
+          "targets": [
+            "ref",
+            "mr"
+          ],
+          "verify_timeout_seconds": 2700
+        },
+        "provenance": {
+          "commit_trailers": false,
+          "include_usage": true
+        },
+        "schedule": {
+          "quiet_hours": "22:00-06:00",
+          "timezone": "UTC"
+        },
+        "triage": {
+          "label_prefix": "bot::",
+          "respond_to_mentions": false
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-agentic-repo-337901b9"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "agentic/repo",
+      "rig": "agentic-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / fixes-under-a-group-naming-a-merge-mode": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": 80000000,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:ce0ea67edc0c5b2b69b3e121f8d3a2666b2d8664ea2b19924773ffd1a5a4407b",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": true,
+          "pipelines": true,
+          "scaffold": true,
+          "triage": true
+        },
+        "continuity": "fresh",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": true,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "auto",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 9,
+          "max_changed_lines": 12,
+          "max_files": 2,
+          "paths": [
+            "internal/**"
+          ],
+          "targets": [
+            "ref",
+            "mr"
+          ],
+          "verify_timeout_seconds": 1800
+        },
+        "provenance": {
+          "commit_trailers": false,
+          "include_usage": true
+        },
+        "schedule": {
+          "quiet_hours": "22:00-06:00",
+          "timezone": "UTC"
+        },
+        "triage": {
+          "label_prefix": "bot::",
+          "respond_to_mentions": false
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-other-repo-a811ea4c"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "other/repo",
+      "rig": "other-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / fixes-under-a-nested-group": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": 80000000,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:ce0ea67edc0c5b2b69b3e121f8d3a2666b2d8664ea2b19924773ffd1a5a4407b",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": true,
+          "scaffold": true,
+          "triage": true
+        },
+        "continuity": "fresh",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": true,
+          "auto_merge": {
+            "classes": [
+              "docs",
+              "ci"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "auto",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 2,
+          "max_changed_lines": 12,
+          "max_files": 2,
+          "paths": [
+            "internal/**"
+          ],
+          "targets": [
+            "ref",
+            "mr"
+          ],
+          "verify_timeout_seconds": 2700
+        },
+        "provenance": {
+          "commit_trailers": false,
+          "include_usage": true
+        },
+        "schedule": {
+          "quiet_hours": "22:00-06:00",
+          "timezone": "UTC"
+        },
+        "triage": {
+          "label_prefix": "bot::",
+          "respond_to_mentions": false
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-agentic-experiments-repo-677ea59d"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "agentic/experiments/repo",
+      "rig": "agentic-experiments-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / invalid: fixes without pipelines": {
+    "http_status": 422,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 0,
+        "monthly_tokens": 0,
+        "per_task_tokens": 0
+      },
+      "config_hash": "sha256:a4f0a93674442ee2d1d43fffd5aa70062ebd9c7a65a88921e641f099a57e5b58",
+      "disabled_reason": "",
+      "effective": null,
+      "error": ".gonk.yml: jsonschema validation failed with 'https://raw.githubusercontent.com/gonk-factory/gonk/main/docs/schemas/gonk-config.v1.schema.json#'\n- at '/actions': missing property 'pipelines'",
+      "key_ref": {
+        "secret_key": "",
+        "secret_name": ""
+      },
+      "operator_scope": null,
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "invalid",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / invalid: unknown top-level key": {
+    "http_status": 422,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 0,
+        "monthly_tokens": 0,
+        "per_task_tokens": 0
+      },
+      "config_hash": "sha256:47a5e04fef5dc36b79f83345943b8d8a0e43f6ec6f4eee0ffcc243d68f9730c7",
+      "disabled_reason": "",
+      "effective": null,
+      "error": ".gonk.yml: jsonschema validation failed with 'https://raw.githubusercontent.com/gonk-factory/gonk/main/docs/schemas/gonk-config.v1.schema.json#'\n- at '': additional properties 'banana' not allowed",
+      "key_ref": {
+        "secret_key": "",
+        "secret_name": ""
+      },
+      "operator_scope": null,
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "invalid",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / nothing-opted-in": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 200,
+        "monthly_tokens": 80000000,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:d5d36b85bb8657c37c74d4031243fe1c3f76bb057fdaa496a135b5710dffc4b1",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": false
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / onboarding-default": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 0,
+        "monthly_tokens": 50000000,
+        "per_task_tokens": 2000000
+      },
+      "config_hash": "sha256:4c5735ea46603e82e364b7597349825cf8e4d46acc02da12d8549eff88b79c25",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / pipelines-only": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": 80000000,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:5d25401886196d93514ae95131eecd8c489311c32020d2a197f98c5a4bb11a33",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": true,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-agentic-repo-337901b9"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "agentic/repo",
+      "rig": "agentic-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / staged-fix-section": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 5,
+        "monthly_tokens": 80000000,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:0b49ae6c8b314646322ccc90bc0a557a58c62bb986412d1c7e50c7d2dc83cb99",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm",
+          "sonnet"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [],
+          "max_attempts": 1,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 1,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / triage-only": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 10,
+        "monthly_tokens": 80000000,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:0a2c43ff5c90c194aee75aad4f523240be672acacd1a3bd87c83c550fff5c7fa",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local",
+          "glm"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  },
+  "tight-operator / unlimited-budget": {
+    "http_status": 200,
+    "response": {
+      "budget": {
+        "monthly_cost_usd": 200,
+        "monthly_tokens": 80000000,
+        "per_task_tokens": null
+      },
+      "config_hash": "sha256:50dc842dd08a226b98695197b00bd6e3415344a4c38e80e21641f7c90483d0c8",
+      "disabled_reason": "",
+      "effective": {
+        "actions": {
+          "features": false,
+          "pipeline_fixes": false,
+          "pipelines": false,
+          "scaffold": false,
+          "triage": true
+        },
+        "continuity": "resume",
+        "enabled": true,
+        "ladder": [
+          "qwen-local"
+        ],
+        "pipeline_fix": {
+          "allow_ci": false,
+          "auto_merge": {
+            "classes": [
+              "docs"
+            ],
+            "mode": "off"
+          },
+          "ci_exec_changes": "manual-run",
+          "classes": [
+            "code"
+          ],
+          "max_attempts": 1,
+          "max_chain": 5,
+          "max_changed_lines": 40,
+          "max_files": 3,
+          "paths": [],
+          "targets": [
+            "ref"
+          ],
+          "verify_timeout_seconds": 7200
+        },
+        "provenance": {
+          "commit_trailers": true,
+          "include_usage": false
+        },
+        "schedule": null,
+        "triage": {
+          "label_prefix": "gonk::",
+          "respond_to_mentions": true
+        }
+      },
+      "key_ref": {
+        "secret_key": "LITELLM_API_KEY",
+        "secret_name": "gonk-key-solo-repo-35faac64"
+      },
+      "operator_scope": {
+        "group": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": null,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": null,
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        },
+        "instance": {
+          "allowed_profiles": null,
+          "caps": {
+            "max_deletes": null,
+            "max_file_bytes": null,
+            "max_files": 2,
+            "max_lines": null,
+            "max_patch_bytes": null
+          },
+          "ci_paths": null,
+          "classes": null,
+          "deny_lift": [
+            "ci"
+          ],
+          "docs_paths": null,
+          "profiles": null,
+          "protected_paths": null,
+          "source_paths": null,
+          "test_paths": null
+        }
+      },
+      "project": "solo/repo",
+      "rig": "solo-repo",
+      "state": "active",
+      "updated_at": "2026-07-13T10:00:00Z"
+    }
+  }
+}

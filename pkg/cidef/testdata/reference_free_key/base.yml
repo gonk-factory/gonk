@@ -1,0 +1,11 @@
+# Invented pipeline for pkg/cidef tests. It resembles no real project.
+# reference_free_key: byte-identical sides. The tag sits in `cache`, a free
+# key: it may change anyway, so it does not make the comparison unresolvable.
+.caches:
+  cache:
+    key: parts
+
+assemble:
+  script:
+    - ./tools/assemble.sh
+  cache: !reference [.caches, cache]
