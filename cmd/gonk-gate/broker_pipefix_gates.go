@@ -171,6 +171,13 @@ func weakeningGate(plan effects.FixPlan, base effects.BaseBlobs, cls *scope.Clas
 // obvious spelling of "let the job fail without failing the pipeline" or
 // "stop the job from running". The authoritative check is the definition
 // comparison after the commit (CI-DEF) and the exit check's own.
+//
+// or-true reads `||` followed by one of true, /bin/true, /usr/bin/true, the
+// null command `:` or `exit 0`, and then by the END OF THAT WORD: the end of
+// the line, or any character a command name does not continue with (a space,
+// `;`, `)`, a closing quote, `#`, `&`, ...). So `|| : ;` and `|| : # why` are
+// refused (gonk-z7gr), and a fallback command that merely starts like one of
+// them (`|| true-up.sh`, `|| :retry`) is not: it still fails the job.
 var ciPreChecks = []struct {
 	sub string
 	re  *regexp.Regexp
@@ -178,7 +185,7 @@ var ciPreChecks = []struct {
 	{"allow_failure", regexp.MustCompile(`(?i)\ballow_failure\b`)},
 	{"when", regexp.MustCompile(`(?i)\bwhen\s*:\s*["']?(?:manual|never)\b`)},
 	{"retry", regexp.MustCompile(`(?i)^\s*(?:-\s*)?["']?retry["']?\s*:`)},
-	{"or-true", regexp.MustCompile(`\|\|\s*(?:true|:|/bin/true|exit\s+0)\b|\|\|\s*:\s*$`)},
+	{"or-true", regexp.MustCompile(`\|\|\s*(?:true|(?:/usr)?/bin/true|:|exit\s+0)(?:[^\w./-]|$)`)},
 	{"set-e", regexp.MustCompile(`\bset\s+(?:\+e\b|\+o\s+errexit\b)`)},
 	{"exit-0", regexp.MustCompile(`\bexit\s+0\b`)},
 }
@@ -235,7 +242,12 @@ func textGate(what, text string) *effects.Refusal {
 	if _, kinds := pipelinectx.Redact(text); len(kinds) > 0 { // text:secret
 		return fixRefusal(ruleTextSecret, strings.Join(kinds, ","), "", "the %s holds what looks like a secret", what)
 	}
-	if err := effects.ValidateComments(effects.Batch{Effects: []effects.Effect{{Kind: effects.KindComment, Body: text}}}); err != nil { // text:comment
+	// The comment gate reads the text with the line endings it is RENDERED
+	// with (fence turns a lone CR into a line end, as CommonMark does), so a
+	// quick action after a carriage return is a line here too. This gate, not
+	// the fence the text is shown in, is what stops a quick action
+	// (gonk-2061).
+	if err := effects.ValidateComments(effects.Batch{Effects: []effects.Effect{{Kind: effects.KindComment, Body: untrustedLines(text)}}}); err != nil { // text:comment
 		return fixRefusal(ruleTextComment, "", "", "the %s: %v", what, err)
 	}
 	return nil

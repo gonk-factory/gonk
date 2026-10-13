@@ -191,7 +191,7 @@ func TestPipelineFixReservationOutlivesTheVerifyTimeout(t *testing.T) {
 // operator's.
 func TestRegisterReportsThePipelineFixConfig(t *testing.T) {
 	f := newTestServiceWithConfig(t, strings.Replace(testOperatorYAML,
-		"  agentic:\n", "  agentic:\n    pipeline_fix: { max_chain: 2, classes: [code, configuration] }\n", 1))
+		"  kubernetes:\n", "  kubernetes:\n    pipeline_fix: { max_chain: 2, classes: [code, configuration] }\n", 1))
 	plain := f.register("plain/repo", "plain-repo", simpleYAML("qwen-local", 5))
 	if plain.Effective == nil {
 		t.Fatal("no Effective")
@@ -206,7 +206,7 @@ func TestRegisterReportsThePipelineFixConfig(t *testing.T) {
 		t.Errorf("a project that never opted in: pipeline_fixes=%v\n got  %s\n want %s", plain.Effective.Actions.PipelineFixes, raw, defaults)
 	}
 
-	opted := f.register("agentic/repo", "agentic-repo", fixYAMLHead+"actions: { pipelines: true, pipeline_fixes: true }\n"+
+	opted := f.register("kubernetes/kubectl", "kubernetes-kubectl", fixYAMLHead+"actions: { pipelines: true, pipeline_fixes: true }\n"+
 		"pipeline_fix:\n  classes: [code, test, configuration]\n  targets: [ref, mr]\n  allow_ci: true\n  ci_exec_changes: deny\n"+
 		"  max_attempts: 3\n  max_chain: 9\n  verify_timeout: 45m\n  max_files: 2\n  max_changed_lines: 12\n  paths: [\"internal/**\"]\n"+
 		"  auto_merge: { mode: after-human-approval, classes: [docs, ci] }\n")

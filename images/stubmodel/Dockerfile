@@ -7,8 +7,8 @@
 #
 # DEVIATION FROM PLAN TEXT: the plan sketch used `go mod download` against a live
 # proxy and a floating `golang:1.26` / distroless tag. This repo builds fully
-# offline with a committed vendor/ (docs/environment.md: CI cannot reach
-# proxy.golang.org) and pins EVERY base image by digest via images/versions.env
+# offline with a committed vendor/ (docs/environment.md, "Building and testing this
+# repository") and pins EVERY base image by digest via images/versions.env
 # ("NOTHING may say latest"). This Dockerfile follows the repo rule instead: it
 # reads GO_VERSION / DISTROLESS_BASE as build args (supplied by `make` from
 # images/versions.env, exactly like Dockerfile.intake / Dockerfile.meter) and

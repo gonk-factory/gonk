@@ -57,7 +57,9 @@ G = './cmd/gonk-gate/'
 A = 'cmd/gonk-gate/broker_pipefix_apply.go'
 GA = 'cmd/gonk-gate/broker_pipefix_gates.go'
 RF = 'cmd/gonk-gate/pipefix_refold.go'
+CINC = 'cmd/gonk-gate/pipefix_ciincludes.go'
 RE = 'cmd/gonk-gate/pipefix_render.go'
+PL = 'cmd/gonk-gate/pipeline_landing.go'
 NO = 'cmd/gonk-gate/pipefix_note.go'
 SW = 'cmd/gonk-gate/sweep.go'
 S = 'cmd/gonk-gate/sweep_pipefix.go'
@@ -89,6 +91,18 @@ RESUME = 'TestFixApplyResumesAfterACrash'
 ADOPT = 'TestFixApplyAdoptsOnlyItsOwnCommit'
 MRX = 'TestFixApplyWithAMergeRequestAlreadyOnTheBranch'
 CI = 'TestFixApplyOfACIChange'
+QUOTE = 'TestQuoteIsAThreeBacktickFenceItsTextCannotClose'
+PLAIN = 'TestQuoteLeavesOrdinaryTextAlone'
+QUICK = 'TestAQuickActionLineInModelTextIsRefusedWhateverTheFence'
+DESCQ = 'TestFixDescriptionIsCheckedForAQuickActionLine'
+DIAGQ = 'TestDiagnosisNoteQuotesTheModelsSummaryAndRemedy'
+TCLOSE = 'TestFixTitleAndCommitMessageCarryNoClosingPattern'
+TPLAIN = 'TestFixTitleNamesOrdinaryJobsExactly'
+TINV = 'TestFixApplyChecksTheTitleInvariantBeforeWriting'
+TREAL = 'TestAFixForAJobNamedLikeAClosingStatementIsOpenedAndClosesNothing'
+TTITLE = 'TestFixTitleAndCommitMessageCarryNoClosingPattern'
+INC = 'TestFixApplyDefinitionShortcutCoversEveryInclude'
+REFINC = 'TestFixApplyReadsNestedIncludes'
 SWEEP = 'TestSweepJudgesAFixSessionAndReportsThePlansOutcome'
 VERD = 'TestApplyVerdictDoesNothingWithAFixVerdict'
 DNS = 'TestDispatchLandsNeedsScopeWhenNothingIsEditable'
@@ -226,8 +240,27 @@ w("weaken: any skip at all means 'no new skip' (presence, not count)", [(WF, "\t
   "a second skip added beside an existing one")
 w("weaken: only test functions are searched for skips", [(WF, "\tbs, as := skipCounts(before), skipCounts(after)", "\tbs, as := skipCounts(before), skipCounts(after)\n\tfor k := range as {\n\t\tif _, ok := af[k]; !ok {\n\t\t\tdelete(as, k)\n\t\t}\n\t}")],
   "a skip added in a helper every test calls")
-w("weaken: a bare return added first is not a finding", [(WF, "leadingReturn(fn) && !leadingReturn(old) { // weaken:return", "leadingReturn(fn) && !leadingReturn(old) && false { // weaken:return")],
+w("weaken: a bare return added first is not a finding", [(WF, "leadingReturn(fn) > leadingReturn(old) { // weaken:return", "leadingReturn(fn) > leadingReturn(old) && false { // weaken:return")],
   "a bare return added first")
+# gonk-efjt: the guarded forms of the leading return, and its rank.
+RANK = 'TestGoLeadingReturnIsComparedByRank'
+w("weaken: a guarded return added first is not a finding (only a bare one)", [(WF, "\t\t\tif onlyReturn(s.Body) { // weaken:then", "\t\t\tif onlyReturn(s.Body) && false { // weaken:then")],
+  "a guarded return added first")
+w("weaken: a return in the else branch is not read", [(WF, "\t\t\t\tif onlyReturn(e) { // weaken:else", "\t\t\t\tif onlyReturn(e) && false { // weaken:else")],
+  "a return added first in an else branch")
+w("weaken: an else-if chain is not followed", [(WF, "\t\t\tcase *ast.IfStmt: // weaken:else-if\n\t\t\t\ts = e\n\t\t\t\tcontinue", "\t\t\tcase *ast.IfStmt: // weaken:else-if\n\t\t\t\treturn noReturn")],
+  "a return added first in an else-if branch")
+w("weaken: a leading bare block is not opened", [(WF, "\tcase *ast.BlockStmt: // weaken:block\n\t\treturn returnRank(s)", "\tcase *ast.BlockStmt: // weaken:block\n\t\treturn noReturn")],
+  "a return added first inside a bare block")
+w("weaken: any branch that ENDS in a return is a guarded return (a failing guard is refused)",
+  [(WF, "\tif len(b.List) != 1 { // weaken:only\n\t\treturn false\n\t}\n\t_, ok := b.List[0].(*ast.ReturnStmt)", "\tif len(b.List) == 0 { // weaken:only\n\t\treturn false\n\t}\n\t_, ok := b.List[len(b.List)-1].(*ast.ReturnStmt)")],
+  "a leading guard that fails the test and returns")
+m("weaken: a guard made unconditional is not a finding (presence, not rank)",
+  [(WF, "leadingReturn(fn) > leadingReturn(old) { // weaken:return", "leadingReturn(fn) > noReturn && leadingReturn(old) == noReturn { // weaken:return")],
+  WK, run(RANK, "a guard made unconditional"))
+m("weaken: a leading return that was already there is a finding (no baseline)",
+  [(WF, "leadingReturn(fn) > leadingReturn(old) { // weaken:return", "old != nil && leadingReturn(fn) > noReturn { // weaken:return")],
+  WK, run(RANK, "a guarded test edited elsewhere"))
 
 L = "\tif r := ciPreCheck(plan); r != nil { // gate:A7"
 g("A7: the CI pre-check is not run", [(A, L, off(L))], run(REF, "allow_failure added to the job"))
@@ -237,6 +270,15 @@ g("A7: a definition that no longer parses is not refused",
   run(REF, "a definition that no longer parses"))
 g("A7: the added lines are not scanned", [(GA, "\t\t\t\tif c.re.MatchString(line) { // cipre:line", "\t\t\t\tif c.re.MatchString(line) && false { // cipre:line")],
   run(REF, "the job made manual"))
+# gonk-z7gr: what may follow the or-true word, and the near misses.
+PAT = 'TestCIPreCheckPatterns'
+ORT = '\t{"or-true", regexp.MustCompile(`\\|\\|\\s*(?:true|(?:/usr)?/bin/true|:|exit\\s+0)(?:[^\\w./-]|$)`)},'
+g("A7: or-true needs a word character or the end of the line after it (the old pattern)",
+  [(GA, ORT, '\t{"or-true", regexp.MustCompile(`\\|\\|\\s*(?:true|:|/bin/true|exit\\s+0)\\b|\\|\\|\\s*:\\s*$`)},')], run(PAT))
+g("A7: or-true matches any command that starts like one (no end-of-word)",
+  [(GA, ORT, '\t{"or-true", regexp.MustCompile(`\\|\\|\\s*(?:true|(?:/usr)?/bin/true|:|exit\\s+0)`)},')], run(PAT))
+g("A7: /usr/bin/true is not an or-true",
+  [(GA, ORT, '\t{"or-true", regexp.MustCompile(`\\|\\|\\s*(?:true|/bin/true|:|exit\\s+0)(?:[^\\w./-]|$)`)},')], run(PAT))
 g("A7: an appended or-true is not a pattern", [(GA, '\t{"or-true", regexp.MustCompile(', '\t{"or-true-off", regexp.MustCompile(`^$`)},\n\t{"or-true", regexp.MustCompile(`^$`)}, {"x", regexp.MustCompile(')],
   run(REF, "the exit code swallowed"))
 
@@ -281,6 +323,27 @@ g("5.4 step 2: ci_exec_changes: deny is not acted on",
 g("5.4 step 2: the definition is not compared when no ci path changed",
   [(A, "\t\t\tif (berr == nil) != (herr == nil) || !bytes.Equal(b, h) { // delta:same", "\t\t\tif (berr == nil) != (herr == nil) || !bytes.Equal(b, h) && false { // delta:same")],
   run(CI, "a non-CI change in a project whose definition moved is not applied"))
+g("5.4 step 2 (gonk-9q0y): only the root file's own includes are compared (an include of an include is not)",
+  [(CINC, "\tinc, err = scope.ResolveCILocalIncludes(root, func(path string) ([]byte, bool, error) {",
+          "\tinc.Complete = true\n\tinc.Paths, err = scope.CILocalIncludes(root)\n\t_, _ = scope.ResolveCILocalIncludes(nil, func(path string) ([]byte, bool, error) {")],
+  run(INC, "a file included by an included file differs at the commit: not applied"))
+g("5.4 step 2 (gonk-9q0y): the shortcut is taken with a wildcard include (the files behind it are not compared)",
+  [(A, "\t\tif inc.Complete { // delta:complete", "\t\tif true { // delta:complete")],
+  run(INC, "a wildcard include: the merged definitions are compared, and one that moved (a gating change) is not applied"))
+g("5.4 step 2 (gonk-9q0y): the shortcut is never taken (every non-CI change asks GitLab for two lints)",
+  [(A, "\t\tif inc.Complete { // delta:complete", "\t\tif false { // delta:complete")],
+  run(INC, "the near miss: nested includes that did not move change nothing"))
+g("5.4 step 2 (gonk-9q0y): behind a wildcard, a definition that moved is reported as the delta it would be for a ci change",
+  [(A, "\tif !changesCI(a.plan) { // delta:wildcard", "\tif false { // delta:wildcard")],
+  run(INC))
+g("5.4 step 2 (gonk-9q0y): behind a wildcard, a definition that moved is `none`",
+  [(A, ".Kind != cidef.KindNone {\n\t\t\treturn cidef.Delta{Kind: cidef.KindUnresolvable}, nil", ".Kind != cidef.KindNone && false {\n\t\t\treturn cidef.Delta{Kind: cidef.KindUnresolvable}, nil")],
+  run(INC))
+g("5.4 step 2 (gonk-9q0y): behind a wildcard, an unchanged definition is not applied",
+  [(A, "\t\treturn cidef.Delta{Kind: cidef.KindNone}, nil\n\t}\n\tif !headLint.Valid { // delta:invalid", "\t\treturn cidef.Delta{Kind: cidef.KindUnresolvable}, nil\n\t}\n\tif !headLint.Valid { // delta:invalid")],
+  run(INC, "the near miss: a wildcard include whose merged definition is the same is applied as `none`"))
+g("refold (gonk-9q0y): an include that cannot be understood is ignored at the apply",
+  [(RF, "\tcase ierr != nil: // refold:includes", "\tcase false && ierr != nil: // refold:includes")], run(REFINC))
 g("5.4 step 2: the delta of a CI change is not computed (reported as none)",
   [(A, "\tif !changesCI(a.plan) { // delta:shortcut", "\tif true { // delta:shortcut")], run(CI, "an execution-changing edit is labelled"))
 g("write: an execution-changing fix is not labelled",
@@ -300,9 +363,9 @@ g("write: agent and project text reaches the description able to reference",
   [(RE, '\ts = inertHash.ReplaceAllString(s, "# $1")\n\ts = strings.ReplaceAll(s, "://", ": //")\n\treturn inertKey.ReplaceAllString(s, "$1- $2")', "\treturn s")], run(CLOSE))
 g("write: ... and the finished description is not checked either",
   [(RE, '\ts = inertHash.ReplaceAllString(s, "# $1")\n\ts = strings.ReplaceAll(s, "://", ": //")\n\treturn inertKey.ReplaceAllString(s, "$1- $2")', "\treturn s"),
-   (RE, '\tif m := closingPattern.FindString(desc); m != "" { // render:closing', '\tif m := closingPattern.FindString(desc); m != "" && false { // render:closing')], run(CLOSE))
+   (RE, '\tif m := closingPattern.FindString(text); m != "" { // render:closing', '\tif m := closingPattern.FindString(text); m != "" && false { // render:closing')], run(CLOSE))
 g("write: a tracker key in agent text is left able to close", [(RE, '\treturn inertKey.ReplaceAllString(s, "$1- $2")', "\treturn s"),
-   (RE, '\tif m := closingPattern.FindString(desc); m != "" { // render:closing', '\tif m := closingPattern.FindString(desc); m != "" && false { // render:closing')], run(CLOSE))
+   (RE, '\tif m := closingPattern.FindString(text); m != "" { // render:closing', '\tif m := closingPattern.FindString(text); m != "" && false { // render:closing')], run(CLOSE))
 # gonk-htl3: a NAME is shown exactly and GitLab can read nothing into it
 NAMES = "TestFixMRDescriptionShowsNamesExactly"
 IDENT = "TestIdentShowsANameExactlyAndGitLabCanReadNothingIntoIt"
@@ -327,7 +390,7 @@ g("names: a name is shown RAW in a code span (a job called 'closes #1' can close
     'fmt.Fprintf(&b, "| %s | %s | %s |\\n", codeSpan(t.Name), codeSpan(t.Stage), codeSpan(sig))')], run(CLOSE))
 g("names: ... and raw other failing jobs, with the finished description not checked either",
   [(RE, "\t\t\tnames = append(names, ident(n))", "\t\t\tnames = append(names, codeSpan(n))"),
-   (RE, '\tif m := closingPattern.FindString(desc); m != "" { // render:closing', '\tif m := closingPattern.FindString(desc); m != "" && false { // render:closing')], run(NAMES))
+   (RE, '\tif m := closingPattern.FindString(text); m != "" { // render:closing', '\tif m := closingPattern.FindString(text); m != "" && false { // render:closing')], run(NAMES))
 g("names: ident leaves a hyphen in the raw text (a tracker key can form)",
   [(RE, "|| r == ' ' { // ident:plain", "|| r == ' ' || r == '-' { // ident:plain")], run(IDENT))
 g("names: ident leaves a '#' in the raw text (an issue reference can form)",
@@ -342,15 +405,73 @@ g("names: ident is not a code element (the name is prose)",
   [(RE, '\tb.WriteString("<code>")\n\tfor _, r := range s {', '\tfor _, r := range s {'), (RE, '\tb.WriteString("</code>")\n\treturn b.String()', '\treturn b.String()')], run(NAMES))
 g("prose: A CLOSING PATTERN IN MODEL TEXT SURVIVES (the rationale is not made inert, and the description is not checked)",
   [(RE, "\tb.WriteString(fence(inert(a.plan.Reason)) + \"\\n\")", "\tb.WriteString(fence(a.plan.Reason) + \"\\n\")"),
-   (RE, '\tif m := closingPattern.FindString(desc); m != "" { // render:closing', '\tif m := closingPattern.FindString(desc); m != "" && false { // render:closing')], run(NAMES))
+   (RE, '\tif m := closingPattern.FindString(text); m != "" { // render:closing', '\tif m := closingPattern.FindString(text); m != "" && false { // render:closing')], run(NAMES))
 g("prose: the rationale is not made inert (the final check alone must stop it)",
   [(RE, "\tb.WriteString(fence(inert(a.plan.Reason)) + \"\\n\")", "\tb.WriteString(fence(a.plan.Reason) + \"\\n\")")], run(NAMES))
 g("prose: inert's tracker-key rule is upper-case only (a lower-case key in the rationale is left alone)",
   [(RE, "inertKey  = regexp.MustCompile(`([A-Za-z][A-Za-z0-9_]+)-(\\d)`)", "inertKey  = regexp.MustCompile(`([A-Z][A-Z0-9_]+)-(\\d)`)")], run("TestInertStillDefusesProse"))
-g("write: the rationale's fence can be closed by the rationale", [(RE, '\tf := strings.Repeat("`", longest+1)', '\tf := strings.Repeat("`", 3)')], run(CLOSE))
+g("write: the rationale's fence can be closed by the rationale",
+  [(RE, '\t\tif strings.HasPrefix(strings.TrimLeft(line, " \\t"), "```") { // quote:fence-line', '\t\tif false { // quote:fence-line')], run(CLOSE))
+# ---- gonk-37kg part D: the quote (gonk-2061, gonk-d2ct) and the title (gonk-vu0n) ----
+g("quote (gonk-2061): THE OLD RULE -- the fence grows past the longest run of backticks in the text",
+  [(RE, '\treturn "```text\\n" + strings.Join(lines, "\\n") + "\\n```"',
+        '\tf := "```"\n\tfor strings.Contains(text, f) {\n\t\tf += "`"\n\t}\n\treturn f + "text\\n" + strings.Join(lines, "\\n") + "\\n" + f')],
+  run(QUOTE))
+g("quote (gonk-2061): a fence line of the text is left where it is",
+  [(RE, '\t\tif strings.HasPrefix(strings.TrimLeft(line, " \\t"), "```") { // quote:fence-line', '\t\tif false { // quote:fence-line')], run(QUOTE))
+g("quote (gonk-2061): only a line that STARTS with the backticks is moved (an indented one closes the block)",
+  [(RE, '\t\tif strings.HasPrefix(strings.TrimLeft(line, " \\t"), "```") { // quote:fence-line', '\t\tif strings.HasPrefix(line, "```") { // quote:fence-line')], run(QUOTE))
+g("quote (gonk-2061): a fence line is moved three spaces, which CommonMark still reads as a closing fence",
+  [(RE, '\t\t\tlines[i] = "    " + line', '\t\t\tlines[i] = "   " + line')], run(QUOTE))
+g("quote (gonk-2061): only a line of EXACTLY three backticks is moved (a longer one closes the block)",
+  [(RE, '\t\tif strings.HasPrefix(strings.TrimLeft(line, " \\t"), "```") { // quote:fence-line', '\t\tif strings.TrimSpace(line) == "```" { // quote:fence-line')], run(QUOTE))
+g("quote (gonk-2061): every line with a backtick is moved (ordinary text is rewritten)",
+  [(RE, '\t\tif strings.HasPrefix(strings.TrimLeft(line, " \\t"), "```") { // quote:fence-line', '\t\tif strings.Contains(line, "`") { // quote:fence-line')], run(PLAIN))
+g("quote (gonk-2061): a carriage return is kept (it ends a line for CommonMark and for nothing here)",
+  [(RE, '\treturn strings.NewReplacer("\\r\\n", "\\n", "\\r", "\\n").Replace(text)', '\treturn text')], run(QUOTE))
+g("quote (gonk-2061): a quick action after a carriage return passes the fix agent's comment gate",
+  [(GA, "Body: untrustedLines(text)}}}); err != nil { // text:comment", "Body: text}}}); err != nil { // text:comment")], run(QUICK))
+g("quote (gonk-2061): THE COMMENT GATE IS OFF for the fix agent's text (the fence is trusted to stop a quick action)",
+  [(GA, "Body: untrustedLines(text)}}}); err != nil { // text:comment", "Body: untrustedLines(text)}}}); err != nil && false { // text:comment")], run(QUICK))
+g("quote (gonk-2061): the finished description is not checked for a quick-action line",
+  [(RE, "Body: desc}}}); err != nil { // render:quick", "Body: desc}}}); err != nil && false { // render:quick")], run(DESCQ))
+g("diagnosis (gonk-d2ct): THE DEFECT -- the summary is written into the note as it came",
+  [(PL, 'fence(strings.TrimSpace(e.Summary)) + "\\n\\n") // diagnosis:quote-summary', 'strings.TrimSpace(e.Summary) + "\\n\\n") // diagnosis:quote-summary')], run(DIAGQ))
+g("diagnosis (gonk-d2ct): THE DEFECT -- the remedy is written into the note as it came",
+  [(PL, 'fence(strings.TrimSpace(e.Remedy)) + "\\n") // diagnosis:quote-remedy', 'strings.TrimSpace(e.Remedy) + "\\n") // diagnosis:quote-remedy')], run(DIAGQ))
+g("diagnosis (gonk-d2ct): the remedy is a code SPAN, which its own newline and backticks break",
+  [(PL, 'fence(strings.TrimSpace(e.Remedy)) + "\\n") // diagnosis:quote-remedy', '"`" + strings.TrimSpace(e.Remedy) + "`" + "\\n") // diagnosis:quote-remedy')], run(DIAGQ))
+g("title (gonk-vu0n): THE DEFECT -- the title is not defused and nothing checks it",
+  [(A, '\treturn defuseClosing(fmt.Sprintf("gonk: fix job %s on %s", job, refSafe(pf.TargetBranch)))', '\treturn fmt.Sprintf("gonk: fix job %s on %s", job, refSafe(pf.TargetBranch))'),
+   (A, "\tif err := a.titleInvariant(); err != nil { // apply:title-invariant", "\tif err := a.titleInvariant(); err != nil && false { // apply:title-invariant")], run(TCLOSE))
+g("title (gonk-vu0n): the title is not defused (the invariant alone stops the apply: a legitimate project gets no fix)",
+  [(A, '\treturn defuseClosing(fmt.Sprintf("gonk: fix job %s on %s", job, refSafe(pf.TargetBranch)))', '\treturn fmt.Sprintf("gonk: fix job %s on %s", job, refSafe(pf.TargetBranch))')], run(TREAL))
+g("title (gonk-vu0n): defuseClosing does nothing",
+  [(RE, "\tfor i := 0; i < 4 && closingPattern.MatchString(s); i++ { // title:defuse", "\tfor i := 0; false && i < 4 && closingPattern.MatchString(s); i++ { // title:defuse")], run(TTITLE))
+g("title (gonk-vu0n): the whole title goes through inert (a job called unit-tests-3.12 is misnamed: gonk-htl3 again)",
+  [(RE, "\t\ts = closingPattern.ReplaceAllStringFunc(s, inert)", "\t\ts = inert(s)"),
+   (RE, "\tfor i := 0; i < 4 && closingPattern.MatchString(s); i++ { // title:defuse", "\tfor i := 0; i < 1; i++ { // title:defuse")], run(TPLAIN))
+g("title (gonk-vu0n): a URL in a job name reaches the title",
+  [(A, 'strings.TrimSpace(strings.ReplaceAll(b.String(), "://", ": //")); out != "" { // refsafe:url', 'strings.TrimSpace(b.String()); out != "" { // refsafe:url')], run(TPLAIN))
+g("title (gonk-vu0n): the invariant does not look at the title",
+  [(RE, '\tif err := checkNoClosingPattern("merge request title", title); err != nil { // title:invariant', '\tif err := checkNoClosingPattern("merge request title", title); err != nil && false { // title:invariant')], run(TINV))
+g("title (gonk-vu0n): the invariant does not look at the commit message",
+  [(RE, '\treturn checkNoClosingPattern("commit message", message) // commit:invariant', "\treturn nil // commit:invariant")], run(TINV))
+g("title (gonk-vu0n): the invariant is asked about another text than the one that is sent",
+  [(RE, "\treturn titleInvariantOf(a.title(), a.commitMessage())", '\treturn titleInvariantOf("", "")')], run(TINV))
+g("title (gonk-vu0n): the invariant finds nothing (checkNoClosingPattern is off)",
+  [(RE, '\tif m := closingPattern.FindString(text); m != "" { // render:closing', '\tif m := closingPattern.FindString(text); m != "" && false { // render:closing')], run(TINV))
+g("title (gonk-vu0n): the invariant is not asked before the commit",
+  [(A, "\tif err := a.titleInvariant(); err != nil { // apply:title-invariant", "\tif err := a.titleInvariant(); err != nil && false { // apply:title-invariant"),
+   (RE, "\tfor i := 0; i < 4 && closingPattern.MatchString(s); i++ { // title:defuse", "\tfor i := 0; false && i < 4 && closingPattern.MatchString(s); i++ { // title:defuse")], run(TREAL))
 g("write: the job name reaches the title raw", [(A, "\t\tjob = refSafe(pf.Targets[0].Name)", "\t\tjob = pf.Targets[0].Name")], run(CLOSE))
-g("write: the title reads 'fix <name>' (a job named like a tracker key closes it)",
-  [(A, '\treturn fmt.Sprintf("gonk: fix job %s on %s", job, refSafe(pf.TargetBranch))', '\treturn fmt.Sprintf("gonk: fix %s on %s", job, refSafe(pf.TargetBranch))')], run(CLOSE))
+g("write: the title reads 'fix <name>' and is not defused or checked (a job named like a tracker key closes it)",
+  [(A, '\treturn defuseClosing(fmt.Sprintf("gonk: fix job %s on %s", job, refSafe(pf.TargetBranch)))', '\treturn fmt.Sprintf("gonk: fix %s on %s", job, refSafe(pf.TargetBranch))'),
+   (A, "\tif err := a.titleInvariant(); err != nil { // apply:title-invariant", "\tif err := a.titleInvariant(); err != nil && false { // apply:title-invariant")], run(CLOSE))
+g("write: the title reads 'fix <name>' (defused, so a job named like a tracker key is MISNAMED instead)",
+  [(A, '\treturn defuseClosing(fmt.Sprintf("gonk: fix job %s on %s", job, refSafe(pf.TargetBranch)))', '\treturn defuseClosing(fmt.Sprintf("gonk: fix %s on %s", job, refSafe(pf.TargetBranch)))')], run(TPLAIN))
+g("5.4 step 2 (gonk-9q0y): behind a wildcard, a definition GitLab REJECTS at the commit is `none` when its text did not move",
+  [(A, "\t\tif !headLint.Valid || cidef.Diff(", "\t\tif cidef.Diff(")], run(INC))
 
 # ---- the record
 for field, line in [
@@ -405,7 +526,7 @@ g("sweep: the finished fix session is left running", [(S, "\t\t\"verify_deadline
 g("sweep: the open fix is not written to the store", [(S, "\tif _, err := d.Store.PutIf(ctx, rec, readRevision); errors.Is(err, beadstore.ErrStale) {\n\t\td.Log.Warn(\"sweep: pipeline fix: the record changed after this pass read it",
                                                         "\tif _, err := error(nil), error(nil); errors.Is(err, beadstore.ErrStale) {\n\t\td.Log.Warn(\"sweep: pipeline fix: the record changed after this pass read it")],
   run(SWEEP, "an accepted fix reports no outcome and waits for the exit check"))
-g("sweep: a fix batch goes down the issue-shaped chain", [(BA, "\tif fbKinds != nil { // apply:own-chain", "\tif fbKinds != nil && agent != pipefixAgent { // apply:own-chain")],
+g("sweep: a fix batch goes down the issue-shaped chain", [(BA, "\tif ownChainAgent(agent) { // apply:own-chain", "\tif ownChainAgent(agent) && agent != pipefixAgent { // apply:own-chain")],
   run(SWEEP, "needs-scope is success and terminal"))
 g("sweep: a fix batch goes down the DIAGNOSIS chain", [(BA, "\t\tif agent == pipefixAgent {\n\t\t\tapply = applyPipefixBatch\n\t\t}\n", "")],
   run(SWEEP, "needs-scope is success and terminal"))

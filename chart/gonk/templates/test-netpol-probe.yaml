@@ -2,9 +2,9 @@
 Does THIS cluster enforce the gonk-agent egress policy?
 
 The chart declares six NetworkPolicies. The API server accepts them whether or
-not any controller implements them -- which is exactly how gonk ran for months
-with policies that blocked nothing, on a cluster whose CNI is flannel. That is a
-property of the CLUSTER, not of the chart, so the chart ships the instrument
+not any controller implements them -- which is exactly how a release can run
+for months with policies that block nothing, on a CNI that does not implement
+NetworkPolicy. That is a property of the CLUSTER, not of the chart, so the chart ships the instrument
 alongside the claim and the operator does not have to take the README's word.
 
 A HELM TEST HOOK, NOT AN INSTALL HOOK. An install hook that failed would block
@@ -92,15 +92,16 @@ spec:
         egress to component=meter on 8080, and the meter policy permits ingress
         from app=gc-agent on 8080. Checked, not assumed.
         
-        gonk-intake:9090 does NOT qualify, even though the agent's egress rule
-        names it: the intake policy admits only the traefik and monitoring
-        namespaces, so that egress rule is dead and a probe using it would report
-        INCONCLUSIVE on a cluster that enforces correctly. That inconsistency is
-        filed as its own bug; do not "fix" it by pointing this leg back at it.
+        gonk-intake:9090 qualifies too since gonk-nax7 (the intake policy now
+        admits the agent pods on its private listener; before that the agent's
+        egress rule there was dead). This leg was left on the meter: the probe
+        is the instrument that says whether a cluster enforces, and moving its
+        legs is a change to make on its own, with both CNIs in the
+        netpol-enforcement workflow watching. hack/netpol_enforcement_e2e.sh
+        observes agent -> intake:9090 separately.
         
-        THE COST, stated because it weakens the design: there is no single pod
-        with both a permitted and a forbidden port that is also ingress-permitted,
-        so the two legs differ in POD as well as port. The allow leg still proves
+        THE COST, stated because it weakens the design: the two legs differ in
+        POD as well as port. The allow leg still proves
         the probe has working networking and that policy permits something; it no
         longer isolates "ignores ports" from "ignores pods" on its own. The L3
         leg below is what preserves that distinction.

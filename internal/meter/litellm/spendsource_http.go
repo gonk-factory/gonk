@@ -19,10 +19,10 @@ import (
 
 // *** THE POLL MUST ALWAYS BE BOUNDED, PAGINATED, AND NEVER NAKED. ***
 //
-// An unbounded GET /spend/logs (no start_date) OOM-killed the live LiteLLM pod
-// during research (2Gi limit, exit 137, ~90s outage; docs/environment.md,
-// "OPERATIONAL HAZARD"). gonk-meter POLLS this endpoint on a timer, so a
-// regression here does not just break gonk -- it takes down the inference
+// An unbounded GET /spend/logs (no start_date) OOM-killed a live LiteLLM pod
+// during research (2Gi limit, exit 137, ~90s outage). The rule is in
+// docs/environment.md, "OPERATIONAL HAZARD". gonk-meter POLLS this endpoint
+// on a timer, so a regression here does not just break gonk -- it takes down the inference
 // gateway for the whole cluster. HTTPSpendSource.Since sets BOTH start_date
 // and end_date on EVERY request, and pages until the source reports no more
 // pages. TestHTTPSpendSourceParsesTagsAndClock enforces both properties: it
@@ -108,7 +108,7 @@ type logEntry struct {
 	CompletionTokens int64     `json:"completion_tokens"`
 	StartTime        time.Time `json:"startTime"`
 	Metadata         struct {
-		// VERIFIED against live LiteLLM v1.92.0 (docs/environment.md): this is
+		// VERIFIED against a live LiteLLM v1.92.0: this is
 		// where opencode's x-litellm-spend-logs-metadata header lands.
 		SpendLogsMetadata map[string]string `json:"spend_logs_metadata"`
 	} `json:"metadata"`

@@ -8,7 +8,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -26,7 +26,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
 ---
@@ -39,7 +39,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: litellm-advisory
@@ -72,7 +72,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -117,7 +117,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -156,7 +156,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -185,7 +185,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: intake
@@ -213,7 +213,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: intake
@@ -242,7 +242,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -269,7 +269,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: intake
@@ -291,7 +291,7 @@ spec:
         helm.sh/chart: gonk-0.0.0-golden
         app.kubernetes.io/name: gonk
         app.kubernetes.io/instance: gonk
-        app.kubernetes.io/version: "0.2.0"
+        app.kubernetes.io/version: "0.2.1"
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/part-of: gonk
         app.kubernetes.io/component: intake
@@ -315,7 +315,7 @@ spec:
             - name: GONK_GITLAB_TOKEN_FILE
               value: "/etc/gonk/secrets/gitlab/token"
             # Used ONLY for /hooks calls (spec 5.1). Unset -> the bot token does
-            # everything, which is the homelab default. NO second slot: a failed
+            # everything, which is the default. NO second slot: a failed
             # hook repair is simply repaired on the next reconcile pass.
             - name: GONK_GITLAB_ADMIN_TOKEN_FILE
               value: "/etc/gonk/secrets/gitlab/admin-token"
@@ -323,9 +323,10 @@ spec:
             # named. *** THIS IS HOW WE TRUST A GITLAB BEHIND A PRIVATE CA. ***
             # The image carries no trust setting of its own: gonk.caTrustEnv
             # (_helpers.tpl) ADDS the mounted bundle's directory to the system
-            # roots, it does not replace them. It is the reason no code in this
-            # repo ever sets InsecureSkipVerify -- there is no value that disables
-            # TLS verification, and there never will be.
+            # roots, it does not replace them. It is the reason no gonk code
+            # ever sets InsecureSkipVerify -- there is no value that disables
+            # TLS verification, and there never will be
+            # (internal/buildgate/tls_verification_test.go holds both).
             - name: SSL_CERT_DIR
               value: "/etc/ssl/certs:/etc/ssl/gonk"
             - name: GONK_WEBHOOK_SECRET_FILE
@@ -362,11 +363,11 @@ spec:
             # Projects gonk must never work on. Unparseable entries make intake refuse
             # to start -- fail closed, never "block less than was written" (gonk-jn5).
             - name: GONK_BLOCKED_PROJECTS
-              value: "agentic/gonk-project"
+              value: "gonk-factory/gonk"
             - name: GONK_PRIVATE_ADDR
               value: ":9090"
             - name: GONK_VERSION
-              value: "0.2.0"
+              value: "0.2.1"
           ports:
             # The PUBLIC listener: POST /hook/gitlab, and 404 for everything else.
             - name: http-hook
@@ -467,7 +468,7 @@ spec:
         # gitlab.caCert.existingConfigMap is a NAME: the chart does not create the
         # ConfigMap (trust-manager, or you, publish it into this namespace).
         # It is how a Go service trusts a GitLab behind a private CA --
-        # and it is the reason no code in this repo ever sets InsecureSkipVerify.
+        # and it is the reason no gonk code ever sets InsecureSkipVerify.
         - name: gitlab-ca
           configMap:
             name: gitlab-ca
@@ -486,7 +487,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -510,7 +511,7 @@ spec:
         helm.sh/chart: gonk-0.0.0-golden
         app.kubernetes.io/name: gonk
         app.kubernetes.io/instance: gonk
-        app.kubernetes.io/version: "0.2.0"
+        app.kubernetes.io/version: "0.2.1"
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/part-of: gonk
         app.kubernetes.io/component: meter
@@ -519,7 +520,7 @@ spec:
         # from disk on each tick, so this is belt-and-braces -- but a config that
         # fails to validate should surface as a failed rollout, not a quiet
         # "kept the previous config" log line.)
-        checksum/operator-config: 603badae3cf0871eebdd102fc7cd5f0b514b49f142bcfb3678f8ec98e9d19844
+        checksum/operator-config: 07afb0880edf3c50edda379fb5b749be42b8bf0bf894d12bae9f286cac4f9693
     spec:
       serviceAccountName: gonk-meter
       securityContext:

@@ -49,6 +49,8 @@ FG = 'pkg/effects/fixgate.go'
 PR = 'pkg/effects/protected.go'
 SH = 'pkg/effects/shape.go'
 EF = 'pkg/effects/effects.go'
+DG = 'pkg/effects/diagnosis.go'
+FB = 'pkg/effects/feedback.go'
 
 EACH = 'TestFixGateEachPredicateAlone'
 APPLY = 'TestApplyEdits'
@@ -190,6 +192,41 @@ muts = [
   [(FX, 'KindEdit:         {"Path": true, "Old": true, "New": true},', 'KindEdit:         {"Path": true, "Old": true, "New": true, "Reason": true},')]),
  ("FX-SHAPE: the foreign-field rule forgets a field (content rides on an edit)", 'TestFixKindsRefuseEveryForeignField',
   [(FX, 'if name == "Kind" || own[name] || targetFields[name] {', 'if name == "Kind" || own[name] || targetFields[name] || name == "Content" {')]),
+ # ---- gonk-8yux: a diagnosis's foreign-field rule is by reflection too ----
+ ("gonk-8yux: a diagnosis may carry another kind's fields", 'TestValidateDiagnosisRefusesForeignFields',
+  [(DG, off('rule:foreign-field'))]),
+ ("gonk-8yux: a diagnosis's field list gains the fix vocabulary's reason", 'TestValidateDiagnosisRefusesForeignFields|TestDiagnosisFieldsMatchTheValidator',
+  [(FB, '\t"Classification": true, "Summary": true, "Evidence": true, "Remedy": true, "Files": true,\n',
+        '\t"Classification": true, "Summary": true, "Evidence": true, "Remedy": true, "Files": true, "Reason": true,\n')]),
+ ("gonk-8yux: the diagnosis rule forgets a field added later (old rides on a diagnosis)", 'TestDiagnosisRefusesEveryForeignField',
+  [(FX, 'if name == "Kind" || own[name] || targetFields[name] {', 'if name == "Kind" || own[name] || targetFields[name] || name == "Old" {')]),
+ ("gonk-8yux: the diagnosis rule refuses the target fields (a legitimate diagnosis is refused)", 'TestDiagnosisRefusesEveryForeignField',
+  [(FX, 'if name == "Kind" || own[name] || targetFields[name] {', 'if name == "Kind" || own[name] || (targetFields[name] && e.Kind != KindDiagnosis) {')]),
+ # ---- gonk-s0td: the batch is one JSON value ----
+ ("gonk-s0td: text after the batch's JSON object is ignored", 'TestParseBatchRefusesAnythingAfterTheBatch',
+  [(EF, off('parse:trailing'))]),
+ ("gonk-s0td: only a second OBJECT is refused (prose after the batch passes)", 'TestParseBatchRefusesAnythingAfterTheBatch',
+  [(EF, 'len(rest) > 0 { // parse:trailing', "len(rest) > 0 && rest[0] == '{' { // parse:trailing")]),
+ ("gonk-s0td: white space after the batch is refused (a legitimate batch with a final newline)", 'TestParseBatchRefusesAnythingAfterTheBatch',
+  [(EF, 'bytes.Trim(text[dec.InputOffset():], " \\t\\r\\n")', 'bytes.Trim(text[dec.InputOffset():], "")')]),
+ ("gonk-s0td: the retry feedback for trailing text falls through to the generic sentence", 'TestExplainParse',
+  [(FB, '\tcase errors.Is(err, ErrBatchTrailingData):\n', '\tcase false:\n')]),
+ # ---- v0.2.1 verification: a key of the batch is stated once ----
+ ("DUP: a key of the batch stated twice is accepted (the last one wins)", 'TestParseBatchRefusesAKeyOfTheBatchStatedTwice',
+  [(EF, off('parse:duplicate'))]),
+ ("DUP: keys are compared exactly (`Effects` beside `effects` passes)", 'TestParseBatchRefusesAKeyOfTheBatchStatedTwice',
+  [(EF, 'if strings.EqualFold(s, key) { // parse:duplicate-fold', 'if strings.EqualFold(s, key) && s == key { // parse:duplicate-fold')]),
+ ("DUP: any two keys count as a repeat (a batch with a verdict and effects is refused)", 'TestParseBatchRefusesAKeyOfTheBatchStatedTwice',
+  [(EF, 'if strings.EqualFold(s, key) { // parse:duplicate-fold', 'if s != "" || strings.EqualFold(s, key) { // parse:duplicate-fold')]),
+ ("DUP: only an ADJACENT repeat is seen (effects, verdict, effects passes)", 'TestParseBatchRefusesAKeyOfTheBatchStatedTwice',
+  [(EF, '\t\tseen = append(seen, key)\n', '\t\tseen = []string{key}\n')]),
+ ("DUP: a key's value is not skipped (the scan stops at the first value and sees no repeat)", 'TestParseBatchRefusesAKeyOfTheBatchStatedTwice',
+  [(EF, '\t\tif err := dec.Decode(&skip); err != nil {\n\t\t\treturn false\n\t\t}\n', '\t\t_ = skip\n')]),
+ ("DUP: the retry feedback for a repeated key falls through to the generic sentence", 'TestExplainParse',
+  [(FB, '\tcase errors.Is(err, ErrBatchDuplicateKey):\n', '\tcase false:\n')]),
+ ("DUP: the retry feedback states no allowed set", 'TestExplainParse',
+  [(FB, '\t\tfb.What = "the batch itself states the same key more than once: each of its keys is stated at most once"\n\t\tfb.Allowed = batchKeysText()\n',
+        '\t\tfb.What = "the batch itself states the same key more than once: each of its keys is stated at most once"\n')]),
  ("FX-SHAPE: a blank fix_meta reason is accepted", RULES, [(FX, off('shape:meta-reason-empty'))]),
  ("FX-SHAPE: the fix_meta reason cap is not enforced", RULES, [(FX, off('shape:meta-reason-cap'))]),
  ("FX-SHAPE: the scope_request path count is not enforced", RULES, [(FX, off('shape:paths-count'))]),

@@ -265,7 +265,13 @@ var targetFields = map[string]bool{"TargetIID": true, "TargetType": true}
 // foreignField returns the name of the first field e carries that its kind
 // does not own, or "". It is defined for the three fix kinds only.
 func foreignField(e Effect) string {
-	own := fixKindFields[e.Kind]
+	return foreignTo(e, fixKindFields[e.Kind])
+}
+
+// foreignTo returns the name of the first field e carries that is not Kind,
+// not a target field and not in own, or "". The name is a Go field name of
+// Effect: the controller's text, never the batch's.
+func foreignTo(e Effect, own map[string]bool) string {
 	rv := reflect.ValueOf(e)
 	for i := 0; i < rv.NumField(); i++ {
 		name := rv.Type().Field(i).Name

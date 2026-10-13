@@ -4,9 +4,9 @@
 # DSN) from FILES, never env values (cmd/gonk-meter/main.go's own Config doc
 # comment) -- this Dockerfile never bakes a secret and never disables TLS.
 #
-# Multi-stage: a vendored, OFFLINE Go build (docs/environment.md: this box and
-# CI cannot reach proxy.golang.org) producing a static binary, then a minimal
-# distroless runtime. Every ARG below is read from images/versions.env (except
+# Multi-stage: a vendored, OFFLINE Go build (the build needs no module proxy:
+# docs/environment.md, "Building and testing this repository") producing a
+# static binary, then a minimal distroless runtime. Every ARG below is read from images/versions.env (except
 # BUILD_TAGS -- see the testclock variant below); there is no default and no
 # `latest` anywhere.
 #
@@ -15,8 +15,8 @@
 ARG GO_VERSION
 ARG DISTROLESS_BASE
 
-# ---- build gonk-meter (static; vendor/ is committed -- docs/environment.md:
-# CI cannot reach proxy.golang.org, so this stage is fully offline, -mod=vendor,
+# ---- build gonk-meter (static; vendor/ is committed, so no module proxy is
+# needed and this stage is fully offline, -mod=vendor,
 # no `go mod download` anywhere, same as images/Dockerfile.agent's gate stage
 # and images/Dockerfile.controller's gate stage). ----------------------------
 FROM golang:${GO_VERSION} AS build

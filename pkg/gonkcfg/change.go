@@ -100,7 +100,7 @@ var (
 	changeMergeClassOrder = []string{AutoMergeClassDocs}
 	requireDocsRank       = map[string]int{RequireDocsNever: 0, RequireDocsWhenLabelled: 1, RequireDocsAlways: 2}
 
-	defaultChangeTriggers    = []string{ChangeTriggerLabel, ChangeTriggerCommand, ChangeTriggerMention}
+	defaultChangeTriggers    = []string{ChangeTriggerLabel}
 	defaultCreateClasses     = []string{CreateClassTest, CreateClassDocs}
 	defaultDocsLabels        = []string{"feature", "enhancement", "type::feature"}
 	defaultChangeMergeClass  = []string{AutoMergeClassDocs}

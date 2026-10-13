@@ -64,3 +64,11 @@ onboarding:
 # the render. Saying so here is the explicit opt-in that guard requires.
 imageFloor:
   acceptUnrankedTags: true
+
+# gonk-vxel: the Kubernetes API server allowance. Off (empty) in values.yaml,
+# so this profile is the golden that asserts the RENDERED ipBlock rule on the
+# controller and meter policies. The addresses are documentation addresses.
+networkPolicy:
+  kubeAPI:
+    cidrs: ["192.0.2.10/32", "192.0.2.11/32"]
+    ports: [6443]

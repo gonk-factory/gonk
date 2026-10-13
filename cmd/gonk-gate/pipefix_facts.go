@@ -193,7 +193,7 @@ func readPipefixPipelines(ctx context.Context, r pipefixReader, projectID, mrIID
 	}
 	facts := pipefix.PipelineFacts{Read: true}
 	for _, p := range listed {
-		out := pipefix.Pipeline{ID: p.ID, SHA: p.SHA, Source: p.Source, Status: p.Status}
+		out := pipefix.Pipeline{ID: p.ID, SHA: p.SHA, Source: p.Source, Ref: p.Ref, Status: p.Status}
 		if p.SHA == fixCommitSHA && p.Source != pipefix.SourceParentPipeline {
 			var jr []pipefixRead
 			out.Jobs, out.JobsRead, jr = readPipefixAttempts(ctx, r, projectID, p.ID, inT)

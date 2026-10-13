@@ -5,7 +5,7 @@
 // after it has spent them.
 //
 // The fixtures in testdata/opencode-output are the REAL lines from the pod
-// log of agentic/rom#1 attempt 1 (Job gonk-triage-p84-i1-a1, 2026-10-04,
+// log of the first attempt at one triage issue (Job gonk-triage-p84-i1-a1, 2026-10-04,
 // opencode 1.18.3), ANSI colour codes and all -- cut, never retyped:
 //
 //	rom1-loop.txt                   up to and including the SECOND failure of

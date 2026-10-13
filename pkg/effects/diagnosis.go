@@ -197,14 +197,29 @@ type DiagnosisContext struct {
 	FailedJobs []FailedJob
 }
 
+// JobNames is the closed set of names an evidence item's `job` may hold, in
+// the context's order (a copy). It is the ONE enumeration: ValidateDiagnosis
+// builds the set rule:evidence-job reads from it, and a refusal's feedback
+// lists it (gonk-37kg.1), so what the gate accepts and what the next attempt
+// is told cannot drift.
+func (c DiagnosisContext) JobNames() []string {
+	out := make([]string, 0, len(c.FailedJobs))
+	for _, j := range c.FailedJobs {
+		out = append(out, j.Name) // jobs:names
+	}
+	return out
+}
+
 // ValidateDiagnosis enforces the diagnosis shape rules (D8 step 4) on every
 // diagnosis effect in b. It is a no-op for a batch with none -- cardinality
 // ("exactly one") is the shape gate's job (Validate), as for every kind.
 func ValidateDiagnosis(b Batch, ctx DiagnosisContext) error {
 	jobs := make(map[string]bool, len(ctx.FailedJobs))
 	anyExcerpt := false
+	for _, name := range ctx.JobNames() { // rule:evidence-job reads THIS set
+		jobs[name] = true
+	}
 	for _, j := range ctx.FailedJobs {
-		jobs[j.Name] = true
 		anyExcerpt = anyExcerpt || j.HasExcerpt
 	}
 	for i, e := range b.Effects {
@@ -222,8 +237,14 @@ func validateDiagnosis(e Effect, jobs map[string]bool, anyExcerpt bool) error {
 	// A diagnosis carries only its own fields. Above all no path/content: its
 	// files are citations the denylist deliberately does not check
 	// (citationOnlyPathFields), so a write shape must not ride along on it.
-	if e.Path != "" || e.Content != "" || e.Body != "" || e.Title != "" || len(e.Add) > 0 || len(e.Remove) > 0 { // rule:foreign-field
-		return ErrDiagnosisForeignField
+	//
+	// By REFLECTION over diagnosisFields (gonk-8yux), as the fix kinds' rule
+	// is over fixKindFields: until 2026-10-12 this named six fields by hand,
+	// and the fix vocabulary added to Effect afterwards (old, new, paths,
+	// reason) rode on a diagnosis unread. A field added to Effect later is
+	// now foreign here until someone lists it.
+	if f := foreignTo(e, diagnosisFields); f != "" { // rule:foreign-field
+		return fmt.Errorf("%w: %s", ErrDiagnosisForeignField, f)
 	}
 	if !knownClassifications[e.Classification] { // rule:classification
 		return fmt.Errorf("%w: %q", ErrDiagnosisClassification, e.Classification)

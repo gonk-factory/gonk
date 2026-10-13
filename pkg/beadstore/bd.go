@@ -24,8 +24,7 @@ import (
 // documented in docs/reference/gonk-state-record.md.
 //
 // *** THE EXACT SUBCOMMANDS BELOW ARE CONFIRMED AGAINST THE REAL `bd` 1.0.3
-// BINARY *** (Task 6 Step 5, docs/environment.md's dev-box `bd` and the
-// pinned BD_VERSION in images/versions.env agree). Three invocations an
+// BINARY *** (the version pinned as BD_VERSION in images/versions.env). Three invocations an
 // earlier draft of this file guessed at were WRONG, confirmed by actually
 // running them:
 //

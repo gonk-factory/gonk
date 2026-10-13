@@ -15,8 +15,8 @@ import (
 	"github.com/gonk-factory/gonk/internal/envname"
 )
 
-// G14: the chart renders NO Secret, ever. Secrets come from Vault/1Password via
-// an ExternalSecret, outside this chart.
+// G14: the chart renders NO Secret, ever. Secrets are provisioned outside this
+// chart (by hand, or synced from a secret store).
 func TestChartRendersNoSecretObjects(t *testing.T) {
 	for _, o := range Objects(t, Render(t, Minimum()...)) {
 		if o.Kind == "Secret" {

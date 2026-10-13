@@ -20,9 +20,9 @@ import (
 // put there by this chart -- while the NetworkPolicy that governs it does not
 // permit the call, and nothing in the build notices. The two facts live in
 // different files and, until this test, only ever met in a running cluster
-// that enforces policy. This cluster does NOT enforce policy (Flannel; the
-// Cilium HelmRelease is suspended), so the build is the only place the
-// mismatch can be caught at all.
+// that enforces policy. On a cluster whose CNI enforces no NetworkPolicy there
+// is no runtime signal at all, so the build is the only place the mismatch can
+// be caught.
 //
 // Three instances existed when this was written, all found by this test:
 //   - controller -> meter:     GONK_METER_URL, no egress rule. gonk-zjk7.
@@ -41,16 +41,17 @@ import (
 //
 // SCOPE -- stated so nobody over-trusts the green:
 //   - EGRESS ONLY, which is what gonk-zjk7 asked for. Reachability also needs
-//     the destination's INGRESS half, and that half has its own gaps today
-//     (gonk-intake's ingress admits neither the controller nor the agent pods
-//     on its private listener). Deliberately out of scope here, filed
-//     separately -- an honest narrow test beats a sloppy broad one.
+//     the destination's INGRESS half. That half is held by
+//     TestEveryInNamespaceRuleHasItsOtherHalf (netpol_pairs_test.go), which
+//     reads the policies alone and pairs every same-namespace rule with its
+//     mirror; it found the two dead rules towards gonk-intake's private
+//     listener (gonk-nax7).
 //   - IN-CHART SERVICES ONLY. A URL outside the release (LiteLLM, GitLab)
 //     resolves to no Service in the render and is skipped: those rules are
 //     namespaceSelector-shaped and cannot be derived from a URL.
 //   - RENDERED SHAPE ONLY. This proves the RULE exists. It does not prove a
-//     packet arrives; no CNI on this cluster enforces any of these policies.
-//     Plan 06's egress-denial test is the one that would, and it is skipped.
+//     packet arrives: that depends on the cluster's CNI. The enforcement
+//     probe (`helm test`) and the netpol-enforcement workflow are what do.
 
 const componentLabel = "app.kubernetes.io/component"
 

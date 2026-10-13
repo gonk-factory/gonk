@@ -463,16 +463,17 @@ func (lk *pipefixLook) readScope(ctx context.Context) {
 
 	// Base facts, at the commit the fix would be written against.
 	base := scope.BaseFacts{Generated: map[string]bool{}}
-	switch ci, cerr := f.GetRawFile(ctx, pid, pipefixCIFile, latest.SHA, intake.MaxConfigBytes*16); {
-	case cerr == nil:
-		if base.CILocalIncludes, err = scope.CILocalIncludes(ci); err != nil {
-			lk.warn("the pipeline definition's includes cannot be read", err)
-			return
-		}
-	case !glab.IsNotFound(cerr):
+	inc, cerr, ierr := pipefixCIIncludes(ctx, f, pid, latest.SHA, intake.MaxConfigBytes*16)
+	switch {
+	case ierr != nil: // dispatch:includes
+		lk.warn("the pipeline definition's includes cannot be read", ierr)
+		return
+	case cerr != nil:
 		lk.warn("could not read the pipeline definition at the pipeline's commit", cerr)
 		return
 	}
+	// Every file the definition includes, nested ones too (gonk-9q0y).
+	base.CILocalIncludes = inc.Paths
 	cited := make([]pipefix.CitedFile, 0, len(lk.run.PipelineDiagnosis.Files))
 	cls := eff.Classifier(base, lk.d.Log)
 	for _, path := range lk.run.PipelineDiagnosis.Files {

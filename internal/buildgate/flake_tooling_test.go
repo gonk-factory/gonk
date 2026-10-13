@@ -105,11 +105,32 @@ func TestHuntIsNeverPartOfTheGate(t *testing.T) {
 	}
 	// Nor is it scheduled or run by CI: the owner approved it explicitly NOT
 	// as a nightly job.
-	for _, f := range []string{".gitlab-ci.yml", ".github/workflows"} {
-		p := filepath.Join(repoRoot(t), f)
-		out, _ := exec.Command("grep", "-rl", "flake_hunt\\|make hunt", p).Output()
-		if s := strings.TrimSpace(string(out)); s != "" {
-			t.Errorf("CI runs the flake hunt (%s). It is not a CI job and not scheduled (gonk-5pyx).", s)
+	huntRe := regexp.MustCompile(`flake_hunt|make hunt`)
+	ci := map[string][]byte{}
+	if data, ok := maintainerCI(t); ok {
+		ci[maintainerCIFile] = data
+	}
+	dir := filepath.Join(repoRoot(t), ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ci[".github/workflows/"+e.Name()] = data
+	}
+	if len(entries) == 0 {
+		t.Fatalf("no workflow files under %s -- the scan is broken, not the repo", dir)
+	}
+	for name, data := range ci {
+		if huntRe.Match(data) {
+			t.Errorf("CI runs the flake hunt (%s). It is not a CI job and not scheduled (gonk-5pyx).", name)
 		}
 	}
 }
@@ -349,11 +370,20 @@ func TestTheTimeSleepLintCheckActuallyFails(t *testing.T) {
 func TestTheGateShufflesEverywhere(t *testing.T) {
 	root := repoRoot(t)
 	lineRe := regexp.MustCompile(`(?m)^[\t -]*(?:run: )?(?:\$\(GO\)|go) test \./\.\.\. -race -count=1(.*)$`)
-	for _, f := range []string{"Makefile", ".github/workflows/ci.yml", ".gitlab-ci.yml"} {
+	files := map[string][]byte{}
+	for _, f := range []string{"Makefile", ".github/workflows/ci.yml"} {
 		data, err := os.ReadFile(filepath.Join(root, f))
 		if err != nil {
 			t.Fatal(err)
 		}
+		files[f] = data
+	}
+	// The maintainers' pipeline is the third runner; an exported tree does
+	// not carry it, and the two published ones are still checked there.
+	if data, ok := maintainerCI(t); ok {
+		files[maintainerCIFile] = data
+	}
+	for f, data := range files {
 		ms := lineRe.FindAllStringSubmatch(string(data), -1)
 		if len(ms) != 1 {
 			t.Errorf("%s: want exactly one untagged `go test ./... -race -count=1` line, found %d", f, len(ms))

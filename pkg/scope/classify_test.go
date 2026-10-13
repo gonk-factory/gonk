@@ -408,6 +408,11 @@ func TestCILocalIncludes(t *testing.T) {
 		{"not yaml", "{{{{", nil, true},
 		{"bad local", "include:\n  - local: ../../etc/x\n", nil, true},
 		{"empty doc", "", nil, false},
+		{"spec header document", "spec:\n  inputs: {}\n---\ninclude:\n  - local: /ci/a.yml\n", []string{"ci/a.yml"}, false},
+		{"second document not yaml", "spec: {}\n---\n{{{{", nil, true},
+		{"second document not a mapping", "spec: {}\n---\n- a\n", nil, true},
+		{"empty second document", "include: ci/a.yml\n---\n", []string{"ci/a.yml"}, false},
+		{"reference tag", "include: !reference [.a, b]\n", nil, false},
 	}
 	for _, c := range cases {
 		got, err := CILocalIncludes([]byte(c.yaml))

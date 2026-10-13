@@ -705,7 +705,7 @@
       },
       "key_ref": {
         "secret_key": "LITELLM_API_KEY",
-        "secret_name": "gonk-key-agentic-repo-337901b9"
+        "secret_name": "gonk-key-kubernetes-kubectl-9c90167c"
       },
       "operator_scope": {
         "group": {
@@ -745,8 +745,8 @@
           "test_paths": null
         }
       },
-      "project": "agentic/repo",
-      "rig": "agentic-repo",
+      "project": "kubernetes/kubectl",
+      "rig": "kubernetes-kubectl",
       "state": "active",
       "updated_at": "2026-07-13T10:00:00Z"
     }
@@ -933,7 +933,7 @@
       },
       "key_ref": {
         "secret_key": "LITELLM_API_KEY",
-        "secret_name": "gonk-key-agentic-experiments-repo-677ea59d"
+        "secret_name": "gonk-key-kubernetes-experiments-kubectl-bfed038a"
       },
       "operator_scope": {
         "group": {
@@ -973,8 +973,8 @@
           "test_paths": null
         }
       },
-      "project": "agentic/experiments/repo",
-      "rig": "agentic-experiments-repo",
+      "project": "kubernetes/experiments/kubectl",
+      "rig": "kubernetes-experiments-kubectl",
       "state": "active",
       "updated_at": "2026-07-13T10:00:00Z"
     }
@@ -1293,7 +1293,7 @@
       },
       "key_ref": {
         "secret_key": "LITELLM_API_KEY",
-        "secret_name": "gonk-key-agentic-repo-337901b9"
+        "secret_name": "gonk-key-kubernetes-kubectl-9c90167c"
       },
       "operator_scope": {
         "group": {
@@ -1333,8 +1333,8 @@
           "test_paths": null
         }
       },
-      "project": "agentic/repo",
-      "rig": "agentic-repo",
+      "project": "kubernetes/kubectl",
+      "rig": "kubernetes-kubectl",
       "state": "active",
       "updated_at": "2026-07-13T10:00:00Z"
     }
@@ -2360,7 +2360,7 @@
       },
       "key_ref": {
         "secret_key": "LITELLM_API_KEY",
-        "secret_name": "gonk-key-agentic-repo-337901b9"
+        "secret_name": "gonk-key-kubernetes-kubectl-9c90167c"
       },
       "operator_scope": {
         "group": {
@@ -2402,8 +2402,8 @@
           "test_paths": null
         }
       },
-      "project": "agentic/repo",
-      "rig": "agentic-repo",
+      "project": "kubernetes/kubectl",
+      "rig": "kubernetes-kubectl",
       "state": "active",
       "updated_at": "2026-07-13T10:00:00Z"
     }
@@ -2587,7 +2587,7 @@
       },
       "key_ref": {
         "secret_key": "LITELLM_API_KEY",
-        "secret_name": "gonk-key-agentic-experiments-repo-677ea59d"
+        "secret_name": "gonk-key-kubernetes-experiments-kubectl-bfed038a"
       },
       "operator_scope": {
         "group": {
@@ -2629,8 +2629,8 @@
           "test_paths": null
         }
       },
-      "project": "agentic/experiments/repo",
-      "rig": "agentic-experiments-repo",
+      "project": "kubernetes/experiments/kubectl",
+      "rig": "kubernetes-experiments-kubectl",
       "state": "active",
       "updated_at": "2026-07-13T10:00:00Z"
     }
@@ -2950,7 +2950,7 @@
       },
       "key_ref": {
         "secret_key": "LITELLM_API_KEY",
-        "secret_name": "gonk-key-agentic-repo-337901b9"
+        "secret_name": "gonk-key-kubernetes-kubectl-9c90167c"
       },
       "operator_scope": {
         "group": {
@@ -2992,8 +2992,8 @@
           "test_paths": null
         }
       },
-      "project": "agentic/repo",
-      "rig": "agentic-repo",
+      "project": "kubernetes/kubectl",
+      "rig": "kubernetes-kubectl",
       "state": "active",
       "updated_at": "2026-07-13T10:00:00Z"
     }

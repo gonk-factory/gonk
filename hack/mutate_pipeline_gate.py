@@ -74,7 +74,7 @@ muts = [
   [(LD, "\tCloseIssue(ctx context.Context, projectID, issueIID int64) error\n}",
         "\tCloseIssue(ctx context.Context, projectID, issueIID int64) error\n\tCreateCommit(ctx context.Context, projectID int64, opts glab.CommitOptions) (*glab.Commit, error)\n}")]),
  ("routing: the pipeline batch takes the issue path (routing line removed)",
-  [(BA, "\tif fbKinds != nil { // apply:own-chain", "\tif fbKinds != nil && agent != pipelineAgent { // apply:own-chain")]),
+  [(BA, "\tif ownChainAgent(agent) { // apply:own-chain", "\tif ownChainAgent(agent) && agent != pipelineAgent { // apply:own-chain")]),
  # ---- what is posted (D8 step 8) ----
  ("secret: the rendered note is never redact-checked",
   [(AP, "if _, kinds := pipelinectx.Redact(body); len(kinds) > 0 {", "if kinds := []string(nil); len(kinds) > 0 {")]),

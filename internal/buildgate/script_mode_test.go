@@ -11,8 +11,8 @@ import (
 // Scripts meant to be RUN BY PATH must be executable IN GIT, which is not the
 // same as being executable on the machine that wrote them.
 //
-// This repository is checked out on a /mnt/c path, where `chmod +x` does not
-// reliably reach git's index. On 2026-09-07 two new scripts reached main as mode
+// On a Windows-backed checkout (WSL on a Windows drive, for example) `chmod +x`
+// does not reliably reach git's index. On 2026-09-07 two new scripts reached main as mode
 // 100644 despite a local chmod, and the GitHub workflow running one of them died
 // with "Permission denied" (exit 126) AFTER successfully standing up two
 // Kubernetes clusters -- the expensive part done, then defeated by a file mode.

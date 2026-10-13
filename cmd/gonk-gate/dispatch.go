@@ -384,6 +384,9 @@ func runDispatch(ctx context.Context, d dispatchDeps) int {
 	if isFix {
 		setPipelineFixIdentity(&base, decided.rec)
 	}
+	if ag := agentForTrigger[a.Trigger]; ag == triageAgent || ag == scaffoldAgent {
+		carryRetryFeedback(&base, decided) // retry_feedback.go (gonk-hpgy)
+	}
 
 	switch dec.Decision {
 	case meterapi.DecisionDefer:

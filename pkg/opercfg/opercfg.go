@@ -452,10 +452,10 @@ func (oc *OperatorConfig) checkPolicy(who string, p gonkcfg.Policy) error {
 //
 // GroupFor matches a group either exactly (project == g) or on a SEGMENT
 // boundary (strings.HasPrefix(project, g+"/")). A key with a trailing slash
-// satisfies neither: "agentic/" is not a project path, and the prefix test
-// becomes "agentic//", which no project path contains. The schema's
+// satisfies neither: "kubernetes/" is not a project path, and the prefix test
+// becomes "kubernetes//", which no project path contains. The schema's
 // propertyNames pattern permits the key, so today it loads clean and then
-// applies to nothing -- an operator who tightens a budget on "agentic/" gets
+// applies to nothing -- an operator who tightens a budget on "kubernetes/" gets
 // silence, not enforcement, and the ceiling they think they set is not there.
 // An empty interior segment ("a//b") is the same defect for the same reason.
 //
@@ -475,8 +475,8 @@ func checkGroupKey(g string) error {
 // FOLDING every matching ancestor group coarsest-first.
 //
 // Returning only the longest-prefix match would be a budget escape: with groups
-// "agentic" (ceiling $50) and "agentic/experiments" (which sets no budget),
-// project agentic/experiments/spike would inherit NO group ceiling at all and be
+// "kubernetes" (ceiling $50) and "kubernetes/experiments" (which sets no budget),
+// project kubernetes/experiments/spike would inherit NO group ceiling at all and be
 // bounded only by the instance's $200. Spec 5.4 and ADR-002 say ceilings only
 // tighten downward, so a nested group must never be able to LOOSEN its parent's.
 //
@@ -484,8 +484,8 @@ func checkGroupKey(g string) error {
 // the minimum, `enabled` and `actions` are vetoable (an explicit false anywhere
 // in the chain wins), ladders intersect, and other scalars are most-specific-wins.
 //
-// Prefixes match on SEGMENT boundaries only: group "agentic" does not capture
-// project "agentic-other/repo".
+// Prefixes match on SEGMENT boundaries only: group "kubernetes" does not capture
+// project "kubernetes-other/repo".
 func (oc *OperatorConfig) GroupFor(project string) gonkcfg.Policy {
 	var matches []string
 	for g := range oc.Groups {

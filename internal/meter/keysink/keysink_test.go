@@ -8,9 +8,9 @@ import (
 )
 
 func TestSlugShape(t *testing.T) {
-	got := Slug("Agentic/Gonk_Project.v2")
-	if !strings.HasPrefix(got, "agentic-gonk-project-v2-") {
-		t.Fatalf("Slug = %q, want prefix agentic-gonk-project-v2-", got)
+	got := Slug("Gonk-Factory/Gonk.v2")
+	if !strings.HasPrefix(got, "gonk-factory-gonk-v2-") {
+		t.Fatalf("Slug = %q, want prefix gonk-factory-gonk-v2-", got)
 	}
 	if strings.HasPrefix(got, "-") || strings.HasSuffix(got, "-") {
 		t.Fatalf("Slug = %q, has a leading or trailing dash", got)
@@ -34,7 +34,7 @@ func TestSlugNoCollisionBetweenSlashAndDash(t *testing.T) {
 // Slug is a key alias. An unstable slug orphans the previous key on every
 // restart.
 func TestSlugIsStable(t *testing.T) {
-	const project = "agentic/gonk-project"
+	const project = "gonk-factory/gonk"
 	first := Slug(project)
 	for i := 0; i < 5; i++ {
 		if got := Slug(project); got != first {
@@ -49,7 +49,7 @@ var dns1123Subdomain = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 func TestSlugIsLegalDNS1123Subdomain(t *testing.T) {
 	for _, project := range []string{
-		"Agentic/Gonk_Project.v2",
+		"Gonk-Factory/Gonk_Mirror.v2",
 		"a/b",
 		"a-b",
 		"Group/Repo",

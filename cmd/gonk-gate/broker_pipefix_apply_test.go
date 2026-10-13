@@ -71,6 +71,8 @@ type faWorld struct {
 	rt      *testRuntime
 	session string
 	mark    int // len(write log) when the session started
+	// lintsAtSetup: how many ci/lint requests the dispatch had made.
+	lintsAtSetup int
 }
 
 func newFAWorld(t *testing.T, o faOpts) *faWorld {
@@ -130,7 +132,8 @@ func newFAWorld(t *testing.T, o faOpts) *faWorld {
 	if rec.State != beadstore.StateRunning || !rec.PipelineFix.Context.Recorded() || rec.PipelineFix.State != "" {
 		t.Fatalf("setup: fix record state %q fix state %q context %v", rec.State, rec.PipelineFix.State, rec.PipelineFix.Context.Recorded())
 	}
-	return &faWorld{pfWorld: w, rt: pd.rt, session: pd.rt.Starts()[0].Name, mark: len(w.r.gl.Writes())}
+	return &faWorld{pfWorld: w, rt: pd.rt, session: pd.rt.Starts()[0].Name, mark: len(w.r.gl.Writes()),
+		lintsAtSetup: len(w.r.gl.CILintQueries(w.r.pid))}
 }
 
 func (w *faWorld) deps() sweepDeps {
@@ -720,6 +723,11 @@ func faOutsideFences(md string) string {
 		n := 0
 		for n < len(t) && t[n] == '`' {
 			n++
+		}
+		// CommonMark: a fence line is indented by at most three spaces. A
+		// line further right is the block's content (or indented code).
+		if len(line)-len(t) > 3 {
+			n = 0
 		}
 		switch {
 		case fence == "" && n >= 3:
@@ -1315,16 +1323,52 @@ func TestCIPreCheckPatterns(t *testing.T) {
 		return ""
 	}
 	for line, want := range map[string]string{
-		"  allow_failure: true":           "allow_failure",
-		"  allow_failure:":                "allow_failure",
-		"  when: manual":                  "when",
-		"  when: \"never\"":               "when",
-		"    - when: never":               "when",
-		"  retry: 2":                      "retry",
-		"  retry:":                        "retry",
-		"  - ./run-tests || true":         "or-true",
-		"  - ./run-tests || :":            "or-true",
-		"  - ./run-tests || exit 0":       "or-true",
+		"  allow_failure: true":     "allow_failure",
+		"  allow_failure:":          "allow_failure",
+		"  when: manual":            "when",
+		"  when: \"never\"":         "when",
+		"    - when: never":         "when",
+		"  retry: 2":                "retry",
+		"  retry:":                  "retry",
+		"  - ./run-tests || true":   "or-true",
+		"  - ./run-tests || :":      "or-true",
+		"  - ./run-tests || exit 0": "or-true",
+		// gonk-z7gr: the null command followed by something other than the
+		// end of the line, and the same family.
+		"  - ./run-tests || : ;":            "or-true",
+		"  - ./run-tests || : # flaky":      "or-true",
+		"  - ./run-tests || :;":             "or-true",
+		"  - ./run-tests ||:":               "or-true",
+		"  - ./run-tests ||: ; echo done":   "or-true",
+		"  - ./run-tests || : && echo done": "or-true",
+		"  - (./run-tests || :)":            "or-true",
+		"  - \"./run-tests || :\"":          "or-true",
+		"  - sh -c './run-tests || :'":      "or-true",
+		"  - ./run-tests || true ;":         "or-true",
+		"  - ./run-tests || true # flaky":   "or-true",
+		"  - ./run-tests ||true":            "or-true",
+		"  - (./run-tests || true)":         "or-true",
+		"  - \"./run-tests || true\"":       "or-true",
+		"  - ./run-tests || /bin/true":      "or-true",
+		"  - ./run-tests || /usr/bin/true":  "or-true",
+		"  - ./run-tests || exit 0;":        "or-true",
+		"  - ./run-tests || true; ./next":   "or-true",
+		// Near misses: a fallback COMMAND whose name merely starts like one
+		// of the spellings still fails the job when it fails.
+		"  - ./run-tests || true-up.sh":                          "",
+		"  - ./run-tests || true_up":                             "",
+		"  - ./run-tests || true.sh":                             "",
+		"  - ./run-tests || truer":                               "",
+		"  - ./run-tests || :retry":                              "",
+		"  - ./run-tests || ./bin/true-up":                       "",
+		"  - ./run-tests || /bin/true-up":                        "",
+		"  - ./run-tests || exit 1 ;":                            "",
+		"  - ./run-tests || exit 0x1":                            "",
+		"  - ./run-tests | true":                                 "",
+		"  - 'if: $A || $B'":                                     "",
+		"  - if [ -z \"$A\" ] || [ -z \"$B\" ]; then exit 1; fi": "",
+		"  - echo \"a || b: c\"":                                 "",
+		"  - ./run-tests || echo \"failed: $?\" >&2 && false":    "",
 		"  - set +e":                      "set-e",
 		"  - set +o errexit":              "set-e",
 		"  - ./run-tests; exit 0":         "exit-0",
@@ -1595,4 +1639,131 @@ func TestCIPreCheckOnlyReadsCIFiles(t *testing.T) {
 	if applied, v, _, err := w.apply(b); !applied {
 		t.Fatalf("a source change was refused: %q %v", v, err)
 	}
+}
+
+// gonk-9q0y: the "definition unchanged" shortcut for a change that touches no
+// ci path compared the root file and its FIRST-LEVEL literal includes only.
+// A file included by an included file, and everything behind a wildcard
+// include, was outside the comparison and the delta was `none` unexamined.
+func TestFixApplyDefinitionShortcutCoversEveryInclude(t *testing.T) {
+	const (
+		root   = "include:\n- local: ci/a.yml\n" + faCIBody
+		a      = "include:\n- local: /ci/deep/b.yml\n"
+		b      = "deep:\n  stage: test\n  script:\n  - ./deep\n"
+		bMoved = "deep:\n  stage: test\n  script:\n  - ./deep\n  allow_failure: true\n"
+	)
+	nested := func(t *testing.T, bAtCommit string) *faWorld {
+		w := newFAWorld(t, faOpts{files: map[string]string{faCI: root, "ci/a.yml": a, "ci/deep/b.yml": b}})
+		for path, body := range map[string]string{faCI: root, "ci/a.yml": a, "ci/deep/b.yml": bAtCommit, pfSource: pfSourceBody} {
+			w.r.proj.PutFileOn(w.branch(), path, []byte(body))
+		}
+		w.r.gl.SetBranchHead(w.r.pid, w.branch(), plSHA)
+		return w
+	}
+	t.Run("a file included by an included file differs at the commit: not applied", func(t *testing.T) {
+		w := nested(t, bMoved)
+		applied, v, _, err := w.apply(faGood())
+		if applied || v != "" || err == nil || len(w.fixMRs()) != 0 {
+			t.Fatalf("applied=%v %q %v, %d MR(s)", applied, v, err, len(w.fixMRs()))
+		}
+	})
+	t.Run("the near miss: nested includes that did not move change nothing", func(t *testing.T) {
+		w := nested(t, b)
+		applied, v, rec, err := w.apply(faGood())
+		if !applied || len(w.fixMRs()) != 1 || rec.PipelineFix.CIDelta != "none" {
+			t.Fatalf("applied=%v %q %v, %d MR(s), delta %q\n%s", applied, v, err, len(w.fixMRs()), rec.PipelineFix.CIDelta, w.log)
+		}
+		if qs := w.r.gl.CILintQueries(w.r.pid); len(qs) != w.lintsAtSetup {
+			t.Errorf("the shortcut asked GitLab for a lint (%d queries after setup's %d): every include was literal", len(qs), w.lintsAtSetup)
+		}
+	})
+
+	// A WILDCARD include cannot be enumerated from the files gonk reads, so
+	// the shortcut does not apply: the MERGED definition of both commits is
+	// compared, as for a change that does touch a ci path.
+	const (
+		wild       = "include:\n- local: 'ci/*.yml'\n" + faCIBody
+		mergedPath = "merged-definition.yml" // what the fake's lint answers for the commit
+		gated      = faCIBody + "extra:\n  stage: test\n  script:\n  - ./x\n"
+	)
+	wildcard := func(t *testing.T, mergedAtCommit string) *faWorld {
+		w := newFAWorld(t, faOpts{files: map[string]string{faCI: wild, "ci/jobs.yml": "include: ci/deep/b.yml\n", "ci/deep/b.yml": b}})
+		for path, body := range map[string]string{faCI: wild, "ci/jobs.yml": "include: ci/deep/b.yml\n", "ci/deep/b.yml": b,
+			pfSource: pfSourceBody, mergedPath: mergedAtCommit} {
+			w.r.proj.PutFileOn(w.branch(), path, []byte(body))
+		}
+		w.r.gl.SetBranchHead(w.r.pid, w.branch(), plSHA)
+		w.r.gl.SetCILintFromFile(w.r.pid, mergedPath)
+		return w
+	}
+	// "Moved" in each way the comparison tells apart: a free change (a new
+	// job: `preserving` for a ci change), a gating change (a violation), and
+	// a definition GitLab no longer accepts. None is the agent's doing --
+	// its change touches no ci path -- so each is OURS: no merge request, no
+	// refusal the agent is told about.
+	for name, merged := range map[string]string{"a new job": gated, "a gating change": faCIBody + "  allow_failure: true\n", "no definition at all": ""} {
+		t.Run("a wildcard include: the merged definitions are compared, and one that moved ("+name+") is not applied", func(t *testing.T) {
+			w := wildcard(t, merged)
+			if merged == "" {
+				w.r.gl.SetCILintFromFile(w.r.pid, "no-such-file.yml")
+			}
+			applied, v, rec, err := w.apply(faGood())
+			if applied || v != "" || err == nil || len(w.fixMRs()) != 0 || rec.PipelineFix.Refusal != "" {
+				t.Fatalf("applied=%v %q %v, %d MR(s), refusal %q", applied, v, err, len(w.fixMRs()), rec.PipelineFix.Refusal)
+			}
+			if len(w.r.gl.CILintQueries(w.r.pid)) < w.lintsAtSetup+2 {
+				t.Errorf("the merged definitions were not both read")
+			}
+		})
+	}
+	t.Run("a wildcard include: a definition GitLab REJECTS at the commit is not `none`, even with the same text", func(t *testing.T) {
+		// `valid: false` with the base's own merged YAML: the text compares
+		// equal, and only the lint's verdict says the commit runs nothing.
+		w := wildcard(t, faCIBody)
+		w.r.gl.SetCILintDefault(w.r.pid, glab.CILint{Valid: false, MergedYAML: faCIBody, Errors: []string{"jobs config should contain at least one visible job"}})
+		applied, v, rec, err := w.apply(faGood())
+		if applied || v != "" || err == nil || len(w.fixMRs()) != 0 || rec.PipelineFix.Refusal != "" {
+			t.Fatalf("applied=%v %q %v, %d MR(s), refusal %q", applied, v, err, len(w.fixMRs()), rec.PipelineFix.Refusal)
+		}
+		// It was the DELTA that stopped it, not a lint reply gonk could not read.
+		if strings.Contains(err.Error(), "lint the CI definition") || !strings.Contains(err.Error(), "unresolvable") {
+			t.Fatalf("stopped for another reason than the delta: %v", err)
+		}
+	})
+	t.Run("the near miss: a wildcard include whose merged definition is the same is applied as `none`", func(t *testing.T) {
+		w := wildcard(t, faCIBody)
+		applied, v, rec, err := w.apply(faGood())
+		if !applied || len(w.fixMRs()) != 1 || rec.PipelineFix.CIDelta != "none" {
+			t.Fatalf("applied=%v %q %v, %d MR(s), delta %q\n%s", applied, v, err, len(w.fixMRs()), rec.PipelineFix.CIDelta, w.log)
+		}
+	})
+}
+
+// gonk-9q0y at the APPLY: the envelope is folded again from the record, and
+// its base facts are the definition's includes through every level. A file
+// that is `ci` by inclusion is never SHOWN to a session without the lift (the
+// dispatch classifies it, TestTheRecordedEnvelopeIsTheFold), so SC-SHOWN
+// refuses an edit of it before the class is asked; what can be observed here
+// is that the walk happens, and that a definition it cannot understand stops
+// the apply as OURS.
+func TestFixApplyReadsNestedIncludes(t *testing.T) {
+	files := map[string]string{
+		faCI:            "include:\n- local: ci/a.yml\n" + faCIBody,
+		"ci/a.yml":      "include:\n- local: /ci/deep/b.yml\n",
+		"ci/deep/b.yml": "steps:\n  stage: test\n  script:\n  - ./steps\n",
+	}
+	t.Run("the near miss: the good batch is applied in a project with nested includes", func(t *testing.T) {
+		w := newFAWorld(t, faOpts{files: files})
+		if applied, v, _, err := w.apply(faGood()); !applied {
+			t.Fatalf("%q %v\n%s", v, err, w.log)
+		}
+	})
+	t.Run("a nested include that cannot be understood stops the apply (ours, nothing written)", func(t *testing.T) {
+		w := newFAWorld(t, faOpts{files: files})
+		w.r.proj.PutFileOn(plSHA, "ci/deep/b.yml", []byte("{{{{ not yaml"))
+		applied, v, _, err := w.apply(faGood())
+		if applied || v != "" || err == nil || len(w.written()) != 0 {
+			t.Fatalf("applied=%v %q %v, %d write(s)", applied, v, err, len(w.written()))
+		}
+	})
 }

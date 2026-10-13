@@ -1,13 +1,12 @@
 # Prove the gonk-agent egress policy is CORRECT, on clusters that enforce it.
 #
-# This gate exists because NOWHERE ELSE CAN RUN IT (gonk-v47):
-#   * the maintainers' cluster runs flannel with no policy controller, so its NetworkPolicies are
-#     accepted and enforced by nothing -- `helm test gonk` measures exactly that
-#     and correctly reports NOT ENFORCED there (gonk-dku);
-#   * the GitLab runner's k8s executor is privileged=false, so no kind, no k3s,
-#     no DinD -- which is why that pipeline builds images with kaniko;
-#   * this workstation has k3d but only a podman shim, and k3d wants real Docker.
-# A GitHub runner has real Docker. That is the whole reason for the mirror.
+# WHY IT RUNS HERE (gonk-v47). The test needs a cluster whose CNI enforces
+# NetworkPolicy AND one that does not, both disposable:
+#   * on a cluster with no policy controller the policies are accepted and
+#     enforced by nothing -- `helm test gonk` measures exactly that and
+#     correctly reports NOT ENFORCED there (gonk-dku);
+#   * an unprivileged CI runner cannot start kind, k3s or DinD.
+# A GitHub runner has real Docker, so it can build both clusters.
 #
 # TWO CNIs ON PURPOSE. k3s bundles kube-router, which REJECTS a denied
 # connection (ECONNREFUSED); Calico DROPS it (timeout). The probe's verdict is
@@ -70,9 +69,21 @@ jobs:
 
       - name: create a cluster that ENFORCES NetworkPolicy (k3s / kube-router)
         if: matrix.cni == 'k3s-kube-router'
+        env:
+          K3D_VERSION: v5.7.4
+          # The release binary, checked, instead of `curl .../install.sh | bash`
+          # (gonk-jvuo): that ran a script fetched by tag, which then fetched
+          # the binary, and nothing asserted either. The value is the line for
+          # k3d-linux-amd64 in the v5.7.4 release's checksums.txt and equals
+          # the sha256sum of a real download (both checked 2026-10-12).
+          K3D_SHA256: 1ac1da365236736a8df8c32107b54aca208384ab1d9a06771443c85ad698a5eb
         run: |
           set -euo pipefail
-          curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/v5.7.4/install.sh | TAG=v5.7.4 bash
+          url="https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          curl -fsSL "$url" -o "${RUNNER_TEMP}/k3d-linux-amd64"
+          echo "${K3D_SHA256}  ${RUNNER_TEMP}/k3d-linux-amd64" | sha256sum -c -
+          sudo install -m 0755 "${RUNNER_TEMP}/k3d-linux-amd64" /usr/local/bin/k3d
+          k3d version
           # k3s ships kube-router's NetworkPolicy controller and enables it by
           # default; --disable-network-policy would turn this gate into theatre.
           k3d cluster create gonk --agents 0 --wait
@@ -81,12 +92,37 @@ jobs:
 
       - name: create a cluster that ENFORCES NetworkPolicy (kind / Calico)
         if: matrix.cni == 'kind-calico'
+        env:
+          KIND_VERSION: v0.24.0
+          # The release binary, checked (gonk-jvuo), instead of
+          # `go install sigs.k8s.io/kind@v0.24.0`: one pinning rule for every
+          # tool a workflow fetches, and it is installed over whatever kind the
+          # runner ships. The value is the content of the release's
+          # kind-linux-amd64.sha256sum and equals the sha256sum of a real
+          # download (both checked 2026-10-12).
+          KIND_SHA256: b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d
+          # Calico's manifest, by COMMIT and by content. v3.28.2 is a tag, and
+          # `kubectl apply -f <url by tag>` applied whatever that URL served,
+          # with cluster-admin on the test cluster. The commit is what the tag
+          # v3.28.2 pointed at on 2026-10-12, and the sha256 is of the file
+          # that commit's URL (and the tag's) served that day.
+          #
+          # NOT pinned by this: the manifest names its three images by tag
+          # (docker.io/calico/{cni,node,kube-controllers}:v3.28.2), so the
+          # manifest is fixed and the images it pulls are not.
+          CALICO_VERSION: v3.28.2
+          CALICO_COMMIT: 9a96ee39f3833c3eabde151add8a84d546bcf24d
+          CALICO_MANIFEST_SHA256: be59408bf990e96276f631d2f9285c2a0f9802194c0ad1cecdb6d9c52623a1c8
         run: |
           set -euo pipefail
-          go install sigs.k8s.io/kind@v0.24.0
+          url="https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          curl -fsSL "$url" -o "${RUNNER_TEMP}/kind-linux-amd64"
+          echo "${KIND_SHA256}  ${RUNNER_TEMP}/kind-linux-amd64" | sha256sum -c -
+          sudo install -m 0755 "${RUNNER_TEMP}/kind-linux-amd64" /usr/local/bin/kind
+          kind version
           # kindnet does NOT implement NetworkPolicy, so it is disabled and
           # Calico installed in its place. Leaving kindnet on would produce a
-          # cluster that silently enforces nothing -- exactly the maintainers' cluster's failure.
+          # cluster that silently enforces nothing -- the failure this test exists to catch.
           cat > /tmp/kind.yaml <<EOF
           kind: Cluster
           apiVersion: kind.x-k8s.io/v1alpha4
@@ -94,11 +130,14 @@ jobs:
             disableDefaultCNI: true
             podSubnet: "192.168.0.0/16"
           EOF
-          "$(go env GOPATH)/bin/kind" create cluster --name gonk --config /tmp/kind.yaml --wait 120s
-          kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.2/manifests/calico.yaml
+          kind create cluster --name gonk --config /tmp/kind.yaml --wait 120s
+          url="https://raw.githubusercontent.com/projectcalico/calico/${CALICO_COMMIT}/manifests/calico.yaml"
+          curl -fsSL "$url" -o "${RUNNER_TEMP}/calico.yaml"
+          echo "${CALICO_MANIFEST_SHA256}  ${RUNNER_TEMP}/calico.yaml" | sha256sum -c -
+          kubectl apply -f "${RUNNER_TEMP}/calico.yaml"
           kubectl -n kube-system rollout status daemonset/calico-node --timeout=300s
           kubectl wait --for=condition=Ready nodes --all --timeout=300s
-          "$(go env GOPATH)/bin/kind" load docker-image gonk-intake:ci --name gonk
+          kind load docker-image gonk-intake:ci --name gonk
 
       # Runs the probe twice: once with NO policies (must say NOT ENFORCED) and
       # once with the chart's policies applied (must say ENFORCED). The negative
@@ -106,9 +145,8 @@ jobs:
       - name: probe both ways
         env:
           IMAGE: gonk-intake:ci
-        # Invoked through bash rather than relying on the exec bit: this repo is
-        # checked out on a /mnt/c path where the mode does not always survive,
-        # and a contributor on Windows would hit the same thing. The mode is set
+        # Invoked through bash rather than relying on the exec bit: on a
+        # Windows-backed checkout the mode does not always survive. The mode is set
         # in git as well; this is the belt to that braces.
         run: bash hack/netpol_enforcement_e2e.sh
 

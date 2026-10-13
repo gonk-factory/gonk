@@ -157,8 +157,10 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminReconcile is POST /admin/reconcile (spec 5.2). It is unauthenticated
-// and lives ONLY on the private listener: the NetworkPolicy (Plan 05) is what
-// keeps it to Prometheus and the harness. It fires no order that /decide would
+// and lives ONLY on the private listener. The NetworkPolicy does NOT keep it
+// to Prometheus: the same listener serves the per-session checkout, so the
+// policy admits the controller and the agent session pods to the port as well
+// (gonk-nax7), and a policy cannot tell routes apart. It fires no order that /decide would
 // not gate, but it is free work, so it must never be reachable from the
 // ingress.
 func (s *Server) adminReconcile(w http.ResponseWriter, r *http.Request) {

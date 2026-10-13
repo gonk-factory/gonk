@@ -10,12 +10,12 @@
 # WHY IT IS ITS OWN WORKFLOW rather than a job in ci.yml: it is the only
 # thing here that is scheduled rather than per-push, and it is the only thing
 # that needs credentials to a private deployment. ci.yml is the hermetic
-# half of the gate by design ("a red badge that means our homelab was down
-# tells a reader nothing") and this must not be able to redden it.
+# half of the gate by design ("a red badge that means a private deployment
+# was down tells a reader nothing") and this must not be able to redden it.
 #
-# WHY IT IS GATED ON SECRETS, and what that honestly buys today. The maintainers'
-# internal network is a private LAN; a GitHub runner cannot reach it unless somebody wires up
-# a tunnel and stores the three secrets below. Until they do, the credential
+# WHY IT IS GATED ON SECRETS, and what that honestly buys today. A deployment
+# worth measuring is usually on a private network; a GitHub runner cannot reach
+# it unless somebody provides a route and stores the three secrets below. Until they do, the credential
 # gate means this workflow runs its unconditional compile check and reports,
 # in plain words, that the drift checks did not run. That is deliberately
 # NOT dressed up as a pass of the drift checks -- read the summary line.
@@ -129,7 +129,7 @@ jobs:
             echo "- \`GONK_LIVE_KUBECONFIG\` - base64 of a kubeconfig that can read"
             echo "  the \`gonk-operator-config\` ConfigMap"
             echo
-            echo "the maintainers' network is a private LAN, so a GitHub runner needs a tunnel to it"
+            echo "A deployment on a private network also needs a route from the runner"
             echo "before these can be anything but empty."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "live drift checks did not run: GONK_LIVE_LITELLM_URL / _KEY / _KUBECONFIG are not all set" >&2

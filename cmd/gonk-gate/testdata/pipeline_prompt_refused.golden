@@ -155,4 +155,5 @@ gonk checked the answer of attempt 1 of this task and refused it; nothing of it 
 refused by: diagnosis_invalid
 what was wrong: evidence item 2 of 2 names a fact key that does not exist: "log"
 what is allowed: the fact keys are: failure_reason, runner, tags, stage, allow_failure, duration, history, definition, pipeline_error
+the failed jobs are, each name between double quotes: "unit-tests"
 gonk wrote the lines above from its own checks. Answer again in full, with this corrected.

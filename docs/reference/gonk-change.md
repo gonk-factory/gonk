@@ -48,7 +48,7 @@ false (it is validated and otherwise unused), with one exception: see
 
 | Key | Type | Default | Ceiling / allowed values | Meaning |
 |---|---|---|---|---|
-| `triggers` | list | `[label, command, mention]` | subset of `label`, `command`, `mention` | Which forms of an explicit request start the workflow (section 3). `[]` means nothing starts it. `triage-verdict` is not a value: no model's verdict starts this workflow in v1. |
+| `triggers` | list | `[label]` | subset of `label`, `command`, `mention` | Which forms of an explicit request start the workflow (section 3). `[]` means nothing starts it. `triage-verdict` is not a value: no model's verdict starts this workflow in v1. |
 | `create_classes` | list | `[test, docs]` | subset of `source`, `test`, `docs` | `scope` path classes in which a change may CREATE a new file. `source` is a per-project opt-in. `[]`: a change may only edit existing files. |
 | `require_docs` | string | `when-labelled` | `never`, `when-labelled`, `always` | When a change to source code must also change documentation. `when-labelled`: when the issue carries one of `docs_labels`. |
 | `docs_labels` | list of label names | `[feature, enhancement, "type::feature"]` | at most 16 labels of 1 to 255 characters, one line, no leading or trailing space | The issue labels that make documentation required under `when-labelled`. A label can only ADD the requirement. |

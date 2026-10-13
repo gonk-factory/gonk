@@ -10,29 +10,27 @@ metadata:
     {{- include "gonk.networkPolicyBanner" . | nindent 4 }}
 spec:
   # ==========================================================================
-  # *** THE POLICY SPEC 9's CENTRAL CLAIM RESTS ON -- AND IT IS NOT ENFORCED. ***
+  # *** THE POLICY THE BUDGET CLAIM RESTS ON -- ENFORCED ONLY IF YOUR CNI DOES. ***
   #
-  # "Cloud access exists only through the metered proxy, so budgets cannot be
-  # bypassed" is TRUE ONLY IF (a) this selector matches the pods Gas City's k8s
-  # session provider actually creates (OD-5 -- Gas City is not even deployed yet,
-  # so nobody knows the labels), AND (b) the CNI actually enforces policy.
+  # "Model access exists only through the metered proxy, so budgets cannot be
+  # bypassed" is TRUE ONLY IF (a) this selector matches the session pods
+  # (networkPolicy.agentPodSelector), AND (b) the cluster's network plugin
+  # actually enforces NetworkPolicy.
   #
-  # (b) IS FALSE TODAY. Flannel does not implement NetworkPolicy and the Cilium
-  # HelmRelease is SUSPENDED. So RIGHT NOW an agent pod can reach anything --
-  # including a model server on the LAN (e.g. http://192.0.2.10:11434) THAT NEEDS NO CREDENTIAL --
-  # skip LiteLLM entirely, and burn local GPU with ZERO METERING.
+  # WHERE (b) IS FALSE, a session pod can reach anything its node can -- for
+  # example a model server on the local network (http://192.0.2.10:11434) THAT
+  # NEEDS NO CREDENTIAL -- skip LiteLLM entirely, and use it with ZERO METERING.
   #
-  # Owner decision 2026-07-13: SHIP IT, DOCUMENT THE GAP, DO NOT GATE ON IT.
   # Therefore:
   #   * CLOUD-rung budgets ARE hard: a cloud call needs an API key, and the pod's
   #     only route to one is LiteLLM's virtual key, which refuses at the ceiling.
-  #   * LOCAL-model budgets are ADVISORY until Cilium lands.
+  #   * LOCAL-model budgets are ADVISORY wherever this policy is not enforced.
   # Say it that way in every README, dashboard and demo. Not "budgets cannot be
   # bypassed".
   #
-  # Plan 06 writes the egress-denial test and SKIPS it, naming Cilium. UN-SKIPPING
-  # THAT TEST IS THE GATE -- and note that a WRONG selector renders fine and
-  # enforces nothing, so the test, not this template, is what proves it.
+  # `helm test` (templates/test-netpol-probe.yaml) is what tells the two cases
+  # apart on a real cluster -- and note that a WRONG selector renders fine and
+  # enforces nothing, so the probe, not this template, is what proves it.
   # ==========================================================================
   podSelector:
     matchLabels:

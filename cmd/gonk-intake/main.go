@@ -101,11 +101,11 @@ type Config struct {
 	IssueSweepMaxAge time.Duration // GONK_ISSUE_SWEEP_MAX_AGE
 	// BlockedProjects names projects gonk must never work on, however it came
 	// to see them (gonk-jn5). GONK_BLOCKED_PROJECTS, comma-separated, each
-	// entry a path with namespace ("agentic/gonk-project") or a numeric id.
+	// entry a path with namespace ("gonk-factory/gonk") or a numeric id.
 	//
 	// gonk's OWN repository belongs here. `membership=true` includes projects
-	// inherited through GROUP membership, and gonk-project sits in the same
-	// group as the repos gonk works on -- so adding the bot to that group would
+	// inherited through GROUP membership, and a copy of gonk often sits in the
+	// same group as the repos gonk works on -- so adding the bot to that group would
 	// hand a code-writing agent a path to its own broker and gate, as a side
 	// effect of onboarding rather than as a decision.
 	BlockedProjects []string

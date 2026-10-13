@@ -146,6 +146,17 @@ ADR-004 (Plan 03), which records the other half of the split.
     (`docs/environment.md`). There is no config value anywhere in `pkg/glab`
     or `cmd/gonk-intake` that lets a caller set `InsecureSkipVerify`.
 
+    *As of v0.2.0 the mechanism is different and the decision is unchanged.*
+    No image and no chart value sets `SSL_CERT_FILE` any more. With
+    `gitlab.caCert` set, the chart mounts the CA ConfigMap you name and sets
+    `SSL_CERT_DIR` to the system roots plus the CA's directory, which ADDS the
+    CA to the public roots instead of replacing them; with it unset, nothing is
+    mounted and no trust variable is set (`chart/gonk/README.md`, "Trusting a
+    private CA"; `CHANGELOG.md`, v0.2.0). The chart requires no particular
+    tool to publish that ConfigMap. `internal/buildgate/tls_verification_test.go`
+    holds "verification is never disabled" for every Go file, every rendered
+    manifest and the chart's own source.
+
 14. **`POST /admin/reconcile` is unauthenticated, private-listener-only, and
     bounded.** It is not a spend surface -- it fires no order that `/decide`
     would not gate -- but it is free work on an unauthenticated endpoint, so

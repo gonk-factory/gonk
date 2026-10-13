@@ -49,10 +49,10 @@ instance:
 cloud_allowance:
   enabled: true
 groups:
-  agentic:
+  kubernetes:
     budget: { monthly_cost_usd: 50 }
     actions: { pipeline_fixes: false }
-  agentic/experiments:
+  kubernetes/experiments:
     pipeline_fix: { max_chain: 2 }
   other:
     pipeline_fix: { verify_timeout: 30m, auto_merge: { mode: after-human-approval, classes: [docs] } }
@@ -90,12 +90,12 @@ func existingCorpus(t *testing.T) []existingCase {
 			{"triage-only", "solo/repo", simpleYAML("qwen-local, glm", 10)},
 			{"nothing-opted-in", "solo/repo", "version: 1\nenabled: true\nladder: [qwen-local]\n"},
 			{"disabled", "solo/repo", "version: 1\nenabled: false\nladder: [qwen-local]\nactions: { triage: true, pipelines: true }\n"},
-			{"pipelines-only", "agentic/repo", head + "actions: { triage: true, pipelines: true }\n"},
+			{"pipelines-only", "kubernetes/kubectl", head + "actions: { triage: true, pipelines: true }\n"},
 			{"features-on", "solo/repo", head + "actions: { triage: true, features: true }\n"},
 			{"fixes-defaults", "solo/repo", head + "actions: { pipelines: true, pipeline_fixes: true }\n"},
 			{"fixes-everything-set", "solo/repo", fullFix},
-			{"fixes-everything-set-under-a-vetoing-group", "agentic/repo", fullFix},
-			{"fixes-under-a-nested-group", "agentic/experiments/repo", fullFix},
+			{"fixes-everything-set-under-a-vetoing-group", "kubernetes/kubectl", fullFix},
+			{"fixes-under-a-nested-group", "kubernetes/experiments/kubectl", fullFix},
 			{"fixes-under-a-group-naming-a-merge-mode", "other/repo", fullFix},
 			{"fixes-agentic-review-mode", "other/repo", head + "actions: { pipelines: true, pipeline_fixes: true }\npipeline_fix: { auto_merge: { mode: after-agentic-review } }\n"},
 			{"staged-fix-section", "solo/repo", head + "actions: { triage: true }\npipeline_fix: { classes: [], max_files: 1, auto_merge: { mode: after-human-approval } }\n"},

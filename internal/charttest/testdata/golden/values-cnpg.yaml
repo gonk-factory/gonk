@@ -8,20 +8,21 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
   annotations:
-    gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+    gonk-factory.github.io/network-policy-enforcement: "Enforced only where the cluster's network plugin (CNI) implements NetworkPolicy. The API server accepts this object either way; where it is not enforced it blocks nothing, and local-model budgets are advisory. Run helm test on the release to find out which; see chart/gonk/README.md, section 0."
 spec:
   # ==========================================================================
-  # !!! NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13) !!!
-  # Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that
-  # would is SUSPENDED (gitops:clusters/<cluster>/foundation/kustomization.yaml).
-  # THIS OBJECT BLOCKS NOTHING TODAY. It is documentation-as-code: it is
-  # correct, it ships, and it starts enforcing the day Cilium is unsuspended --
-  # with no further work. Do not read it as a guarantee.
-  # See docs/environment.md ("KNOWN LIMITATION") and chart/gonk/README.md.
+  # !!! ENFORCED ONLY WHERE THE CLUSTER'S NETWORK PLUGIN IMPLEMENTS IT !!!
+  # The API server accepts a NetworkPolicy whether or not the CNI implements
+  # NetworkPolicy, and some do not. On such a cluster THIS OBJECT BLOCKS
+  # NOTHING: it is correct, it ships, and it starts enforcing the day the
+  # network plugin does -- with no further work. Do not read it as a guarantee
+  # until `helm test` has reported ENFORCED on your cluster.
+  # See docs/environment.md ("KNOWN LIMITATION") and chart/gonk/README.md,
+  # section 0.
   # ==========================================================================
   #
   # Deny everything, in both directions, for every pod in this namespace. The
@@ -44,37 +45,35 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: agent-session
   annotations:
-    gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+    gonk-factory.github.io/network-policy-enforcement: "Enforced only where the cluster's network plugin (CNI) implements NetworkPolicy. The API server accepts this object either way; where it is not enforced it blocks nothing, and local-model budgets are advisory. Run helm test on the release to find out which; see chart/gonk/README.md, section 0."
 spec:
   # ==========================================================================
-  # *** THE POLICY SPEC 9's CENTRAL CLAIM RESTS ON -- AND IT IS NOT ENFORCED. ***
+  # *** THE POLICY THE BUDGET CLAIM RESTS ON -- ENFORCED ONLY IF YOUR CNI DOES. ***
   #
-  # "Cloud access exists only through the metered proxy, so budgets cannot be
-  # bypassed" is TRUE ONLY IF (a) this selector matches the pods Gas City's k8s
-  # session provider actually creates (OD-5 -- Gas City is not even deployed yet,
-  # so nobody knows the labels), AND (b) the CNI actually enforces policy.
+  # "Model access exists only through the metered proxy, so budgets cannot be
+  # bypassed" is TRUE ONLY IF (a) this selector matches the session pods
+  # (networkPolicy.agentPodSelector), AND (b) the cluster's network plugin
+  # actually enforces NetworkPolicy.
   #
-  # (b) IS FALSE TODAY. Flannel does not implement NetworkPolicy and the Cilium
-  # HelmRelease is SUSPENDED. So RIGHT NOW an agent pod can reach anything --
-  # including a model server on the LAN (e.g. http://192.0.2.10:11434) THAT NEEDS NO CREDENTIAL --
-  # skip LiteLLM entirely, and burn local GPU with ZERO METERING.
+  # WHERE (b) IS FALSE, a session pod can reach anything its node can -- for
+  # example a model server on the local network (http://192.0.2.10:11434) THAT
+  # NEEDS NO CREDENTIAL -- skip LiteLLM entirely, and use it with ZERO METERING.
   #
-  # Owner decision 2026-07-13: SHIP IT, DOCUMENT THE GAP, DO NOT GATE ON IT.
   # Therefore:
   #   * CLOUD-rung budgets ARE hard: a cloud call needs an API key, and the pod's
   #     only route to one is LiteLLM's virtual key, which refuses at the ceiling.
-  #   * LOCAL-model budgets are ADVISORY until Cilium lands.
+  #   * LOCAL-model budgets are ADVISORY wherever this policy is not enforced.
   # Say it that way in every README, dashboard and demo. Not "budgets cannot be
   # bypassed".
   #
-  # Plan 06 writes the egress-denial test and SKIPS it, naming Cilium. UN-SKIPPING
-  # THAT TEST IS THE GATE -- and note that a WRONG selector renders fine and
-  # enforces nothing, so the test, not this template, is what proves it.
+  # `helm test` (templates/test-netpol-probe.yaml) is what tells the two cases
+  # apart on a real cluster -- and note that a WRONG selector renders fine and
+  # enforces nothing, so the probe, not this template, is what proves it.
   # ==========================================================================
   podSelector:
     matchLabels:
@@ -172,18 +171,17 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: controller
   annotations:
-    gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+    gonk-factory.github.io/network-policy-enforcement: "Enforced only where the cluster's network plugin (CNI) implements NetworkPolicy. The API server accepts this object either way; where it is not enforced it blocks nothing, and local-model budgets are advisory. Run helm test on the release to find out which; see chart/gonk/README.md, section 0."
 spec:
-  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
-  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
-  # (gitops:clusters/<cluster>/foundation/kustomization.yaml). This object blocks
-  # nothing today; it is documentation-as-code that starts enforcing the day
-  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  # ENFORCED ONLY WHERE THE CLUSTER'S NETWORK PLUGIN IMPLEMENTS NetworkPolicy.
+  # The API server accepts this object either way; on a CNI that does not
+  # implement it, this object blocks nothing. `helm test` reports which you
+  # have. See chart/gonk/README.md, section 0.
   podSelector:
     matchLabels:
       app.kubernetes.io/name: gonk
@@ -202,16 +200,18 @@ spec:
           port: 9443
   egress:
     # DNS, GitLab, Dolt (beads), gonk-meter, gonk-intake's private listener, the
-    # work store's Postgres, and the API server
-    # (spawn agent pods). The API
-    # server cannot be named by a NetworkPolicy selector -- left to the cluster's
-    # own allowance; if your CNI blocks it, NO SESSION SPAWNS. Plan 06 confirms.
+    # work store's Postgres, and the Kubernetes API server (last rule).
+    #
+    # DNS on UDP AND TCP (gonk-6xzj): a response that does not fit in a datagram
+    # is retried over TCP, and this policy alone allowed UDP only.
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
       ports:
         - protocol: UDP
+          port: 53
+        - protocol: TCP
           port: 53
     - to:
         - podSelector:
@@ -260,6 +260,17 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: gitlab
+    # THE KUBERNETES API SERVER (gonk-vxel). gonk-gate creates every session as
+    # a Job and reads its pod, log and Secrets (Roles gonk-gate-jobs and
+    # gc-controller), all through the API server. The API server is not a pod,
+    # so no selector names it: the rule is an ipBlock, and the addresses are
+    # yours (networkPolicy.kubeAPI.cidrs, with .ports).
+    #
+    # WITH THE VALUE UNSET THERE IS NO RULE, and on a cluster that enforces
+    # NetworkPolicy NO SESSION JOB IS CREATED: the dispatch is refused at the
+    # first API call. The chart does not guess an address, because the only
+    # guess that is right on every cluster is 0.0.0.0/0. See values.yaml and
+    # chart/gonk/README.md, section 0.
 ---
 # Source: gonk/templates/networkpolicy-gonk-dolt.yaml
 apiVersion: networking.k8s.io/v1
@@ -270,18 +281,17 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: dolt
   annotations:
-    gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+    gonk-factory.github.io/network-policy-enforcement: "Enforced only where the cluster's network plugin (CNI) implements NetworkPolicy. The API server accepts this object either way; where it is not enforced it blocks nothing, and local-model budgets are advisory. Run helm test on the release to find out which; see chart/gonk/README.md, section 0."
 spec:
-  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
-  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
-  # (gitops:clusters/<cluster>/foundation/kustomization.yaml). This object blocks
-  # nothing today; it is documentation-as-code that starts enforcing the day
-  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  # ENFORCED ONLY WHERE THE CLUSTER'S NETWORK PLUGIN IMPLEMENTS NetworkPolicy.
+  # The API server accepts this object either way; on a CNI that does not
+  # implement it, this object blocks nothing. `helm test` reports which you
+  # have. See chart/gonk/README.md, section 0.
   podSelector:
     matchLabels:
       app.kubernetes.io/name: gonk
@@ -311,18 +321,17 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: intake
   annotations:
-    gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+    gonk-factory.github.io/network-policy-enforcement: "Enforced only where the cluster's network plugin (CNI) implements NetworkPolicy. The API server accepts this object either way; where it is not enforced it blocks nothing, and local-model budgets are advisory. Run helm test on the release to find out which; see chart/gonk/README.md, section 0."
 spec:
-  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
-  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
-  # (gitops:clusters/<cluster>/foundation/kustomization.yaml). This object blocks
-  # nothing today; it is documentation-as-code that starts enforcing the day
-  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  # ENFORCED ONLY WHERE THE CLUSTER'S NETWORK PLUGIN IMPLEMENTS NetworkPolicy.
+  # The API server accepts this object either way; on a CNI that does not
+  # implement it, this object blocks nothing. `helm test` reports which you
+  # have. See chart/gonk/README.md, section 0.
   podSelector:
     matchLabels:
       app.kubernetes.io/name: gonk
@@ -338,12 +347,47 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-    # The private listener (metrics, health, and an UNAUTHENTICATED
-    # POST /admin/reconcile), from Prometheus only.
+    # The private listener, from Prometheus (metrics, health).
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+    # The private listener, from the two pods that use the per-session checkout
+    # (pkg/rig, gonk-msz): gonk-gate in the controller REGISTERS it
+    # (POST /rig/{alias}) and the agent session pod FETCHES it
+    # (GET /rig/{alias}.tar.gz).
+    #
+    # THIS IS THE INGRESS HALF OF TWO RULES THAT ALREADY EXISTED (gonk-nax7).
+    # gonk-agent and gonk-controller have each allowed EGRESS to this port since
+    # the checkout was built, and nothing here admitted either of them, so on a
+    # cluster that enforces NetworkPolicy both calls were dropped on the way in
+    # and every session ran with no working copy. A permission between two pods
+    # in this namespace is two rules; TestEveryInNamespaceRuleHasItsOtherHalf
+    # fails when either is edited alone.
+    #
+    # WHAT ELSE THIS ADMITS, because a NetworkPolicy cannot tell one path or
+    # method from another: EVERYTHING on the private listener is reachable from
+    # an agent session pod, a pod that runs text written by whoever opened the
+    # issue. That is the unauthenticated POST /admin/reconcile, and it is the
+    # REGISTRATION route itself: POST /rig/{alias} is not authenticated either
+    # (pkg/rig/http.go), so a session pod can register a checkout of any
+    # project the forge token can read, and then fetch it. The policy cannot
+    # close that. Authenticating the registration, or serving the fetch on a
+    # listener of its own, would; until then a session is confined to its own
+    # project by the agent's instructions and not by the network. On a cluster
+    # that does not enforce NetworkPolicy this was already the case.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gc-agent
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gonk
+              app.kubernetes.io/instance: gonk
+              app.kubernetes.io/component: controller
       ports:
         - protocol: TCP
           port: 9090
@@ -402,18 +446,17 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
   annotations:
-    gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+    gonk-factory.github.io/network-policy-enforcement: "Enforced only where the cluster's network plugin (CNI) implements NetworkPolicy. The API server accepts this object either way; where it is not enforced it blocks nothing, and local-model budgets are advisory. Run helm test on the release to find out which; see chart/gonk/README.md, section 0."
 spec:
-  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
-  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
-  # (gitops:clusters/<cluster>/foundation/kustomization.yaml). This object blocks
-  # nothing today; it is documentation-as-code that starts enforcing the day
-  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  # ENFORCED ONLY WHERE THE CLUSTER'S NETWORK PLUGIN IMPLEMENTS NetworkPolicy.
+  # The API server accepts this object either way; on a CNI that does not
+  # implement it, this object blocks nothing. `helm test` reports which you
+  # have. See chart/gonk/README.md, section 0.
   podSelector:
     matchLabels:
       app.kubernetes.io/name: gonk
@@ -506,8 +549,8 @@ spec:
     # DELETED -- that state does not exist any more (ADR-004 Decision 10), and
     # meter never has a legitimate reason to egress to the Dolt Service (it backs
     # beads only). The `cnpg` branch below is unchanged. A gap this reconciliation
-    # ALSO closes: the DEFAULT ledger.postgres.mode is `shared` (the existing
-    # databases-app/postgres CNPG cluster), and the original text had NO egress
+    # ALSO closes: the DEFAULT ledger.postgres.mode is `shared` (an existing
+    # CloudNativePG cluster), and the original text had NO egress
     # rule for that mode at all -- meter's own default profile would have had no
     # NetworkPolicy path to its own ledger. `external` has the same gap. Both now
     # get a namespaceSelector egress, matching the litellm/dns pattern above.
@@ -518,10 +561,14 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
-    # The Kubernetes API server (the KeySink writes per-project Secrets). A
-    # NetworkPolicy cannot name the API server by service, so this is left to the
-    # cluster's own allowance -- and if your CNI blocks it, meter cannot deliver
-    # keys and NOTHING RUNS. Plan 06 must confirm.
+    # THE KUBERNETES API SERVER (gonk-vxel). The KeySink writes each project's
+    # LiteLLM key as a Secret (Role gonk-meter), through the API server. It is
+    # not a pod, so no selector names it: the rule is an ipBlock, and the
+    # addresses are yours (networkPolicy.kubeAPI.cidrs, with .ports).
+    #
+    # WITH THE VALUE UNSET THERE IS NO RULE, and on a cluster that enforces
+    # NetworkPolicy the meter cannot deliver a key: every project stays without
+    # one and nothing runs. See values.yaml and chart/gonk/README.md, section 0.
 ---
 # Source: gonk/templates/serviceaccount-gc-agent.yaml
 apiVersion: v1
@@ -532,7 +579,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: agent
@@ -550,7 +597,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: controller
@@ -567,7 +614,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -585,7 +632,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
 ---
@@ -598,7 +645,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     grafana_dashboard: "1"
@@ -715,7 +762,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     grafana_dashboard: "1"
@@ -861,7 +908,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     grafana_dashboard: "1"
@@ -1007,7 +1054,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: litellm-advisory
@@ -1040,7 +1087,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -1089,7 +1136,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: agent
@@ -1113,7 +1160,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: controller
@@ -1203,7 +1250,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: controller
@@ -1230,7 +1277,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -1269,7 +1316,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: agent
@@ -1291,7 +1338,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: controller
@@ -1314,7 +1361,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: controller
@@ -1343,7 +1390,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -1372,7 +1419,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: controller
@@ -1400,7 +1447,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: dolt
@@ -1425,7 +1472,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: intake
@@ -1453,7 +1500,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: intake
@@ -1482,7 +1529,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -1509,7 +1556,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: intake
@@ -1531,7 +1578,7 @@ spec:
         helm.sh/chart: gonk-0.0.0-golden
         app.kubernetes.io/name: gonk
         app.kubernetes.io/instance: gonk
-        app.kubernetes.io/version: "0.2.0"
+        app.kubernetes.io/version: "0.2.1"
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/part-of: gonk
         app.kubernetes.io/component: intake
@@ -1558,9 +1605,10 @@ spec:
             # named. *** THIS IS HOW WE TRUST A GITLAB BEHIND A PRIVATE CA. ***
             # The image carries no trust setting of its own: gonk.caTrustEnv
             # (_helpers.tpl) ADDS the mounted bundle's directory to the system
-            # roots, it does not replace them. It is the reason no code in this
-            # repo ever sets InsecureSkipVerify -- there is no value that disables
-            # TLS verification, and there never will be.
+            # roots, it does not replace them. It is the reason no gonk code
+            # ever sets InsecureSkipVerify -- there is no value that disables
+            # TLS verification, and there never will be
+            # (internal/buildgate/tls_verification_test.go holds both).
             - name: SSL_CERT_DIR
               value: "/etc/ssl/certs:/etc/ssl/gonk"
             - name: GONK_WEBHOOK_SECRET_FILE
@@ -1609,11 +1657,11 @@ spec:
             # Projects gonk must never work on. Unparseable entries make intake refuse
             # to start -- fail closed, never "block less than was written" (gonk-jn5).
             - name: GONK_BLOCKED_PROJECTS
-              value: "agentic/gonk-project"
+              value: "gonk-factory/gonk"
             - name: GONK_PRIVATE_ADDR
               value: ":9090"
             - name: GONK_VERSION
-              value: "0.2.0"
+              value: "0.2.1"
           ports:
             # The PUBLIC listener: POST /hook/gitlab, and 404 for everything else.
             - name: http-hook
@@ -1727,7 +1775,7 @@ spec:
         # gitlab.caCert.existingConfigMap is a NAME: the chart does not create the
         # ConfigMap (trust-manager, or you, publish it into this namespace).
         # It is how a Go service trusts a GitLab behind a private CA --
-        # and it is the reason no code in this repo ever sets InsecureSkipVerify.
+        # and it is the reason no gonk code ever sets InsecureSkipVerify.
         - name: gitlab-ca
           configMap:
             name: gitlab-ca
@@ -1746,7 +1794,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -1770,7 +1818,7 @@ spec:
         helm.sh/chart: gonk-0.0.0-golden
         app.kubernetes.io/name: gonk
         app.kubernetes.io/instance: gonk
-        app.kubernetes.io/version: "0.2.0"
+        app.kubernetes.io/version: "0.2.1"
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/part-of: gonk
         app.kubernetes.io/component: meter
@@ -1779,7 +1827,7 @@ spec:
         # from disk on each tick, so this is belt-and-braces -- but a config that
         # fails to validate should surface as a failed rollout, not a quiet
         # "kept the previous config" log line.)
-        checksum/operator-config: 1d802dc403f51ca5bfd0073a6fa7678403de5ec5079cc46ad4a4fbfafee9df75
+        checksum/operator-config: 8596760f0da28c6c4b2e7e05dc1b8b8531fa6b5f720a501d5b47de0526678d9f
     spec:
       serviceAccountName: gonk-meter
       securityContext:
@@ -1954,7 +2002,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: controller
@@ -1978,7 +2026,7 @@ spec:
         helm.sh/chart: gonk-0.0.0-golden
         app.kubernetes.io/name: gonk
         app.kubernetes.io/instance: gonk
-        app.kubernetes.io/version: "0.2.0"
+        app.kubernetes.io/version: "0.2.1"
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/part-of: gonk
         app.kubernetes.io/component: controller
@@ -2687,7 +2735,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: dolt
@@ -2710,7 +2758,7 @@ spec:
         helm.sh/chart: gonk-0.0.0-golden
         app.kubernetes.io/name: gonk
         app.kubernetes.io/instance: gonk
-        app.kubernetes.io/version: "0.2.0"
+        app.kubernetes.io/version: "0.2.1"
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/part-of: gonk
         app.kubernetes.io/component: dolt
@@ -2863,7 +2911,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: intake
@@ -2894,9 +2942,8 @@ spec:
 # failing the reservation-race isolation test decisively (32/32 concurrent
 # writers won a ceiling-of-2 race, 12.8x overspend, at every isolation level
 # including SELECT ... FOR UPDATE -- docs/spikes/dolt-reservation-isolation.md).
-# Postgres on the CNPG cluster the owner ALREADY RUNS is the answer, not a
-# contingency. Not a new stateful dependency -- CNPG's operator is already
-# there, and this chart does not install it.
+# Postgres is the answer, not a contingency. This template is the `cnpg` mode:
+# it needs the CloudNativePG operator, which this chart does not install.
 #
 # Why Postgres, not Dolt: SERIALIZABLE / SELECT ... FOR UPDATE is well-trodden
 # for exactly the concurrent-reservation race on Postgres (verified: it blocks,
@@ -2911,7 +2958,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: ledger
@@ -2939,7 +2986,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
 spec:
@@ -3037,7 +3084,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: intake
@@ -3066,7 +3113,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: meter
@@ -3094,7 +3141,7 @@ metadata:
     helm.sh/chart: gonk-0.0.0-golden
     app.kubernetes.io/name: gonk
     app.kubernetes.io/instance: gonk
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: gonk
     app.kubernetes.io/component: netpol-probe

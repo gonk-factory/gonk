@@ -7,7 +7,9 @@ package effects
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 )
 
 type Kind string
@@ -232,9 +234,52 @@ type ParseError struct {
 func (e *ParseError) Error() string { return e.Err.Error() }
 func (e *ParseError) Unwrap() error { return e.Err }
 
+// ErrBatchTrailingData: the text holds something after its one JSON value
+// (gonk-s0td).
+// It is a refusal like any other parse failure: nothing is applied.
+var ErrBatchTrailingData = errors.New("effects: parse batch: there is text after the end of the batch's JSON object")
+
+// ErrBatchDuplicateKey: the batch object states one of its own keys more than
+// once. encoding/json keeps the last and reports nothing, so the text a
+// person reads and the batch the gates check would differ.
+var ErrBatchDuplicateKey = errors.New("effects: parse batch: a key of the batch object is stated more than once")
+
+// batchKeyRepeated reports whether the JSON object in text states one of its
+// OWN keys twice. text has already decoded as a Batch with unknown fields
+// refused, so every key here is one the decoder matched to a field -- and it
+// matches without regard to case ("Effects" is "effects"), which is why the
+// comparison folds case too. Only the top level is read: each value is
+// skipped whole, so a key repeated inside an effect is not this rule's.
+func batchKeyRepeated(text []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(text))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return false
+	}
+	var seen []string
+	for dec.More() {
+		t, err := dec.Token()
+		key, ok := t.(string)
+		if err != nil || !ok {
+			return false
+		}
+		for _, s := range seen {
+			if strings.EqualFold(s, key) { // parse:duplicate-fold
+				return true
+			}
+		}
+		seen = append(seen, key)
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return false
+		}
+	}
+	return false
+}
+
 func ParseBatch(raw []byte) (Batch, error) {
 	var b Batch
-	dec := json.NewDecoder(bytes.NewReader(escapeRawControlsInStrings(raw)))
+	text := escapeRawControlsInStrings(raw)
+	dec := json.NewDecoder(bytes.NewReader(text))
 	// DisallowUnknownFields is CORRECT and intentional: Effect is a superset
 	// struct, so {"kind":"comment","body":"x"} decodes cleanly and fields like
 	// `add`/`title` are known struct fields (never wrongly rejected); a genuinely
@@ -242,6 +287,19 @@ func ParseBatch(raw []byte) (Batch, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&b); err != nil {
 		return Batch{}, fmt.Errorf("effects: parse batch: %w", err)
+	}
+	// ONE value, and nothing after it but JSON white space (gonk-s0td). The
+	// decoder stops at the end of the first value: without this, an object
+	// followed by prose, or by a second object, was read as the first -- the
+	// agent said two things and one of them was applied.
+	if rest := bytes.Trim(text[dec.InputOffset():], " \t\r\n"); len(rest) > 0 { // parse:trailing
+		return Batch{}, ErrBatchTrailingData
+	}
+	// Each key of the batch object ONCE. The decoder above keeps the last of
+	// two equal keys without a word, so `{"effects":[],"effects":[...]}` was
+	// its second list.
+	if batchKeyRepeated(text) { // parse:duplicate
+		return Batch{}, ErrBatchDuplicateKey
 	}
 	for i, e := range b.Effects {
 		if !knownKinds[e.Kind] {

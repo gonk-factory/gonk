@@ -1,7 +1,7 @@
 {
   "object_kind": "note",
   "event_type": "note",
-  "user": { "id": 9, "username": "steve", "name": "Steven Wagner" },
+  "user": { "id": 9, "username": "example-maintainer", "name": "Example Maintainer" },
   "project": {
     "id": 75,
     "name": "sortlib",

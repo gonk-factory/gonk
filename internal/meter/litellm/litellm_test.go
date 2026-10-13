@@ -86,7 +86,7 @@ func TestHTTPSpendSourceParsesTagsAndClock(t *testing.T) {
 		reqs++
 		q := r.URL.Query()
 		// THE BOUND IS NOT OPTIONAL, ON EVERY PAGE. An unbounded /spend/logs
-		// OOM-killed the live LiteLLM (docs/environment.md, OPERATIONAL HAZARD).
+		// OOM-killed a live LiteLLM (docs/environment.md, OPERATIONAL HAZARD).
 		// Every request MUST carry BOTH a start_date and an end bound; a request
 		// missing either is the bug these two assertions exist to catch.
 		if q.Get("start_date") == "" {
@@ -101,7 +101,7 @@ func TestHTTPSpendSourceParsesTagsAndClock(t *testing.T) {
 		// total_pages}, paginated by page/total_pages -- there is NO X-Next-Page
 		// header on the real proxy. A regression to a single-page fetch FAILS: c3
 		// lives on page 2. LiteLLM persists the header-supplied tags at
-		// metadata.spend_logs_metadata (VERIFIED, docs/environment.md).
+		// metadata.spend_logs_metadata (verified against LiteLLM v1.92.0).
 		switch q.Get("page") {
 		case "", "1":
 			_, _ = w.Write([]byte(`{"total":3,"page":1,"page_size":2,"total_pages":2,"data":[

@@ -74,9 +74,9 @@ func TestLiteLLMAdminAPIShapes(t *testing.T) {
 }
 
 // TestMeterSpendPollerAlwaysCarriesADateBound is a HARD SAFETY test, not a
-// convenience one: an unbounded GET /spend/logs OOM-killed the live LiteLLM the
-// whole cluster shares (docs/environment.md; gonk-wgq). Meter polls this endpoint
-// on a timer. So drive the REAL HTTPSpendSource through a recording proxy and
+// convenience one: an unbounded GET /spend/logs OOM-killed a live LiteLLM that
+// a whole cluster shared (docs/environment.md, "OPERATIONAL HAZARD"; gonk-wgq).
+// Meter polls this endpoint on a timer. So drive the REAL HTTPSpendSource through a recording proxy and
 // require EVERY captured request to carry a start_date -- never a naked query.
 func TestMeterSpendPollerAlwaysCarriesADateBound(t *testing.T) {
 	w := newWorld(t)
@@ -168,7 +168,8 @@ func TestLiteLLMHasNoRealUpstream(t *testing.T) {
 // TestWhetherLiteLLMForwardsMetadataUpstream discovers, empirically, whether
 // LiteLLM forwards `metadata` to the upstream model. EITHER answer is fine -- but
 // it decides whether the stub log can check ATTRIBUTION (it can always check
-// VOLUME). The answer is WRITTEN DOWN in docs/spikes/litellm-verified.md.
+// VOLUME). The answer is WRITTEN DOWN in the maintainers' LiteLLM spike record
+// (litellm-verified.md, not published).
 func TestWhetherLiteLLMForwardsMetadataUpstream(t *testing.T) {
 	w := newWorld(t)
 	w.Stub.SetScript(alwaysAnswer(10, 0))

@@ -55,7 +55,7 @@ func TestProbeIsNotMistakableForAnAgentSession(t *testing.T) {
 //
 // The probe originally used gonk-intake:9090 because the agent's egress rule
 // names it -- and that rule is DEAD: intake's own policy admits only the traefik
-// and monitoring namespaces. On the reference cluster, which enforces nothing, the leg connected
+// and monitoring namespaces. On a cluster that enforces nothing, the leg connected
 // and the probe looked fine. On a cluster that enforces, it would have failed
 // and the probe would have reported INCONCLUSIVE on a perfectly good cluster.
 //

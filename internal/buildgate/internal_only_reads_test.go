@@ -41,6 +41,18 @@ import (
 // proof is the export tool's own: build the public tree and run the gate in
 // it.
 //
+// A NAME THE PRODUCT USES AS DATA (targetProjectNames). One listed path is
+// also what gonk calls a file in the repository it WORKS ON: the product
+// classifies, protects and cites the target project's pipeline definition by
+// that name all through pkg/scope, pkg/effects and cmd/gonk-gate. In a Go file
+// such a name is therefore a read only where the file system is asked for it:
+// as an argument of an os, filepath, path or ioutil call (which includes a
+// Join). As a bare literal anywhere else it is data. In a script, Makefile or
+// workflow it stays a read, as every listed path does. What that leaves
+// unseen is a read through a named constant -- which is how the one
+// sanctioned reader (maintainer_ci_test.go) is written, and why every other
+// reader must go through it.
+//
 // EXEMPTIONS are exact and each has its reason: a file (or a directory,
 // written with a trailing "/") whose subject IS the internal-only paths, or
 // one path in one file that only looks like a listed one. One that no longer
@@ -71,12 +83,27 @@ var notARead = map[[2]string]string{
 	{"pkg/pipelinectx/fixepoch_test.go", "release/1.x"}: "a branch name in a fixture",
 }
 
+// targetProjectNames: listed paths whose name the product also uses as DATA,
+// for a file of the target project. See the note above. The key is the list
+// entry.
+var targetProjectNames = map[string]string{
+	".gitlab-ci.yml": "the target project's pipeline definition: gonk classifies it (pkg/scope), protects it (pkg/effects) " +
+		"and cites it in diagnoses (cmd/gonk-gate); fixtures name it constantly and none of them opens this repository's file",
+}
+
 // internalRead is one path in a published file that points into the list.
 type internalRead struct {
 	File string // the published file
 	Line int
 	Path string // as written
+	// FSCall: the path is an argument of an os, filepath, path or ioutil
+	// call (Go files only). It decides whether a targetProjectNames entry is
+	// a read or data, and nothing else.
+	FSCall bool
 }
+
+// fsPackages are the packages whose calls take a path to open, stat or build.
+var fsPackages = map[string]bool{"os": true, "filepath": true, "path": true, "ioutil": true}
 
 // stripUp drops leading "./" and "../" segments: where a path is read FROM
 // does not change what it reads.
@@ -131,8 +158,9 @@ func goInternalReads(list *exportguard.List, name string, src []byte) ([]interna
 		return nil, err
 	}
 	var out []internalRead
-	add := func(pos token.Pos, written string) {
-		out = append(out, internalRead{name, fset.Position(pos).Line, written})
+	fsArg := map[token.Pos]bool{} // literals that are arguments of a file-system call
+	add := func(pos token.Pos, written string, fsCall bool) {
+		out = append(out, internalRead{name, fset.Position(pos).Line, written, fsCall})
 	}
 	lit := func(e ast.Expr) (string, bool) {
 		b, ok := e.(*ast.BasicLit)
@@ -148,14 +176,25 @@ func goInternalReads(list *exportguard.List, name string, src []byte) ([]interna
 			return false // an import path is not a file path
 		case *ast.BasicLit:
 			if s, ok := lit(x); ok && pointsIntoList(list, s) {
-				add(x.Pos(), s)
+				add(x.Pos(), s, fsArg[x.Pos()])
 			}
 		case *ast.CallExpr:
 			sel, ok := x.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Join" {
+			if !ok {
 				return true
 			}
-			if pkg, ok := sel.X.(*ast.Ident); !ok || (pkg.Name != "filepath" && pkg.Name != "path") {
+			pkg, ok := sel.X.(*ast.Ident)
+			if !ok || !fsPackages[pkg.Name] {
+				return true
+			}
+			// Inspect reaches a call before its arguments, so the literals
+			// among them are marked by the time they are visited.
+			for _, a := range x.Args {
+				if _, ok := lit(a); ok {
+					fsArg[a.Pos()] = true
+				}
+			}
+			if sel.Sel.Name != "Join" || (pkg.Name != "filepath" && pkg.Name != "path") {
 				return true
 			}
 			// The literal arguments, in order, skipping the non-literal ones
@@ -172,7 +211,7 @@ func goInternalReads(list *exportguard.List, name string, src []byte) ([]interna
 				return true // a single literal is already seen as a BasicLit
 			}
 			if joined := strings.Join(parts, "/"); pointsIntoList(list, joined) {
-				add(x.Pos(), joined)
+				add(x.Pos(), joined, true)
 			}
 		}
 		return true
@@ -211,7 +250,7 @@ func textInternalReads(list *exportguard.List, name string, src []byte) []intern
 		}
 		for _, tok := range candidates {
 			if pointsIntoList(list, tok) {
-				out = append(out, internalRead{name, i + 1, tok})
+				out = append(out, internalRead{File: name, Line: i + 1, Path: tok})
 			}
 		}
 	}
@@ -412,7 +451,7 @@ type internalReadReport struct {
 // scan must have seen: below that the walk looked in the wrong place, and a
 // check that scanned nothing must not report "clean".
 func internalReadCheck(root string, tracked func() ([]string, error), fileExempt map[string]string,
-	pathExempt map[[2]string]string, minGo, minText int) (internalReadReport, error) {
+	pathExempt map[[2]string]string, dataNames map[string]string, minGo, minText int) (internalReadReport, error) {
 	var rep internalReadReport
 	_, srcErr := os.Stat(filepath.Join(root, exportguard.ExportSourcePath))
 	_, dataErr := os.Stat(filepath.Join(root, exportguard.SelfDir))
@@ -452,6 +491,7 @@ func internalReadCheck(root string, tracked func() ([]string, error), fileExempt
 	}
 	fileHit := map[string]bool{}
 	pathHit := map[[2]string]bool{}
+	dataHit := map[string]bool{}
 	for _, path := range paths {
 		if path == "" || strings.HasPrefix(path, "vendor/") || list.Covers(path) {
 			continue
@@ -481,6 +521,12 @@ func internalReadCheck(root string, tracked func() ([]string, error), fileExempt
 			continue
 		}
 		for _, h := range hits {
+			// A name the product uses as data is a read, in a Go file, only
+			// where the file system is asked for it.
+			if entry := stripUp(h.Path); goFile && !h.FSCall && dataNames[entry] != "" {
+				dataHit[entry] = true
+				continue
+			}
 			key := [2]string{h.File, h.Path}
 			if _, ok := pathExempt[key]; ok {
 				pathHit[key] = true
@@ -507,6 +553,17 @@ func internalReadCheck(root string, tracked func() ([]string, error), fileExempt
 	for key, reason := range pathExempt {
 		if !pathHit[key] {
 			rep.Stale = append(rep.Stale, fmt.Sprintf("notARead[%s, %q] (%s)", key[0], key[1], reason))
+		}
+	}
+	for entry, reason := range dataNames {
+		// It must be a FILE on the list (a directory's name is never data),
+		// and it must have excused something.
+		onList := false
+		for _, e := range list.Entries {
+			onList = onList || e == entry
+		}
+		if !onList || strings.HasSuffix(entry, "/") || !dataHit[entry] {
+			rep.Stale = append(rep.Stale, fmt.Sprintf("targetProjectNames[%q] (%s)", entry, reason))
 		}
 	}
 	sort.Strings(rep.Stale)
@@ -567,7 +624,7 @@ func TestInternalReadCheckOnAScratchTree(t *testing.T) {
 	fileExempt := map[string]string{"tool/": "the tool"}
 	pathExempt := map[[2]string]string{{"pkg/b/b_test.go", "release/1.x"}: "a branch"}
 
-	rep, err := internalReadCheck(root, tracked, fileExempt, pathExempt, 4, 2)
+	rep, err := internalReadCheck(root, tracked, fileExempt, pathExempt, nil, 4, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +653,7 @@ func TestInternalReadCheckOnAScratchTree(t *testing.T) {
 	// are then stale: neither matched anything.
 	rep, err = internalReadCheck(root, tracked,
 		map[string]string{"tools/": "a directory that is not there", "pkg/a/a.go": "a file with no hit"},
-		map[[2]string]string{{"pkg/a/a_test.go", "release/1.x"}: "the wrong file"}, 4, 2)
+		map[[2]string]string{{"pkg/a/a_test.go", "release/1.x"}: "the wrong file"}, nil, 4, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,16 +677,90 @@ func TestInternalReadCheckOnAScratchTree(t *testing.T) {
 	}
 }
 
+// A listed name that the product also uses as data: in a Go file it is a read
+// only as an argument of a file-system call. Everything else about the check
+// is unchanged -- a script still reads it, and an entry that is not a listed
+// file or excuses nothing is reported.
+func TestADataNameIsAReadOnlyWhereTheFileSystemIsAsked(t *testing.T) {
+	files := scratchInternal()
+	files["release/internal-only.txt"] = scratchList + "ci.yml       # the private pipeline\n"
+	files["ci.yml"] = "stages: [test]\n"
+	files["pkg/c/data.go"] = "package c\nvar protected = map[string]bool{\"ci.yml\": true, \"./ci.yml\": false}\n" +
+		"func f() { put(\"ci.yml\", nil); proj.PutFile(\"ci.yml\") }\n"
+	files["pkg/c/read_test.go"] = "package c\nimport (\"os\"; \"path/filepath\")\n" +
+		"var a, _ = os.ReadFile(\"../../ci.yml\")\n" +
+		"var b = filepath.Join(root(), \"ci.yml\")\n" +
+		"var c, _ = os.Stat(\"ci.yml\")\n"
+	files["hack/ci.sh"] = "#!/bin/sh\ngrep -c stages ci.yml\n"
+	root, tracked := scratchTree(t, files)
+	data := map[string]string{"ci.yml": "the target project's pipeline"}
+
+	// Without the entry every literal is reported: this is the rule the
+	// entry relaxes, seen first.
+	rep, err := internalReadCheck(root, tracked, nil, nil, nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict := 0
+	for _, r := range rep.Found {
+		if strings.HasSuffix(r.Path, "ci.yml") {
+			strict++
+		}
+	}
+	if strict != 8 {
+		t.Fatalf("with no data name, want all 8 mentions of ci.yml reported (4 data, 3 reads, 1 script), got %d: %q", strict, readPaths(rep.Found))
+	}
+
+	rep, err = internalReadCheck(root, tracked, nil, nil, data, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range rep.Found {
+		if strings.HasSuffix(r.Path, "ci.yml") {
+			got = append(got, fmt.Sprintf("%s:%d:%s", r.File, r.Line, r.Path))
+		}
+	}
+	want := []string{
+		"hack/ci.sh:2:ci.yml",
+		"pkg/c/read_test.go:3:../../ci.yml",
+		"pkg/c/read_test.go:4:ci.yml",
+		"pkg/c/read_test.go:5:ci.yml",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("with the data name:\n got %q\nwant %q", got, want)
+	}
+	if len(rep.Stale) != 0 {
+		t.Errorf("stale reported though the entry excused the data literals: %q", rep.Stale)
+	}
+
+	// Stale: a name that is not on the list, a directory, and one that
+	// excused nothing.
+	rep, err = internalReadCheck(root, tracked, nil, nil,
+		map[string]string{"nope.yml": "not listed", "docs/plans/": "a directory", "CLAUDE.md": "listed, never a bare literal here"}, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantStale := []string{
+		`targetProjectNames["CLAUDE.md"] (listed, never a bare literal here)`,
+		`targetProjectNames["docs/plans/"] (a directory)`,
+		`targetProjectNames["nope.yml"] (not listed)`,
+	}
+	if strings.Join(rep.Stale, "|") != strings.Join(wantStale, "|") {
+		t.Errorf("stale:\n got %q\nwant %q", rep.Stale, wantStale)
+	}
+}
+
 // A scan that saw too few files reports that, not "clean".
 func TestInternalReadCheckRefusesAScanThatSawTooLittle(t *testing.T) {
 	root, tracked := scratchTree(t, scratchInternal())
 	for _, floor := range [][2]int{{5, 2}, {4, 3}} {
-		_, err := internalReadCheck(root, tracked, nil, nil, floor[0], floor[1])
+		_, err := internalReadCheck(root, tracked, nil, nil, nil, floor[0], floor[1])
 		if err == nil || !strings.Contains(err.Error(), "looking in the wrong place") {
 			t.Errorf("floors %v on a tree with 4 Go and 2 text files: err = %v", floor, err)
 		}
 	}
-	if _, err := internalReadCheck(root, tracked, nil, nil, 4, 2); err != nil {
+	if _, err := internalReadCheck(root, tracked, nil, nil, nil, 4, 2); err != nil {
 		t.Errorf("floors equal to what the tree holds: %v", err)
 	}
 }
@@ -649,7 +780,7 @@ func TestInternalReadCheckKnowsWhichTreeItIsIn(t *testing.T) {
 	}
 	public[exportguard.ExportSourcePath] = "generated\n"
 	root, _ := scratchTree(t, public)
-	rep, err := internalReadCheck(root, never, nil, nil, 300, 20)
+	rep, err := internalReadCheck(root, never, nil, nil, nil, 300, 20)
 	if err != nil || !rep.Public || len(rep.Found) != 0 {
 		t.Errorf("an exported tree: rep = %+v, err = %v; want Public and nothing else", rep, err)
 	}
@@ -657,21 +788,21 @@ func TestInternalReadCheckKnowsWhichTreeItIsIn(t *testing.T) {
 	both := scratchInternal()
 	both[exportguard.ExportSourcePath] = "generated\n"
 	root, tracked := scratchTree(t, both)
-	if _, err := internalReadCheck(root, tracked, nil, nil, 0, 0); err == nil || !strings.Contains(err.Error(), "both") {
+	if _, err := internalReadCheck(root, tracked, nil, nil, nil, 0, 0); err == nil || !strings.Contains(err.Error(), "both") {
 		t.Errorf("a tree with EXPORT-SOURCE and release/: err = %v, want a refusal", err)
 	}
 
 	neither := scratchInternal()
 	delete(neither, "release/internal-only.txt")
 	root, tracked = scratchTree(t, neither)
-	if _, err := internalReadCheck(root, tracked, nil, nil, 0, 0); err == nil || !strings.Contains(err.Error(), "neither") {
+	if _, err := internalReadCheck(root, tracked, nil, nil, nil, 0, 0); err == nil || !strings.Contains(err.Error(), "neither") {
 		t.Errorf("a tree with neither: err = %v, want a refusal", err)
 	}
 
 	broken := scratchInternal()
 	broken["release/internal-only.txt"] = "docs/plans/\n" // no reason, no release/ entry
 	root, tracked = scratchTree(t, broken)
-	if _, err := internalReadCheck(root, tracked, nil, nil, 0, 0); err == nil || !strings.Contains(err.Error(), "internal-only list") {
+	if _, err := internalReadCheck(root, tracked, nil, nil, nil, 0, 0); err == nil || !strings.Contains(err.Error(), "internal-only list") {
 		t.Errorf("a list that does not parse: err = %v, want a refusal", err)
 	}
 }
@@ -687,7 +818,7 @@ func TestNoPublicFileReadsAnInternalOnlyPath(t *testing.T) {
 		return strings.Split(strings.TrimRight(string(out), "\x00"), "\x00"), nil
 	}
 	// Not vacuous: the tree has hundreds of Go files and dozens of scripts.
-	rep, err := internalReadCheck(root, tracked, internalReadExempt, notARead, 300, 20)
+	rep, err := internalReadCheck(root, tracked, internalReadExempt, notARead, targetProjectNames, 300, 20)
 	if err != nil {
 		t.Fatal(err)
 	}

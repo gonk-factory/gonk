@@ -445,11 +445,24 @@ func (s *Server) SetCILintFromFile(projectID int64, path string) {
 	s.mustProject("SetCILintFromFile", projectID).ciLintFile = path
 }
 
+// SetCILintDefault makes the lint of every ref that has NO SetCILint entry
+// answer l, whatever the repository holds (it wins over SetCILintFromFile).
+// It exists for a reply no file can stand for -- above all `valid: false` --
+// on a commit the code under test creates, whose SHA no test knows.
+func (s *Server) SetCILintDefault(projectID int64, l glab.CILint) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mustProject("SetCILintDefault", projectID).ciLintDefault = &l
+}
+
 func (s *Server) handleCILint(w http.ResponseWriter, r *http.Request, p *Project) {
 	ref := r.URL.Query().Get("content_ref")
 	s.mu.Lock()
 	p.CILintQueries = append(p.CILintQueries, r.URL.Query())
 	l, ok := p.CILints[ref]
+	if !ok && p.ciLintDefault != nil {
+		l, ok = *p.ciLintDefault, true
+	}
 	if !ok && p.ciLintFile != "" {
 		if content, has := p.Files[ref][p.ciLintFile]; has {
 			l, ok = glab.CILint{Valid: true, MergedYAML: string(content)}, true

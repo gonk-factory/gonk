@@ -23,10 +23,21 @@
 //	go test -tags live ./test/live/ -v
 //
 // Skips (does not fail) when those are unset, so it is safe in any pipeline.
+//
+// TLS IS VERIFIED (gonk-s2tk). If the proxy's certificate is signed by a
+// private CA, make the CA trusted for this run -- do not look for a switch,
+// there is none. crypto/x509 reads both of these on Linux with no code here:
+//
+//	SSL_CERT_DIR=/path/to/dir-holding-your-ca:/etc/ssl/certs   (adds a directory)
+//	SSL_CERT_FILE=/path/to/bundle-with-public-roots-and-your-ca.pem
+//
+// SSL_CERT_DIR replaces the default DIRECTORIES, so keep /etc/ssl/certs in it
+// if anything else in the run needs the public roots.
+// internal/buildgate/tls_verification_test.go refuses InsecureSkipVerify in
+// any Go file of this module, this one included.
 package live
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -82,13 +93,17 @@ func deployedCatalog(t *testing.T, ns string) []opercfg.RungSpec {
 
 type modelPrice struct{ in, out float64 }
 
+// liveHTTPClient is the one client this suite talks to the deployment with.
+// It has no TLSClientConfig: the system roots (and SSL_CERT_FILE /
+// SSL_CERT_DIR) decide what is trusted. See the package comment.
+func liveHTTPClient() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second}
+}
+
 // livePrices reads GET /model/info from the RUNNING proxy.
 func livePrices(t *testing.T, url, key string) map[string]modelPrice {
 	t.Helper()
-	c := &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // private CA
-	}
+	c := liveHTTPClient()
 	req, err := http.NewRequest(http.MethodGet, url+"/model/info", nil)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
@@ -217,10 +232,7 @@ func TestEveryProjectKeyIsScopedAndBudgeted(t *testing.T) {
 
 func listKeys(t *testing.T, url, key string) map[string]*float64 {
 	t.Helper()
-	c := &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // private CA
-	}
+	c := liveHTTPClient()
 	// size=100 is LiteLLM's documented maximum -- asking for more is a 422, and
 	// a 422 decodes to an empty key list, which reads as "no keys exist". That
 	// is how this check silently passed while asserting nothing.

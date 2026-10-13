@@ -56,9 +56,14 @@ func extractLintPin(t *testing.T, path string, re *regexp.Regexp) string {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
+	return lintPinIn(t, path, b, re)
+}
+
+func lintPinIn(t *testing.T, name string, b []byte, re *regexp.Regexp) string {
+	t.Helper()
 	m := re.FindStringSubmatch(string(b))
 	if m == nil {
-		t.Fatalf("%s: golangci-lint version pin not found with pattern %s -- has the file's shape changed?", path, re)
+		t.Fatalf("%s: golangci-lint version pin not found with pattern %s -- has the file's shape changed?", name, re)
 	}
 	return m[1]
 }
@@ -73,11 +78,15 @@ func TestLintVersionPinsAgree(t *testing.T) {
 	// makefileVer is the bare number (no "v"); strip the "v" the other two
 	// files spell so all three compare as the same shape.
 	makefileVer := extractLintPin(t, filepath.Join(root, "Makefile"), makefileLintVersionRe)
-	gitlabVer := strings.TrimPrefix(extractLintPin(t, filepath.Join(root, ".gitlab-ci.yml"), gitlabLintImageRe), "v")
 	ciVer := strings.TrimPrefix(extractLintPin(t, filepath.Join(root, ".github", "workflows", "ci.yml"), ciActionVersionRe), "v")
 
-	if makefileVer != gitlabVer {
-		t.Errorf("Makefile LINT_VERSION_NUM=%s but .gitlab-ci.yml lint image=v%s -- these must match", makefileVer, gitlabVer)
+	// The maintainers' pipeline pins a third copy. An exported tree does not
+	// carry it; the two published pins are compared there all the same.
+	if data, ok := maintainerCI(t); ok {
+		gitlabVer := strings.TrimPrefix(lintPinIn(t, maintainerCIFile, data, gitlabLintImageRe), "v")
+		if makefileVer != gitlabVer {
+			t.Errorf("Makefile LINT_VERSION_NUM=%s but %s lint image=v%s -- these must match", makefileVer, maintainerCIFile, gitlabVer)
+		}
 	}
 	if makefileVer != ciVer {
 		t.Errorf("Makefile LINT_VERSION_NUM=%s but .github/workflows/ci.yml golangci-lint-action version=v%s -- these must match", makefileVer, ciVer)

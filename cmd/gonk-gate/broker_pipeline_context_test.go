@@ -541,8 +541,9 @@ func TestPipelineJobDefinitionFromMergedYAMLWithInclude(t *testing.T) {
 	}
 }
 
-// recordedLint loads one RAW ci/lint reply recorded by hack/pipefix_probe.py
-// --keep-json on the synthetic project 75 (GitLab CE 19.4.1, run
+// recordedLint loads one RAW ci/lint reply recorded by the maintainers'
+// pipefix probe (pipefix_probe.py --keep-json, not published) on the synthetic
+// project 75 (GitLab CE 19.4.1, run
 // 20261007T145957Z, the `include` case: a commit that changed ONLY its locally
 // included CI file). Kept under pkg/glab/testdata, where the client's own test
 // reads the same two files.

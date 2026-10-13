@@ -2,6 +2,7 @@ package effects
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -329,11 +330,60 @@ func TestValidateDiagnosisRefusesForeignFields(t *testing.T) {
 		"add":     func(e *Effect) { e.Add = []string{"a"} },
 		"remove":  func(e *Effect) { e.Remove = []string{"a"} },
 		"title":   func(e *Effect) { e.Title = "x" },
+		// gonk-8yux: the fix vocabulary, added to Effect after this rule was
+		// written by hand, rode on a diagnosis unread.
+		"old":    func(e *Effect) { e.Old = "x" },
+		"new":    func(e *Effect) { e.New = "x" },
+		"paths":  func(e *Effect) { e.Paths = []string{"a.go"} },
+		"reason": func(e *Effect) { e.Reason = "x" },
 	} {
 		e := goodDiagnosis()
 		f(&e)
 		if err := ValidateDiagnosis(one(e), diagCtx()); !errors.Is(err, ErrDiagnosisForeignField) {
 			t.Errorf("%s on a diagnosis: got %v, want %v", name, err, ErrDiagnosisForeignField)
 		}
+	}
+}
+
+// gonk-8yux: the rule is by REFLECTION over diagnosisFields, as the fix kinds'
+// is over fixKindFields, so a field added to Effect later is foreign to a
+// diagnosis until someone lists it. Every field of Effect is tried: the
+// diagnosis's own are accepted, the target fields are left to ValidateTargets
+// (which accepts them on a diagnosis), and every other one is refused.
+func TestDiagnosisRefusesEveryForeignField(t *testing.T) {
+	rt := reflect.TypeOf(Effect{})
+	foreign := 0
+	for i := 0; i < rt.NumField(); i++ {
+		name := rt.Field(i).Name
+		if name == "Kind" {
+			continue
+		}
+		e := goodDiagnosis()
+		setField(t, &e, name)
+		if name == "TargetType" {
+			e.TargetType = TargetPipeline
+		}
+		err := ValidateDiagnosis(one(e), diagCtx())
+		switch {
+		case diagnosisFields[name] || targetFields[name]:
+			if errors.Is(err, ErrDiagnosisForeignField) {
+				t.Errorf("a diagnosis carrying its own field %s is refused as foreign", name)
+			}
+		default:
+			foreign++
+			if !errors.Is(err, ErrDiagnosisForeignField) {
+				t.Errorf("a diagnosis carrying %s: got %v, want %v", name, err, ErrDiagnosisForeignField)
+			}
+		}
+	}
+	if foreign < 10 {
+		t.Errorf("only %d fields of Effect were tried as foreign: the loop is not covering the struct", foreign)
+	}
+	// The near miss: a good diagnosis with the target fields set is not
+	// refused by THIS rule.
+	e := goodDiagnosis()
+	e.TargetIID, e.TargetType = 7, TargetPipeline
+	if err := ValidateDiagnosis(one(e), diagCtx()); err != nil {
+		t.Errorf("a diagnosis with its target fields: %v", err)
 	}
 }

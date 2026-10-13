@@ -4,6 +4,7 @@ package testnet
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -71,6 +72,24 @@ func TestRefusedAddrCannotBeBoundByAnyoneElseWhileHeld(t *testing.T) {
 //
 // Only 8 of each: a bind costs ~11 ms on this box (docs/testing-time.md), and
 // with 64 this one test took 1.4 s in the gate and timed a 500-run hunt out.
+//
+// A LISTENER THE KERNEL REFUSES IS NOT A FAILURE (gonk-njmr). This test used to
+// t.Fatalf on any error from net.Listen("127.0.0.1:0"), and went red in a plain
+// `go test ./...` with "bind: address already in use" while three other
+// worktrees ran tests: the ephemeral range here is 4,096 ports, the test itself
+// holds 8 of them, and the neighbours had the rest. That is the host having no
+// port to give, which is not what this test is about, and it is the direction
+// rule 4 says a test must not assert: nothing here controls how many ephemeral
+// ports other processes hold. The claim under test is "a held address is never
+// HANDED to a listener", and a bind(0) that is refused hands out nothing, so
+// EADDRINUSE from port 0 satisfies it. It is counted and logged, never fatal;
+// any other errno is still a failure.
+//
+// What that costs: in a run where every one of the 8 listens is refused, the
+// second half of this test observed nothing. The same property, in the form
+// that needs no free port at all -- an EXPLICIT bind of the held address must
+// fail -- is TestRefusedAddrCannotBeBoundByAnyoneElseWhileHeld, which is the
+// stronger statement and is unaffected by how full the range is.
 func TestRefusedAddrsAreDistinctAndNeverHandedToAListener(t *testing.T) {
 	held := map[string]bool{}
 	for i := 0; i < 8; i++ {
@@ -80,18 +99,122 @@ func TestRefusedAddrsAreDistinctAndNeverHandedToAListener(t *testing.T) {
 		}
 		held[a] = true
 	}
-	for i := 0; i < 8; i++ {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("listen: %v", err)
+	refused := checkNoListenerGetsAHeldAddr(t, held, 8, net.Listen)
+	if refused > 0 {
+		t.Logf("the kernel had no ephemeral port for %d of 8 listeners (EADDRINUSE on 127.0.0.1:0): the host's range is full, nothing was handed out, and that is not this test's failure", refused)
+	}
+}
+
+// checkNoListenerGetsAHeldAddr opens n listeners on a kernel-chosen loopback
+// port, one at a time, and reports an error on t for each one that was given
+// an address in held. It returns how many the kernel REFUSED with EADDRINUSE,
+// which are not failures (see the test above). The listen call is injected so
+// each of the three outcomes can be asserted without a real full port range.
+func checkNoListenerGetsAHeldAddr(t testing.TB, held map[string]bool, n int, listen func(network, address string) (net.Listener, error)) (refused int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		ln, err := listen("tcp", "127.0.0.1:0")
+		if errors.Is(err, syscall.EADDRINUSE) {
+			refused++
+			continue
 		}
-		collided := held[ln.Addr().String()]
-		if collided {
+		if err != nil {
+			t.Fatalf("listen on 127.0.0.1:0 failed with %v; only EADDRINUSE (no ephemeral port to give) is the host's doing", err)
+		}
+		if held[ln.Addr().String()] {
 			t.Errorf("the kernel handed the held address %s to a new listener", ln.Addr())
 		}
 		_ = ln.Close()
 	}
+	return refused
 }
+
+// recorder is a testing.TB that records Errorf and Fatalf instead of failing
+// the real test, so the helper's verdicts can be asserted. Fatalf must stop
+// the caller, as the real one does: it panics with fatalStop and run recovers.
+type recorder struct {
+	testing.TB
+	errors, fatals []string
+}
+
+type fatalStop struct{}
+
+func (r *recorder) Helper() {}
+func (r *recorder) Errorf(format string, args ...any) {
+	r.errors = append(r.errors, fmt.Sprintf(format, args...))
+}
+func (r *recorder) Fatalf(format string, args ...any) {
+	r.fatals = append(r.fatals, fmt.Sprintf(format, args...))
+	panic(fatalStop{})
+}
+
+func (r *recorder) run(f func()) {
+	defer func() {
+		if v := recover(); v != nil {
+			if _, ok := v.(fatalStop); !ok {
+				panic(v)
+			}
+		}
+	}()
+	f()
+}
+
+// gonk-njmr, with the listen injected: the three things a bind(0) can do, and
+// what the check makes of each. A full range is not a failure; a held address
+// handed out is; and an errno that is not "in use" still stops the test.
+func TestAFullEphemeralRangeIsNotAHeldAddressHandedOut(t *testing.T) {
+	held := map[string]bool{RefusedAddr(t): true}
+	var heldAddr string
+	for a := range held {
+		heldAddr = a
+	}
+
+	t.Run("every listen refused with EADDRINUSE", func(t *testing.T) {
+		rec := &recorder{TB: t}
+		var refused int
+		rec.run(func() { refused = checkNoListenerGetsAHeldAddr(rec, held, 8, inUseListen) })
+		if refused != 8 || len(rec.errors) != 0 || len(rec.fatals) != 0 {
+			t.Fatalf("refused=%d errors=%q fatals=%q; want 8 refused and no failure: a full range hands out nothing", refused, rec.errors, rec.fatals)
+		}
+	})
+
+	t.Run("a held address handed to a listener", func(t *testing.T) {
+		rec := &recorder{TB: t}
+		handOut := func(string, string) (net.Listener, error) { return fakeListener{addr: heldAddr}, nil }
+		rec.run(func() { _ = checkNoListenerGetsAHeldAddr(rec, held, 3, handOut) })
+		if len(rec.errors) != 3 || !strings.Contains(rec.errors[0], heldAddr) {
+			t.Fatalf("errors=%q; want one per listener, each naming the held address %s", rec.errors, heldAddr)
+		}
+	})
+
+	t.Run("another errno is still a failure", func(t *testing.T) {
+		rec := &recorder{TB: t}
+		calls := 0
+		denied := func(string, string) (net.Listener, error) { calls++; return nil, syscall.EACCES }
+		rec.run(func() { _ = checkNoListenerGetsAHeldAddr(rec, held, 8, denied) })
+		if len(rec.fatals) != 1 || calls != 1 {
+			t.Fatalf("fatals=%q after %d listen(s); want exactly one fatal at the first EACCES", rec.fatals, calls)
+		}
+	})
+}
+
+func inUseListen(network, address string) (net.Listener, error) {
+	return nil, inUse(network, address) // newserver_test.go: the error net.Listen really returns
+}
+
+// fakeListener is a listener that only has an address.
+type fakeListener struct {
+	net.Listener
+	addr string
+}
+
+func (f fakeListener) Addr() net.Addr { return fakeAddr(f.addr) }
+func (f fakeListener) Close() error   { return nil }
+
+type fakeAddr string
+
+func (a fakeAddr) Network() string { return "tcp" }
+func (a fakeAddr) String() string  { return string(a) }
 
 // The hold ends with the test, not before and not never: release succeeds
 // exactly once (a second close of the same descriptor is EBADF).

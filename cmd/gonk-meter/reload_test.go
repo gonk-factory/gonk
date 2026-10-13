@@ -93,12 +93,12 @@ func TestRejectedReloadKeepsThePreviousConfigAndTheProjectsKey(t *testing.T) {
 	svc := service.New(good, st, admin, admin, keys, func() time.Time { return now })
 
 	resp, status, err := svc.Register(ctx, meterapi.ProjectRequest{
-		Project: "agentic/widget", ProjectID: 1, Rig: "agentic-widget", GonkYML: projectYAML,
+		Project: "kubernetes/widget", ProjectID: 1, Rig: "kubernetes-widget", GonkYML: projectYAML,
 	})
 	if err != nil || status != 200 {
 		t.Fatalf("setup: Register = %+v %d %v", resp, status, err)
 	}
-	tokenBefore := keys.Token("agentic/widget")
+	tokenBefore := keys.Token("kubernetes/widget")
 	if tokenBefore == "" {
 		t.Fatal("setup: the project has no virtual key, so this test could not observe one being deleted")
 	}
@@ -126,7 +126,7 @@ func TestRejectedReloadKeepsThePreviousConfigAndTheProjectsKey(t *testing.T) {
 	if err := svc.Reresolve(ctx); err != nil {
 		t.Fatalf("Reresolve after a rejected reload: %v", err)
 	}
-	reg, ok, err := st.GetRegistration(ctx, "agentic/widget")
+	reg, ok, err := st.GetRegistration(ctx, "kubernetes/widget")
 	if err != nil || !ok {
 		t.Fatalf("registration gone after a rejected reload: ok=%v err=%v", ok, err)
 	}
@@ -134,7 +134,7 @@ func TestRejectedReloadKeepsThePreviousConfigAndTheProjectsKey(t *testing.T) {
 		t.Fatalf("project state = %q after a rejected reload, want %q (invalid_detail: %q)",
 			reg.State, store.StateActive, reg.InvalidDetail)
 	}
-	if got := keys.Token("agentic/widget"); got != tokenBefore {
+	if got := keys.Token("kubernetes/widget"); got != tokenBefore {
 		t.Fatalf("the project's virtual key changed across a rejected reload: %q -> %q", tokenBefore, got)
 	}
 }

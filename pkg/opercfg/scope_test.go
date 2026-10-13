@@ -18,7 +18,7 @@ func withScope(instanceScope, groupScope string) string {
 		doc = strings.Replace(doc, "instance:\n  enabled: true\n", "instance:\n  enabled: true\n  scope:\n"+instanceScope, 1)
 	}
 	if groupScope != "" {
-		doc = strings.Replace(doc, "  agentic:\n", "  agentic:\n    scope:\n"+groupScope, 1)
+		doc = strings.Replace(doc, "  kubernetes:\n", "  kubernetes:\n    scope:\n"+groupScope, 1)
 	}
 	return doc
 }
@@ -35,7 +35,7 @@ func TestLoadDecodesOperatorScope(t *testing.T) {
 		in.SourcePaths[0] != "**/*.py" || len(in.ProtectedPaths) != 1 || len(in.DenyLift) != 1 || in.DenyLift[0] != scope.ClassCI {
 		t.Errorf("instance scope = %+v", in)
 	}
-	g := oc.Groups["agentic"].Scope
+	g := oc.Groups["kubernetes"].Scope
 	if g.Caps.MaxLines == nil || *g.Caps.MaxLines != 10 || len(g.CIPaths) != 1 || len(g.TestPaths) != 1 || len(g.DocsPaths) != 1 {
 		t.Errorf("group scope = %+v", g)
 	}
@@ -59,7 +59,7 @@ func TestLoadWithoutScopeIsTheZeroPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !oc.Instance.Scope.IsZero() || !oc.Groups["agentic"].Scope.IsZero() {
+	if !oc.Instance.Scope.IsZero() || !oc.Groups["kubernetes"].Scope.IsZero() {
 		t.Error("an operator config with no scope section has a non-zero scope policy")
 	}
 }
@@ -70,7 +70,7 @@ func TestLoadRejectsInvalidOperatorScope(t *testing.T) {
 	cases := map[string]struct{ instance, group, want string }{
 		"instance unknown key":    {"    banana: 1\n", "", "scope"},
 		"instance lattice":        {"    docs_paths: [\"deploy/**\"]\n", "", "instance"},
-		"group lattice":           {"", "      test_paths: [\"chart/**\"]\n", "group agentic"},
+		"group lattice":           {"", "      test_paths: [\"chart/**\"]\n", "group kubernetes"},
 		"group unknown key":       {"", "      banana: 1\n", "scope"},
 		"instance protected":      {"    classes: [ci]\n", "", "scope"},
 		"instance deny non-lift":  {"    deny_lift: [source]\n", "", "scope"},
@@ -106,7 +106,7 @@ func TestGroupForCarriesTheGroupScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	got := oc.GroupFor("agentic/repo").Scope
+	got := oc.GroupFor("kubernetes/kubectl").Scope
 	if got.Caps.MaxLines == nil || *got.Caps.MaxLines != 10 || got.Caps.MaxFiles == nil || *got.Caps.MaxFiles != 4 {
 		t.Errorf("caps not carried: %+v", got.Caps)
 	}
@@ -140,7 +140,7 @@ func TestGroupForNestedScopeOnlyTightens(t *testing.T) {
 	}
 	for name, c := range cases {
 		oc := nestedConfig(t, c.parent, c.child)
-		got := oc.GroupFor("agentic/sub/repo").Scope
+		got := oc.GroupFor("kubernetes/sub/kubectl").Scope
 		if got.Caps.MaxLines == nil || *got.Caps.MaxLines != 10 {
 			t.Errorf("%s: max_lines = %v, want 10 (the tighter of the two)", name, got.Caps.MaxLines)
 		}
@@ -148,7 +148,7 @@ func TestGroupForNestedScopeOnlyTightens(t *testing.T) {
 	oc := nestedConfig(t,
 		"      classes: [source, test, docs]\n      protected_paths: [\"release/**\"]\n      deny_lift: [ci]\n",
 		"      classes: [source, other]\n      protected_paths: [\"infra/**\"]\n")
-	got := oc.GroupFor("agentic/sub/repo").Scope
+	got := oc.GroupFor("kubernetes/sub/kubectl").Scope
 	if len(got.Classes) != 1 || got.Classes[0] != scope.ClassSource {
 		t.Errorf("classes = %v, want the intersection [source]", got.Classes)
 	}
@@ -161,17 +161,17 @@ func TestGroupForNestedScopeOnlyTightens(t *testing.T) {
 	// A group that sets classes under a silent parent keeps them; an empty
 	// (allow nothing) list stays non-nil through the fold.
 	oc = nestedConfig(t, "", "      classes: []\n")
-	if c := oc.GroupFor("agentic/sub/repo").Scope.Classes; c == nil || len(c) != 0 {
+	if c := oc.GroupFor("kubernetes/sub/kubectl").Scope.Classes; c == nil || len(c) != 0 {
 		t.Errorf("classes: [] = %#v, want non-nil empty (allow no class)", c)
 	}
 	oc = nestedConfig(t, "      classes: [source]\n", "      classes: [test]\n")
-	if c := oc.GroupFor("agentic/sub/repo").Scope.Classes; c == nil || len(c) != 0 {
+	if c := oc.GroupFor("kubernetes/sub/kubectl").Scope.Classes; c == nil || len(c) != 0 {
 		t.Errorf("disjoint classes = %#v, want non-nil empty", c)
 	}
 }
 
-// nestedConfig is the valid operator config with groups "agentic" (scope
-// `parent`) and "agentic/sub" (scope `child`), each a pre-indented scope body.
+// nestedConfig is the valid operator config with groups "kubernetes" (scope
+// `parent`) and "kubernetes/sub" (scope `child`), each a pre-indented scope body.
 func nestedConfig(t *testing.T, parent, child string) *OperatorConfig {
 	t.Helper()
 	doc := withScope("", parent)
@@ -179,7 +179,7 @@ func nestedConfig(t *testing.T, parent, child string) *OperatorConfig {
 	if child != "" {
 		body = "    scope:\n" + child
 	}
-	doc = strings.Replace(doc, "  agentic/experiments:\n", "  agentic/sub:\n"+body+"  agentic/experiments:\n", 1)
+	doc = strings.Replace(doc, "  kubernetes/experiments:\n", "  kubernetes/sub:\n"+body+"  kubernetes/experiments:\n", 1)
 	oc, err := Load([]byte(doc))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -197,7 +197,7 @@ func TestAllowedProfilesFoldAcrossOperatorLayers(t *testing.T) {
 	if got := oc.Instance.Scope.AllowedProfiles; len(got) != 3 || got[0] != "go" {
 		t.Errorf("instance allowed_profiles = %v", got)
 	}
-	group := oc.GroupFor("agentic/repo").Scope
+	group := oc.GroupFor("kubernetes/kubectl").Scope
 	if got := group.AllowedProfiles; len(got) != 3 || got[1] != "node" {
 		t.Errorf("GroupFor did not carry the group's allowed_profiles: %v", got)
 	}
@@ -223,20 +223,20 @@ func TestAllowedProfilesFoldAcrossOperatorLayers(t *testing.T) {
 		"parent narrower": {"      allowed_profiles: [python]\n", "      allowed_profiles: [go, python, node]\n"},
 		"overlap":         {"      allowed_profiles: [go, python]\n", "      allowed_profiles: [python, node]\n"},
 	} {
-		got := nestedConfig(t, c.parent, c.child).GroupFor("agentic/sub/repo").Scope.AllowedProfiles
+		got := nestedConfig(t, c.parent, c.child).GroupFor("kubernetes/sub/kubectl").Scope.AllowedProfiles
 		if len(got) != 1 || got[0] != "python" {
 			t.Errorf("%s: nested allowed_profiles = %v, want [python]", name, got)
 		}
 	}
 	// A nested group cannot re-open what its parent closed, and an empty
 	// menu stays an empty menu (non-nil) through the fold.
-	if got := nestedConfig(t, "      allowed_profiles: [go]\n", "      allowed_profiles: [node]\n").GroupFor("agentic/sub/repo").Scope.AllowedProfiles; got == nil || len(got) != 0 {
+	if got := nestedConfig(t, "      allowed_profiles: [go]\n", "      allowed_profiles: [node]\n").GroupFor("kubernetes/sub/kubectl").Scope.AllowedProfiles; got == nil || len(got) != 0 {
 		t.Errorf("disjoint menus = %#v, want non-nil empty", got)
 	}
-	if got := nestedConfig(t, "      allowed_profiles: []\n", "      caps: { max_lines: 5 }\n").GroupFor("agentic/sub/repo").Scope.AllowedProfiles; got == nil || len(got) != 0 {
+	if got := nestedConfig(t, "      allowed_profiles: []\n", "      caps: { max_lines: 5 }\n").GroupFor("kubernetes/sub/kubectl").Scope.AllowedProfiles; got == nil || len(got) != 0 {
 		t.Errorf("allowed_profiles: [] under a child that says nothing about profiles = %#v, want non-nil empty", got)
 	}
-	if got := nestedConfig(t, "      caps: { max_lines: 5 }\n", "      caps: { max_lines: 5 }\n").GroupFor("agentic/sub/repo").Scope.AllowedProfiles; got != nil {
+	if got := nestedConfig(t, "      caps: { max_lines: 5 }\n", "      caps: { max_lines: 5 }\n").GroupFor("kubernetes/sub/kubectl").Scope.AllowedProfiles; got != nil {
 		t.Errorf("no layer set allowed_profiles, got %#v", got)
 	}
 }

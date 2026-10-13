@@ -19,7 +19,7 @@ func withFix(instanceBody, groupBody string) string {
 		doc = strings.Replace(doc, "instance:\n  enabled: true\n", "instance:\n  enabled: true\n"+instanceBody, 1)
 	}
 	if groupBody != "" {
-		doc = strings.Replace(doc, "  agentic:\n", "  agentic:\n"+groupBody, 1)
+		doc = strings.Replace(doc, "  kubernetes:\n", "  kubernetes:\n"+groupBody, 1)
 	}
 	return doc
 }
@@ -44,7 +44,7 @@ func TestLoadDecodesOperatorPipelineFix(t *testing.T) {
 		!reflect.DeepEqual(f.AutoMerge.Classes, []string{"docs"}) {
 		t.Errorf("instance pipeline_fix = %+v", f)
 	}
-	g := oc.Groups["agentic"].PipelineFix
+	g := oc.Groups["kubernetes"].PipelineFix
 	if g.MaxChain == nil || *g.MaxChain != 2 || g.AutoMerge.Mode == nil || *g.AutoMerge.Mode != "after-human-approval" {
 		t.Errorf("group pipeline_fix = %+v", g)
 	}
@@ -55,10 +55,10 @@ func TestLoadWithoutPipelineFixIsTheZeroPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !oc.Instance.PipelineFix.IsZero() || !oc.Groups["agentic"].PipelineFix.IsZero() || oc.Instance.Actions.PipelineFixes != nil {
+	if !oc.Instance.PipelineFix.IsZero() || !oc.Groups["kubernetes"].PipelineFix.IsZero() || oc.Instance.Actions.PipelineFixes != nil {
 		t.Error("an operator config with no pipeline-fix keys has a non-zero pipeline-fix policy")
 	}
-	if !oc.GroupFor("agentic/x/repo").PipelineFix.IsZero() || oc.GroupFor("agentic/x/repo").Actions.PipelineFixes != nil {
+	if !oc.GroupFor("kubernetes/x/kubectl").PipelineFix.IsZero() || oc.GroupFor("kubernetes/x/kubectl").Actions.PipelineFixes != nil {
 		t.Error("GroupFor invented a pipeline-fix policy")
 	}
 }
@@ -80,7 +80,7 @@ func TestLoadRejectsInvalidOperatorPipelineFix(t *testing.T) {
 		"group mode always":            {"", "    pipeline_fix: { auto_merge: { mode: always } }\n", "mode"},
 		"instance merge class source":  {"  pipeline_fix: { auto_merge: { classes: [source] } }\n", "", "classes"},
 		"instance timeout over (Go)":   {"  pipeline_fix: { verify_timeout: 7h }\n", "", "instance: pipeline_fix: verify_timeout"},
-		"group timeout zero (Go)":      {"", "    pipeline_fix: { verify_timeout: 0s }\n", "group agentic: pipeline_fix: verify_timeout"},
+		"group timeout zero (Go)":      {"", "    pipeline_fix: { verify_timeout: 0s }\n", "group kubernetes: pipeline_fix: verify_timeout"},
 		"instance unknown action key":  {"  actions: { pipeline_fix: false }\n", "", "actions"},
 		"instance action not a bool":   {"  actions: { pipeline_fixes: \"no\" }\n", "", "pipeline_fixes"},
 		"group timeout a bare integer": {"", "    pipeline_fix: { verify_timeout: 3600 }\n", "verify_timeout"},
@@ -105,7 +105,7 @@ func TestCheckPolicyValidatesPipelineFix(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := int64(99)
-	for _, who := range []string{"instance", "group agentic"} {
+	for _, who := range []string{"instance", "group kubernetes"} {
 		for name, p := range map[string]gonkcfg.PipelineFixPolicy{
 			"paths":        {Paths: []string{"internal/**"}},
 			"over ceiling": {MaxFiles: &n},
@@ -187,7 +187,7 @@ func TestOperatorSchemaAloneRefusesBadPipelineFix(t *testing.T) {
 		if layer == "instance" {
 			d["instance"] = p
 		} else {
-			d["groups"] = map[string]any{"agentic": p}
+			d["groups"] = map[string]any{"kubernetes": p}
 		}
 		return d
 	}

@@ -2,8 +2,6 @@ package buildgate
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -29,15 +27,18 @@ var reservedTopLevel = map[string]bool{
 	"cache":         true,
 }
 
+// ciConfig is the maintainers' pipeline definition, parsed. In an exported
+// tree, which does not carry it, the calling test is SKIPPED (see
+// maintainer_ci_test.go for why that cannot hide a failure here).
 func ciConfig(t *testing.T) map[string]any {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".gitlab-ci.yml"))
-	if err != nil {
-		t.Fatalf("read .gitlab-ci.yml: %v", err)
+	data, ok := maintainerCI(t)
+	if !ok {
+		t.Skip(skipWithoutMaintainerCI)
 	}
 	var doc map[string]any
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		t.Fatalf("parse .gitlab-ci.yml: %v", err)
+		t.Fatalf("parse %s: %v", maintainerCIFile, err)
 	}
 	return doc
 }

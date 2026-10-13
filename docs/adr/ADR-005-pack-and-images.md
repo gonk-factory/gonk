@@ -246,8 +246,9 @@ verbatim JSON of the **seven `pkg/atags` keys**
 and handed the pod via the `GC_WEBHOOK_ARG_METADATA_JSON` order var. The
 render uses `jq`, not string concatenation, so an embedded quote in the
 metadata JSON cannot corrupt the config. This mechanism was **smoke-tested
-against a live LiteLLM v1.92.0** on 2026-07-13 (`docs/environment.md`,
-"VERIFIED: the attribution chain works") — LiteLLM parses the header into
+against a live LiteLLM v1.92.0** on 2026-07-13 (the record of that run is
+not published; `internal/meter/litellm/live_component_test.go` drives the real spend
+source against a real LiteLLM) — LiteLLM parses the header into
 `data["metadata"]["spend_logs_metadata"]` and persists it to
 `LiteLLM_SpendLogs.metadata.spend_logs_metadata`, all seven keys intact. It
 was independently re-confirmed against opencode's own compiled source at the
@@ -470,9 +471,11 @@ plan holds Plan 06's HB-4 to).
   session_key)`, the ledger backend, and — as of Task 1 of this plan — the
   classifier's known false positive, recorded there verbatim as well as
   here.
-- `docs/environment.md` — the live-cluster facts this plan cites without
-  re-deriving: GitLab CE 18.10.1, the private CA, the OD-7 LiteLLM smoke
-  test, the network-layer NetworkPolicy bypass (Flannel; Cilium suspended).
+- `docs/environment.md` — what a deployment must provide. (When this ADR was
+  written that page was an inventory of the maintainers' own cluster, and this
+  plan cited it for GitLab CE 18.10.1, the private CA, the LiteLLM smoke test
+  and the NetworkPolicy limitation. The inventory is no longer published; the
+  NetworkPolicy limitation is on the page as "KNOWN LIMITATION".)
 - `docs/superpowers/plans/2026-07-13-plan-04-pack-and-images.md` — the plan
   this ADR closes out; its "Upstream amendments required" section and
   "Hand-offs: what this plan genuinely CANNOT verify" table are the source

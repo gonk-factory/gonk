@@ -12,8 +12,9 @@ GONK_TAG ?= $(GONK_VERSION)-$(shell git rev-parse --short=12 HEAD)
 # Defaults to THIS host's arch, which is what a local `make images` wants.
 TARGETARCH ?= $(shell go env GOARCH)
 
-# PODMAN, and --network=host: the CNI bridge is broken on this box
-# (docs/environment.md). Do not "fix" it by removing the flag.
+# PODMAN, and --network=host: the build must not depend on a working container
+# bridge network (docs/environment.md, "Building and testing this repository").
+# Do not "fix" it by removing the flag.
 PODMAN := podman
 BUILD  := $(PODMAN) build --network=host --build-arg TARGETARCH=$(TARGETARCH)
 
@@ -86,14 +87,13 @@ meter-testclock-image:
 # This target used to push $(GONK_TAG) itself, from the era when every runner
 # was offline and images HAD to be built by hand. That era is over: CI builds
 # all five images on both architectures and publishes $(GONK_TAG) as an OCI
-# index over them (.gitlab-ci.yml + homelab/ci-templates .manifest-merge).
+# index over them.
 #
-# On 2026-08-04 a hand `make push` overwrote four of those indexes with amd64
-# images. the maintainers' cluster is mixed-architecture, so every gonk pod that landed on an arm64
-# node crash-looped with `exec format error` -- 1593 controller restarts, 1100
-# meter restarts, six days -- while CI stayed green, because the merge job's
-# verification could not tell a single-arch image from an index (gonk-n50,
-# homelab/ci-templates!4).
+# A hand `make push` once overwrote four of those indexes with single-arch
+# images. On a mixed-architecture cluster every pod that lands on a node of
+# the other architecture then crash-loops with `exec format error`, while CI
+# stays green if its verification cannot tell a single-arch image from an
+# index (gonk-n50).
 #
 # So a hand push can no longer write a DEPLOYABLE tag at all. It writes only
 # arch-suffixed tags, which is exactly the convention CI's own legs use: these
@@ -296,7 +296,7 @@ toolchain:
 	  for d in /snap/go/*/bin; do \
 	    [ -x "$$d/go" ] || continue; \
 	    v=$$("$$d/go" version 2>/dev/null | grep -oE 'go[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 | sed 's/^go//'); \
-	    [ "$$(echo "$$v" | cut -d. -f1,2)" = "$(GO_SERIES)" ] && echo "         PATH=$$d:\$$PATH make gate   (go $$v, already on this box)"; \
+	    [ "$$(echo "$$v" | cut -d. -f1,2)" = "$(GO_SERIES)" ] && echo "         PATH=$$d:\$$PATH make gate   (go $$v, already installed)"; \
 	  done; \
 	  echo "         or hold the snap so it cannot drift again: snap refresh --hold go"; \
 	  exit 1; \
@@ -330,8 +330,8 @@ toolchain:
 #
 # THE IN-CLUSTER REACHABILITY TESTS RUN HERE TOO (gonk-zjk7). They are the only
 # thing that catches a pod configured to call a Service its own NetworkPolicy
-# does not permit -- no CNI on this cluster enforces policy, so there is no
-# runtime signal at all and the defect is invisible until the day Cilium lands.
+# does not permit -- on a cluster whose CNI enforces no NetworkPolicy there is
+# no runtime signal at all, and the defect is invisible until the day one does.
 # Leaving them in the GitHub chart job (which is gated on a $GONK_CHART_TOOLS_IMAGE
 # that does not exist, so it never runs) would have been writing the test and
 # never running it. They need only helm, like the goldens, and cost ~2s.
@@ -366,8 +366,20 @@ toolchain:
 # checked before push, not after. internal/buildgate/release_tag_gate_test.go
 # pins ^TestReleaseTag in the pattern against internal/charttest/release_tag_test.go.
 #
+# THE NOTES TESTS RUN HERE TOO (gonk-tomt). NOTES.txt is what a first-time
+# installer reads to learn which Secrets to create; ^TestNotes compares that
+# list with the Secrets the render mounts. It needs only helm.
+#
+# THE POLICY-PAIRING, API-SERVER AND RBAC-DOCUMENT TESTS RUN HERE TOO
+# (gonk-nax7, gonk-vxel, gonk-6xzj, gonk-6by9; netpol_pairs_test.go). They hold
+# that every same-namespace NetworkPolicy rule has its other half, that the
+# API-server allowance reaches the pods that call the API and no others, and
+# that values.yaml and the chart README describe the Roles that render. Dev
+# does not enforce NetworkPolicy, so nothing at run time says when one of these
+# breaks. They need only helm.
+#
 # The REST of the chart suite deliberately stays in the GitHub chart job, and
-# the numbers are why (measured 2026-09-23, this box, helm 3.19.0, warm build
+# the numbers are why (measured 2026-09-23, one development machine, helm 3.19.0, warm build
 # cache; two sets, the second with a parallel gate loading the box, which is
 # why the range and not a single figure):
 #
@@ -383,7 +395,7 @@ toolchain:
 HELM ?= helm
 export HELM
 goldens:
-	$(GO) test -tags chart ./internal/charttest/ -run '^TestGoldenManifests$$|^TestTheHelm|^TestImageFloor|^TestInClusterDials|^TestEveryDialExemption|^TestPodReap|^TestJobsRuntime|^TestReleaseTag' -count=1
+	$(GO) test -tags chart ./internal/charttest/ -run '^TestGoldenManifests$$|^TestTheHelm|^TestImageFloor|^TestInClusterDials|^TestEveryDialExemption|^TestPodReap|^TestJobsRuntime|^TestReleaseTag|^TestNotes|^TestEveryInNamespaceRule|^TestEveryPairExemption|^TestIntakePrivateListener|^TestIntakeIngressFollows|^TestEveryDNSEgress|^TestKubeAPI|^TestGuardKubeAPI|^TestValuesDoNotClaim|^TestREADMEDescribesEveryRole' -count=1
 
 # Seal the chart: append `<version> <sha256 of chart/gonk>` to chart/CHART-SEAL.
 #
@@ -462,8 +474,8 @@ test:
 
 # lint runs the SAME golangci-lint the CI job runs, pinned to the same tag.
 #
-# It used to hard-code /root/go/bin/golangci-lint, which is not installed on
-# every dev box -- so `make gate` was not actually runnable here, and lint
+# It used to hard-code one path to golangci-lint, which is not installed on
+# every machine -- so `make gate` was not actually runnable everywhere, and lint
 # findings were discovered in CI instead. That happened (gonk-mzd: nine findings,
 # one pipeline). The container fallback means there is no excuse and no version
 # skew: if the binary is present it is used, otherwise the pinned image is.
@@ -479,14 +491,14 @@ lint:
 	@bin=""; \
 	if command -v golangci-lint >/dev/null 2>&1; then \
 	  bin=golangci-lint; \
-	elif [ -x /root/go/bin/golangci-lint ]; then \
-	  bin=/root/go/bin/golangci-lint; \
+	elif [ -x "$$($(GO) env GOPATH)/bin/golangci-lint" ]; then \
+	  bin="$$($(GO) env GOPATH)/bin/golangci-lint"; \
 	fi; \
 	if [ -n "$$bin" ]; then \
 	  got=$$($$bin version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1); \
 	  if [ "$$got" != "$(LINT_VERSION_NUM)" ]; then \
 	    echo "host golangci-lint ($$bin) reports version $${got:-<unknown>}, but CI is pinned to $(LINT_VERSION) -- refusing to run a mismatched linter, which can report different findings than the pin (new/removed checks, changed defaults) and pass locally while CI still fails it, or the reverse"; \
-	    echo "fix: install $(LINT_VERSION), or take $$bin off PATH (and /root/go/bin) to fall back to the pinned $(LINT_IMAGE) container below"; \
+	    echo "fix: install $(LINT_VERSION), or take $$bin off PATH (and out of GOPATH/bin) to fall back to the pinned $(LINT_IMAGE) container below"; \
 	    exit 1; \
 	  fi; \
 	  : "--allow-serial-runners: WAIT for another run's lock, do not fail." ; \
@@ -496,7 +508,18 @@ lint:
 	  : " a clean gate red for a reason unrelated to the code (2026-09-21)." ; \
 	  : " Serial, not --allow-parallel-runners: parallel runs share a cache" ; \
 	  : " and can race on it; serialising only costs wall time." ; \
-	  $$bin run --allow-serial-runners ./...; \
+	  : "A CACHE PER CHECKOUT (gonk-nn71; hack/lint_cache_dir.sh says why)." ; \
+	  : " With the per-user default, a second checkout of the same commit" ; \
+	  : " replays the first one's cached issues at the FIRST one's paths;" ; \
+	  : " once that checkout is deleted the nolint lines cannot be read and" ; \
+	  : " lint exits 1 naming files in a directory that is gone." ; \
+	  cache="$$(hack/lint_cache_dir.sh)" || exit 1; \
+	  GOLANGCI_LINT_CACHE="$$cache" $$bin run --allow-serial-runners ./... || { \
+	    rc=$$?; \
+	    echo "lint: exit $$rc with GOLANGCI_LINT_CACHE=$$cache"; \
+	    echo "lint: every finding should be at a path inside this checkout ($$PWD). One at a path OUTSIDE it is a cache entry replayed from another checkout (gonk-nn71), which a per-checkout cache is meant to make impossible: it is not a fault in this tree. Delete the cache directory above, rerun, and report it."; \
+	    exit $$rc; \
+	  }; \
 	else \
 	  echo "golangci-lint not installed; running $(LINT_IMAGE) in a container"; \
 	  : "--network=none, NOT host: the lint is fully offline (vendored deps," ; \
@@ -538,8 +561,8 @@ e2e-doctor:
 # it starts gonk-stubmodel as a PROXY in front of a real upstream model API,
 # capturing every {request, response} pair it forwards into a scrubbed cassette
 # under test/stubmodel/cassettes/. It is run by a HUMAN, OUT OF BAND -- never by
-# a test or by CI, and never with a shared/production credential (docs/environment.md:
-# never commit an unencrypted secret; the credential lives only in the requests
+# a test or by CI, and never with a shared/production credential (never commit
+# an unencrypted secret; the credential lives only in the requests
 # YOU send it, and is redacted before the cassette is written).
 #
 # Required: GONK_STUBMODEL_UPSTREAM, the base URL of a real OpenAI-compatible

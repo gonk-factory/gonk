@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gonk-factory/gonk/internal/testnet"
 	"github.com/gonk-factory/gonk/pkg/gcapi"
 	"github.com/gonk-factory/gonk/pkg/meterapi"
 	"github.com/gonk-factory/gonk/test/harness"
@@ -305,33 +306,11 @@ func TestCheckPortsFreeNamesEveryOccupiedPort(t *testing.T) {
 	}
 }
 
-// CheckPortsFree must report a bindable port free. The port here is 0: binding
-// 127.0.0.1:0 asks the kernel for any free ephemeral port, so it succeeds UNLESS
-// THE EPHEMERAL RANGE IS EXHAUSTED. That is not "by construction": verification
-// made it fail in a private netns by filling a 32-port range, with listeners and
-// with TIME-WAIT sockets alike, and this box's range is only 4,096 ports.
-//
-// It is still the right test, for two reasons. There is no WINDOW here, unlike
-// the test it replaces: it fails only under whole-range exhaustion, which would
-// equally break TestCheckPortsFreeNamesEveryOccupiedPort (its mustListen binds
-// :0) and every httptest server in the gate, so it adds no failure the gate does
-// not already have. And it is the only test that catches a real probe that
-// always reports busy -- dropping it leaves that mutation green.
-//
-// Why not "bind an ephemeral port, close it, check that number" (the test this
-// replaces, gonk-th5r): nothing keeps a real port free between two independent
-// operations on a shared machine. That test failed whenever another process held
-// the port during CheckPortsFree and released it before the test's confirm-bind,
-// then blamed CheckPortsFree -- an inference that does not follow. The free/busy
-// verdict logic for specific port numbers is pinned deterministically by
-// TestCheckPortsFreeVerdictIsTheProbesVerdict (ports_internal_test.go) with an
-// injected probe; the busy direction of the real probe by
-// TestCheckPortsFreeNamesEveryOccupiedPort, where the test holds the ports.
-func TestCheckPortsFreeReportsABindablePortFree(t *testing.T) {
-	if err := harness.CheckPortsFree(0); err != nil {
-		t.Fatalf("CheckPortsFree(0) = %v; binding 127.0.0.1:0 asks the kernel for any free port, so this means either the real probe is broken or the ephemeral range is exhausted -- check how many loopback ports are in use before blaming CheckPortsFree", err)
-	}
-}
+// The FREE direction of the real probe is in ports_internal_test.go
+// (TestTheRealProbeReportsAKernelChosenPortFreeUnlessTheKernelHasNone). It was
+// here as TestCheckPortsFreeReportsABindablePortFree, asserting
+// CheckPortsFree(0) == nil, which is red whenever the host's ephemeral range is
+// full -- something no test controls (gonk-njmr; docs/testing-time.md rule 4).
 
 // ---------------------------------------------------------------- RequireInfra (T-14)
 
@@ -664,13 +643,14 @@ func readClock(t *testing.T, path string) int64 {
 	return n
 }
 
+// mustListen is a listener on 127.0.0.1 that the test holds. testnet.Listen,
+// not net.Listen("127.0.0.1:0"): with the host's ephemeral range full, port 0
+// answers EADDRINUSE, and a test about ports THIS test occupies must not go
+// red because other processes occupy the rest (gonk-njmr). Which port is held
+// does not matter to any caller; that it is held does.
 func mustListen(t *testing.T) net.Listener {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	return ln
+	return testnet.Listen(t)
 }
 
 func portOf(t *testing.T, ln net.Listener) int {

@@ -8,7 +8,7 @@ is `beadstore.Record` (`pkg/beadstore/store.go`);
 runs against every implementation (`Run`: Memory, BdCLI, Postgres;
 `RunCompareAndSwap`: Memory, Postgres -- BdCLI fails it, see "Storage in bd").
 
-Last changed: 2026-10-07, gonk-nf9i / gonk-zxsx (added the `RetryFeedback` object; section "Retry feedback"; additive JSON, work store schema version unchanged, no migration). Before that 2026-10-05, gonk-2usw part FACTS (added six failure-fact fields to each `PipelineJobs` entry and the `PipelineDiagnosis` object; section "Pipeline failure facts"; additive JSON, work store schema version unchanged at `3`, no migration). Before that 2026-10-04, gonk-tios P7 (added the `Pipeline*` fields, pipeline-diagnosis records only). Before that 2026-10-03, gonk-qdr4 (added `CheckoutSHA`). Before that 2026-09-13, gonk-p8w8 (added `Revision`, `ReslungAt`,
+Last changed: 2026-10-12, gonk-37kg.1 / gonk-hpgy (`RetryFeedback` is now also written for `issue-triage` and `scaffold` records, with the codes of their gates; the diagnosis prompt's block states the failed job names and the fact keys; no field added, work store schema version unchanged, no migration). Before that 2026-10-07, gonk-nf9i / gonk-zxsx (added the `RetryFeedback` object; section "Retry feedback"; additive JSON, work store schema version unchanged, no migration). Before that 2026-10-05, gonk-2usw part FACTS (added six failure-fact fields to each `PipelineJobs` entry and the `PipelineDiagnosis` object; section "Pipeline failure facts"; additive JSON, work store schema version unchanged at `3`, no migration). Before that 2026-10-04, gonk-tios P7 (added the `Pipeline*` fields, pipeline-diagnosis records only). Before that 2026-10-03, gonk-qdr4 (added `CheckoutSHA`). Before that 2026-09-13, gonk-p8w8 (added `Revision`, `ReslungAt`,
 `ReslingFireBy`, the `IfRevision` envelope field, and the resolution rule).
 2026-09-14: `ReslingFiredAt` (never deployed) replaced by `ReslingFireBy`.
 2026-09-14: gonk-t41 -- the record moves to the `work_items` table in the
@@ -47,11 +47,12 @@ means "unset".
 | `Revision` | string | **the store** | 32 hex chars, random, new on EVERY write (including the `pending-prompt` exception above). Opaque: compare for equality only. `""` on records written before 2026-09-13. |
 | `ReslungAt` | time | sweep; carried back verbatim by dispatch's release | When the sweep reported this record's outcome and fired the re-sling. Marks the record as already judged; see `ReslingFireBy` for how long that holds. Dispatch never sets it, but a failed dispatch restores the record it found, `ReslungAt` included. |
 | `ReslingFireBy` | time | sweep, in the same write as `ReslungAt` (before firing); carried back verbatim by dispatch's release | `ReslungAt + 240s`: the deadline passed to the re-sling's dispatch as the `fire_by` order var. A gonk-dispatch that starts after it exits before doing anything. A broker record is not judged again until `ReslingFireBy + 300s` (dispatch timeout) `+ 2s` (gc's SIGTERM-to-SIGKILL grace) `+ 5s` (wall-clock margin). That bound holds however late, or how many times, gc fires the order: it assumes only that gc delivers its timeout kill, and a wall clock that does not step more than 5s between the sweep and dispatch processes (same container, same kernel clock). |
-| `RetryFeedback` | object | sweep, in the write that records the re-sling; carried onto every record dispatch writes for the anchor (`pipeline-diagnosis` and `pipeline-fix` only); cleared by the sweep when an answer is applied | What the NEXT attempt's prompt is told about an answer a static gate refused. Absent (`omitzero`) when there is none. See "Retry feedback". |
+| `RetryFeedback` | object | sweep, in the write that records the re-sling; carried onto every record dispatch writes for the anchor (`pipeline-diagnosis`, `pipeline-fix`, `issue-triage` and `scaffold`); cleared by the sweep when an answer is applied | What the NEXT attempt's prompt is told about an answer a static gate refused. Absent (`omitzero`) when there is none. See "Retry feedback". |
 
-## Retry feedback (gonk-nf9i, gonk-zxsx)
+## Retry feedback (gonk-nf9i, gonk-zxsx, gonk-37kg.1, gonk-hpgy)
 
-`pipeline-diagnosis` and `pipeline-fix` records only. Before this an answer a
+`pipeline-diagnosis`, `pipeline-fix`, `issue-triage` and `scaffold` records
+(the last two since gonk-hpgy). Before this an answer a
 static gate refused -- no fenced batch, unparseable JSON, a shape or rule
 refusal -- was retried with a byte-identical prompt. On dev the fix agent
 misspelled one JSON key in 5 of 8 sessions; the retry was told nothing.
@@ -59,11 +60,13 @@ misspelled one JSON key in 5 of 8 sessions; the retry was told nothing.
 | Field | Type | Meaning |
 |---|---|---|
 | `Attempt` | int | The attempt whose answer was refused, from 1. |
-| `Code` | string | The refusal's stable code: `no-batch`, `parse`, a fix rule code with its sub code (`FX-SHAPE(reason-empty)`, `SC-SHOWN(SC-CITED)`, ... -- the same string as `PipelineFix.Refusal`), or a diagnosis refusal's cause (`shape`, `target`, `diagnosis_invalid`, `evidence_ungrounded`, `cited_file_missing`, `would_forge_marker`, `would_post_secret`, `quick_action`, `trajectory`). |
+| `Code` | string | The refusal's stable code: `no-batch`, `parse`, a fix rule code with its sub code (`FX-SHAPE(reason-empty)`, `SC-SHOWN(SC-CITED)`, ... -- the same string as `PipelineFix.Refusal`), or a diagnosis refusal's cause (`shape`, `target`, `diagnosis_invalid`, `evidence_ungrounded`, `cited_file_missing`, `would_forge_marker`, `would_post_secret`, `quick_action`, `trajectory`), or the gate of the issue-shaped chain that refused a triage or scaffold answer (`shape`, `target`, `path`, `comment`, `trajectory`, `label` -- the word the violation is prefixed with). |
 | `What` | string | One controller-built sentence: what was wrong. |
 | `Allowed` | string | The exact allowed set for whatever `What` names (the keys of the effect kind concerned, the fact keys, the classes, the per-kind counts); empty when the refusal is not about a set. |
 
-**Who writes it.** `applyBrokerBatch` and the two apply chains set it on the
+**Who writes it.** `applyBrokerBatch` (for every wired agent: no batch, a
+batch that does not parse, and each gate of the issue-shaped chain) and the two
+pipeline apply chains set it on the
 record at the point of refusal; the sweep's re-sling write persists it (the
 same `PutIf` that stamps `ReslungAt`). A failure of OURS (an unknown: a read
 that failed, a context that no longer hashes) writes nothing. An answer that
@@ -82,11 +85,25 @@ offending name (a misspelled key, an unknown kind, class, verdict or fact
 key), cut to 32 bytes, every byte outside `[A-Za-z0-9_.-]` replaced by `?`,
 between double quotes, with ` (cut)` after the closing quote when it was cut.
 No free-text field of the answer (summary, remedy, reason, `old`,
-`new`, a quoted log line, a path, a job name) and no error or `Refusal.Detail`
-text is ever read into it.
+`new`, a quoted log line, a path, a job name, a label, a comment) and no error
+or `Refusal.Detail` text is ever read into it.
+
+For `issue-triage` and `scaffold` (gonk-hpgy) the gates of the issue-shaped
+chain report errors that quote the batch -- the label, the path, the comment
+line -- and what a triage session read is an issue anyone may have written. So
+each of those gates has ONE fixed sentence (`issueGateFeedback`): `target`,
+`path`, `comment`, `trajectory`, `label`. `shape` uses `ExplainShape` (the
+per-kind counts of the agent's shape file). A misspelled key is named by its
+`Token`, but NO key list follows it: `comment`, `label` and `file` have no
+per-kind key table in the validator, and none is invented for the feedback. A
+sentence of `pkg/effects` that points at the pipeline prompts' `OUTPUT`
+heading is recorded as pointing at "this message" instead, because the triage
+and scaffold prompts have no such heading.
 
 **How it is rendered.** `renderRetryFeedback` appends this block to the END
-of the fix prompt and of the diagnosis prompt, only when `Attempt` is lower
+of the fix prompt, the diagnosis prompt, the triage prompt and the two scaffold
+prompts that ask for a batch (not the one that tells the session to emit none,
+when no repository material could be fetched), only when `Attempt` is lower
 than the attempt being prompted:
 
 ```
@@ -95,14 +112,53 @@ gonk checked the answer of attempt <Attempt> of this task and refused it; nothin
 refused by: <Code>                   (only when Code is set)
 what was wrong: <What>
 what is allowed: <Allowed>           (only when Allowed is set)
+the failed jobs are, each name between double quotes: "<name>", "<name>"   (diagnosis prompt only)
+the fact keys are: <key>, <key>, ...                                       (diagnosis prompt only)
 gonk wrote the lines above from its own checks. Answer again in full, with this corrected.
 ```
 
 Each field is filtered AGAIN at render (`feedbackText`): every byte that is
 not printable ASCII, and each of `` ` `` `<` `>` `=`, becomes `?`, and the
 field is cut to 64 (`Code`), 200 (`What`) or 200 (`Allowed`) bytes. The block
-is therefore at most 768 bytes on six lines whatever the record holds; both
-prompts' worst cases are budgeted for it.
+is therefore at most 768 bytes on six lines whatever the record holds; the
+fix and diagnosis prompts' worst cases are budgeted for it. The triage and
+scaffold prompts have no whole-prompt cap; the block adds at most 770 bytes
+to them.
+
+**The diagnosis block's closed sets (gonk-37kg.1).** On dev a diagnosis named
+its failed job with two digits of the name swapped, was told the name must be
+"copied exactly from its heading", and swapped two other digits on the retry.
+So the DIAGNOSIS prompt's block, whatever the refusal was, ends with the two
+closed sets an evidence item chooses from. Neither line is on the record; both
+are built at render from what the gate reads:
+
+- **The job names** are `effects.DiagnosisContext.JobNames()` of the context
+  of the dispatch being prompted -- the enumeration `ValidateDiagnosis` builds
+  the set of rule `evidence-job` from, over the jobs this dispatch writes to
+  `PipelineJobs`. So the names shown are the ones THIS attempt's answer will be
+  checked against. A job name is project text, not model output: the prompt
+  already shows it, in this canonical form (`jobNameText`), in the job's
+  heading. A name is shown WHOLE AND UNCHANGED OR NOT AT ALL, and only when
+  it is ONE TOKEN: every byte an ASCII letter, a digit or one of `-` `_` `.`
+  `:` `/`. The line stands above "gonk wrote the lines above from its own
+  checks", and a job named like a sentence must not read as the controller's
+  text; so a name with a space, a matrix suffix (`test: [go, 1.22]`), a quote
+  or any other byte, and one that does not fit the line, are counted --
+  `; N more, named in the headings under Failed jobs` -- never cut, escaped
+  or repaired. What a shown token spells is still the project's choice. The
+  line is at most 320 bytes; a name longer than
+  about 210 bytes is therefore never shown. With no failed job the line reads
+  `the failed jobs are: none; the only evidence item this pipeline takes is the fact pipeline_error, without "job"`.
+- **The fact keys** are `effects.FactsText()`, built from the list the gate's
+  set is built from (`factOrder`). The line is left out when the refusal's own
+  `what is allowed` already is that line (an unknown fact key).
+
+`TestDiagnosisFeedbackSetsAreTheGates` fails if either set shown differs from
+the set the gate accepts. The gate itself is unchanged: a job name is compared
+exactly, and nothing near a name is accepted or corrected. With both lines the
+diagnosis block is at most 1206 bytes (768 + 321 + 117);
+`TestPipelinePromptFitsWithFourMaximalJobs` holds a prompt at every block cap
+with a block of that size inside the 28 KiB prompt cap (headroom 31 bytes).
 
 **Hashing.** For a fix the block is part of the prompt, so it is covered by
 `FixContext.PromptSHA256` and through it by `PipelineFix.ContextSHA256`, as
@@ -110,9 +166,10 @@ the rest of the prompt is. A diagnosis record holds no hash of its whole
 prompt (only each excerpt's), so there the block is covered by nothing but
 this record field itself.
 
-**Not wired:** `issue-triage` and scaffold. They share the sweep's re-sling,
-but dispatch builds their record fresh from the order and their prompts have
-no place for the block.
+**Not wired:** the `mention` agent, which is not dispatched. A triage or
+scaffold answer refused because of a fault of OURS (the forge would not take
+the note or the commit) is an unknown, not a refusal, and leaves no feedback,
+as for the pipeline agents.
 
 ## Pipeline failure facts (gonk-2usw part FACTS)
 
@@ -714,8 +771,8 @@ release, no session.
 
 ## Storage in Postgres (`Postgres`, gonk-t41)
 
-Database `gonk` on the reference cluster's shared CNPG cluster (the meter's database), but NOT
-the meter's role or schema (owner decision on the gonk-t41 review): login role
+A database on your Postgres -- it may be the meter's database -- but NOT the
+meter's role or schema (owner decision on the gonk-t41 review): login role
 `gonk_workstore`, owning schema `gonk_workstore`, DSN in Secret
 `gonk-workstore` key `dsn`. Postgres's default search_path (`"$user", public`)
 resolves the store's unqualified table names to that schema; the store adds
@@ -726,10 +783,10 @@ this role the controller cannot read or write the meter's tables in `public`
 (`TestWorkStoreRoleCannotTouchTheMeterLedger`: settling reservations, deleting
 spend rows, reading LiteLLM keys and rewriting registrations are all denied).
 
-On the reference cluster the role is a CNPG managed role (`cluster-postgres.yaml`), its password
-from the cluster's secret store, and the schema is
-declared in the `gonk` Database CR's `spec.schemas` (CNPG >= 1.26; the reference cluster runs
-1.29.1). The store creates and migrates its own tables inside that schema
+How the role and the schema come to exist is yours to choose. With
+CloudNativePG, for example, the role can be a managed role with its password
+from the cluster's secret store, and the schema declared in the Database CR's
+`spec.schemas` (CNPG >= 1.26). The store creates and migrates its own tables inside that schema
 (`pkg/beadstore/postgres_schema.go`, `workStoreDDL`, version `3`; 2 added
 `work_items_revision_set` and `work_items_quarantine`, 3 added
 `work_items_pipeline_run_open_idx`). Requires
@@ -852,8 +909,8 @@ conflict (review defect A2).
 | never synced | absent / absent in bd | copied | written |
 | never synced | present and different | CONFLICT | CONFLICT |
 
-- A bd record with no `Revision` (every record the pre-gonk-p8w8 binary on
-  the reference cluster wrote) is imported with a fresh one; `work_items_bd_sync.bd_revision`
+- A bd record with no `Revision` (every record a pre-gonk-p8w8 binary
+  wrote) is imported with a fresh one; `work_items_bd_sync.bd_revision`
   keeps bd's `""`.
 - The import copies what the bd-backed binary's `Get` returned: the beads found
   by `bd list --label-pattern 'gonk-anchor:*' --limit 0 --json` (bd's default

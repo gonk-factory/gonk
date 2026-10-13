@@ -70,6 +70,10 @@ type pfSpec struct {
 	// oldPipeline adds a pipeline of an EARLIER commit to the merge request.
 	oldPipeline bool
 	noHead      bool
+	// headSHA, headRef: the head pipeline's own sha and ref, when they are
+	// not the fix commit's and refs/merge-requests/12/head (a merged-results
+	// pipeline, gonk-ow8u). "" is the default.
+	headSHA, headRef string
 }
 
 func pfDefault() pfSpec {
@@ -127,7 +131,14 @@ func pfSeed(t *testing.T, spec pfSpec) *pfxWorld {
 		gl.AddMRPipeline(p.ID, pfMRIID, w.old.ID)
 	}
 	if !spec.noHead {
-		w.head = gl.AddPipeline(p.ID, glab.Pipeline{Status: spec.headStatus, Source: spec.headSource, Ref: "refs/merge-requests/12/head", SHA: pfHeadSHA})
+		sha, ref := pfHeadSHA, "refs/merge-requests/12/head"
+		if spec.headSHA != "" {
+			sha = spec.headSHA
+		}
+		if spec.headRef != "" {
+			ref = spec.headRef
+		}
+		w.head = gl.AddPipeline(p.ID, glab.Pipeline{Status: spec.headStatus, Source: spec.headSource, Ref: ref, SHA: sha})
 		add(w.head, spec.headJobs, w.headIDs)
 		gl.AddMRPipeline(p.ID, pfMRIID, w.head.ID)
 	}
@@ -747,6 +758,48 @@ func TestOnlyTheFixCommitsPipelinesHaveTheirJobsRead(t *testing.T) {
 		if strings.Contains(rq, fmt.Sprintf("/pipelines/%d/jobs", w.old.ID)) {
 			t.Errorf("request %q: the earlier commit's jobs were fetched", rq)
 		}
+	}
+}
+
+// gonk-ow8u, through the real reader: a merged-results pipeline of the merge
+// request -- green, on GitLab's merge commit, ref .../merge -- is listed with
+// its ref, has no job read, is no candidate, and at the deadline the verdict
+// is UNVERIFIABLE by J1.MERGED_RESULT. Never FIXED.
+func TestAMergedResultsPipelineIsListedNotReadAndNeverAVerdict(t *testing.T) {
+	const merged = "dddddddddddddddddddddddddddddddddddddddd"
+	spec := pfDefault()
+	spec.headSHA, spec.headRef = merged, "refs/merge-requests/12/merge"
+	w := pfSeed(t, spec)
+	c := w.gl.Client()
+	fix := w.fix(t, c)
+	facts, _ := readPipefixJudgeFacts(context.Background(), c, w.pid, fix)
+	if len(facts.Pipelines.Pipelines) != 1 || facts.Pipelines.Pipelines[0].Ref != "refs/merge-requests/12/merge" ||
+		facts.Pipelines.Pipelines[0].SHA != merged || facts.Pipelines.Pipelines[0].JobsRead {
+		t.Fatalf("pipelines = %+v, want the one merged-results pipeline with its ref and no jobs read", facts.Pipelines.Pipelines)
+	}
+	for _, rq := range w.gl.Requests() {
+		if strings.Contains(rq, fmt.Sprintf("/pipelines/%d/jobs", w.head.ID)) {
+			t.Errorf("request %q: the merged-results pipeline's jobs were fetched", rq)
+		}
+	}
+	early := pipefix.Judge(facts, fix.VerifyDeadline.Add(-time.Minute))
+	pfWant(t, early, pipefix.DecisionWait, "", pipefix.RuleJ1Wait)
+	late := pipefix.Judge(facts, fix.VerifyDeadline)
+	pfWant(t, late, pipefix.DecisionVerdict, pipefix.VerdictUnverifiable, pipefix.RuleJ1MergedResult)
+	if len(late.MergedResult) != 1 || late.MergedResult[0] != w.head.ID {
+		t.Errorf("merged-result pipelines %v, want [%d]", late.MergedResult, w.head.ID)
+	}
+	// What a person is told.
+	why := unverifiableWhy(string(late.Rule))
+	if !strings.Contains(why, "merged results") || why == unverifiableWhy(string(pipefix.RuleJ1Timeout)) {
+		t.Errorf("the note's words for %s: %q", late.Rule, why)
+	}
+	// The near miss, same reader: the ordinary merge request pipeline of the
+	// fix commit is FIXED, and its ref is carried too.
+	res, plain, _ := pfJudge(t, pfSeed(t, pfDefault()))
+	pfWant(t, res, pipefix.DecisionVerdict, pipefix.VerdictFixed, pipefix.RuleJ5Fixed)
+	if plain.Pipelines.Pipelines[0].Ref != "refs/merge-requests/12/head" {
+		t.Errorf("the plain pipeline's ref = %q", plain.Pipelines.Pipelines[0].Ref)
 	}
 }
 

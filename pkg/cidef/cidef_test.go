@@ -900,8 +900,9 @@ func TestCompareIsDeterministic(t *testing.T) {
 //
 // testdata/gitlab_merged/*.yml are NOT hand-written: each is the `merged_yaml`
 // of a STATIC ci/lint reply (GET .../ci/lint?content_ref=<sha>&
-// include_merged_yaml=true), byte for byte, recorded by hack/pipefix_probe.py
-// --keep-json on the synthetic project 75 (GitLab CE 19.4.1, run
+// include_merged_yaml=true), byte for byte, recorded by the maintainers'
+// pipefix probe (pipefix_probe.py --keep-json, not published) on the synthetic
+// project 75 (GitLab CE 19.4.1, run
 // 20261007T145957Z): the probe's base commit and four of its case commits.
 // What they show that no hand-written fixture did (plan 2.2, G4 REFUTED):
 // `stages` GAINS ".pre" first and ".post" last; `include:` is expanded and the

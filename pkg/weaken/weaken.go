@@ -16,8 +16,12 @@
 //	                  no longer a _test.go-shaped package member at all
 //	added-skip        a function has MORE calls to a method named Skip, Skipf
 //	                  or SkipNow after than before (t.Skip, b.Skipf, ...), or
-//	                  an early `return` was added as the FIRST statement of a
-//	                  test function
+//	                  the FIRST statement of a test function became an early
+//	                  `return`: a bare one, or an `if` with a branch that is
+//	                  nothing but `return` (`if testing.Short() { return }`),
+//	                  either of them directly or leading a bare block. A
+//	                  guarded return that was already there is not a
+//	                  finding; one made unconditional is
 //	build-constraint  the file's build constraints differ (//go:build and
 //	                  // +build lines, and a leading `package ... // import`
 //	                  is not one): a tag can take the whole file, and every
@@ -99,7 +103,7 @@ func Go(base, patched []byte) Finding {
 		}
 	}
 	for name, fn := range af {
-		if old, ok := bf[name]; ok && leadingReturn(fn) && !leadingReturn(old) { // weaken:return
+		if old, ok := bf[name]; ok && leadingReturn(fn) > leadingReturn(old) { // weaken:return
 			skipped = append(skipped, name)
 		}
 	}
@@ -187,13 +191,62 @@ func recvName(e ast.Expr) string {
 	return "?"
 }
 
-// leadingReturn reports a function whose first statement is a bare return:
-// a test switched off without calling Skip.
-func leadingReturn(fn *ast.FuncDecl) bool {
-	if fn.Body == nil || len(fn.Body.List) == 0 {
+// How much of a test its first statement switches off without calling Skip.
+// Ordered: a change is a finding when the rank RISES.
+const (
+	noReturn      = iota // the body is reached
+	guardedReturn        // `if <cond> { return }`: off whenever cond holds
+	bareReturn           // `return`: off always
+)
+
+// leadingReturn ranks a function by its first statement.
+func leadingReturn(fn *ast.FuncDecl) int {
+	if fn.Body == nil {
+		return noReturn
+	}
+	return returnRank(fn.Body)
+}
+
+// returnRank ranks the first statement of a block. Only the SHAPE is read,
+// never the condition: `if true { return }` and `if testing.Short() { return }`
+// are the same thing to it, and so is whatever else the `if` carries. A
+// branch that does anything before it returns (t.Fatal(...); return) is not
+// one: that is a test failing early, which is the opposite of a skip.
+func returnRank(b *ast.BlockStmt) int {
+	if len(b.List) == 0 { // weaken:empty
+		return noReturn
+	}
+	switch s := b.List[0].(type) {
+	case *ast.ReturnStmt:
+		return bareReturn
+	case *ast.BlockStmt: // weaken:block
+		return returnRank(s)
+	case *ast.IfStmt:
+		for {
+			if onlyReturn(s.Body) { // weaken:then
+				return guardedReturn
+			}
+			switch e := s.Else.(type) {
+			case *ast.IfStmt: // weaken:else-if
+				s = e
+				continue
+			case *ast.BlockStmt:
+				if onlyReturn(e) { // weaken:else
+					return guardedReturn
+				}
+			}
+			return noReturn
+		}
+	}
+	return noReturn
+}
+
+// onlyReturn reports a block that is a single return and nothing else.
+func onlyReturn(b *ast.BlockStmt) bool {
+	if len(b.List) != 1 { // weaken:only
 		return false
 	}
-	_, ok := fn.Body.List[0].(*ast.ReturnStmt)
+	_, ok := b.List[0].(*ast.ReturnStmt)
 	return ok
 }
 

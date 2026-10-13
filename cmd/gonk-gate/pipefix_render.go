@@ -13,8 +13,9 @@ package main
 // fence is no protection: the agent's prose is made unable to form a
 // reference (inert), every NAME is written so that the raw text holds none of
 // the characters a reference is spelled with (ident), the title and the
-// commit message use refSafe, and the finished description is checked
-// against the pattern before it is sent (closingPattern).
+// commit message use refSafe and defuseClosing, and the finished title,
+// commit message and description are each checked against the pattern before
+// anything is sent (checkNoClosingPattern).
 
 import (
 	"fmt"
@@ -116,22 +117,95 @@ type fixFacts struct {
 	landing runLanding
 }
 
-// fence renders text as a fenced block it cannot close: the fence is longer
-// than the longest run of backticks or tildes at the start of any of its
-// lines. GitLab resolves no reference, mention, quick action or closing
-// keyword inside one.
+// fence QUOTES text gonk did not write -- the model's summary, remedy,
+// rationale and scope reason -- as a code block the text cannot end. It is
+// the one rendering of untrusted prose (the rule is written out in
+// docs/reference/gonk-pipeline-fix.md, "How untrusted text is rendered"):
+//
+//   - The fence is ALWAYS three backticks. Until 2026-10-12 it grew to be
+//     longer than any run of backticks in the text, which CommonMark honours
+//     -- but whether GitLab's quick-action extractor does was assumed, not
+//     known (gonk-2061): read as "a block ends at a line of exactly three
+//     backticks", a four-backtick fence is not a block at all, and a
+//     three-backtick line of the text's own ends it early.
+//   - Every line of the text that begins (after spaces or tabs) with three
+//     or more backticks is moved FOUR SPACES right. CommonMark lets a closing
+//     fence be indented by at most three, so such a line cannot close the
+//     block; and it is no longer a line of exactly three backticks either.
+//     Both readings of a fence then agree on where this block ends: at
+//     gonk's own last line. The change is visible and small -- a summary
+//     that quotes code in a fence of its own shows that fence indented --
+//     and nothing is refused for it.
+//   - Carriage returns become line feeds first: CommonMark ends a line at a
+//     lone CR, so "x\r```" would otherwise hide a fence line from the
+//     line-by-line reading here, and "x\r/close" a quick action from the
+//     comment gate (which reads what this returns, or untrustedLines).
+//
+// WHAT THE QUOTE IS RELIED ON FOR, and what it is not. Inside a code block
+// GitLab renders no mention, no issue or merge request reference, no label
+// and no link: those are made from the RENDERED document, and this is a code
+// block under CommonMark whatever the text holds. It is NOT relied on to stop
+// a quick action -- the comment gate refuses any line of the text that reads
+// as one, fence or no fence (effects.ValidateComments; textGate for a fix,
+// step 8 for a diagnosis) -- and NOT to stop a closing pattern, which GitLab
+// finds in the raw text of a merge request's description: that is inert and
+// the closingPattern check, for the one quote that lands in a description.
 func fence(text string) string {
-	longest := 2
-	for _, line := range strings.Split(text, "\n") {
-		t := strings.TrimLeft(line, " \t")
-		n := 0
-		for n < len(t) && t[n] == '`' {
-			n++
+	lines := strings.Split(strings.TrimRight(untrustedLines(text), "\n"), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "```") { // quote:fence-line
+			lines[i] = "    " + line
 		}
-		longest = max(longest, n)
 	}
-	f := strings.Repeat("`", longest+1)
-	return f + "text\n" + strings.TrimRight(text, "\n") + "\n" + f
+	return "```text\n" + strings.Join(lines, "\n") + "\n```"
+}
+
+// untrustedLines gives untrusted text the line endings it is rendered and
+// gated with: CRLF and a lone CR are LF.
+func untrustedLines(text string) string {
+	return strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(text)
+}
+
+// defuseClosing makes a controller-built line of PLAIN text (the title, the
+// commit message's first line) unable to close an issue, where it holds a
+// project-chosen name that cannot go through ident: a title is not markdown.
+// Only what closingPattern matches is changed, and by inert's smallest
+// visible change ("fixes ABC- 12", "closes https: //..."), so a job called
+// `unit-tests-3.12` or `lint-fixes` is named exactly -- the opposite choice
+// to inert's own, which rewrites every key-shaped word of the agent's prose
+// because prose need not be exact and a name must be (gonk-htl3, gonk-vu0n).
+func defuseClosing(s string) string {
+	for i := 0; i < 4 && closingPattern.MatchString(s); i++ { // title:defuse
+		s = closingPattern.ReplaceAllStringFunc(s, inert)
+	}
+	return s
+}
+
+// checkNoClosingPattern is THE INVARIANT on text about to be sent where
+// GitLab looks for closing patterns -- a merge request's title and
+// description, a commit message: nothing in it can close an issue. A match
+// is OURS (some text got there without inert, ident or defuseClosing), and
+// nothing is written with it.
+func checkNoClosingPattern(what, text string) error {
+	if m := closingPattern.FindString(text); m != "" { // render:closing
+		return fmt.Errorf("the fix %s would carry a closing pattern (%q); not writing it", what, m)
+	}
+	return nil
+}
+
+// titleInvariant checks the title and the commit message before the first
+// write (gonk-vu0n: until 2026-10-12 only the description was checked).
+func (a *fixApply) titleInvariant() error {
+	return titleInvariantOf(a.title(), a.commitMessage())
+}
+
+// titleInvariantOf is titleInvariant over two given texts. It is separate so
+// a test can hand it a title that title() itself can no longer produce.
+func titleInvariantOf(title, message string) error {
+	if err := checkNoClosingPattern("merge request title", title); err != nil { // title:invariant
+		return err
+	}
+	return checkNoClosingPattern("commit message", message) // commit:invariant
 }
 
 // fixStatusLine is the one sentence of the status block.
@@ -232,12 +306,16 @@ func (a *fixApply) description(f fixFacts) (string, error) {
 		"requests no review and approves nothing.\n\n")
 	b.WriteString(marker)
 	desc := b.String()
-	// THE INVARIANT, checked on what is about to be sent: nothing in the
-	// description can close an issue. A match is OURS -- some text reached
-	// the description without going through inert or ident -- and no merge
-	// request is opened with it.
-	if m := closingPattern.FindString(desc); m != "" { // render:closing
-		return "", fmt.Errorf("the fix description would carry a closing pattern (%q); not opening the merge request", m)
+	// THE INVARIANTS, checked on what is about to be sent: nothing in the
+	// description can close an issue, and no line of it reads as a quick
+	// action. A failure is OURS -- some text reached the description without
+	// going through inert, ident or gate A8 -- and no merge request is
+	// opened with it.
+	if err := checkNoClosingPattern("merge request description", desc); err != nil {
+		return "", err
+	}
+	if err := effects.ValidateComments(effects.Batch{Effects: []effects.Effect{{Kind: effects.KindComment, Body: desc}}}); err != nil { // render:quick
+		return "", fmt.Errorf("the fix description: %w", err)
 	}
 	return desc, nil
 }

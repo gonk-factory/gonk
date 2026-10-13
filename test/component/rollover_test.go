@@ -41,7 +41,8 @@ const maxSpendStaleness = 5 * time.Minute
 // spend-sync cycle of any length elapses during this test, and this test does
 // not start a meter at all.)
 //
-//   - docs/spikes/2026-09-10-spend-log-lag.md measured 0.24s-2.1s into
+//   - the maintainers' spend-log-lag spike (2026-09-10, not published)
+//     measured 0.24s-2.1s into
 //     Postgres over two samples, with /spend/logs/v2 -- the endpoint meter
 //     polls, and the one sampled here -- trailing the table by ~17ms.
 //   - The structural ceiling is LiteLLM's spend-log queue monitor: it polls
@@ -145,7 +146,7 @@ func TestMeasureLiteLLMSpendLogLag(t *testing.T) {
 			parts = append(parts, fmt.Sprintf("p95=n/a (n<%d: nearest-rank p95 would just be max)", lagSamples))
 		}
 		parts = append(parts, "max="+s[n-1].Round(time.Millisecond).String())
-		t.Logf("SPEND-LOG LAG (n=%d): %s -- track this over time in docs/spikes/litellm-verified.md",
+		t.Logf("SPEND-LOG LAG (n=%d): %s -- track this over time (the maintainers keep it in litellm-verified.md)",
 			n, strings.Join(parts, " "))
 	}()
 

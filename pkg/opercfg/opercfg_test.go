@@ -15,9 +15,9 @@ instance:
   ladder: [qwen-local, glm, sonnet]
   budget: { monthly_cost_usd: 200, monthly_tokens: "5G" }
 groups:
-  agentic:
+  kubernetes:
     budget: { monthly_cost_usd: 50 }
-  agentic/experiments:
+  kubernetes/experiments:
     enabled: false
 rungs:
   - { name: qwen-local, kind: local,  model: qwen3-coder-30b, est_cost_usd: 0,    est_tokens: "200K", synthetic_usd_per_1m_tokens: 0.20 }
@@ -67,22 +67,22 @@ func TestGroupFor(t *testing.T) {
 		t.Fatal(err)
 	}
 	for project, wantEnabledSet := range map[string]bool{
-		"agentic/gonk-project":      false, // agentic sets budget only, not enabled
-		"agentic/experiments/spike": true,  // agentic/experiments sets enabled: false
-		"unrelated/thing":           false, // no group matches -> zero Policy
+		"kubernetes/kubernetes":        false, // kubernetes sets budget only, not enabled
+		"kubernetes/experiments/spike": true,  // kubernetes/experiments sets enabled: false
+		"unrelated/thing":              false, // no group matches -> zero Policy
 	} {
 		p := oc.GroupFor(project)
 		if (p.Enabled != nil) != wantEnabledSet {
 			t.Errorf("GroupFor(%q).Enabled set = %v, want %v", project, p.Enabled != nil, wantEnabledSet)
 		}
 	}
-	if p := oc.GroupFor("agentic/gonk-project"); p.Budget.MonthlyCostUSD == nil || *p.Budget.MonthlyCostUSD != 50 {
-		t.Errorf("GroupFor(agentic/...) lost the group budget: %+v", p.Budget)
+	if p := oc.GroupFor("kubernetes/kubernetes"); p.Budget.MonthlyCostUSD == nil || *p.Budget.MonthlyCostUSD != 50 {
+		t.Errorf("GroupFor(kubernetes/...) lost the group budget: %+v", p.Budget)
 	}
 	// THE money case: the nested group sets no budget, so the PARENT's $50
 	// ceiling must survive the fold. A longest-prefix-only GroupFor returns the
 	// experiments policy alone and this project silently gets the instance's $200.
-	p := oc.GroupFor("agentic/experiments/spike")
+	p := oc.GroupFor("kubernetes/experiments/spike")
 	if p.Budget.MonthlyCostUSD == nil || *p.Budget.MonthlyCostUSD != 50 {
 		t.Errorf("a nested group dropped its ancestor's ceiling: %+v", p.Budget)
 	}
@@ -90,8 +90,8 @@ func TestGroupFor(t *testing.T) {
 		t.Errorf("the nested group's enabled:false was lost in the fold: %+v", p.Enabled)
 	}
 	// A prefix must match on a path SEGMENT boundary, not a string prefix:
-	// group "agentic" must not capture project "agentic-other/repo".
-	if p := oc.GroupFor("agentic-other/repo"); p.Budget.MonthlyCostUSD != nil {
+	// group "kubernetes" must not capture project "kubernetes-other/repo".
+	if p := oc.GroupFor("kubernetes-other/repo"); p.Budget.MonthlyCostUSD != nil {
 		t.Error("group prefix matched across a segment boundary")
 	}
 }
@@ -330,8 +330,8 @@ func TestLoadRejectsQuietHoursWithoutTimezoneAtEveryLayer(t *testing.T) {
 		"instance": "version: 1\n" +
 			"rungs: [{name: a, kind: local, model: m, est_tokens: \"200K\", synthetic_usd_per_1m_tokens: 0.2}]\n" +
 			"instance: { ladder: [a], schedule: { quiet_hours: \"22:00-07:00\" } }\n",
-		"group": base("groups: { agentic: { schedule: { quiet_hours: \"22:00-07:00\" } } }\n"),
-		"nested group": base("groups: { agentic: {}, agentic/experiments: " +
+		"group": base("groups: { kubernetes: { schedule: { quiet_hours: \"22:00-07:00\" } } }\n"),
+		"nested group": base("groups: { kubernetes: {}, kubernetes/experiments: " +
 			"{ schedule: { quiet_hours: \"22:00-07:00\" } } }\n"),
 	}
 	for name, doc := range layers {
@@ -359,8 +359,8 @@ func TestLoadRejectsQuietHoursWithoutTimezoneAtEveryLayer(t *testing.T) {
 // pass the test above.
 func TestLoadAcceptsScheduleThatIsWellFormed(t *testing.T) {
 	cases := map[string]string{
-		"both set":      base("groups: { agentic: { schedule: { quiet_hours: \"22:00-07:00\", timezone: \"America/New_York\" } } }\n"),
-		"timezone only": base("groups: { agentic: { schedule: { timezone: \"America/New_York\" } } }\n"),
+		"both set":      base("groups: { kubernetes: { schedule: { quiet_hours: \"22:00-07:00\", timezone: \"America/New_York\" } } }\n"),
+		"timezone only": base("groups: { kubernetes: { schedule: { timezone: \"America/New_York\" } } }\n"),
 	}
 	for name, doc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -377,12 +377,12 @@ func TestLoadAcceptsScheduleThatIsWellFormed(t *testing.T) {
 
 // GroupFor matches a group exactly, or as a prefix on a SEGMENT boundary
 // (project == g, or strings.HasPrefix(project, g+"/")). A key ending in "/"
-// satisfies neither: "agentic/" is not a project path, and the prefix test
-// becomes "agentic//". So the override loads clean and applies to NOTHING --
+// satisfies neither: "kubernetes/" is not a project path, and the prefix test
+// becomes "kubernetes//". So the override loads clean and applies to NOTHING --
 // an operator who tightens a budget there gets silence instead of enforcement.
 func TestLoadRejectsGroupKeysThatCanNeverMatch(t *testing.T) {
 	cases := map[string]string{
-		"trailing slash":       base("groups: { 'agentic/': { budget: { monthly_cost_usd: 10 } } }\n"),
+		"trailing slash":       base("groups: { 'kubernetes/': { budget: { monthly_cost_usd: 10 } } }\n"),
 		"bare trailing slash":  base("groups: { 'g/': { enabled: false } }\n"),
 		"empty middle segment": base("groups: { 'a//b': { enabled: false } }\n"),
 	}
@@ -401,14 +401,14 @@ func TestLoadRejectsGroupKeysThatCanNeverMatch(t *testing.T) {
 
 // ...and the ordinary keys keep working. GroupFor's own tests cover matching;
 // this one exists so the rejection above cannot be satisfied by refusing every
-// group key with a slash in it -- "agentic/experiments" is the shape the chart
+// group key with a slash in it -- "kubernetes/experiments" is the shape the chart
 // documents and must stay valid.
 func TestLoadAcceptsOrdinaryGroupKeys(t *testing.T) {
-	oc, err := Load([]byte(base("groups: { agentic: { budget: { monthly_cost_usd: 50 } }, agentic/experiments: { enabled: false } }\n")))
+	oc, err := Load([]byte(base("groups: { kubernetes: { budget: { monthly_cost_usd: 50 } }, kubernetes/experiments: { enabled: false } }\n")))
 	if err != nil {
 		t.Fatalf("Load rejected ordinary group keys: %v", err)
 	}
-	if _, ok := oc.Groups["agentic/experiments"]; !ok {
+	if _, ok := oc.Groups["kubernetes/experiments"]; !ok {
 		t.Fatalf("nested group key did not survive Load: %+v", oc.Groups)
 	}
 }

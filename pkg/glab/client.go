@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -67,7 +68,8 @@ func (c *Client) SetPreviousToken(tok string) { c.prevToken = tok }
 // New builds a client for baseURL.
 //
 // *** THE http.Client HAS NO TLSClientConfig, AND MUST NEVER GET ONE. ***
-// gitlab.example.internal serves a PRIVATE CA certificate (docs/environment.md). The
+// A self-hosted GitLab often serves a certificate signed by a PRIVATE CA
+// (docs/environment.md, "Optional: a private certificate authority"). The
 // fix is to TRUST the CA, not to skip verification: the chart mounts the CA
 // ConfigMap and adds its directory to SSL_CERT_DIR beside the system roots,
 // which crypto/x509 honours with no code here at all. A single InsecureSkipVerify in
@@ -169,7 +171,7 @@ func (c *Client) do(ctx context.Context, rq request) ([]byte, http.Header, error
 		if rq.admin && c.AdminToken != "" {
 			tok = c.AdminToken
 		}
-		req.Header.Set("PRIVATE-TOKEN", tok)
+		req.Header.Set(tokenHeader, tok)
 		req.Header.Set("User-Agent", c.UserAgent)
 		if rq.body != nil {
 			req.Header.Set("Content-Type", "application/json")
@@ -178,7 +180,12 @@ func (c *Client) do(ctx context.Context, rq request) ([]byte, http.Header, error
 			req.Header.Set(k, v)
 		}
 
-		resp, err := c.HTTP.Do(req)
+		resp, err := c.httpClient().Do(req)
+		if errors.Is(err, ErrCrossOriginRedirect) {
+			// Not retried, and reported in our words: the url.Error Go wraps
+			// it in prints the Location, which is the other host's text.
+			return nil, nil, fmt.Errorf("gitlab: %s %s: %w", rq.method, rq.path, ErrCrossOriginRedirect)
+		}
 		if err != nil {
 			lastErr = fmt.Errorf("gitlab: %s %s: %w", rq.method, rq.path, err)
 		} else if rq.consume != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -333,4 +340,101 @@ func asAPIError(err error) *APIError {
 		return ae
 	}
 	return nil
+}
+
+// ---- redirects (gonk-467e) -------------------------------------------------------
+
+// tokenHeader carries the PAT. It is a CUSTOM header, so Go's http.Client
+// copies it onto every redirect, to any host: only Authorization,
+// WWW-Authenticate, Cookie and Cookie2 are dropped when the host changes.
+const tokenHeader = "PRIVATE-TOKEN"
+
+// ErrCrossOriginRedirect: a write was answered with a redirect to another
+// origin, and was not followed.
+var ErrCrossOriginRedirect = errors.New("gitlab: a write was redirected to another origin; not followed")
+
+// maxRedirects is Go's own default limit, kept when the caller's http.Client
+// has no CheckRedirect of its own (setting ours replaces the default).
+const maxRedirects = 10
+
+// httpClient is c.HTTP with THIS client's redirect policy in front of
+// whatever policy c.HTTP has. It is built per request from a shallow copy
+// (the transport and its connections are shared), so the policy holds
+// whatever c.HTTP was replaced with.
+//
+// The policy, for a redirect chain that has LEFT the origin of the first
+// request (scheme, host and port; sameOrigin):
+//
+//   - a read (GET, HEAD) is followed WITHOUT the token. GitLab answers a raw
+//     file, a job trace or an archive with a 302 to object storage when
+//     direct download is on, and that URL is pre-signed: it needs no token
+//     and must not be given one.
+//   - the token stays off for the rest of the chain, even on a hop that
+//     points back at the origin: the other host chose that URL.
+//   - a write (anything else) is NOT followed at all (ErrCrossOriginRedirect):
+//     a 307/308 would carry the body to the named host, and a 301/302/303
+//     would turn the write into a GET there and report its answer as the
+//     write's.
+//
+// A chain that stays on the origin is untouched: token and all, as before.
+func (c *Client) httpClient() *http.Client {
+	hc := *c.HTTP
+	inner := hc.CheckRedirect
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := redirectPolicy(req, via); err != nil {
+			return err
+		}
+		if inner != nil {
+			return inner(req, via)
+		}
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		return nil
+	}
+	return &hc
+}
+
+// redirectPolicy is the rule httpClient documents. req is the request about
+// to be sent; via holds the ones already made, the first being ours.
+func redirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	first := via[0]
+	left := !sameOrigin(first.URL, req.URL) // redirect:leaves
+	for _, v := range via[1:] {
+		if !sameOrigin(first.URL, v.URL) { // redirect:left-earlier
+			left = true
+		}
+	}
+	if !left {
+		return nil
+	}
+	if first.Method != http.MethodGet && first.Method != http.MethodHead { // redirect:write
+		return ErrCrossOriginRedirect
+	}
+	req.Header.Del(tokenHeader) // redirect:strip
+	return nil
+}
+
+// sameOrigin reports whether two URLs have the same scheme, host name and
+// port (the scheme's default port when none is written). Host names compare
+// without regard to letter case and in no other way: a subdomain, a suffix
+// and another name for the same address are all other origins. http and
+// https are different origins in both directions.
+func sameOrigin(a, b *url.URL) bool {
+	port := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http":
+			return "80"
+		case "https":
+			return "443"
+		}
+		return ""
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Hostname(), b.Hostname()) && port(a) == port(b)
 }

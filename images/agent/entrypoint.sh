@@ -10,8 +10,8 @@
 #      process), and the attribution metadata as the static provider header
 #      `provider.gonk.options.headers["x-litellm-spend-logs-metadata"]`,
 #      stamped VERBATIM from gonk-meter's own DecideResponse.Metadata
-#      (docs/environment.md, "VERIFIED: the attribution chain works"; Plan 04
-#      OD-7).
+#      (LiteLLM persists that header's keys on the spend row:
+#      internal/meter/litellm/spendsource_http.go reads them back).
 #   2. execs opencode.
 #
 # There used to be a third step here, installing a prepare-commit-msg hook
@@ -30,8 +30,8 @@
 # see packages/web/src/content/docs/providers.mdx and
 # packages/opencode/src/config/variable.ts in github.com/anomalyco/opencode.
 # It is NOT confirmed against a LIVE LiteLLM with THIS opencode binary in a
-# real pod: docs/environment.md's smoke test used a hand-built HTTP request,
-# not opencode itself. Plan 06 must do that live verification before this
+# real pod: the original smoke test used a hand-built HTTP request, not
+# opencode itself. Plan 06 must do that live verification before this
 # seam is trusted in production; a future opencode bump could rename or move
 # the config key, and Task 5 Step 4 says to re-confirm at every bump.
 
@@ -163,7 +163,7 @@ fi
 # Step 3) that stops the session the moment the SAME tool call FAILS for the
 # GONK_LOOP_WATCHDOG_THRESHOLD-th time, so the tokens a looping model would
 # burn are never spent -- rather than spent and then classified. Observed on
-# agentic/rom#1 attempt 1 (2026-10-04): the model Read two files that do not
+# the first attempt at one triage issue (2026-10-04): the model Read two files that do not
 # exist, the same pair three times, ~13k prompt tokens per call for no new
 # information, and then ended without a batch.
 #

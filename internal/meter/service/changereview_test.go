@@ -278,13 +278,13 @@ func TestIssueChangeReservationOutlivesTheVerifyTimeout(t *testing.T) {
 // the store holds, not only what Register computed.
 func TestRegisterReportsTheChangeAndReviewConfig(t *testing.T) {
 	op := strings.Replace(withReviewRung("glm"),
-		"  agentic:\n", "  agentic:\n    change: { max_open: 1, triggers: [label, command], docs_labels: [api], require_test_report: true }\n    review: { max_notes: 5 }\n", 1)
+		"  kubernetes:\n", "  kubernetes:\n    change: { max_open: 1, triggers: [label, command], docs_labels: [api], require_test_report: true }\n    review: { max_notes: 5 }\n", 1)
 	f := newTestServiceWithConfig(t, op)
 	plain := f.register("plain/repo", "plain-repo", simpleYAML("qwen-local", 5))
 	if plain.Effective == nil {
 		t.Fatal("no Effective")
 	}
-	const changeDefaults = `{"triggers":["label","command","mention"],"create_classes":["test","docs"],"require_docs":"when-labelled",` +
+	const changeDefaults = `{"triggers":["label"],"create_classes":["test","docs"],"require_docs":"when-labelled",` +
 		`"docs_labels":["feature","enhancement","type::feature"],"require_test_report":false,"max_attempts":2,"max_open":1,"verify_timeout_seconds":7200,` +
 		`"max_files":6,"max_changed_lines":200,"paths":[],"auto_merge":{"mode":"off","classes":["docs"],"max_per_day":3}}`
 	const reviewDefaults = `{"targets":["gonk"],"rung":"glm","max_notes":20,"max_reviews_per_mr":3,` +
@@ -305,7 +305,7 @@ func TestRegisterReportsTheChangeAndReviewConfig(t *testing.T) {
 	}
 	check("a project that never opted in", plain.Effective, changeDefaults, reviewDefaults, false)
 
-	opted := f.register("agentic/repo", "agentic-repo", crYAMLHead+"actions: { features: true, reviews: true }\n"+
+	opted := f.register("kubernetes/kubectl", "kubernetes-kubectl", crYAMLHead+"actions: { features: true, reviews: true }\n"+
 		"change:\n  triggers: [label, mention]\n  create_classes: [source, test]\n  require_docs: never\n  docs_labels: [ux]\n"+
 		"  max_attempts: 3\n  max_open: 3\n  verify_timeout: 45m\n  max_files: 4\n  max_changed_lines: 120\n  paths: [\"internal/**\"]\n"+
 		"  auto_merge: { mode: after-agentic-review, classes: [docs], max_per_day: 1 }\n"+
@@ -320,7 +320,7 @@ func TestRegisterReportsTheChangeAndReviewConfig(t *testing.T) {
 		`"agentic_merge":{"pipeline_fix":{"available":true,"reason":""},"change":{"available":true,"reason":""}}}`
 	check("an opted-in project under a tightening group", opted.Effective, wantChange, wantReview, true)
 
-	got, found, err := f.svc.Get(context.Background(), "agentic/repo")
+	got, found, err := f.svc.Get(context.Background(), "kubernetes/kubectl")
 	if err != nil || !found || got.Effective == nil {
 		t.Fatalf("GetProject: %+v, %v, %v", got, found, err)
 	}

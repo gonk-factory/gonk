@@ -101,8 +101,8 @@ muts=[
  ("trajectory names a non-class", S, 'require_any_read_for = ["code", "test", "configuration"]', 'require_any_read_for = ["code", "test", "configuraton"]', "./internal/packtest/", "Pipeline"),
  # gonk-zxsx: retry feedback for a refused diagnosis, and the prompt's key lists
  ("zxsx: the retry after a refused diagnosis is prompted as the first was (the block is not rendered)", P,
-  'if fb := renderRetryFeedback(pc.Req.Refused, pc.Req.Attempt); fb != "" { // prompt:refused',
-  'if fb := renderRetryFeedback(pc.Req.Refused, pc.Req.Attempt); false && fb != "" { // prompt:refused', "./cmd/gonk-gate/", "Pipeline"),
+  'pc.DiagnosisContext())...); fb != "" { // prompt:refused',
+  'pc.DiagnosisContext())...); false && fb != "" { // prompt:refused', "./cmd/gonk-gate/", "Pipeline"),
  ("zxsx: dispatch does not hand the record's feedback to the prompt", "cmd/gonk-gate/broker_pipeline_dispatch.go",
   "\t\tAttempt: rec.Attempt, Refused: rec.RetryFeedback,\n", "", "./cmd/gonk-gate/", "Pipeline"),
  ("zxsx: dispatch does not carry the feedback onto the record it writes", "cmd/gonk-gate/broker_pipeline_dispatch.go",

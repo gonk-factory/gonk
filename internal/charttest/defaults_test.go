@@ -97,16 +97,15 @@ func TestChartDefaultsNameNoSite(t *testing.T) {
 
 // THE SELF-BLOCK DEFAULT IS UNCHANGED, AND STILL A DEFAULT. gonk must never
 // work on its own repository; the chart ships that project path so that an
-// installation which says nothing is still protected. (The reference cluster
-// also pins it explicitly in its HelmRelease, so it does not depend on this.)
+// installation which says nothing is still protected.
 func TestSelfBlockDefaultIsStillShipped(t *testing.T) {
 	got, _ := at(t, chartDefaults(t), "intake", "blockedProjects").([]any)
-	if len(got) != 1 || got[0] != "agentic/gonk-project" {
-		t.Fatalf("values.yaml intake.blockedProjects = %#v, want [agentic/gonk-project]", got)
+	if len(got) != 1 || got[0] != "gonk-factory/gonk" {
+		t.Fatalf("values.yaml intake.blockedProjects = %#v, want [gonk-factory/gonk]", got)
 	}
 	env := workloadEnv(t, MustObject(t, Render(t, Minimum()...), "Deployment", "gonk-intake"))
-	if env["GONK_BLOCKED_PROJECTS"] != "agentic/gonk-project" {
-		t.Fatalf("GONK_BLOCKED_PROJECTS = %q in the default render, want agentic/gonk-project", env["GONK_BLOCKED_PROJECTS"])
+	if env["GONK_BLOCKED_PROJECTS"] != "gonk-factory/gonk" {
+		t.Fatalf("GONK_BLOCKED_PROJECTS = %q in the default render, want gonk-factory/gonk", env["GONK_BLOCKED_PROJECTS"])
 	}
 }
 
@@ -392,8 +391,8 @@ func TestDefaultRenderUsesThePublicRegistryAndNoPullSecret(t *testing.T) {
 }
 
 // A PRIVATE MIRROR IS TWO VALUES: every gonk image moves to image.registry and
-// every pod (and the agents' ServiceAccount) carries the pull Secret. This is
-// the reference cluster's configuration, so it is the override that must work.
+// every pod (and the agents' ServiceAccount) carries the pull Secret. A
+// deployment that mirrors the images depends on exactly this override.
 func TestPrivateRegistryAndPullSecretReachEveryPod(t *testing.T) {
 	const reg, secret = "registry.example.internal/group/project", "registry-pull-creds"
 	objs := Objects(t, Render(t, append(Minimum(),

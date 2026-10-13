@@ -58,7 +58,7 @@ spec:
             {{- end }}
             {{- if eq .Values.gitlab.mode "split-credential" }}
             # Used ONLY for /hooks calls (spec 5.1). Unset -> the bot token does
-            # everything, which is the homelab default. NO second slot: a failed
+            # everything, which is the default. NO second slot: a failed
             # hook repair is simply repaired on the next reconcile pass.
             - name: GONK_GITLAB_ADMIN_TOKEN_FILE
               value: {{ include "gonk.secretPath" (dict "root" $root "name" "gitlab" "key" .Values.secrets.gitlab.keys.adminToken) | quote }}
@@ -68,9 +68,10 @@ spec:
             # named. *** THIS IS HOW WE TRUST A GITLAB BEHIND A PRIVATE CA. ***
             # The image carries no trust setting of its own: gonk.caTrustEnv
             # (_helpers.tpl) ADDS the mounted bundle's directory to the system
-            # roots, it does not replace them. It is the reason no code in this
-            # repo ever sets InsecureSkipVerify -- there is no value that disables
-            # TLS verification, and there never will be.
+            # roots, it does not replace them. It is the reason no gonk code
+            # ever sets InsecureSkipVerify -- there is no value that disables
+            # TLS verification, and there never will be
+            # (internal/buildgate/tls_verification_test.go holds both).
             {{- . | nindent 12 }}
             {{- end }}
             - name: GONK_WEBHOOK_SECRET_FILE
@@ -222,7 +223,7 @@ spec:
         # gitlab.caCert.existingConfigMap is a NAME: the chart does not create the
         # ConfigMap (trust-manager, or you, publish it into this namespace).
         # It is how a Go service trusts a GitLab behind a private CA --
-        # and it is the reason no code in this repo ever sets InsecureSkipVerify.
+        # and it is the reason no gonk code ever sets InsecureSkipVerify.
         - name: gitlab-ca
           configMap:
             name: {{ .Values.gitlab.caCert.existingConfigMap }}

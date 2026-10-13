@@ -75,13 +75,13 @@ func TestNewServiceWiresTheIssueSweep(t *testing.T) {
 // unplug-in-one-line risk, same seam.
 func TestNewServiceWiresTheBlocklist(t *testing.T) {
 	svc, _ := wiringService(t, func(c *Config) {
-		c.BlockedProjects = []string{"agentic/gonk-project"}
+		c.BlockedProjects = []string{"gonk-factory/gonk"}
 	})
 	if svc.Reconciler.Blocked.Empty() {
 		t.Fatal("Reconciler.Blocked is empty: the blocklist is parsed and then discarded, " +
 			"so a project on it would be reconciled and dispatched to anyway (gonk-jn5)")
 	}
-	if !svc.Reconciler.Blocked.Blocked(glab.Project{ID: 69, PathWithNamespace: "agentic/gonk-project"}) {
+	if !svc.Reconciler.Blocked.Blocked(glab.Project{ID: 69, PathWithNamespace: "gonk-factory/gonk"}) {
 		t.Error("the configured entry does not actually block the project it names")
 	}
 }
@@ -94,7 +94,7 @@ func TestNewServiceRefusesToStartOnAnUnparseableBlocklist(t *testing.T) {
 	gl.Me = glab.User{ID: 99, Username: "gonk"}
 	cfg := wiringConfig(t, gl)
 	// The dangerous typo: looks deliberate, parses as a name, matches nothing.
-	cfg.BlockedProjects = []string{"gonk-project"}
+	cfg.BlockedProjects = []string{"gonk"}
 
 	if _, err := newService(context.Background(), cfg, slog.New(slog.DiscardHandler)); err == nil {
 		t.Fatal("started with a blocklist entry that blocks nothing; it must fail closed")

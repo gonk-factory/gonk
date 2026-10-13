@@ -28,20 +28,20 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{/*
-  gonk.networkPolicyBanner -- the "NOT ENFORCED" disclaimer, as a real
-  ANNOTATION, not just a spec-block comment.
+  gonk.networkPolicyBanner -- the "enforced only where the CNI implements
+  NetworkPolicy" disclaimer, as a real ANNOTATION, not just a spec-block
+  comment.
 
-  Helm comments never reach the API server (they are stripped at template
-  render time, long before `kubectl apply`), so `kubectl get networkpolicy -o
-  yaml` on the real cluster would show NONE of the surrounding spec comments
+  Comments never reach the API server, so `kubectl get networkpolicy -o
+  yaml` on a live cluster shows NONE of the surrounding spec comments
   -- an operator inspecting the live object would see nothing warning them
-  that it blocks nothing. An annotation is real object data: it survives all
+  that it may block nothing. An annotation is real object data: it survives all
   the way to etcd and back out through `kubectl get/describe`. Every
   NetworkPolicy template carries this AND keeps its own spec-block prose
   comment for anyone reading the chart source or a `helm template` dry run.
 */}}
 {{- define "gonk.networkPolicyBanner" -}}
-gonk-factory.github.io/network-policy-enforcement: "NOT ENFORCED on this cluster: Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that would (gitops:clusters/<cluster>/foundation/kustomization.yaml) is SUSPENDED. This object blocks nothing today; see chart/gonk/README.md."
+gonk-factory.github.io/network-policy-enforcement: "Enforced only where the cluster's network plugin (CNI) implements NetworkPolicy. The API server accepts this object either way; where it is not enforced it blocks nothing, and local-model budgets are advisory. Run helm test on the release to find out which; see chart/gonk/README.md, section 0."
 {{- end -}}
 
 {{/*

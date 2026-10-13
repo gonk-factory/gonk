@@ -98,6 +98,11 @@ type Pipeline struct {
 	ID     int64
 	SHA    string
 	Source string // GitLab's pipeline source, e.g. merge_request_event, push, parent_pipeline
+	// Ref is GitLab's pipeline ref: a branch name, or for a merge request
+	// pipeline refs/merge-requests/<iid>/head, .../merge (merged results) or
+	// .../train (a merge train). Read only by mergedResultPipeline; "" is a
+	// pipeline whose ref was not recorded, and is none of those.
+	Ref    string
 	Status string
 	// JobsRead: the pipeline's jobs were listed, completely (every page).
 	JobsRead bool
@@ -225,6 +230,10 @@ const (
 	RuleJ1Wait    Rule = "J1.WAIT"
 	RuleJ1Timeout Rule = "J1.TIMEOUT"
 	RuleJ1Unread  Rule = "J1.UNREAD" // the pipeline list stayed unreadable past the deadline
+	// RuleJ1MergedResult: at the deadline the merge request's only pipelines
+	// ran on GitLab's merged-results (or merge train) commit, which cannot be
+	// attributed to the fix commit (gonk-ow8u; mergedResultPipeline).
+	RuleJ1MergedResult Rule = "J1.MERGED_RESULT"
 
 	RuleJ2Violation        Rule = "J2.VIOLATION"         // D1 / D2 / D3 broken
 	RuleJ2HeadUnresolvable Rule = "J2.HEAD_UNRESOLVABLE" // the change introduced what cannot be compared
@@ -296,6 +305,10 @@ type Result struct {
 	// Skipped: the pipelines of the fix commit that are NOT candidates
 	// because they were `skipped` and ran no job (a `[skip ci]` commit).
 	Skipped []int64
+	// MergedResult: the pipelines of this merge request that ran on GitLab's
+	// merged-results or merge-train commit and so are NOT candidates
+	// (mergedResultPipeline). Listed so the outcome can say what was there.
+	MergedResult []int64
 	// Definition is J2's delta when the definition could be compared:
 	// none, preserving or exec-changing. A recorded fact that the merge
 	// policy consumes (plan 9.1 A4); "" otherwise.
@@ -373,6 +386,11 @@ func Judge(f JudgeFacts, now time.Time) Result {
 				return cannotJudge(RuleFacts, []string{"pipelines: a pipeline without id, sha or source"}, Result{})
 			}
 			if p.SHA != f.Fix.FixCommitSHA {
+				// Not a candidate, whatever it is. One shape is remembered so
+				// the outcome can name it (gonk-ow8u).
+				if mergedResultPipeline(p, f.Fix.MRIID) { // j1:merged-result
+					res.MergedResult = append(res.MergedResult, p.ID)
+				}
 				continue
 			}
 			if p.Source == SourceParentPipeline {
@@ -386,6 +404,7 @@ func Judge(f JudgeFacts, now time.Time) Result {
 		}
 		sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
 		sort.Slice(res.Skipped, func(i, j int) bool { return res.Skipped[i] < res.Skipped[j] })
+		sort.Slice(res.MergedResult, func(i, j int) bool { return res.MergedResult[i] < res.MergedResult[j] })
 		settled := len(candidates) > 0
 		// pendingDetail: the first candidate that has a terminal status while
 		// one of its job attempts has not finished (gonk-5b2f).
@@ -408,6 +427,9 @@ func Judge(f JudgeFacts, now time.Time) Result {
 			if len(res.Skipped) > 0 {
 				res.Detail = skippedText(res.Skipped) + "; waiting for one to be started"
 			}
+			if len(candidates) == 0 && len(res.MergedResult) > 0 { // j1:merged-wait
+				res.Detail = mergedResultText(res.MergedResult) + "; waiting for a pipeline of the fix commit itself"
+			}
 			if len(candidates) > 0 {
 				res.Detail = "a pipeline of the fix commit has not finished"
 			}
@@ -424,7 +446,13 @@ func Judge(f JudgeFacts, now time.Time) Result {
 			if pendingDetail != "" {
 				detail = pendingDetail + " at the verify deadline"
 			}
-			unverifiable = append(unverifiable, cause{RuleJ1Timeout, detail})
+			rule := RuleJ1Timeout
+			if len(candidates) == 0 && len(res.MergedResult) > 0 { // j1:merged-timeout
+				// Nothing of the fix commit ever ran, and something of the
+				// merge request did -- on a commit that is not the fix's.
+				rule, detail = RuleJ1MergedResult, mergedResultText(res.MergedResult)+", and no pipeline of the fix commit itself finished before the verify deadline"
+			}
+			unverifiable = append(unverifiable, cause{rule, detail})
 		}
 	}
 
@@ -562,13 +590,14 @@ type cause struct {
 // before the missing fact was met (candidates, job findings), for the log.
 func cannotJudge(rule Rule, missing []string, partial Result) Result {
 	return Result{
-		Decision:   DecisionCannotJudge,
-		Rule:       rule,
-		Detail:     "no verdict: " + strings.Join(missing, "; "),
-		Missing:    missing,
-		Candidates: partial.Candidates,
-		Skipped:    partial.Skipped,
-		Jobs:       partial.Jobs,
+		Decision:     DecisionCannotJudge,
+		Rule:         rule,
+		Detail:       "no verdict: " + strings.Join(missing, "; "),
+		Missing:      missing,
+		Candidates:   partial.Candidates,
+		Skipped:      partial.Skipped,
+		MergedResult: partial.MergedResult,
+		Jobs:         partial.Jobs,
 	}
 }
 
@@ -632,6 +661,61 @@ var activeJobStatuses = []string{"created", "waiting_for_resource", "preparing",
 
 // ActiveJobStatuses is the list J1 holds a verdict for (a copy).
 func ActiveJobStatuses() []string { return append([]string(nil), activeJobStatuses...) }
+
+// SourceMergeRequestEvent is the pipeline source of a merge request pipeline
+// of any kind (detached, merged results, merge train).
+const SourceMergeRequestEvent = "merge_request_event"
+
+// mergedResultPipeline reports whether p -- a pipeline of the merge request
+// whose sha is NOT the fix commit's -- is a merged-results or merge-train
+// pipeline of merge request mrIID: source `merge_request_event`, and ref
+// exactly refs/merge-requests/<mrIID>/merge or .../train.
+//
+// WHY SUCH A PIPELINE IS NEVER A CANDIDATE (gonk-ow8u). GitLab runs it on "a
+// temporary merged commit that combines code from the source and target
+// branches", which "doesn't exist in either branch"
+// (docs.gitlab.com/ci/pipelines/merged_results_pipelines): the pipeline's
+// `sha` is that commit's. The REST pipeline object documents no field naming
+// the source commit it was merged from (docs.gitlab.com/api/pipelines: id,
+// iid, project_id, sha, ref, status, source, before_sha, ...); GitLab states
+// it only to the jobs themselves, as CI_MERGE_REQUEST_SOURCE_BRANCH_SHA
+// (docs.gitlab.com/ci/variables/predefined_variables). The merge request's
+// own `sha`, `diff_refs.head_sha` and `head_pipeline` describe its CURRENT
+// head, not the commit a given past pipeline was built from. So nothing
+// GitLab asserts through the API ties such a pipeline to FixCommitSHA, and a
+// verdict that needs "this ran the fix commit" cannot be given from it:
+// neither FIXED when it is green, nor NOT_FIXED when it is red (its tree
+// also holds whatever the target branch gained since the fix was written).
+//
+// What the shape IS used for: when it is all there is at the deadline, the
+// outcome is UNVERIFIABLE by J1.MERGED_RESULT -- naming what happened --
+// instead of J1.TIMEOUT's "no pipeline finished". Misreading the shape can
+// therefore only change that wording, never a verdict.
+//
+// The `/merge` ref is in GitLab's documentation (the list-pipelines example
+// of docs.gitlab.com/api/pipelines shows `refs/merge-requests/<iid>/merge`).
+// The `/train` ref is NOT documented there; it is what GitLab's source uses
+// for a merge train, taken on that basis alone. Neither was observed: the
+// instance this was built against is Community Edition, where a merge
+// request pipeline's ref is refs/merge-requests/<iid>/head and its sha the
+// source head (observed, project 75, GitLab 19.4.1).
+func mergedResultPipeline(p Pipeline, mrIID int64) bool {
+	if p.Source != SourceMergeRequestEvent || mrIID <= 0 {
+		return false
+	}
+	base := fmt.Sprintf("refs/merge-requests/%d/", mrIID)
+	return p.Ref == base+"merge" || p.Ref == base+"train"
+}
+
+// mergedResultText names the merged-results pipelines in a detail.
+func mergedResultText(ids []int64) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprint(id)
+	}
+	return fmt.Sprintf("this merge request's pipeline(s) %s ran on GitLab's merged-results commit, not on the fix commit, "+
+		"and cannot be attributed to it", strings.Join(parts, ", "))
+}
 
 // activeAttempt is the lowest-id job attempt of a candidate pipeline that is
 // still active. GitLab can report a pipeline `failed` while an automatic

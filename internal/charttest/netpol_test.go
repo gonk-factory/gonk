@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// GitLab is IN-CLUSTER on the target cluster (namespace `gitlab`, OD-6), so the
+// The default assumes GitLab is IN-CLUSTER (namespace `gitlab`, OD-6), so the
 // default profile uses a namespaceSelector, NOT an ipBlock: a CIDR for an
 // in-cluster Service is a pod IP, and pod IPs move on every reschedule -- the
 // policy would work until the first restart and then silently stop allowing
@@ -23,7 +23,7 @@ func withNetpol(extra ...string) []string {
 
 func withExternalGitLab(extra ...string) []string {
 	// RECONCILED, Task 0: networkPolicy.gitlabInCluster.enabled now DEFAULTS to
-	// true (OD-6 answered: GitLab is in-cluster on the target cluster), so
+	// true (OD-6: the default assumes an in-cluster GitLab), so
 	// exercising the external (ipBlock) path requires explicitly turning the
 	// in-cluster path back off -- it is no longer off by default.
 	return append(append(Minimum(),
@@ -31,21 +31,46 @@ func withExternalGitLab(extra ...string) []string {
 		"--set", "networkPolicy.gitlab.cidrs={192.0.2.7/32}"), extra...)
 }
 
-// EVERY policy must carry the "not enforced" banner. It is the ONLY thing between
-// a future reader and the conclusion that spec 9's egress guarantee is live.
-// Deleting the comment is a documentation regression with a security blast radius,
-// so it is a TEST, not a convention.
-func TestEveryNetworkPolicyDeclaresItIsNotEnforced(t *testing.T) {
+// EVERY policy must carry the enforcement banner, as an ANNOTATION (object
+// data: it survives to `kubectl get -o yaml`, which a comment does not). It is
+// the ONLY thing between a reader of the live object and the conclusion that
+// the egress guarantee holds on a cluster whose CNI may not enforce it.
+// Deleting it is a documentation regression with a security blast radius, so it
+// is a TEST, not a convention.
+//
+// THE BANNER STATES A CONDITION, NOT ONE CLUSTER'S STATE (gonk-z6js). It used
+// to say "NOT ENFORCED on this cluster" and name the CNI and the gitops path of
+// the maintainers' own deployment -- false on every cluster that does enforce,
+// and nobody else's business on the rest. So this also refuses those words.
+//
+// (Named TestEveryNetworkPolicyDeclaresItIsNotEnforced until gonk-z6js.)
+func TestEveryNetworkPolicyDeclaresEnforcementDependsOnTheCNI(t *testing.T) {
+	const key = "gonk-factory.github.io/network-policy-enforcement"
+	policies := 0
 	for _, o := range Objects(t, Render(t, withNetpol()...)) {
 		if o.Kind != "NetworkPolicy" {
 			continue
 		}
-		if !strings.Contains(o.Doc, "NOT ENFORCED") || !strings.Contains(o.Doc, "Cilium") {
-			t.Errorf("NetworkPolicy/%s does not say it is unenforced and name Cilium.\n"+
-				"Flannel does not implement NetworkPolicy and the Cilium HelmRelease is suspended: "+
-				"this object blocks nothing today, and anyone reading it must be told so.\n%s",
-				o.Metadata.Name, o.Doc)
+		policies++
+		banner := o.Metadata.Annotations[key]
+		for _, want := range []string{"only where", "CNI", "blocks nothing", "advisory", "helm test"} {
+			if !strings.Contains(banner, want) {
+				t.Errorf("NetworkPolicy/%s: annotation %s does not say %q.\n"+
+					"A NetworkPolicy is enforced only where the CNI implements it, and anyone reading "+
+					"the live object must be told so. Got: %q",
+					o.Metadata.Name, key, want, banner)
+			}
 		}
+		for _, siteWord := range []string{"this cluster", "Flannel", "flannel", "Cilium", "SUSPENDED", "gitops:", "HelmRelease", "today"} {
+			if strings.Contains(o.Doc, siteWord) {
+				t.Errorf("NetworkPolicy/%s carries %q: the banner must state the general condition, "+
+					"not the state of one cluster.", o.Metadata.Name, siteWord)
+			}
+		}
+	}
+	// default-deny, agent, intake, meter, controller, dolt.
+	if policies < 6 {
+		t.Fatalf("only %d NetworkPolicies rendered, want at least 6: the loop above checked too little", policies)
 	}
 }
 
@@ -67,9 +92,9 @@ func TestDefaultDenyExists(t *testing.T) {
 // THE spec-9 policy.
 //
 // This test proves the policy RENDERS CORRECTLY. It does NOT prove a packet is
-// dropped -- the CNI does not enforce policy on this cluster at all. That proof
-// is Plan 06's egress-denial test, which is WRITTEN AND SKIPPED until Cilium
-// lands. Do not mistake this green for that one.
+// dropped: that depends on the cluster's CNI, and the proof is the enforcement
+// probe (`helm test`) and the netpol-enforcement workflow. Do not mistake this
+// green for that one.
 func TestAgentEgressIsLimitedToGitLabLiteLLMAndDNS(t *testing.T) {
 	np := MustObject(t, Render(t, withNetpol()...), "NetworkPolicy", "gonk-agent")
 	// GitLab egress is OFF by default (gonk-7oz). This test used to assert the
@@ -101,10 +126,12 @@ func TestAgentEgressIsLimitedToGitLabLiteLLMAndDNS(t *testing.T) {
 	}
 }
 
-// The public listener may be reached from the ingress controller -- which on this
-// cluster is TRAEFIK, the only IngressClass (docs/environment.md). The PRIVATE one
-// (metrics, health, and the UNAUTHENTICATED POST /admin/reconcile) may be reached
-// only by Prometheus and the e2e harness.
+// The public listener may be reached from the ingress controller -- by default
+// the namespace `traefik` (networkPolicy.ingressController). The PRIVATE one
+// (metrics, health, the checkout routes and the UNAUTHENTICATED
+// POST /admin/reconcile) may be reached by Prometheus, the controller and the
+// agent session pods (gonk-nax7: the last two use the checkout, and a policy
+// cannot admit them to one route only).
 func TestIntakeIngressIsLimited(t *testing.T) {
 	np := MustObject(t, Render(t, withNetpol()...), "NetworkPolicy", "gonk-intake")
 	if !strings.Contains(np.Doc, "traefik") {
@@ -225,7 +252,7 @@ func TestMeterIngressIsLimited(t *testing.T) {
 }
 
 // RECONCILED, Task 0: NEW. The default ledger.postgres.mode is `shared`
-// (the actual target-cluster CNPG tenancy, databases-app/postgres), and the
+// (tenancy on an existing CloudNativePG cluster), and the
 // original egress rule only covered mode=cnpg -- meter's DEFAULT profile
 // would have shipped a NetworkPolicy with no path to its own ledger at all.
 // Assert both the default (shared) and the cnpg mode render a real egress
@@ -268,8 +295,8 @@ func TestNetworkPolicyCanBeDisabledWholesale(t *testing.T) {
 
 func TestControllerPolicyRendersWhenBundled(t *testing.T) {
 	np := MustObject(t, Render(t, withNetpol()...), "NetworkPolicy", "gonk-controller")
-	if !strings.Contains(np.Doc, "NOT ENFORCED") {
-		t.Error("the controller policy lost its unenforced banner")
+	if np.Metadata.Annotations["gonk-factory.github.io/network-policy-enforcement"] == "" {
+		t.Error("the controller policy lost its enforcement banner")
 	}
 	// BYO controller -> no in-namespace controller policy.
 	byo := Render(t, withNetpol(

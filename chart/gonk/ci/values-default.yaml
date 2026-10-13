@@ -47,9 +47,9 @@ litellm:
   externalURL: http://litellm.litellm.svc.cluster.local:4000
 
 # ledger.backend stays at its only value (postgres); ledger.postgres.mode stays
-# at the default (shared) -- tenancy on the databases-app/postgres cluster the
-# owner already runs. The chart renders NOTHING for the ledger in this mode; it
-# just consumes the DSN. See README (the four gitops objects it needs).
+# at the default (shared) -- tenancy on a CloudNativePG cluster that already
+# exists. The chart renders NOTHING for the ledger in this mode; it just
+# consumes the DSN. See the chart README, "The ledger".
 
 operatorConfig:
   instance:

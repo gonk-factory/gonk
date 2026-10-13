@@ -19,7 +19,7 @@
 // the parser and `extends:` followed (a job inherits `image` from its
 // extends chain unless it sets its own; `image` is replaced wholesale, not
 // merged). WHAT IT CANNOT SEE: jobs that come from `include:`d files
-// (homelab/ci-templates, e.g. .manifest-merge) -- they are not in this
+// (the shared templates project, e.g. .manifest-merge) -- they are not in this
 // repo's file -- and `default: image:`. A job whose image is a variable
 // ($GONK_CHART_TOOLS_IMAGE) is not matched by name and so is not checked.
 package buildgate

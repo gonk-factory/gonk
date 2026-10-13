@@ -160,6 +160,11 @@ func allKindKeysText(kinds []Kind) string {
 			parts = append(parts, fmt.Sprintf("%s: %s", k, strings.Join(keys, ", ")))
 		}
 	}
+	if len(parts) == 0 { // feedback:no-key-table
+		// No kind of the task has a key table the validator reads (comment,
+		// label, file): there is no set to state, and none is invented.
+		return ""
+	}
 	return "the keys of each effect kind are -- " + strings.Join(parts, "; ")
 }
 
@@ -170,6 +175,11 @@ func batchKeysText() string {
 func evidenceKeysText() string {
 	return "the keys of an evidence item are: " + strings.Join(EvidenceItemKeys(), ", ")
 }
+
+// FactsText is the closed evidence-fact key set as one line of feedback,
+// built from factOrder -- the enumeration knownFacts (the gate's set) is
+// built from.
+func FactsText() string { return factsText() }
 
 func factsText() string {
 	keys := make([]string, len(factOrder))
@@ -267,6 +277,11 @@ func ExplainParse(raw []byte, err error, kinds []Kind) Feedback {
 		case ParseUnknownVerdict:
 			fb.What = "the batch states a verdict that does not exist: " + Token(pe.Value)
 		}
+	case errors.Is(err, ErrBatchDuplicateKey):
+		fb.What = "the batch itself states the same key more than once: each of its keys is stated at most once"
+		fb.Allowed = batchKeysText()
+	case errors.Is(err, ErrBatchTrailingData):
+		fb.What = "there is text after the end of the JSON object between the fence lines: the batch is exactly one JSON object and nothing else"
 	case errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF):
 		fb.What = "the JSON between the fence lines ended before it was complete: a string, a bracket or a brace was left open, or there was no JSON at all"
 	case errors.As(err, &syn):

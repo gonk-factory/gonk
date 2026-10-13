@@ -22,8 +22,8 @@ WORKDIR /src
 RUN git clone https://github.com/gastownhall/gascity . && git checkout "${GASCITY_REF}"
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/gc ./cmd/gc
 
-# ---- build gonk-gate (static; vendor/ is committed -- docs/environment.md: --
-# CI cannot reach proxy.golang.org, so this stage is fully offline, -mod=vendor,
+# ---- build gonk-gate (static; vendor/ is committed, so no module proxy is
+# needed and this stage is fully offline, -mod=vendor,
 # no `go mod download` anywhere, same as images/Dockerfile.agent's gate stage) --
 FROM golang:${GO_VERSION} AS gate
 WORKDIR /src

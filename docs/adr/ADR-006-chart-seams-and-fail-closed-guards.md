@@ -24,10 +24,10 @@ each behind a `<component>.enabled` toggle. It wires to a **BYO** GitLab, LiteLL
 and CNPG operator.
 
 This **reverses the earlier "Gas City and Dolt are BYO" framing** (OD-4). The
-reason is concrete: the target cluster has neither a Gas City controller nor a Dolt
-server, so a pack-plus-glue chart that assumed them would deploy nothing that runs.
-An umbrella that stands up its own controller and beads store is the only shape
-that produces a working factory on this cluster. The default render is therefore
+reason is concrete: a cluster with neither a Gas City controller nor a Dolt
+server is the normal starting point, so a pack-plus-glue chart that assumed them
+would deploy nothing that runs. An umbrella that stands up its own controller and
+beads store is the only shape that produces a working factory there. The default render is therefore
 the **whole factory** — proven by `TestChartLintsAndRendersWithDefaults` and the
 `values-default` golden (27 objects: controller + Dolt + intake + meter + operator
 config).
@@ -35,8 +35,7 @@ config).
 ## 2. Only LiteLLM is BYO among the model/runtime layer (OD-3)
 
 `litellm.mode` is a single-value enum, `external`. The chart bundles no LiteLLM and
-no Ollama. On the target cluster LiteLLM is already deployed (`litellm:4000`); the
-chart consumes it by URL. The cost: the **synthetic-price agreement** between the
+no Ollama. LiteLLM is deployed separately; the chart consumes it by URL. The cost: the **synthetic-price agreement** between the
 rung catalog and LiteLLM's `model_cost_map` is unenforceable at chart time — a
 local model priced at `$0` in LiteLLM would leave the token ceiling open. The chart
 mitigates by rendering an **advisory** `gonk-litellm-model-prices` ConfigMap with
@@ -66,7 +65,7 @@ Plan 04's image (`gascity.image`) is hard and partially preceding.
 
 ## 4. Beads is Dolt-only; CNPG is the ledger only
 
-There is no beads-on-Postgres path (`docs/environment.md`: the beads backend enum
+There is no beads-on-Postgres path (the beads backend enum
 is Dolt/DoltLite; sqlite/coordstore were removed and hard-error). So
 `dolt.enabled: false` means an **external Dolt** (e.g. self-hosted DoltLab),
 guarded by G16 — never "Postgres for beads". Conversely, CNPG can only ever replace
@@ -92,15 +91,14 @@ and all three modes render, lint, and validate independently.
 ## 6. Secrets are file mounts from externally-provisioned Secrets, two slots
 
 **The chart renders no `Secret` and uses no `secretKeyRef` anywhere.** Every
-credential is provisioned outside the chart (Vault/1Password → ExternalSecret → k8s
-Secret) and consumed as a **projected file mount** (`defaultMode: 0400`,
+credential is provisioned outside the chart (by hand, or synced from a secret
+store) and consumed as a **projected file mount** (`defaultMode: 0400`,
 `readOnly`), passed to the binary as a `*_FILE` env var — **never** `envFrom`,
 **never** `valueFrom.secretKeyRef`, because env leaks into `/proc/<pid>/environ`,
 crash dumps, and every child process (owner decision 2026-07-13). This is a
-**deliberate deviation from the gitops repo's `env` house style**; ESO *delivery*
-is identical (the same ClusterSecretStore, secret-store paths and rotation
-annotations the maintainers' other applications use), only *consumption* differs.
-Recorded here so it is not "fixed" later. Every credential has **two rotation
+**deliberate deviation from the common `env`-from-Secret style**: how a Secret is
+*delivered* into the namespace is unchanged and yours to choose, only its
+*consumption* differs. Recorded here so it is not "fixed" later. Every credential has **two rotation
 slots** (slot 2 opt-in per credential, because a projected volume with an absent
 key fails the pod to start). `secrets_test.go` enforces the whole contract
 key-by-key and asserts **no `Secret` object and no `secretKeyRef`** in the render.
@@ -160,48 +158,57 @@ Kubernetes schemas plus vendored CRD schemas (`chart/gonk/tests/crd-schemas`, **
 
 ## 11. THE NETWORKPOLICY GAP — an accepted, UN-CLOSED limitation
 
-Not a mitigated risk; an open one. **NetworkPolicies are not enforced on this
-cluster** — Flannel does not implement them, and the Cilium HelmRelease that would
-is suspended. LiteLLM routes local models to an **unauthenticated Ollama**
-(`192.0.2.10:11434`), so an agent pod can bypass metering entirely.
+*(Reworded for v0.2.1: this section used to state the enforcement posture of the
+cluster gonk was developed on as a fact about the chart. The decision is the
+same.)*
+
+Not a mitigated risk; an open one. **A NetworkPolicy is enforced only where the
+cluster's network plugin (CNI) implements it**, and some do not; the API server
+accepts the object either way. Where it is not enforced, and LiteLLM routes
+local models to a model server that needs no credential (for example an Ollama
+at `192.0.2.10:11434`), an agent pod can bypass metering entirely.
 **Consequence: cloud-rung budgets are hard (a cloud call needs the per-project
 virtual key, and LiteLLM refuses at the ceiling); local-model budgets are
-advisory.** Spec §9's "budgets cannot be bypassed" is, at the network layer for
-local models, a **known-false** statement today, not merely unverified.
+advisory wherever the egress policy is not enforced.** "Budgets cannot be
+bypassed" is, at the network layer for local models, **false** on such a
+cluster, not merely unverified. The cluster this was first deployed on was one.
 
 **Owner decision 2026-07-13: ship the policy, document the gap, do not gate on it.**
-The policies are correct and start enforcing the day Cilium is unsuspended. The
-gap is closed by infra work outside gonk (unsuspend Cilium, or credential Ollama),
-and by **un-skipping Plan 06's egress-denial test — which is the gate.** The
-decision is recorded here *with the fact that it is still open*. The gap is stated
-loudly in four places — every `networkpolicy-*.yaml`, `values.yaml`,
-`chart/gonk/README.md` §0, and this ADR — and
-`TestEveryNetworkPolicyDeclaresItIsNotEnforced` fails the build if any policy loses
-its banner.
+The policies are correct and enforce wherever the CNI does. On a cluster where
+it does not, the gap is closed by work outside gonk (a CNI that enforces
+NetworkPolicy, or a credential in front of the model server). The chart ships
+the instrument beside the claim: `helm test` runs a probe that reports
+ENFORCED or NOT ENFORCED (`chart/gonk/README.md`, section 0). The gap is stated
+in four places — an annotation on every rendered NetworkPolicy, `values.yaml`,
+`chart/gonk/README.md` section 0, and this ADR — and
+`TestEveryNetworkPolicyDeclaresEnforcementDependsOnTheCNI` fails the build if
+any policy loses its banner.
 
 ## 12. The agent-pod NetworkPolicy selector (OD-5) is an unverified assumption
 
 `networkPolicy.agentPodSelector` defaults to `app: gc-agent` (read from Gas City's
-`internal/runtime/k8s/pod.go`, unverified live). It **will still be an unverified
-assumption on the day Cilium lands** — a *wrong* selector renders fine and enforces
+`internal/runtime/k8s/pod.go`). It **is an unverified assumption even on a
+cluster that enforces NetworkPolicy** — a *wrong* selector renders fine and enforces
 nothing. G10 refuses an **empty** selector; it cannot detect a **wrong** one. The
-proof is the test, not the template: Plan 06's egress-denial run, and only that.
+proof is the probe, not the template: `helm test` on the cluster, and only that.
 This is the most dangerous unknown in the chart, and it is called out as such.
 
 ## 13. Flux consumes the chart as an OCI artifact; charts are never vendored
 
-The deployment lives in `gitops:clusters/example/apps/gonk/`; the chart is pulled from
-`oci://registry.example.internal/agentic/gonk-project/charts` by an `OCIRepository`. The
-gitops repo's `charts/` root is gitignored — vendoring a chart into it is rejected.
-One Kubernetes object per file, `<kind>-<name>.yaml`; `apps/renovate/` and
-`apps/nagus/` are the templates to copy.
+The chart is published as an OCI artifact and pulled by an `OCIRepository` (for
+example from `oci://registry.example.internal/<group>/<project>/charts`); a
+deployment's own manifests live in its own GitOps repository, one Kubernetes
+object per file, `<kind>-<name>.yaml`. The chart is never vendored into that
+repository. (How the maintainers' own deployment is laid out is not part of
+this record.)
 
 ---
 
 ## What this ADR does not decide (handed forward)
 
-- **Whether the NetworkPolicy actually enforces** — infra (Cilium) + Plan 06's
-  un-skipped test. Open.
+- **Whether the NetworkPolicy actually enforces** — a property of each cluster's
+  CNI; the `helm test` probe reports it. Open by design.
 - **The controller image completeness** — Plan 04 (`gonk-fsl`); a re-smoke is owed.
 - **The chart's OCI publish target** (OD-8) and the CI tools image (OD-7) — moot
-  until a runner exists; both are documented-manual in `.gitlab-ci.yml`.
+  until a runner exists; both are documented-manual in the maintainers' GitLab pipeline definition
+  (not published).

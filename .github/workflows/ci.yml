@@ -1,9 +1,9 @@
 # The HERMETIC half of gonk's gate.
 #
-# gonk's full test suite has tiers that need the maintainers' cluster, a live GitLab, a
-# LiteLLM proxy and a GPU box. None of that exists on a GitHub runner and none of
-# it should: a red badge that means "our homelab was down" tells a reader
-# nothing. What runs here is everything that needs only this repository.
+# gonk's full test suite has tiers that need a running deployment: a cluster, a
+# live GitLab, a LiteLLM proxy and a model server. None of that exists on a
+# GitHub runner and none of it should: a red badge that means "a private
+# deployment was down" tells a reader nothing. What runs here is everything that needs only this repository.
 #
 # WHAT THIS BUYS OVER THE GITLAB PIPELINE, concretely: the chart gate. On GitLab
 # `chart-test` is gated on $GONK_CHART_TOOLS_IMAGE, which is defined nowhere, so
@@ -223,7 +223,14 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:16
+        # By digest, as the header of this file says everything is
+        # (gonk-jvuo): `postgres:16` is a tag that moves with every minor and
+        # every base-image rebuild. The digest is the multi-arch index that
+        # docker.io/library/postgres:16 and :16.15 both resolved to on
+        # 2026-10-12 (registry-1.docker.io, Docker-Content-Digest). The tag
+        # is kept beside it only so a reader can tell which release it is;
+        # the digest is what is pulled.
+        image: postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: gonk
@@ -289,9 +296,9 @@ jobs:
           go-version: "1.26"
           cache: false
 
-      # GitHub's ubuntu-24.04 runner ships a genuine Docker daemon -- unlike
-      # this repo's dev box, whose `docker` is a podman shim under WSL with a
-      # broken CNI bridge (docs/environment.md). This step just fails fast
+      # GitHub's ubuntu-24.04 runner ships a genuine Docker daemon (a
+      # development machine may have podman, or a podman shim named docker;
+      # test/harness handles both). This step just fails fast
       # and legibly if it is somehow not running, matching the `component`
       # job's own preflight above.
       - name: docker is available

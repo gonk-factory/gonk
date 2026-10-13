@@ -210,7 +210,9 @@ func renderPipelinePrompt(pc *pipelineContext, checkoutSHA string) string {
 		"invalid and costs you the whole batch: write \\n instead. Escape quotes and\n" +
 		"backslashes copied from a log line (\\\" and \\\\); the line is compared after\n" +
 		"JSON decoding, so escaping does not break the match.\n")
-	if fb := renderRetryFeedback(pc.Req.Refused, pc.Req.Attempt); fb != "" { // prompt:refused
+	// The block ends with the two closed sets an evidence item chooses from,
+	// read from the context the sweep will check THIS session's answer against.
+	if fb := renderRetryFeedback(pc.Req.Refused, pc.Req.Attempt, diagnosisFeedbackSets(pc.Req.Refused, pc.DiagnosisContext())...); fb != "" { // prompt:refused
 		b.WriteString("\n" + fb)
 	}
 	return b.String()

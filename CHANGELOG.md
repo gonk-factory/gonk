@@ -9,6 +9,92 @@ Each release also has notes with more detail in `docs/releases/<tag>.md`.
 Identifiers of the form `gonk-xxxx` are from the maintainers' issue tracker,
 which is not public; they are opaque labels here.
 
+## [0.2.1]
+
+Notes: [`docs/releases/v0.2.1.md`](docs/releases/v0.2.1.md). A maintenance
+release: no workflow is added. Chart version 0.2.4 (the release asset is
+`gonk-0.2.4.tgz`).
+
+### Fixed
+
+- NetworkPolicy, on a cluster that enforces it: agent sessions and the
+  controller are admitted to gonk-intake's private listener; the controller's
+  DNS rule allows TCP; egress to the Kubernetes API server is rendered from
+  the new value `networkPolicy.kubeAPI.cidrs` (empty by default: see
+  "Upgrading").
+- Pipeline-fix hardening: a fix merge request's title and commit message
+  cannot carry a closing pattern; model text in a diagnosis note is quoted; a
+  quick action after a carriage return is refused; a batch is exactly one
+  JSON object (trailing text and a repeated top-level key are refused); the
+  GitLab token is not sent to another origin on a redirect; nested CI
+  includes are followed; a merged-results or merge-train pipeline is never
+  used as evidence; a diagnosis carrying a fix kind's keys is refused.
+- Retry feedback is wired for issue triage and scaffolding, and a refused
+  diagnosis is told the failed job names and the fact keys.
+- Two gate checks that could be evaded: a test that opens with a guarded
+  `return`, and `|| :` followed by `;` or a comment.
+- Two port-allocating tests no longer fail on a busy machine; the lint cache
+  is per checkout.
+- Downloads in the workflows are pinned by checksum, commit or digest, and a
+  test refuses an unpinned one.
+- The test behind the chart README's statement about TLS verification checks
+  what the statement says, and the statement says what the test checks.
+- Eleven files with no use outside the maintainers' environment are no longer
+  published; documents and comments that described that environment as fact
+  state conditions instead.
+
+### Changed
+
+- `change.triggers` defaults to `[label]` (was `[label, command, mention]`).
+  The workflow it belongs to is not active.
+- `intake.blockedProjects` defaults to `[gonk-factory/gonk]`, the upstream
+  project's path, in place of a path on the maintainers' GitLab.
+- A diagnosis note shows its summary and remedy as a code block.
+
+### Upgrading from 0.2.0
+
+- **Set `networkPolicy.kubeAPI.cidrs` on a cluster that enforces
+  NetworkPolicy**, to the addresses and port of the `kubernetes`
+  EndpointSlice (not the Service's cluster IP), or no session Job is created.
+  Cilium needs the API server allowed by a policy of its own kind.
+- An install that relied on the old `intake.blockedProjects` default must set
+  the value.
+- Every pod restarts (the version labels are on every pod template).
+- An `http://` `gitlab.url` that GitLab redirects to `https://` loses the
+  token on the redirect: use the `https://` URL.
+- A diagnosis carrying a fix kind's keys, an answer with text after its JSON
+  object and an answer that repeats `effects` or `verdict` are refused.
+- A project whose CI has a nested include gonk's YAML parser rejects, or a
+  local include of the form `configs/**.yml`, gets a diagnosis and no fix.
+
+### Known issues
+
+- gonk-intake's private listener is unauthenticated for checkout
+  registration and reconcile, and on an enforcing cluster agent session pods
+  can now reach it. It matters where one install serves projects with
+  different trust boundaries, not for a single-tenant install
+  (`gonk-37kg.3`).
+- With `ledger.postgres.mode: cnpg` and default-deny, no policy admits a
+  client to the Postgres pods (`gonk-37kg.4`).
+- The NetworkPolicy fixes were observed on k3s with kube-router only; Calico
+  and Cilium are untested.
+- A fix on a project that uses merged-results pipelines or merge trains ends
+  "unverifiable" (`gonk-ow8u`).
+- A sizeable share of first diagnosis attempts are refused for format with
+  the reference model, and the retry does not always recover; the pipeline
+  then gets a "denied" note (`gonk-zxsx`).
+- Four failed jobs with names near 255 characters overflow the diagnosis
+  prompt and no session starts (`gonk-37kg.5`).
+- The meter's Role covers every Secret in the namespace (`gonk-6by9`).
+- A meter pod that starts during a model-gateway outage never becomes Ready;
+  an outage still takes meter and intake readiness down (`gonk-88ez`).
+- The release workflow's newly pinned downloads have not run yet
+  (`gonk-5at0`).
+- Images tagged plainly `v0.2.1` carry no build number: installing them needs
+  `imageFloor.acceptUnrankedTags=true`.
+- The other chart defaults listed under 0.2.0 still describe the maintainers'
+  environment (`gonk-mp43`).
+
 ## [0.2.0]
 
 Notes: [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md). The first commit
@@ -53,7 +139,7 @@ guide, and the release asset is `gonk-0.2.1.tgz`).
   describes a particular site any more.
 - **Breaking.** Every label and annotation key gonk owns is under
   `gonk-factory.github.io/`. Session Jobs are found by label: drain sessions
-  before the upgrade (`chart/gonk/README.md`, "Upgrading to 0.1.17").
+  before the upgrade (`chart/gonk/README.md`, "Upgrading from the v0.1.0 release").
 - **Breaking.** No image and no chart value sets `SSL_CERT_FILE`. With a CA
   configured the chart sets `SSL_CERT_DIR` to the system roots plus the CA's
   directory; the default mount path is `/etc/ssl/gonk/ca.crt`.

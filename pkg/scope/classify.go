@@ -3,6 +3,7 @@ package scope
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -15,8 +16,10 @@ import (
 // read-only data, never executed, never the session's working tree.
 type BaseFacts struct {
 	// CILocalIncludes are the `include: local:` paths (or patterns) of the base
-	// .gitlab-ci.yml; see CILocalIncludes. A file the pipeline includes IS
-	// pipeline definition, wherever it lives.
+	// .gitlab-ci.yml and of every file those name, as ResolveCILocalIncludes
+	// returns them. A file the pipeline includes IS pipeline definition,
+	// wherever it lives and at whatever depth. What is NOT in it: the files a
+	// wildcard-included file includes (CIIncludes.Complete).
 	CILocalIncludes []string
 	// Generated holds the paths whose base content IsGenerated.
 	Generated map[string]bool
@@ -147,19 +150,78 @@ func IsGenerated(content []byte) bool {
 	return generatedRe.Match(bytes.TrimSuffix(line, []byte("\r")))
 }
 
-// CILocalIncludes returns the local include paths of a .gitlab-ci.yml, with
+// CILocalIncludes returns the local include paths ONE file states (the root
+// .gitlab-ci.yml or a file it includes; ResolveCILocalIncludes walks them), with
 // any leading slash removed (GitLab's `local:` paths are rooted at the
 // repository). GitLab allows `*` and `**` in them, and they are returned as
-// patterns. Remote, project, template and component includes name nothing in
-// this repository and are skipped.
+// patterns; an entry with a `$` variable is returned as written
+// (CIIncludeHasVariable). Remote, project, template and component includes
+// name nothing in this repository and are skipped.
+//
+// EVERY YAML document of the file is read: a definition with a `spec:` header
+// is two documents, and the includes are in the second.
 //
 // It is given the BASE blob by the controller. An include that is not a clean
 // in-repository pattern is an error: the definition cannot be understood, so
 // the caller must not guess which files are CI.
+//
+// What it cannot say is that an include was not readable as a list of
+// entries at all (a custom YAML tag such as `!reference`): such a node names
+// nothing here, and only ResolveCILocalIncludes reports it (Complete false).
 func CILocalIncludes(ciYAML []byte) ([]string, error) {
-	var doc map[string]any
-	if err := yaml.Unmarshal(ciYAML, &doc); err != nil {
-		return nil, fmt.Errorf("scope: .gitlab-ci.yml: %w", err)
+	out, _, err := ciLocalIncludes(ciYAML)
+	return out, err
+}
+
+// customTagged blanks every node under n that carries a custom YAML tag
+// (`!reference`; anything but the `!!` core tags) and reports whether there
+// was one. The decoder ignores such a tag, so `!reference [a, b]` would
+// otherwise be read as the list of two strings it is not.
+func customTagged(n *yaml.Node, depth int) bool {
+	if n == nil || depth > 64 {
+		return false
+	}
+	if n.Kind == yaml.AliasNode {
+		return customTagged(n.Alias, depth+1)
+	}
+	if strings.HasPrefix(n.Tag, "!") && !strings.HasPrefix(n.Tag, "!!") { // includes:tag
+		*n = yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null", Value: "null"}
+		return true
+	}
+	found := false
+	for _, c := range n.Content {
+		if customTagged(c, depth+1) {
+			found = true
+		}
+	}
+	return found
+}
+
+// ciLocalIncludes is CILocalIncludes plus opaque: some part of an `include:`
+// carried a custom tag, was not read, and may name files this result lacks.
+func ciLocalIncludes(ciYAML []byte) (entries []string, opaque bool, err error) {
+	var docs []map[string]any
+	dec := yaml.NewDecoder(bytes.NewReader(ciYAML))
+	for {
+		var n yaml.Node
+		if derr := dec.Decode(&n); derr == io.EOF { // includes:documents
+			break
+		} else if derr != nil {
+			return nil, false, fmt.Errorf("scope: .gitlab-ci.yml: %w", derr)
+		}
+		if n.Kind == yaml.DocumentNode && len(n.Content) == 1 && n.Content[0].Kind == yaml.MappingNode {
+			m := n.Content[0]
+			for i := 0; i+1 < len(m.Content); i += 2 {
+				if m.Content[i].Value == "include" && customTagged(m.Content[i+1], 0) {
+					opaque = true
+				}
+			}
+		}
+		var doc map[string]any
+		if derr := n.Decode(&doc); derr != nil {
+			return nil, false, fmt.Errorf("scope: .gitlab-ci.yml: %w", derr)
+		}
+		docs = append(docs, doc)
 	}
 	var out []string
 	add := func(s string) error {
@@ -188,17 +250,19 @@ func CILocalIncludes(ciYAML []byte) ([]string, error) {
 		}
 		return nil
 	}
-	switch t := doc["include"].(type) {
-	case []any:
-		for _, v := range t {
-			if err := entry(v); err != nil {
-				return nil, err
+	for _, doc := range docs {
+		switch t := doc["include"].(type) {
+		case []any:
+			for _, v := range t {
+				if err := entry(v); err != nil {
+					return nil, false, err
+				}
+			}
+		default:
+			if err := entry(t); err != nil {
+				return nil, false, err
 			}
 		}
-	default:
-		if err := entry(t); err != nil {
-			return nil, err
-		}
 	}
-	return out, nil
+	return out, opaque, nil
 }

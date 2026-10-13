@@ -258,6 +258,58 @@ apply adds"). What a project owner should know of them:
 Record fields, labels, markers, the commit message and the description's
 layout: `docs/reference/gonk-state-record.md`, "Pipeline fix".
 
+### How untrusted text is rendered
+
+Three kinds of text that gonk did not write reach GitLab: the MODEL's prose
+(a diagnosis's summary and remedy, a fix's reason, a scope request's reason),
+and the PROJECT's names (a job, a stage, a branch, a path), which the model's
+prose is seeded by and a pipeline author chooses. One rule covers them, by
+where the text lands and by what GitLab reads there. It is normative: the
+tests named in the last column fail when the code departs from it.
+
+| Text | Where | Rendering | Pinned by (`cmd/gonk-gate`) |
+|---|---|---|---|
+| model prose | a note (the diagnosis note, the needs-scope note) | **quoted**: a three-backtick `text` fence | `TestDiagnosisNoteQuotesTheModelsSummaryAndRemedy` |
+| model prose | the fix merge request's description | **quoted**, after `inert` | `TestFixMRNeverCloses` |
+| a name | the description, a status block | `ident`: `<code>` with every character that is not an ASCII letter, digit or space written as a numeric character reference. Shown exactly | `TestIdentShowsANameExactlyAndGitLabCanReadNothingIntoIt` |
+| a name | a note | an inline code span, as written | -- |
+| a name | the fix merge request's TITLE and the commit message (plain text, no markup) | `refSafe` (letters, digits, `. _ - / :` and spaces; `://` broken), then `defuseClosing` | `TestFixTitleAndCommitMessageCarryNoClosingPattern`, `TestFixTitleNamesOrdinaryJobsExactly` |
+
+**The quote.** The fence is always exactly three backticks. A line of the
+text that begins (after spaces or tabs) with three or more backticks is moved
+four spaces to the right, and carriage returns become line feeds first.
+CommonMark lets a closing fence be indented by at most three spaces, so no
+line of the text can end the block; and no line of the text is a line of
+exactly three backticks. Nothing is refused for this: a summary that quotes
+code in a fence of its own is shown with that fence indented.
+
+**What each defence is for.** They are separate because GitLab reads three
+different things:
+
+| GitLab reads | From | What stops it |
+|---|---|---|
+| mentions (`@all`), issue / merge request / label / milestone references, links | the RENDERED text of a note or description, outside code | the quote, `ident`, a code span. Model prose is never rendered outside a code block |
+| closing patterns (`Closes #12`, `fixes ABC-12`, `closes https://...`) | the RAW text of a merge request's title and description, and of its commits' messages. A fence hides nothing | `inert` for prose in the description (a space after `#`, after a URL scheme's `:`, and after a tracker key's hyphen); `ident` for names there; `defuseClosing` for the title and the commit message; and `checkNoClosingPattern` on each finished text before the first write. A match there is gonk's defect and nothing is written |
+| quick actions (`/close`, `/label`) | the RAW lines of a note or a description | the comment gate, `effects.ValidateComments`: ANY line of model text that reads as a quick action refuses the batch, inside a fence or not (`TX-COMMENT`; step 8 of the diagnosis gate). The fence is NOT relied on for this: whether GitLab's quick-action extractor skips a fenced block, and which fences it recognises, is not something gonk depends on. `TestAQuickActionLineInModelTextIsRefusedWhateverTheFence` |
+
+**Prose is defused, a name is exact.** `inert` rewrites every word of the
+model's prose that is shaped like a tracker key (`unit-tests-3.12` becomes
+`unit-tests- 3.12` inside the quote), in either letter case, because prose
+need not be exact and an external tracker's keys may be lower-case. A NAME is
+never rewritten that way: in the description it goes through `ident`, and in
+the title only a name that would read as a closing statement is changed, at
+the match and nowhere else (`fixes ABC-12` becomes `fixes ABC- 12`; a job
+called `lint-fixes`, `build:linux` or `unit-tests-3.12` is named exactly).
+
+Known limits. A name shaped like a tracker key with no closing verb before it
+(`TRACK-7`) stays as written in the title, where an instance with an external
+tracker integration will link it. A GitLab instance configured with its own
+closing pattern (other verbs) is not covered by `defuseClosing`, which knows
+the default verbs; `inert` and `ident` do not depend on the verb. A diagnosis
+note is not searched for closing patterns by GitLab, so its quotes are not
+made inert. A summary in a code block does not wrap in GitLab's web view: a
+long one-line summary scrolls sideways.
+
 ## 8. What happens to an open fix merge request
 
 Zero tokens: GitLab reads, and writes of gonk's own notes, labels and the
@@ -278,7 +330,7 @@ definition" is.
 | the diagnosed failure is gone and something else fails (the same job differently, or another job) | `fixed-new-failure` | `gonk::fix-verified`, `gonk::fix-new-failure` | the other failure is diagnosed AFTER the merge, as its own run, and may get its own fix merge request then: one at a time, never stacked |
 | a diagnosed job still fails the same way, or the change altered what it is judged by (the job allowed to fail, its rules changed) | `not-fixed` | `gonk::fix-verifying` | another attempt adds a commit to the same branch and merge request, up to `max_attempts`; then `denied`, `gonk::fix-failed`, `gonk::needs-human` |
 | a diagnosed job both failed and passed (a retry does not count as a pass) | `flaky` | `gonk::fix-inconclusive` | a person; `gonk::needs-human` on the diagnosis |
-| the job did not run, the pipeline never finished within `verify_timeout`, the definition could not be compared, GitLab could not be read | `unverifiable` | `gonk::fix-inconclusive` | a person |
+| the job did not run, the pipeline never finished within `verify_timeout`, the only pipelines ran on a merged-results commit (below), the definition could not be compared, GitLab could not be read | `unverifiable` | `gonk::fix-inconclusive` | a person |
 | a job that passed before the change fails now | `regressed` | `gonk::fix-inconclusive` | a person. It is not treated as the fix's fault: that job may be unstable by itself |
 | somebody else pushed to the fix branch | `taken-over` | `gonk::fix-inconclusive` | gonk stops judging and never touches the branch again |
 | the merge request was closed | `closed-unmerged` | `gonk::fix-inconclusive` | gonk does not propose this fix again |
@@ -286,6 +338,23 @@ definition" is.
 A change committed with `[skip ci]` (`awaiting-run`, section 7) is judged on
 the pipeline a maintainer starts; if nobody starts one within
 `verify_timeout` it ends `unverifiable`.
+
+**KNOWN LIMITATION: merged results pipelines and merge trains (GitLab
+Premium and Ultimate).** gonk verifies a fix only from a pipeline whose commit
+IS the fix's commit. With merged results pipelines on, a merge request's
+pipeline runs instead on a temporary commit GitLab makes by merging the branch
+into its target; that commit is in neither branch, and nothing GitLab's API
+says about the pipeline names the commit of the branch it was built from. gonk
+does not guess: such a pipeline is never evidence, green or red. If it is the
+only pipeline the merge request gets, the fix waits until `verify_timeout` and
+then ends `unverifiable` with rule `J1.MERGED_RESULT`, and its note says why.
+The fix merge request is still there for a person to judge and merge. A
+project that also runs a branch pipeline on the fix branch's commit (its sha
+is the fix's) is verified from that one as usual. Community Edition has no
+merged results pipelines and is not affected. Not observed against a live
+merged-results pipeline: the recognition (pipeline source
+`merge_request_event`, ref `refs/merge-requests/<iid>/merge` or `.../train`)
+is from GitLab's documentation and, for `/train`, its source.
 
 A merge request carries exactly one of `gonk::fix-verifying`,
 `gonk::fix-awaiting-run`, `gonk::fix-verified`, `gonk::fix-inconclusive`,

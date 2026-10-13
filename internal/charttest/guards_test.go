@@ -29,7 +29,7 @@ func TestGuardLadderRungNotInCatalog(t *testing.T) {
 // G2 applies to GROUP ladders too -- they are the layer people forget.
 func TestGuardGroupLadderRungNotInCatalog(t *testing.T) {
 	mustFail(t, "not in the rung catalog",
-		"--set", "operatorConfig.groups.agentic.ladder={ghost}")
+		"--set", "operatorConfig.groups.kubernetes.ladder={ghost}")
 }
 
 // G5: the onboarding template's rung must be in the instance ladder, or EVERY
@@ -100,7 +100,7 @@ func TestGuardSupervisorPortMustBe9443(t *testing.T) {
 
 // G22: the bundled controller (`gc start --foreground`) is an 0.0.0.0/allow_mutations
 // any-host [api] plane -- unauthenticated unless write-auth is on, and the
-// NetworkPolicy that would restrict it is NOT enforced on this cluster. So BOTH the
+// NetworkPolicy that would restrict it is enforced only where the CNI does. So BOTH the
 // public verify key AND the private signing-key Secret are required when bundled;
 // there is deliberately no allowUnauthenticated escape hatch.
 func TestGuardBundledControllerNeedsWriteAuth(t *testing.T) {

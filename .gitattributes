@@ -6,5 +6,5 @@
 #
 # core.autocrlf and core.eol are unset here today and nothing under chart/ has
 # CRLF, so this is a guard against a future `text=auto`, not a fix. It matters
-# because this repo lives under /mnt/c and one Windows checkout would do it.
+# because one checkout on a Windows filesystem would do it.
 chart/** -text

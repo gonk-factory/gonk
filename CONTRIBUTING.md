@@ -56,8 +56,10 @@ make gate
 
 That is: a Go toolchain check, `gofmt`, `go vet` under every build tag, the
 export guard, `go test ./... -race`, the chart goldens, and `golangci-lint`.
-It needs Go (the series `images/versions.env` pins), `helm` and `kubeconform`
-for the chart goldens, and either `golangci-lint` at the pinned version or a
+It needs Go (the series `images/versions.env` pins), helm 3 for the chart
+goldens (3.14 or later; helm 4 is refused because it renders different
+whitespace, so if `helm` on your PATH is helm 4 run
+`make gate HELM=/path/to/helm3`), and either `golangci-lint` at the pinned version or a
 container runtime to run the pinned image. `docs/environment.md`, "Building
 and testing this repository", says what the container-backed suites need;
 `docs/testing-time.md` has the rules for tests that involve time.

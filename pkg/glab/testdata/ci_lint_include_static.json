@@ -2,12 +2,12 @@
  "errors": [],
  "includes": [
   {
-   "blob": "https://gitlab.example.internal/agentic/gonk-e2e-1784441480/-/blob/4a774003b2e8f5c8c4497827273c1aaf6d28710b/ci/probe-common.yml",
-   "context_project": "agentic/gonk-e2e-1784441480",
+   "blob": "https://gitlab.example.internal/gonk-factory/gonk-e2e-1784441480/-/blob/4a774003b2e8f5c8c4497827273c1aaf6d28710b/ci/probe-common.yml",
+   "context_project": "gonk-factory/gonk-e2e-1784441480",
    "context_sha": "4a774003b2e8f5c8c4497827273c1aaf6d28710b",
    "extra": {},
    "location": "ci/probe-common.yml",
-   "raw": "https://gitlab.example.internal/agentic/gonk-e2e-1784441480/-/raw/4a774003b2e8f5c8c4497827273c1aaf6d28710b/ci/probe-common.yml",
+   "raw": "https://gitlab.example.internal/gonk-factory/gonk-e2e-1784441480/-/raw/4a774003b2e8f5c8c4497827273c1aaf6d28710b/ci/probe-common.yml",
    "type": "local"
   }
  ],

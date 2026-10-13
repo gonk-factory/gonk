@@ -2,7 +2,7 @@
 # ci/values-full-monitoring.yaml -- "this is a working installation": EVERYTHING on.
 #
 # All four components bundled, Ingress on, ServiceMonitors on, PrometheusRule on,
-# dashboards on, NetworkPolicy on (rendered -- NOT enforced on this cluster; see
+# dashboards on, NetworkPolicy on (rendered -- enforced only where the CNI does; see
 # README section 0 and every networkpolicy-*.yaml banner), a CLOUD rung in both
 # the catalog and the instance ladder, and a NON-ZERO instance cost ceiling.
 #
@@ -51,9 +51,8 @@ ingress:
 
 networkPolicy:
   enabled: true
-  # The agent-session pod selector. RENDERED, not enforced (Flannel; Cilium
-  # suspended). A right selector on an unenforced policy still blocks nothing --
-  # Plan 06's egress-denial test, SKIPPED until Cilium lands, is the only proof.
+  # The agent-session pod selector. A right selector on an unenforced policy
+  # still blocks nothing -- `helm test` (the enforcement probe) is the proof.
   agentPodSelector:
     app: gc-agent
   gitlabInCluster:

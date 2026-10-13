@@ -145,9 +145,10 @@ type Project struct {
 	MRApprovals map[int64][]glab.User
 	MRDiffs     map[int64][]glab.MRDiff
 
-	hookTokens map[int64]string
-	srv        *Server
-	ciLintFile string // SetCILintFromFile
+	hookTokens    map[int64]string
+	srv           *Server
+	ciLintFile    string       // SetCILintFromFile
+	ciLintDefault *glab.CILint // SetCILintDefault
 	// nextMRIID/nextIssueIID: MR and Issue "IID" (internal ID) is scoped to the
 	// PROJECT in real GitLab, unlike every other ID here (project, commit, hook),
 	// which is instance-global. Numbering these from the shared s.nextID would

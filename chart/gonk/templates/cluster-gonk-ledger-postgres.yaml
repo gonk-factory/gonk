@@ -8,9 +8,8 @@
 # failing the reservation-race isolation test decisively (32/32 concurrent
 # writers won a ceiling-of-2 race, 12.8x overspend, at every isolation level
 # including SELECT ... FOR UPDATE -- docs/spikes/dolt-reservation-isolation.md).
-# Postgres on the CNPG cluster the owner ALREADY RUNS is the answer, not a
-# contingency. Not a new stateful dependency -- CNPG's operator is already
-# there, and this chart does not install it.
+# Postgres is the answer, not a contingency. This template is the `cnpg` mode:
+# it needs the CloudNativePG operator, which this chart does not install.
 #
 # Why Postgres, not Dolt: SERIALIZABLE / SELECT ... FOR UPDATE is well-trodden
 # for exactly the concurrent-reservation race on Postgres (verified: it blocks,

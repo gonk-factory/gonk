@@ -91,7 +91,6 @@ import (
 	"github.com/gonk-factory/gonk/pkg/meterapi"
 	"github.com/gonk-factory/gonk/pkg/pipefix"
 	"github.com/gonk-factory/gonk/pkg/pipelinectx"
-	"github.com/gonk-factory/gonk/pkg/scope"
 )
 
 // The labels of a fix merge request (plan 8.1). Controller-written and
@@ -404,6 +403,12 @@ func (a *fixApply) apply(ctx context.Context, recp *beadstore.Record,
 	// an execution-changing edit must not run before a person saw it (5.5).
 	a.skip = changesCI(a.plan) && pf.CIExecChanges != "auto" // apply:skip-ci
 
+	// Before the first write: neither the title nor the commit message can
+	// close an issue (gonk-vu0n). Ours if it fails; nothing is written.
+	if err := a.titleInvariant(); err != nil { // apply:title-invariant
+		return unknown("apply", err)
+	}
+
 	// ---- 1 + 2: the branch at the pinned base, and ONE commit on it.
 	commit, takenOver, err := a.ensureCommit(ctx)
 	if err != nil {
@@ -581,13 +586,21 @@ func (a *fixApply) title() string {
 	// "fix job <name>", not "fix <name>": GitLab reads a closing verb directly
 	// followed by a reference or a tracker key (ABC-12) as "close it on
 	// merge", and a job may be NAMED like a tracker key.
-	return fmt.Sprintf("gonk: fix job %s on %s", job, refSafe(pf.TargetBranch))
+	//
+	// And a job may be named like a whole closing STATEMENT (gonk-vu0n):
+	// "fixes ABC-12", "closes https://...". refSafe leaves the letters, the
+	// hyphen and the colon such a name is spelled with, so the finished line
+	// goes through defuseClosing; apply checks the result (titleInvariant).
+	return defuseClosing(fmt.Sprintf("gonk: fix job %s on %s", job, refSafe(pf.TargetBranch)))
 }
 
 // refSafe keeps letters, digits and a few separators of project-chosen text
 // that is rendered OUTSIDE a code span (a title, a commit message), and
 // replaces everything else -- `#`, `!`, `@`, `[`, newlines -- so the text can
-// never be read as a reference, a mention or a second line.
+// never be read as a `#`/`!` reference, a mention or a second line. It keeps
+// `-`, `:` and `/` (job names are full of them: `build:linux`,
+// `unit-tests-3.12`), so by itself it does NOT stop a tracker key or a
+// closing statement spelled in letters: title() adds defuseClosing.
 func refSafe(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -602,7 +615,9 @@ func refSafe(s string) string {
 			break
 		}
 	}
-	if out := strings.TrimSpace(b.String()); out != "" {
+	// No URL: `://` is what GitLab links and cross-references from a title,
+	// with or without a closing verb before it (inert's own rule).
+	if out := strings.TrimSpace(strings.ReplaceAll(b.String(), "://", ": //")); out != "" { // refsafe:url
 		return out
 	}
 	return "_"
@@ -730,43 +745,46 @@ func (a *fixApply) isOurCommit(ctx context.Context, head, parent string) (bool, 
 // definitionDelta is plan 5.4 step 2 / 6.2 for the commit just made.
 //
 // When the change touches no ci-class path the shortcut applies (SC-CIDEF):
-// the pipeline definition file and its local includes must be byte-identical
-// at the base and at the commit, and then the delta is `none` with no resolver
-// involved. For a gonk-authored commit of `update` actions on other paths
-// they cannot differ; if they do, that is reported as unresolvable (ours).
+// the pipeline definition file and EVERY file it includes -- through the
+// includes of included files, scope.ResolveCILocalIncludes -- must be
+// byte-identical at the base and at the commit, and then the delta is `none`
+// with no resolver involved. For a gonk-authored commit of `update` actions
+// on other paths they cannot differ; if they do, that is reported as
+// unresolvable (ours). Identical files include identical files, so comparing
+// the set resolved at the base covers the commit's set too.
 //
-// When it does, the MERGED definition at both commits is compared by
+// The shortcut does NOT apply when any include is a wildcard: the files
+// behind a pattern are not enumerated. Then, and when the change does touch
+// a ci-class path, the MERGED definition at both commits is compared by
 // pkg/cidef, with the fix's target set as the diagnosed jobs.
 func (a *fixApply) definitionDelta(ctx context.Context, commit string) (cidef.Delta, error) {
 	pf, pid := a.rec.PipelineFix, a.rec.ProjectID
 	if !changesCI(a.plan) { // delta:shortcut
-		ciPaths := []string{pipefixCIFile}
-		raw, err := a.f.GetRawFile(ctx, pid, pipefixCIFile, pf.BaseSHA, 1<<20)
+		inc, rerr, ierr := pipefixCIIncludes(ctx, a.f, pid, pf.BaseSHA, 1<<20)
 		switch {
-		case err == nil:
-			inc, ierr := scope.CILocalIncludes(raw)
-			if ierr != nil {
-				return cidef.Delta{}, fmt.Errorf("read the pipeline definition's includes: %w", ierr)
-			}
-			for _, p := range inc {
-				if !strings.ContainsAny(p, "*?[") {
-					ciPaths = append(ciPaths, strings.TrimPrefix(p, "/"))
+		case ierr != nil:
+			return cidef.Delta{}, fmt.Errorf("read the pipeline definition's includes: %w", ierr)
+		case rerr != nil:
+			return cidef.Delta{}, fmt.Errorf("read %s at %s: %w", pipefixCIFile, pf.BaseSHA, rerr)
+		}
+		// The shortcut holds only when EVERY file of the definition can be
+		// named: a wildcard include is not expanded, so the files behind it
+		// (and what they include) could differ unseen. Then the merged
+		// definitions are compared below, as for a ci change (gonk-9q0y).
+		if inc.Complete { // delta:complete
+			ciPaths := append([]string{pipefixCIFile}, inc.Paths...)
+			for _, p := range ciPaths {
+				b, berr := a.f.GetRawFile(ctx, pid, p, pf.BaseSHA, 1<<20)
+				h, herr := a.f.GetRawFile(ctx, pid, p, commit, 1<<20)
+				if (berr != nil && !glab.IsNotFound(berr)) || (herr != nil && !glab.IsNotFound(herr)) {
+					return cidef.Delta{}, fmt.Errorf("compare %q at the base and at the commit: %w", p, errors.Join(berr, herr))
+				}
+				if (berr == nil) != (herr == nil) || !bytes.Equal(b, h) { // delta:same
+					return cidef.Delta{Kind: cidef.KindUnresolvable}, nil
 				}
 			}
-		case !glab.IsNotFound(err):
-			return cidef.Delta{}, fmt.Errorf("read %s at %s: %w", pipefixCIFile, pf.BaseSHA, err)
+			return cidef.Delta{Kind: cidef.KindNone}, nil
 		}
-		for _, p := range ciPaths {
-			b, berr := a.f.GetRawFile(ctx, pid, p, pf.BaseSHA, 1<<20)
-			h, herr := a.f.GetRawFile(ctx, pid, p, commit, 1<<20)
-			if (berr != nil && !glab.IsNotFound(berr)) || (herr != nil && !glab.IsNotFound(herr)) {
-				return cidef.Delta{}, fmt.Errorf("compare %q at the base and at the commit: %w", p, errors.Join(berr, herr))
-			}
-			if (berr == nil) != (herr == nil) || !bytes.Equal(b, h) { // delta:same
-				return cidef.Delta{Kind: cidef.KindUnresolvable}, nil
-			}
-		}
-		return cidef.Delta{Kind: cidef.KindNone}, nil
 	}
 	baseLint, err := a.f.CILintStatic(ctx, pid, pf.BaseSHA)
 	if err != nil {
@@ -776,14 +794,25 @@ func (a *fixApply) definitionDelta(ctx context.Context, commit string) (cidef.De
 	if err != nil {
 		return cidef.Delta{}, fmt.Errorf("lint the CI definition at the commit %s: %w", commit, err)
 	}
+	var diagnosed []string
+	for _, t := range pf.Targets {
+		diagnosed = append(diagnosed, t.Name)
+	}
+	if !changesCI(a.plan) { // delta:wildcard
+		// Here only because an include is a wildcard. The change touches no
+		// ci path, so ANY difference between the two merged definitions is
+		// not the agent's doing and not something a gonk commit can cause:
+		// unresolvable (ours), as in the shortcut -- never a refusal the
+		// agent is told about, and never a delta other than `none`.
+		if !headLint.Valid || cidef.Diff([]byte(baseLint.MergedYAML), []byte(headLint.MergedYAML), diagnosed).Kind != cidef.KindNone {
+			return cidef.Delta{Kind: cidef.KindUnresolvable}, nil
+		}
+		return cidef.Delta{Kind: cidef.KindNone}, nil
+	}
 	if !headLint.Valid { // delta:invalid
 		// A definition GitLab rejects runs nothing: the diagnosed job cannot
 		// "still run and pass".
 		return cidef.Delta{Kind: cidef.KindViolation}, nil
-	}
-	var diagnosed []string
-	for _, t := range pf.Targets {
-		diagnosed = append(diagnosed, t.Name)
 	}
 	return cidef.Diff([]byte(baseLint.MergedYAML), []byte(headLint.MergedYAML), diagnosed), nil
 }

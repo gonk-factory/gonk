@@ -85,7 +85,8 @@ func TestCILintStatic(t *testing.T) {
 // TestCILintStaticOnTheRecordedReplies serves what the real GitLab answered
 // (testdata/ci_lint_include_static.json and ..._dry_run.json: both raw replies
 // for ONE commit of the synthetic project 75, GitLab CE 19.4.1, recorded by
-// hack/pipefix_probe.py run 20261007T145957Z -- a commit that changed only its
+// the maintainers' pipefix probe (pipefix_probe.py, not published), run
+// 20261007T145957Z -- a commit that changed only its
 // locally included CI file). The server answers the dry-run reply to a request
 // that carries dry_run, and the static one otherwise, as GitLab did.
 func TestCILintStaticOnTheRecordedReplies(t *testing.T) {

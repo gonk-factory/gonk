@@ -157,14 +157,14 @@ func refoldPipefixEnvelope(ctx context.Context, r rawFileReader, cfg *meterapi.P
 	// Base facts at the commit the fix is written against: the pipeline
 	// definition's local includes (they are `ci` class wherever they live).
 	base := scope.BaseFacts{Generated: map[string]bool{}}
-	switch ci, cerr := r.GetRawFile(ctx, fix.ProjectID, pipefixCIFile, pf.BaseSHA, intake.MaxConfigBytes*16); {
-	case cerr == nil:
-		if base.CILocalIncludes, err = scope.CILocalIncludes(ci); err != nil {
-			return none, bad("the pipeline definition's includes cannot be read: %v", err)
-		}
-	case !glab.IsNotFound(cerr):
+	inc, cerr, ierr := pipefixCIIncludes(ctx, r, fix.ProjectID, pf.BaseSHA, intake.MaxConfigBytes*16)
+	switch {
+	case ierr != nil: // refold:includes
+		return none, bad("the pipeline definition's includes cannot be read: %v", ierr)
+	case cerr != nil:
 		return none, bad("read %s at %s: %v", pipefixCIFile, pf.BaseSHA, cerr)
 	}
+	base.CILocalIncludes = inc.Paths
 	return effects.FixEnvelope{
 		Scope: env.scope, Base: base, Lift: env.lift,
 		// The cited files, from the RECORD (already inside pipeline_fix.paths).

@@ -284,7 +284,7 @@ func TestToolCallsAndUsageAreProseIndependent(t *testing.T) {
 // background spend-log writer is unreliable under load" (1-2s alone, timing out
 // at 100s / 3m / a measured 20m after the other tests had run) when the truth
 // was that its row was never written, because the id had already been claimed.
-// See docs/spikes/2026-09-10-spend-log-lag.md.
+// (From the maintainers' spend-log-lag spike of 2026-09-10; not published.)
 //
 // This test fails against the pre-fix stub: every id there was chatcmpl-stub-0001.
 func TestCompletionIDsAreNeverReusedAcrossResetOrSetScript(t *testing.T) {

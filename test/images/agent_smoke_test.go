@@ -2,9 +2,8 @@
 
 // Package images holds container-build smoke tests (build tag `images`) --
 // house rule: "if an app runs in a container, test it in a container." These
-// tests shell out to a real container runtime (this dev box's `podman`;
-// docker/setup-buildx-action's genuine Docker daemon in CI --
-// docs/environment.md, containerBin below) and need the images already
+// tests shell out to a real container runtime (`podman` on a development
+// machine; a genuine Docker daemon in CI -- containerBin below) and need the images already
 // built (`make images` locally; the `images` CI job builds them fresh).
 //
 // Run: go test ./test/images/ -tags images -run Agent -v
@@ -31,9 +30,9 @@ import (
 // out to probe for podman/docker, and running that probe once instead of
 // once per test/subtest keeps the suite from re-forking it dozens of times.
 //
-// This is the "abstract the runtime" half of T-16 (gonk-ak0): this box's
-// podman is what docs/environment.md calls "this box's docker" (a broken CNI
-// bridge means every call here also needs --network=host, T-15's
+// This is the "abstract the runtime" half of T-16 (gonk-ak0): a development
+// machine may have podman, possibly behind a `docker` shim, with no working
+// bridge network (so every call here also needs --network=host, T-15's
 // harness.Runtime.HostNetwork), but a GitHub Actions runner ships a genuine
 // Docker daemon and no podman binary at all. harness.DetectRuntime() (T-15,
 // test/component's TestMain) already resolves exactly this difference --
@@ -139,12 +138,13 @@ func agentImage(t *testing.T) (image string, pins map[string]string) {
 
 // runIn execs the given binary as the container's ENTRYPOINT override and
 // returns the CONTAINER's stdout (never the runtime's own stderr -- podman
-// prints noisy CNI-validation warnings on this box that would otherwise
+// can print noisy CNI-validation warnings that would otherwise
 // corrupt an exact-match or JSON assertion on the container's real output)
 // and the exit code. --rm: this is a smoke test, not a fixture;
-// --network=host: the CNI bridge is broken on this box (docs/environment.md)
-// and, per harness.Runtime's own doc comment, load-bearing on a genuine
-// Docker daemon too for the container-backed harness suites.
+// --network=host: the suite must not depend on a working container bridge
+// (docs/environment.md, "Building and testing this repository") and, per
+// harness.Runtime's own doc comment, load-bearing on a genuine Docker daemon
+// too for the container-backed harness suites.
 func runIn(t *testing.T, image, entrypoint string, args ...string) (string, int) {
 	t.Helper()
 	bin := containerBin(t)

@@ -218,7 +218,8 @@ func TestLiveSpend_ReadsRealV2Rows(t *testing.T) {
 	// this adapter's job, which is to query v2 correctly and decode what it gets.
 	//
 	// The detailed spend log is a best-effort background batch write
-	// (docs/spikes/litellm-verified.md, P3-3), so poll for rows to land.
+	// (P3-3 of the maintainers' LiteLLM spike record, litellm-verified.md, not
+	// published), so poll for rows to land.
 	start := time.Now().UTC().Truncate(24 * time.Hour)
 	deadline := time.Now().Add(120 * time.Second)
 	var attributed, seen int

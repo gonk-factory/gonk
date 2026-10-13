@@ -96,10 +96,9 @@ ledger:
 ingress:
   enabled: false                   # the harness port-forwards; no DNS, no cert
 
-# NetworkPolicies are NOT ENFORCED on this cluster (Flannel; Cilium suspended).
-# They are still RENDERED here, because Plan 06's egress-denial test must be able
-# to find the policy it is skipping -- and because the day Cilium lands, this
-# profile is what proves it.
+# NetworkPolicies are enforced only where the cluster's CNI implements them.
+# They are RENDERED here either way, so that an e2e run on an enforcing
+# cluster exercises them.
 networkPolicy:
   enabled: true
 

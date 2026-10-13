@@ -505,7 +505,15 @@ func supersededStatus(rec beadstore.Record, next int64) string {
 
 // renderDiagnosisBody is the preserved section of a diagnosed note: the D7a
 // fields, every evidence item quoted, the cited files, and what gonk did not
-// do. Evidence is rendered as `- <job>: <code span>` so no rendered line can
+// do.
+//
+// The summary and the remedy are the MODEL's words, seeded by a job log
+// anyone who can push may write. They are QUOTED (fence, pipefix_render.go):
+// until 2026-10-12 they were written into the note as they came, and GitLab
+// made what it found in them -- `@all` notified every member, `group/p#12`
+// left a "mentioned in" on an issue of another project the bot can see
+// (gonk-d2ct). Not inert: a note is not searched for closing patterns, and
+// inert's rewriting would misname what the summary names. Evidence is rendered as `- <job>: <code span>` so no rendered line can
 // begin with a slash (a log line starting with "/" survives the quick-action
 // gate; TestALogLineBeginningWithASlashSurvivesTheCommentGate). <job> is the
 // job's name in a code span, linked to the job's page when the record knows
@@ -513,7 +521,7 @@ func supersededStatus(rec beadstore.Record, next int64) string {
 func renderDiagnosisBody(e effects.Effect, rec beadstore.Record) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "**Classification:** %s\n\n", codeSpan(string(e.Classification)))
-	b.WriteString("**What failed and why**\n\n" + strings.TrimSpace(e.Summary) + "\n\n")
+	b.WriteString("**What failed and why**\n\n" + fence(strings.TrimSpace(e.Summary)) + "\n\n") // diagnosis:quote-summary
 	b.WriteString("**Evidence**\n\n")
 	for _, ev := range e.Evidence {
 		job := "(pipeline)"
@@ -526,7 +534,7 @@ func renderDiagnosisBody(e effects.Effect, rec beadstore.Record) string {
 			fmt.Fprintf(&b, "- %s: the %s fact gonk supplied\n", job, codeSpan(string(ev.Fact)))
 		}
 	}
-	b.WriteString("\n**Suggested remedy**\n\n" + strings.TrimSpace(e.Remedy) + "\n")
+	b.WriteString("\n**Suggested remedy**\n\n" + fence(strings.TrimSpace(e.Remedy)) + "\n") // diagnosis:quote-remedy
 	if len(e.Files) > 0 {
 		fmt.Fprintf(&b, "\n**Files cited** (each exists at %s)\n\n", codeSpan(shortSHA(rec.PipelineSHA)))
 		for _, f := range e.Files {

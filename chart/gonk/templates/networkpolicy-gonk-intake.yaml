@@ -9,11 +9,10 @@ metadata:
   annotations:
     {{- include "gonk.networkPolicyBanner" . | nindent 4 }}
 spec:
-  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
-  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
-  # (gitops:clusters/<cluster>/foundation/kustomization.yaml). This object blocks
-  # nothing today; it is documentation-as-code that starts enforcing the day
-  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  # ENFORCED ONLY WHERE THE CLUSTER'S NETWORK PLUGIN IMPLEMENTS NetworkPolicy.
+  # The API server accepts this object either way; on a CNI that does not
+  # implement it, this object blocks nothing. `helm test` reports which you
+  # have. See chart/gonk/README.md, section 0.
   podSelector:
     matchLabels:
       {{- include "gonk.selectorLabels" (dict "ctx" . "component" "intake") | nindent 6 }}
@@ -27,12 +26,51 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.intake.ports.public }}
-    # The private listener (metrics, health, and an UNAUTHENTICATED
-    # POST /admin/reconcile), from Prometheus only.
+    # The private listener, from Prometheus (metrics, health).
     - from:
         - namespaceSelector:
             matchLabels:
               {{- toYaml .Values.networkPolicy.prometheus.namespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.intake.ports.private }}
+    # The private listener, from the two pods that use the per-session checkout
+    # (pkg/rig, gonk-msz): gonk-gate in the controller REGISTERS it
+    # (POST /rig/{alias}) and the agent session pod FETCHES it
+    # (GET /rig/{alias}.tar.gz).
+    #
+    # THIS IS THE INGRESS HALF OF TWO RULES THAT ALREADY EXISTED (gonk-nax7).
+    # gonk-agent and gonk-controller have each allowed EGRESS to this port since
+    # the checkout was built, and nothing here admitted either of them, so on a
+    # cluster that enforces NetworkPolicy both calls were dropped on the way in
+    # and every session ran with no working copy. A permission between two pods
+    # in this namespace is two rules; TestEveryInNamespaceRuleHasItsOtherHalf
+    # fails when either is edited alone.
+    #
+    # WHAT ELSE THIS ADMITS, because a NetworkPolicy cannot tell one path or
+    # method from another: EVERYTHING on the private listener is reachable from
+    # an agent session pod, a pod that runs text written by whoever opened the
+    # issue. That is the unauthenticated POST /admin/reconcile, and it is the
+    # REGISTRATION route itself: POST /rig/{alias} is not authenticated either
+    # (pkg/rig/http.go), so a session pod can register a checkout of any
+    # project the forge token can read, and then fetch it. The policy cannot
+    # close that. Authenticating the registration, or serving the fetch on a
+    # listener of its own, would; until then a session is confined to its own
+    # project by the agent's instructions and not by the network. On a cluster
+    # that does not enforce NetworkPolicy this was already the case.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.agentPodSelector | nindent 14 }}
+        {{- if .Values.gascity.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "gonk.selectorLabels" (dict "ctx" . "component" "controller") | nindent 14 }}
+        {{- else }}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.gascity.namespaceSelector | nindent 14 }}
+        {{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.intake.ports.private }}

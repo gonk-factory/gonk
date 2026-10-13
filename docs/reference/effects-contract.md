@@ -1,13 +1,17 @@
 # The proposed-effects contract (`pkg/effects`)
 
 What an agent session returns instead of writing to GitLab, and the
-deterministic gates that decide whether any of it is applied. The design
-rationale is in `docs/superpowers/specs/2026-07-27-triage-broker-design.md`
-section 5; this page is the wire format as built. The Go types in
+deterministic gates that decide whether any of it is applied. This page is
+the wire format as built; what the pipeline-fix workflow does with a batch
+that passes is in `docs/reference/gonk-pipeline-fix.md`. The Go types in
 `pkg/effects/effects.go`, `pkg/effects/diagnosis.go` and `pkg/effects/fix.go`
 are authoritative; the tests in `pkg/effects/*_test.go` are the executable form.
 
-Last changed: 2026-10-05, gonk-2usw part EFFECTS (added the pipeline-fix
+Last changed: 2026-10-12, the v0.2.1 release preparation (a key of the batch
+object stated twice is refused). Before that: 2026-10-12, gonk-37kg part D (a batch is exactly one JSON
+object: trailing text is refused, gonk-s0td; a diagnosis carrying any other
+kind's key is refused, by reflection, gonk-8yux; the diagnosis note quotes the
+summary and the remedy in a fence, gonk-d2ct). Before that: 2026-10-05, gonk-2usw part EFFECTS (added the pipeline-fix
 vocabulary: kinds `edit`, `fix_meta`, `scope_request`; verdicts `fix`,
 `needs-scope`; the fix gate and its rule codes; the citation-only `paths`
 rule). Before that: 2026-10-04, gonk-tios P5 (the `diagnosis` kind, the
@@ -22,6 +26,12 @@ fenced batch (`extractBatch`, `cmd/gonk-gate/broker_apply.go`) and parses it wit
 `effects.ParseBatch`. A run with no fenced batch, or one that does not parse,
 applies nothing.
 
+The text between the sentinels is EXACTLY ONE JSON object. White space around
+it is allowed (space, tab, CR, LF); anything else after the object's closing
+brace -- prose, a second object, a stray bracket -- refuses the whole batch at
+parse (`ErrBatchTrailingData`), and the retry feedback says so without quoting
+the text.
+
 ## Batch
 
 ```json
@@ -32,6 +42,7 @@ applies nothing.
 |---|---|---|
 | `effects` | array | Ordered. Every element's `kind` must be known, or the whole batch is refused at parse. |
 | `verdict` | string, optional | `reply-only` (default when absent), `code-change`, `close`, and -- for the fix agent only, see "The pipeline-fix vocabulary" -- `fix`, `needs-scope`. Unknown -> refused at parse. |
+| (each key) | -- | Stated at most once on the batch object. `{"effects":[],"effects":[...]}` is refused at parse (`ErrBatchDuplicateKey`), with retry feedback that names the rule and not the key; keys are compared without regard to case, as the decoder matches them. A key repeated INSIDE one effect is not covered: the last value is taken. |
 
 Unknown keys anywhere -- on the batch, an effect, or an evidence item -- are
 refused at parse (`DisallowUnknownFields`). Literal newline/CR/tab bytes inside
@@ -49,9 +60,9 @@ on valid JSON).
 | `new_issue` | `title`, `body` | -- | Reserved: parses, no apply path. |
 | `file` | `path`, `content` | scaffold commit | Under `.agent/` only, canonical, <= 64 KiB/file, 256 KiB/batch (`ValidatePaths`). |
 | `diagnosis` | `classification`, `summary`, `evidence`, `remedy`, `files` | pipeline landing (gonk-tios D9) | Below. |
-| `edit` | `path`, `old`, `new` | fix commit (gonk-2usw; apply not built yet) | Exact-match replacement in an existing file. Below. |
-| `fix_meta` | `reason` | fix MR description (apply not built yet) | Below. |
-| `scope_request` | `paths`, `reason` | needs-scope note (apply not built yet) | Below. |
+| `edit` | `path`, `old`, `new` | fix commit on a `gonk/pipefix-*` branch (gonk-2usw) | Exact-match replacement in an existing file. Below. |
+| `fix_meta` | `reason` | fix merge request description | Below. |
+| `scope_request` | `paths`, `reason` | needs-scope note | Below. |
 
 Which kinds an agent may emit, and how many, is its
 `pack/agents/<agent>/effect-shape.toml` (`effects.Validate`); a kind the shape
@@ -97,13 +108,13 @@ tracking issue) is chosen by the controller, never by the agent. There is no
 | Field | Type | Rule |
 |---|---|---|
 | `classification` | string | Closed set, below. Unknown or empty -> refused **at parse**. |
-| `summary` | string | What failed and why. Non-blank, <= 1500 characters (runes). |
+| `summary` | string | What failed and why. Non-blank, <= 1500 characters (runes). Rendered QUOTED (a three-backtick fence it cannot close), never as markup: see "How untrusted text is rendered" in `gonk-pipeline-fix.md`. |
 | `evidence` | array | 1..8 items. |
 | `evidence[].job` | string | The name of a failed job of the diagnosed pipeline, as recorded at dispatch. May be empty only on a `pipeline_error` fact. |
 | `evidence[].line` | string | A verbatim line from that job's log excerpt. |
 | `evidence[].fact` | string | One of `failure_reason`, `runner`, `tags`, `stage`, `allow_failure`, `duration`, `history`, `definition`, `pipeline_error`. |
-| `remedy` | string | What a human should change, where. Non-blank, <= 1500 characters. |
-| (others) | | A diagnosis carrying `path`, `content`, `body`, `add`, `remove` or `title` is refused. |
+| `remedy` | string | What a human should change, where. Non-blank, <= 1500 characters. Rendered quoted, like `summary`. |
+| (others) | | A diagnosis carrying ANY other effect key is refused: `body`, `add`, `remove`, `title`, `path`, `content`, `old`, `new`, `paths`, `reason`, and any key added to the effect object later (the rule reads the diagnosis's own field list, it does not name the foreign ones). `target_iid` and `target_type` are not foreign: the target rule decides them. |
 | `files` | array of string | <= 10 repository-relative paths the diagnosis points at: non-empty, no NUL, no leading `/`, no `..` segment, already canonical (`a/./b`, `a//b` refused). Required (>= 1) for `code`, `test`, `configuration`. |
 
 Each evidence item carries EXACTLY ONE of a non-blank `line` or a `fact`. If
@@ -188,16 +199,23 @@ configuration key: `docs/reference/gonk-scope.md`.
 
 What a fix session may PROPOSE (gonk-2usw plan section 4.1). Built in
 `pkg/effects` (`fix.go`, `edit.go`, `fixgate.go`) as pure functions. The agent
-pack exists as of part AGENT (`pack/agents/pipefix`: its `effect-shape.toml`
-lists `edit` {0,10}, `fix_meta` {0,1}, `scope_request` {0,1} and carries the
-one pack `[scope]` row), but nothing DISPATCHES it yet and no apply chain
-calls the gate (parts DISPATCH and APPLY), so **no session that runs today can
-emit any of this** (see "No existing agent may use it").
+pack is `pack/agents/pipefix`: its `effect-shape.toml` lists `edit` {0,10},
+`fix_meta` {0,1}, `scope_request` {0,1} and carries the one pack `[scope]`
+row. **This vocabulary is live.** For a project that has opted in
+(`actions.pipeline_fixes: true`, `docs/reference/gonk-pipeline-fix.md`),
+gonk-sweep decides after a diagnosis whether a fix may be dispatched,
+gonk-gate runs a read-only `pipefix` session (`cmd/gonk-gate/dispatch.go`,
+`broker_pipefix_dispatch.go`), and the apply
+(`cmd/gonk-gate/broker_pipefix_apply.go`) runs `effects.ValidateFix` and
+`effects.PlanFix` over the batch it returns, then the gates listed under "The
+gates the apply adds" below, before it commits anything. Only the `pipefix`
+agent may emit these kinds (see "No existing agent may use it"); a project
+that has not opted in never has such a session dispatched.
 
 The pipefix shape's minimums are all 0, because which kinds a batch must carry
 depends on its verdict. The shape gate (`effects.Validate`) therefore ACCEPTS
 an empty pipefix batch; `effects.ValidateFix` (run by `PlanFix`) is what
-refuses it. A fix apply chain must run both.
+refuses it. The fix apply runs both (gates A1 and `FX-SHAPE` below).
 
 ```json
 {"verdict":"fix","effects":[
@@ -322,8 +340,8 @@ refused by any of them has written NOTHING to GitLab (except `CI-DEF`, below).
 | -- | `FX-TRAJ` | -- | the trajectory floor (`require_any_read_for`), only when `GONK_ENFORCE_TRAJECTORY=1` |
 | A4 | `SC-SHOWN` | the recorded reason: `SC-CITED` for a path the fix was never given, else the rule the prompt-time check recorded for the file (`ED-NOMATCH` for an empty file, `SC-SIZE`, `ED-ENCODING`, ...) | an edit to a file the prompt did not list under "Files you may change" (`PipelineFix.Context.Files`). Runs before any blob is read for the batch |
 | A5 | `SC-FORM` | `symlink`, `submodule`, `directory`, `parent-not-a-dir`, `not-a-regular-file` | an edit path that is not a REGULAR FILE at the base commit, read through `pkg/basefacts` (tree entries with modes). A symlink's blob is editable text; editing it retargets the link |
-| A6 | `SC-WEAKEN` | `removed-test`, `added-skip`, `build-constraint`, `unparseable` | Go only (`pkg/weaken`). In a `test`-class Go file: a `Test*` / `Benchmark*` / `Fuzz*` / `Example*` function removed or renamed; more `Skip` / `Skipf` / `SkipNow` calls in any function than before, or a bare `return` added as a test's first statement; any change to the file's build constraints; a result that does not parse. In a `source`-class Go file: a changed build constraint only. For a changed source or test path with NO predicate (any other language; a non-Go file under the `go` profile) nothing is refused and the fact is RECORDED (`PipelineFix.Weakening = not-decidable`) |
-| A7 | `CI-PRE` | `unparseable`, `allow_failure`, `when`, `retry`, `or-true`, `set-e`, `exit-0` | when a `ci`-class file changed: the patched file does not parse as YAML, or an ADDED line carries `allow_failure`, `when: manual` / `never`, a `retry:` key, an appended or-true, `set +e`, or `exit 0`. A courtesy early refusal of the obvious spellings; the authoritative check is `CI-DEF` and the exit check |
+| A6 | `SC-WEAKEN` | `removed-test`, `added-skip`, `build-constraint`, `unparseable` | Go only (`pkg/weaken`). In a `test`-class Go file: a `Test*` / `Benchmark*` / `Fuzz*` / `Example*` function removed or renamed; more `Skip` / `Skipf` / `SkipNow` calls in any function than before, or a test's first statement turned into an early `return` -- a bare one, or an `if` with a branch that is nothing but `return` (`if testing.Short() { return }`, whatever the condition), directly or leading a bare block; a guarded return that was already there is not a finding, one made unconditional is; any change to the file's build constraints; a result that does not parse. In a `source`-class Go file: a changed build constraint only. For a changed source or test path with NO predicate (any other language; a non-Go file under the `go` profile) nothing is refused and the fact is RECORDED (`PipelineFix.Weakening = not-decidable`) |
+| A7 | `CI-PRE` | `unparseable`, `allow_failure`, `when`, `retry`, `or-true`, `set-e`, `exit-0` | when a `ci`-class file changed: the patched file does not parse as YAML, or an ADDED line carries `allow_failure`, `when: manual` / `never`, a `retry:` key, an appended or-true (`||` followed by `true`, `/bin/true`, `/usr/bin/true`, `:` or `exit 0` as a whole word, whatever follows it on the line), `set +e`, or `exit 0`. A courtesy early refusal of the obvious spellings; the authoritative check is `CI-DEF` and the exit check |
 | A8 | `TX-MARKER` | -- | the `fix_meta` reason, or a `scope_request`'s reason or path, reads as a gonk marker (`<!-- gonk...`) |
 | A8 | `TX-SECRET` | the kinds `pipelinectx.Redact` found | ... holds what `Redact` matches. Refused, never rendered with a hole |
 | A8 | `TX-COMMENT` | -- | ... fails the comment gate (`ValidateComments`: a quick-action line, an oversize body) |

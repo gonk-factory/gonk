@@ -13,15 +13,82 @@ gonk {{ .Chart.AppVersion }} installed into namespace {{ .Release.Namespace }}.
   NOTE: the instance cost ceiling is $0. NO PROJECT CAN SPEND A DOLLAR, whatever
   its .gonk.yml says (ceilings only tighten downward). Local rungs still run.
 {{- end }}
+{{- /*
+  THE SECRET LIST IS DERIVED, NOT WRITTEN OUT (gonk-tomt). Each line below is
+  rendered under the same condition as the volume that mounts the Secret, and
+  names the keys that volume projects. TestNotesNameEverySecretTheRenderMounts
+  (internal/charttest/notes_test.go) compares this list with the Secrets and
+  keys the rendered workloads mount, in both directions, for every ci/
+  profile: a Secret mounted and not listed here fails, and so does one listed
+  and not mounted.
+*/ -}}
+{{- $s := .Values.secrets }}
+{{- $intake := .Values.intake.enabled }}
+{{- $meter := .Values.meter.enabled }}
+{{- $ctl := .Values.gascity.enabled }}
+{{- $dolt := .Values.dolt.enabled }}
+{{- $gitlabKeys := list $s.gitlab.keys.token }}
+{{- if and $intake $s.rotation.gitlabPrevious }}{{- $gitlabKeys = append $gitlabKeys $s.gitlab.keys.tokenPrevious }}{{- end }}
+{{- if and $intake (eq .Values.gitlab.mode "split-credential") }}{{- $gitlabKeys = append $gitlabKeys $s.gitlab.keys.adminToken }}{{- end }}
+{{- $webhookKeys := list $s.webhook.keys.token }}
+{{- if $s.rotation.webhookPrevious }}{{- $webhookKeys = append $webhookKeys $s.webhook.keys.tokenPrevious }}{{- end }}
+{{- $meterKeys := list $s.meterAPI.keys.token }}
+{{- if and $meter $s.rotation.meterAPIPrevious }}{{- $meterKeys = append $meterKeys $s.meterAPI.keys.tokenPrevious }}{{- end }}
+{{- $litellmKeys := list $s.litellm.keys.adminKey }}
+{{- if and $meter $s.rotation.litellmAdminPrevious }}{{- $litellmKeys = append $litellmKeys $s.litellm.keys.adminKeyPrevious }}{{- end }}
+{{- $doltKeys := list }}
+{{- if $dolt }}{{- $doltKeys = append $doltKeys $s.dolt.keys.rootPassword }}{{- end }}
+{{- $doltKeys = append $doltKeys $s.dolt.keys.gcPassword }}
 
-The chart renders NO Secrets. These must exist in {{ .Release.Namespace }} or the
-pods will not start:
+The chart renders NO Secrets. Each Secret below must exist in {{ .Release.Namespace }}
+with the keys named, or the pod that mounts it does not start
+(CreateContainerConfigError):
+{{ if or $intake $ctl }}
+  {{ $s.gitlab.existingSecret }}  (keys: {{ join ", " $gitlabKeys }})
+{{- end }}
+{{- if $intake }}
+  {{ $s.webhook.existingSecret }}  (keys: {{ join ", " $webhookKeys }})
+{{- end }}
+{{- if or $intake $meter $ctl }}
+  {{ $s.meterAPI.existingSecret }}  (keys: {{ join ", " $meterKeys }})
+{{- end }}
+{{- if or $meter $ctl }}
+  {{ $s.litellm.existingSecret }}  (keys: {{ join ", " $litellmKeys }})
+{{- end }}
+{{- if $meter }}
+  {{ $s.ledger.existingSecret }}  (keys: {{ $s.ledger.keys.dsn }})
+{{- end }}
+{{- if or $ctl $dolt }}
+  {{ $s.dolt.existingSecret }}  (keys: {{ join ", " $doltKeys }})
+{{- end }}
+{{- if $ctl }}
+  {{ $s.gcWriteKey.existingSecret }}  (keys: {{ $s.gcWriteKey.key }})
+{{- end }}
+{{- if and $ctl .Values.workstore.enabled }}
+  {{ $s.workstore.existingSecret }}  (keys: {{ $s.workstore.keys.dsn }})
+{{- end }}
 
-  {{ .Values.secrets.gitlab.existingSecret }}    ({{ .Values.secrets.gitlab.keys.token }})
-  {{ .Values.secrets.webhook.existingSecret }}   ({{ .Values.secrets.webhook.keys.token }})
-  {{ .Values.secrets.meterAPI.existingSecret }}  ({{ .Values.secrets.meterAPI.keys.token }})
-  {{ .Values.secrets.litellm.existingSecret }}   ({{ .Values.secrets.litellm.keys.adminKey }})
-  {{ .Values.secrets.ledger.existingSecret }}    ({{ .Values.secrets.ledger.keys.dsn }})
+What each one holds, and how to create it: chart/gonk/README.md, "The Secrets
+the chart needs".
+{{- if and .Values.networkPolicy.enabled (or $ctl $meter) }}
+{{- if .Values.networkPolicy.kubeAPI.cidrs }}
+
+NetworkPolicy: the controller and the meter may reach the Kubernetes API server
+at {{ join ", " .Values.networkPolicy.kubeAPI.cidrs }} on TCP {{ join ", " .Values.networkPolicy.kubeAPI.ports }}
+(networkPolicy.kubeAPI). If those are not the addresses behind the `kubernetes`
+Service in namespace default, no session runs where NetworkPolicy is enforced.
+{{- else }}
+
+NetworkPolicy: networkPolicy.kubeAPI.cidrs is empty, so the policies do NOT allow
+the controller or the meter to reach the Kubernetes API server.
+  * On a cluster that does not enforce NetworkPolicy this changes nothing.
+  * On a cluster that DOES enforce it, no session Job is created and no project
+    key is delivered: no session runs. Set networkPolicy.kubeAPI.cidrs to the
+    addresses behind the `kubernetes` Service in namespace default
+    (chart/gonk/README.md, section 0), then `helm test` to see which cluster
+    you have.
+{{- end }}
+{{- end }}
 
 Webhook endpoint: {{ .Values.intake.webhookPublicURL }}
 {{- if not .Values.ingress.enabled }}

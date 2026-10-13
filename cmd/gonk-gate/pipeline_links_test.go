@@ -158,7 +158,7 @@ func TestTheProjectURLIsDerivedOnlyFromThePipelineObjectsOwnWebURL(t *testing.T)
 		{900, "http://127.0.0.1:4567/example/calc/-/pipelines/900", "http://127.0.0.1:4567/example/calc"},
 		// The shape GitLab really returns, read off the synthetic e2e project
 		// (project 75, pipeline 3251, 2026-10-04, read-only).
-		{3251, "https://gitlab.example.internal/agentic/gonk-e2e-1784441480/-/pipelines/3251", "https://gitlab.example.internal/agentic/gonk-e2e-1784441480"},
+		{3251, "https://gitlab.example.internal/gonk-factory/gonk-e2e-1784441480/-/pipelines/3251", "https://gitlab.example.internal/gonk-factory/gonk-e2e-1784441480"},
 		{900, linkBase + "/-/pipelines/901", ""}, // another pipeline's URL
 		{900, linkBase + "/-/pipelines/9000", ""},
 		{900, linkBase, ""},

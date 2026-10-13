@@ -9,13 +9,14 @@ metadata:
     {{- include "gonk.networkPolicyBanner" . | nindent 4 }}
 spec:
   # ==========================================================================
-  # !!! NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13) !!!
-  # Flannel does not implement NetworkPolicy, and the Cilium HelmRelease that
-  # would is SUSPENDED (gitops:clusters/<cluster>/foundation/kustomization.yaml).
-  # THIS OBJECT BLOCKS NOTHING TODAY. It is documentation-as-code: it is
-  # correct, it ships, and it starts enforcing the day Cilium is unsuspended --
-  # with no further work. Do not read it as a guarantee.
-  # See docs/environment.md ("KNOWN LIMITATION") and chart/gonk/README.md.
+  # !!! ENFORCED ONLY WHERE THE CLUSTER'S NETWORK PLUGIN IMPLEMENTS IT !!!
+  # The API server accepts a NetworkPolicy whether or not the CNI implements
+  # NetworkPolicy, and some do not. On such a cluster THIS OBJECT BLOCKS
+  # NOTHING: it is correct, it ships, and it starts enforcing the day the
+  # network plugin does -- with no further work. Do not read it as a guarantee
+  # until `helm test` has reported ENFORCED on your cluster.
+  # See docs/environment.md ("KNOWN LIMITATION") and chart/gonk/README.md,
+  # section 0.
   # ==========================================================================
   #
   # Deny everything, in both directions, for every pod in this namespace. The

@@ -482,7 +482,7 @@ func TestALegacyParkThenASuccessIsOneAttemptOnTheRealMeter(t *testing.T) {
 }
 
 // fakeGasCity models the two things of Gas City's behaviour the legacy park
-// depends on, as read from its source (/root/src/gascity at 4fda5a28445f,
+// depends on, as read from its source (a checkout of gascity at 4fda5a28445f,
 // which IS the pinned GASCITY_REF in images/versions.env; read, NOT observed
 // on a cluster):
 //

@@ -389,7 +389,7 @@ func runGuard(t *testing.T, c guardCase) (exit int, out string, calls []string) 
 		"PATH=" + bin + ":/usr/bin:/bin",
 		"FAKE_CRANE_DIR=" + dir,
 		"TMPDIR=" + dir,
-		"INTERNAL_REGISTRY_REPO=gitlab-registry.example:5000/agentic/gonk-project",
+		"INTERNAL_REGISTRY_REPO=gitlab-registry.example:5000/gonk-factory/gonk",
 		"GONK_TAG=" + c.gonkTag,
 		"GUARD_IMAGES=" + fmt.Sprint(vars["GUARD_IMAGES"]),
 		"GUARD_LIST_ATTEMPTS=" + fmt.Sprint(vars["GUARD_LIST_ATTEMPTS"]),

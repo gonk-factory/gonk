@@ -35,6 +35,15 @@
 // candidates. Until a pipeline that runs something exists the answer is
 // DecisionWait; at the verify deadline it is UNVERIFIABLE (J1.TIMEOUT).
 //
+// A pipeline on ANOTHER COMMIT is not evidence, whatever GitLab lists it
+// under. On a project with merged results pipelines the merge request's
+// pipeline runs on a commit GitLab makes by merging the branch into its
+// target, and nothing the API says about it names the branch commit it was
+// built from: Judge never counts it (Result.MergedResult), green or red, and
+// when it is all there is at the deadline the answer is UNVERIFIABLE by
+// J1.MERGED_RESULT (gonk-ow8u; mergedResultPipeline says what is and is not
+// established).
+//
 // A pipeline's STATUS is not the end of the wait either. GitLab can report a
 // pipeline `failed` while an automatic retry of the failed job is still
 // `created` and has not run (bead gonk-5b2f). A candidate is settled only

@@ -42,6 +42,7 @@ GO = os.environ.get('GO', 'go')
 
 G = './cmd/gonk-gate/'
 S = 'cmd/gonk-gate/sweep_pipefix.go'
+CINC = 'cmd/gonk-gate/pipefix_ciincludes.go'
 EN = 'cmd/gonk-gate/pipefix_envelope.go'
 BD = 'cmd/gonk-gate/broker_pipefix_dispatch.go'
 DI = 'cmd/gonk-gate/dispatch.go'
@@ -222,10 +223,21 @@ g("E6: the paths hold is off", [(S, "\tif len(lk.editableFiles()) == 0 {", "\tif
 g("E6: a generated file is classified by its name", [(S, "\t\t\tif scope.IsGenerated(content) {", "\t\t\tif scope.IsGenerated(content) && false {")],
   run(FOLD, "a generated file is not source"))
 g("E6: the pipeline definition's local includes are not ci",
-  [(S, "\t\tif base.CILocalIncludes, err = scope.CILocalIncludes(ci); err != nil {", "\t\tif _, err = scope.CILocalIncludes(ci); err != nil {")],
+  [(S, "\tbase.CILocalIncludes = inc.Paths\n", "\t_ = inc\n")],
   run(FOLD, "a file the pipeline definition includes is ci, not whatever its name suggests"))
+g("E6 (gonk-9q0y): only the root file's own includes are ci (an include of an include is not)",
+  [(CINC, "\tinc, err = scope.ResolveCILocalIncludes(root, func(path string) ([]byte, bool, error) {",
+          "\tinc.Complete = true\n\tinc.Paths, err = scope.CILocalIncludes(root)\n\t_, _ = scope.ResolveCILocalIncludes(nil, func(path string) ([]byte, bool, error) {")],
+  run(FOLD, "gonk-9q0y: a file included by an INCLUDED file is ci too"))
+g("E6 (gonk-9q0y): an included file is read at another commit than the definition",
+  [(CINC, "\t\tb, ferr := r.GetRawFile(ctx, projectID, path, sha, maxBytes)", "\t\tb, ferr := r.GetRawFile(ctx, projectID, path, \"main\", maxBytes)")],
+  run(FOLD, "gonk-9q0y: a file included by an INCLUDED file is ci too"))
+g("E6 (gonk-9q0y): an included file that cannot be understood is skipped and the dispatch goes on",
+  [(S, "\tcase ierr != nil: // dispatch:includes\n\t\tlk.warn(\"the pipeline definition's includes cannot be read\", ierr)\n\t\treturn\n",
+       "\tcase false && ierr != nil: // dispatch:includes\n\t\treturn\n")],
+  run(FOLD, "gonk-9q0y: an included file that cannot be read stops the dispatch (the classes cannot be known)"))
 g("E6: base facts are read at the default branch's commit, not the pipeline's",
-  [(S, "f.GetRawFile(ctx, pid, pipefixCIFile, latest.SHA, intake.MaxConfigBytes*16)", "f.GetRawFile(ctx, pid, pipefixCIFile, cfgSHA, intake.MaxConfigBytes*16)"),
+  [(S, "pipefixCIIncludes(ctx, f, pid, latest.SHA, intake.MaxConfigBytes*16)", "pipefixCIIncludes(ctx, f, pid, cfgSHA, intake.MaxConfigBytes*16)"),
    (S, "f.GetRawFile(ctx, pid, path, latest.SHA, pipefixGeneratedProbeBytes)", "f.GetRawFile(ctx, pid, path, cfgSHA, pipefixGeneratedProbeBytes)")],
   run(ELIG, "merge-request"))
 g("Q2: a configuration fix does not wait for a confirmed class",

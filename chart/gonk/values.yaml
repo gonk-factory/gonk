@@ -2,8 +2,8 @@
 # gonk chart values
 #
 # *** NO SECRET VALUE EVER APPEARS IN THIS FILE. ***
-# Secrets are provisioned OUTSIDE the chart (Vault/1Password -> ExternalSecret ->
-# k8s Secret) and referenced BY NAME below. They are mounted as FILES, never as
+# Secrets are provisioned OUTSIDE the chart (by hand, or by an operator that
+# syncs them from a secret store) and referenced BY NAME below. They are mounted as FILES, never as
 # environment variables. See chart/gonk/README.md for the exact contract.
 #
 # The defaults are SAFE, not USEFUL: out of the box this chart cannot spend a
@@ -19,16 +19,13 @@ fullnameOverride: ""
 #
 # The DEFAULT registry is the public one the release workflow publishes to, and
 # it needs no pull secret. A deployment that mirrors the images into a private
-# registry sets BOTH values below (the reference cluster does, in its gitops
-# HelmRelease): `registry` to the mirror's path and `pullSecrets` to a
-# per-namespace Secret the chart does not create (README, "The required image
-# pull secret").
+# registry sets BOTH values below: `registry` to the mirror's path and
+# `pullSecrets` to a per-namespace Secret the chart does not create (README, "The image
+# pull secret, for a mirror").
 #
 # TAGS STILL HAVE NO DEFAULT, and `latest` is still rejected by
 # values.schema.json (G11). Renovate autodiscovers these and bumps them; a
 # floating tag would let it silently roll the BUDGET ENFORCER backwards.
-# And note: no GitLab runner has ever executed on this repo, so the FIRST images
-# are built and pushed by hand.
 image:
   registry: ghcr.io/gonk-factory/gonk
   pullPolicy: IfNotPresent
@@ -123,13 +120,17 @@ intake:
     limit: ""
     maxAge: ""
   # Projects gonk must NEVER work on, however it came to see them (gonk-jn5).
-  # Each entry is a path with namespace ("agentic/gonk-project") or a numeric
-  # project id. An entry that is neither -- a bare "gonk-project", say -- makes
+  # Each entry is a path with namespace ("gonk-factory/gonk") or a numeric
+  # project id. An entry that is neither -- a bare "gonk", say -- makes
   # intake REFUSE TO START, because it would parse cleanly and block nothing.
   #
-  # GONK'S OWN REPOSITORY BELONGS HERE, and the default is not paranoia. GitLab's
-  # `membership=true` includes projects inherited through GROUP membership, and
-  # gonk-project sits in the same group as the repos gonk is meant to work on.
+  # GONK'S OWN REPOSITORY BELONGS HERE, and the default is not paranoia. THE
+  # DEFAULT NAMES THE UPSTREAM PROJECT, gonk-factory/gonk: it protects a mirror
+  # kept at that path and nothing else. IF YOU HOST GONK'S SOURCE ON YOUR
+  # GITLAB UNDER ANOTHER PATH -- a fork, an internal copy -- LIST THAT PATH
+  # (or its numeric id) HERE. Why it matters: GitLab's `membership=true`
+  # includes projects inherited through GROUP membership, and a copy of gonk
+  # often sits in the same group as the repos gonk is meant to work on.
   # Adding the bot to that group would give a code-writing agent a path to its
   # own broker, gate and effect-shape.toml -- arriving as a side effect of
   # onboarding somebody else, with no code change and nobody deciding it.
@@ -143,7 +144,7 @@ intake:
   # An EMPTY list is legal and logs a warning at startup. Change the default
   # only if you know why it is there.
   blockedProjects:
-    - agentic/gonk-project
+    - gonk-factory/gonk
   # The URL GitLab will POST to. Intake writes this into every hook it provisions,
   # so it is REQUIRED even when ingress.enabled is false (you may front it with a
   # Gateway or an IngressRoute outside this chart). OD-2.
@@ -200,7 +201,7 @@ meter:
 # =============================================================================
 gitlab:
   # Developed against GitLab 18.10.1 COMMUNITY EDITION, in-cluster, namespace
-  # `gitlab` (docs/environment.md). CE matters: multiple MR assignees is an EE
+  # `gitlab`. CE matters: multiple MR assignees is an EE
   # feature, so the onboarding MR picks exactly ONE assignee. Nothing here may
   # need EE.
   #
@@ -209,7 +210,7 @@ gitlab:
   # workload at somebody else's host.
   url: ""                 # REQUIRED, e.g. https://gitlab.example.internal
   botUsername: gonk
-  # bot-does-everything : one Maintainer bot token (homelab default, spec 5.1)
+  # bot-does-everything : one Maintainer bot token (the default)
   # split-credential    : a low-privilege bot token + a separate admin token used
   #                       ONLY for webhook management
   mode: bot-does-everything
@@ -232,8 +233,8 @@ gitlab:
   # store -- is in the README ("Trusting a private CA").
   #
   # *** THERE IS NO VALUE THAT DISABLES TLS VERIFICATION, AND THERE NEVER WILL BE. ***
-  # (The gonk git remote uses http.sslVerify=false as a local convenience. A
-  # SERVICE must not copy that.)
+  # (internal/buildgate/tls_verification_test.go reads every rendered manifest,
+  # this file and the templates, and fails on one that tries.)
   caCert:
     existingConfigMap: ""   # e.g. gitlab-ca
     key: ""                 # e.g. ca.crt
@@ -244,22 +245,21 @@ gitlab:
 # =============================================================================
 litellm:
   mode: external          # enum: [external]
-  # REQUIRED. On the target cluster LiteLLM is ALREADY DEPLOYED (ns `litellm`,
-  # Service litellm:4000) -- it is BYO, and this chart does not bundle it.
+  # REQUIRED. LiteLLM is BYO: you deploy it, and this chart does not bundle it.
   externalURL: ""         # e.g. http://litellm.litellm.svc.cluster.local:4000
   # Renders an ADVISORY ConfigMap containing the SAME synthetic prices as the rung
   # catalog below, for you to copy into LiteLLM's config. They MUST agree: a local
   # rung priced at $0 in LiteLLM means the USD virtual-key ceiling never closes on
   # tokens, and monthly_tokens has NO hard enforcement anywhere.
   #
-  # WHERE YOU ACTUALLY PASTE THEM -- it is one named file, in the GITOPS repo:
-  #   clusters/<cluster>/apps/litellm/litellm.yaml
-  #     spec.values.proxy_config.model_list          <- the models
-  #     spec.values.litellm_settings.model_cost_map  <- THE PRICES
-  # LOCAL MODELS ARE PRICED AT ZERO THERE TODAY. That is the hole this exists to
-  # close, and closing it is a gitops MR, not a gonk change.
+  # WHERE YOU PASTE THEM: your LiteLLM configuration, wherever you keep it --
+  # the model list (proxy_config.model_list) and THE PRICES
+  # (litellm_settings.model_cost_map). A local model LiteLLM prices at zero is
+  # the hole this exists to close, and closing it is a change to LiteLLM's
+  # configuration, not to gonk.
   #
-  # Nothing in this chart can verify the agreement. Plan 06 does (P3-4).
+  # Nothing in this chart can verify the agreement; the `live` test suite
+  # (test/live) compares a running deployment's two sides.
   emitModelPricesConfigMap: true
 
 # =============================================================================
@@ -370,8 +370,7 @@ gascity:
 #   cutover needs the role, the schema gonk_workstore OWNED BY it and the
 #   gonk-workstore Secret to exist first. With it on before they do, the
 #   projected volume cannot mount and the controller -- strategy Recreate --
-#   stays down. The deploy that flips it is the one that lands those objects
-#   (reference cluster: the gonk HelmRelease's values, with the two ExternalSecrets).
+#   stays down. The deploy that flips it is the one that lands those objects.
 #
 # enabled: true mounts secrets.workstore into the controller and runs
 #   `gonk-gate workstore-import` (bd -> Postgres) in bootstrap-city before gc
@@ -419,8 +418,8 @@ workstore:
 # enabled is FALSE by default AND SHOULD STAY THAT WAY IN THIS FILE. This is the
 #   only thing in gonk that deletes a Kubernetes object, so merging the chart
 #   must not be able to arm it -- the same rule workstore.enabled follows
-#   (gonk-js99). The deploy that turns it on is a deliberate gitops values
-#   change.
+#   (gonk-js99). The deploy that turns it on is a deliberate change to your
+#   own values.
 #
 # enabled: true sets GONK_POD_REAP_NAMESPACE on the controller (to
 #   .Release.Namespace) and renders Role/RoleBinding gonk-gate-podreap. With the
@@ -507,8 +506,8 @@ dev:
 # COMPONENT: Dolt  (the bundled SQL server -- backs BOTH beads AND, optionally, the ledger)
 #
 # BEADS IS DOLT-ONLY. There is no "beads on Postgres" option and there never will
-# be (`docs/environment.md`: the beads backend enum is dolt/doltlite; sqlite/
-# coordstore were removed and hard-error). CNPG can only ever replace the LEDGER.
+# be (the beads backend enum is dolt/doltlite; sqlite and coordstore were
+# removed and hard-error). CNPG can only ever replace the LEDGER.
 #
 # R-48 (T-26, INTERIM until T-56 deletes Dolt entirely at the Gas City cutover):
 # root is no longer root-open. DOLT_ROOT_HOST is "localhost" (root usable only
@@ -563,9 +562,8 @@ dolt:
 # RECONCILED, Task 0: SETTLED, not pending. Task 0b's spike ran
 # (docs/spikes/dolt-reservation-isolation.md): 32 concurrent writers raced a
 # ceiling with headroom for 2, and EVERY one of 90 iterations overspent 12.8x,
-# at every isolation level tried including `SELECT ... FOR UPDATE`. The owner
-# moved the ledger to Postgres on the existing CNPG cluster (ADR-004 Decision
-# 10). `GONK_METER_STORE_BACKEND` (cmd/gonk-meter/main.go's `openStore`) has
+# at every isolation level tried including `SELECT ... FOR UPDATE`. The ledger
+# therefore moved to Postgres (ADR-004 Decision 10). `GONK_METER_STORE_BACKEND` (cmd/gonk-meter/main.go's `openStore`) has
 # EXACTLY ONE case: "postgres". There is no `store.OpenDolt`, so `backend: dolt`
 # is not a value this chart may offer -- it would render a meter that fails to
 # start, not a meter with a different (worse) durability property.
@@ -586,13 +584,13 @@ ledger:
                           # `dolt` does not serialize the reservation race at
                           # all (measured, not assumed -- see the spike above).
   postgres:
-    # shared   : TENANCY ON THE CNPG CLUSTER THE OWNER ALREADY RUNS
-    #            (databases-app/postgres). Renders NOTHING. This is the DEFAULT and
-    #            it is what docs/environment.md says the fallback actually is --
-    #            standing up a second Postgres next to it would be a new stateful
-    #            dependency nobody asked for.
-    #            *** IT NEEDS FOUR OBJECTS IN THE GITOPS REPO, NOT ONE. *** See
-    #            Task 6 Step 5b and chart/gonk/README.md. Copy apps/nagus/.
+    # shared   : TENANCY ON A CloudNativePG CLUSTER THAT ALREADY EXISTS
+    #            (shared.clusterNamespace/shared.clusterName below). Renders
+    #            NOTHING. This is the DEFAULT: standing up a second Postgres next
+    #            to one you already run would be a new stateful dependency.
+    #            *** IT NEEDS MORE THAN A DATABASE: a role, its password Secret,
+    #            the database, and the DSN Secret in gonk's namespace. *** See
+    #            chart/gonk/README.md, "The ledger".
     # cnpg     : emit a NEW postgresql.cnpg.io/v1 Cluster (for a stranger with no
     #            existing CNPG tenancy). Requires the CNPG operator; the chart does
     #            not install it.
@@ -678,8 +676,8 @@ secrets:
                                     # all -- bundled or external Dolt (G16)
   # The ed25519 PRIVATE signing key gonk-intake AND the in-controller gonk-gate use
   # to mint X-GC-City-Write grants for the grant-gated controller (gascity.writeAuth
-  # above holds its PUBLIC half). Provisioned OUT OF BAND (Vault/1Password ->
-  # ExternalSecret -> k8s Secret; a PEM PKCS#8 ed25519 key, or a raw 32-byte seed):
+  # above holds its PUBLIC half). Provisioned OUT OF BAND (by hand or from your
+  # secret store; a PEM PKCS#8 ed25519 key, or a raw 32-byte seed):
   # the chart creates NO Secret and NEVER reads the value -- it is a 0400 FILE MOUNT
   # only, never an env value, never logged. One keypair / one kid, shared by intake
   # and gate; the controller verifies with the public half. REQUIRED when
@@ -699,7 +697,16 @@ secrets:
     litellmAdminPrevious: false
   # The Secret gonk-meter WRITES per-project LiteLLM virtual keys into (the
   # KeySink, Task 4). One Secret per project, named gonk-key-<slug>, key
-  # LITELLM_API_KEY. Meter's Role is scoped to this prefix.
+  # LITELLM_API_KEY.
+  #
+  # THE PREFIX IS A NAMING CONVENTION, NOT A PERMISSION. Role gonk-meter is NOT
+  # scoped to it: it grants create, update and delete on EVERY Secret in the
+  # release namespace (and no get, list or watch). Kubernetes RBAC has no name
+  # prefixes, cannot restrict `create` by name at all, and the names come from
+  # project paths that do not exist at install time. So a compromised meter
+  # can overwrite or delete any Secret in this namespace, including the ones
+  # listed above; it cannot read one. Keep nothing in this namespace that gonk
+  # does not need. The full list of grants: chart/gonk/README.md, section 12.
   keySink:
     namePrefix: gonk-key-
 
@@ -730,25 +737,25 @@ operatorConfig:
     # runs `qwen3-14b` and a second local rung. A chart that "works out of the box" by
     # pointing at a phantom model 404s at the first token and gonk gets blamed. So
     # this is EMPTY, and the chart FAILS TO RENDER until you supply it (G1). The
-    # operator provides the ladder + catalog via HelmRelease values.
+    # operator provides the ladder + catalog in their own values.
     ladder: []                              # REQUIRED from the operator. Empty -> fail (G1).
     budget:
       monthly_cost_usd: 0                   # AD-4: no cloud spend by default
       monthly_tokens: "5G"
       per_task_tokens: "2M"
   groups: {}
-    # agentic:
+    # kubernetes:
     #   budget: { monthly_cost_usd: 50 }
-    # agentic/experiments:
+    # kubernetes/experiments:
     #   enabled: false
   # THE CHART SHIPS NO RUNG CATALOG. It is site-local operator config; the chart
   # FAILS TO RENDER when `rungs` is empty (a rung named in the ladder that is not
-  # in the catalog cannot be priced -- G2). Supply it via HelmRelease values.
+  # in the catalog cannot be priced -- G2). Supply it in your own values.
   # LOCAL rungs: est_cost_usd MUST be 0 and synthetic_usd_per_1m_tokens MUST be
   # > 0 (the synthetic price is what makes LiteLLM's USD virtual-key ceiling a
   # hard door for TOKENS too -- configure the SAME number in LiteLLM's model list).
   # CLOUD rungs: est_cost_usd MUST be > 0 and synthetic_usd_per_1m_tokens MUST NOT
-  # be set. Example (NOT a default -- on this cluster qwen-local -> qwen3-14b):
+  # be set. Example (NOT a default; the model names are whatever LiteLLM serves):
   #   - {name: qwen-local, kind: local, model: qwen3-14b, est_cost_usd: 0, est_tokens: "200K", synthetic_usd_per_1m_tokens: 0.20}
   #   - {name: glm,        kind: cloud, model: glm-5,     est_cost_usd: 0.40, est_tokens: "200K"}
   rungs: []                                 # REQUIRED from the operator. Empty -> fail (G2).
@@ -775,9 +782,9 @@ onboarding:
 # =============================================================================
 ingress:
   enabled: false          # the chart exposes NOTHING until you say so
-  # OD-2 [ANSWERED, docs/environment.md]: Traefik is the only IngressClass on the
-  # reference cluster. The HOST HAS NO DEFAULT: it is yours, and G12 refuses an
-  # enabled ingress without one.
+  # className defaults to `traefik`; set it to the IngressClass your cluster
+  # has. The HOST HAS NO DEFAULT: it is yours, and G12 refuses an enabled
+  # ingress without one.
   className: traefik      # REQUIRED when enabled
   host: ""                # REQUIRED when enabled, e.g. gonk.example.internal
   path: /hook/gitlab      # DO NOT WIDEN. The private listener must never be exposed.
@@ -785,13 +792,13 @@ ingress:
   # cert-manager issues the cert FROM THE ANNOTATION.
   #
   # *** DO NOT ALSO SHIP AN EXPLICIT Certificate OBJECT. *** Combining the two
-  # once REISSUED 863 CERTS on this cluster. Annotation only, and the chart
+  # has caused a mass reissue of certificates. Annotation only, and the chart
   # renders no Certificate anywhere -- a test asserts that.
   #
-  # AND: if the cluster's own DNS does not resolve the host (a CoreDNS hosts
-  # block, gitops:clusters/<cluster>/foundation/coredns/configmap-coredns.yaml),
-  # in-cluster resolution FAILS SILENTLY. That is a gitops-repo change; it is not
-  # optional; and the symptom is a webhook that simply never arrives.
+  # AND: if the cluster's own DNS does not resolve the host (for example it
+  # needs a CoreDNS hosts block), in-cluster resolution FAILS SILENTLY. That is
+  # a change to your cluster configuration; it is not optional; and the symptom
+  # is a webhook that simply never arrives.
   #
   # EMPTY BY DEFAULT: an issuer and a DNS name are site-local. For example:
   #   cert-manager.io/cluster-issuer: <your ClusterIssuer>
@@ -807,20 +814,27 @@ ingress:
 #
 # *** READ THIS BEFORE YOU TRUST ANY OF IT. ***
 #
-# NETWORKPOLICIES ARE NOT ENFORCED ON THE TARGET CLUSTER (2026-07-13). Flannel
-# does not implement them, and the Cilium HelmRelease that would is SUSPENDED.
-# Everything below RENDERS, VALIDATES, and BLOCKS NOTHING.
+# A NETWORKPOLICY IS ENFORCED ONLY WHERE THE CLUSTER'S NETWORK PLUGIN (CNI)
+# IMPLEMENTS IT. The API server accepts the object either way, and some CNIs do
+# not implement it. On such a cluster everything below RENDERS, VALIDATES, and
+# BLOCKS NOTHING.
 #
-# The concrete consequence: LiteLLM routes local models to a model server on the
-# LAN (e.g. http://192.0.2.10:11434) THAT REQUIRES NO CREDENTIAL. An agent pod can call
-# it directly, bypass LiteLLM entirely, and burn local GPU with ZERO METERING.
-# Spec 9's "budgets cannot be bypassed" is NOT MET at the network layer.
+# The concrete consequence where it is not enforced: if LiteLLM routes local
+# models to a model server on your network (e.g. http://192.0.2.10:11434) THAT
+# REQUIRES NO CREDENTIAL, an agent pod can call it directly, bypass LiteLLM
+# entirely, and use it with ZERO METERING. "Budgets cannot be bypassed" is then
+# NOT MET at the network layer.
 #
-# Owner decision 2026-07-13: SHIP IT, DOCUMENT THE GAP, DO NOT GATE ON IT. So the
-# policies are here, correct, ready to enforce the day Cilium is unsuspended.
-# Until then, say it the honest way:
-#     CLOUD-rung budgets are HARD.  LOCAL-model budgets are ADVISORY.
-# See docs/environment.md and chart/gonk/README.md.
+# So the policies are here, and enforcing wherever the CNI enforces. ON SUCH A
+# CLUSTER YOU MUST ALSO SET networkPolicy.kubeAPI.cidrs (below): without it
+# default-deny cuts the controller and the meter off from the Kubernetes API
+# server and no session runs.
+# Say it the honest way:
+#     CLOUD-rung budgets are HARD.
+#     LOCAL-model budgets are ADVISORY where NetworkPolicy is not enforced.
+# `helm test` reports which cluster you have (enforcementProbe, below).
+# See docs/environment.md ("KNOWN LIMITATION") and chart/gonk/README.md,
+# section 0.
 #
 networkPolicy:
   enabled: true
@@ -828,11 +842,9 @@ networkPolicy:
   # provider creates. THE CHART DOES NOT CREATE THOSE PODS. OD-5 is ANSWERED:
   # Gas City hardcodes `app: gc-agent` on every agent pod (internal/runtime/k8s/
   # pod.go; the provider lists by app=gc-agent), so that is the default below.
-  # BUT: a RIGHT selector on an UNENFORCED policy still blocks nothing -- this
-  # cluster does not enforce NetworkPolicy (Flannel; Cilium suspended). The chart
-  # refuses to render an EMPTY selector (G10); it cannot detect a WRONG one.
-  # Plan 06's egress-denial test is the only thing that can, and it is SKIPPED
-  # until Cilium lands. Un-skipping it is the gate.
+  # BUT: a RIGHT selector on an UNENFORCED policy still blocks nothing (see the
+  # banner above). The chart refuses to render an EMPTY selector (G10); it
+  # cannot detect a WRONG one. The enforcement probe below is what can.
   agentPodSelector:
     app: gc-agent
   # Does THIS cluster actually enforce the policies above? `helm test gonk` runs
@@ -898,7 +910,7 @@ networkPolicy:
     namespaceSelector: {kubernetes.io/metadata.name: gascity}
     podSelector: {}
     ports: [8080]
-  # TRAEFIK is the cluster's only IngressClass (docs/environment.md).
+  # The namespace your ingress controller runs in (default: traefik).
   ingressController:
     namespaceSelector: {kubernetes.io/metadata.name: traefik}
     podSelector: {}
@@ -916,12 +928,52 @@ networkPolicy:
   dns:
     namespaceSelector: {kubernetes.io/metadata.name: kube-system}
     ports: [53]
+  # THE KUBERNETES API SERVER (gonk-vxel). REQUIRED ON A CLUSTER THAT ENFORCES
+  # NetworkPolicy; ignored by one that does not.
+  #
+  # Two pods call the API server: the controller (gonk-gate creates each
+  # session as a Job, and reads its pod, its log and its Secrets) and
+  # gonk-meter (the KeySink writes each project's key Secret). The API server
+  # is not a pod, so a NetworkPolicy cannot select it; it can only be named by
+  # address. The chart cannot know that address and does not guess: the only
+  # guess that is right on every cluster is 0.0.0.0/0, which is no policy.
+  #
+  # EMPTY (the default) RENDERS NO RULE. Where NetworkPolicy is enforced,
+  # default-deny then drops every API call from both pods: no session Job is
+  # created and no key is delivered. Where it is not enforced nothing changes.
+  #
+  # WHAT TO PUT HERE: the addresses BEHIND the `kubernetes` Service, not the
+  # Service's own cluster IP. Policy is evaluated after the Service address has
+  # been translated to an endpoint, so the cluster IP (often 10.x.0.1) on port
+  # 443 matches nothing.
+  #
+  #   kubectl --context <ctx> -n default get endpointslices \
+  #     -l kubernetes.io/service-name=kubernetes \
+  #     -o jsonpath='{range .items[*]}{.endpoints[*].addresses[*]}{" port "}{.ports[*].port}{"\n"}{end}'
+  #
+  # Give each address as a /32 (or /128), or give the control-plane subnet if
+  # the addresses can change: a control-plane node that comes back on another
+  # address is cut off until this value follows it. `ports` is the endpoint's
+  # port from the same output -- 6443 on most self-managed clusters, 443 on
+  # most managed ones. Both are listed by default; narrow it to yours.
+  #
+  # A prefix shorter than /8 (IPv4) or /16 (IPv6) is refused: a /0, or
+  # 0.0.0.0/1 beside 128.0.0.0/1, is every address. Some network plugins do
+  # not match an ipBlock against a node's address at all (Cilium, unless it is
+  # configured to), and need the API server allowed by a policy of their own
+  # kind beside this chart.
+  #
+  # The agent session pods never get this rule: they do not call the API and
+  # their ServiceAccount token is not mounted.
+  kubeAPI:
+    cidrs: []                      # e.g. ["192.0.2.10/32"]
+    ports: [443, 6443]
   # RECONCILED, Task 0: NEW. The original egress rule for meter's ledger only
   # covered ledger.postgres.mode=cnpg (a chart-managed Cluster, matched by
-  # podSelector); mode=shared -- the actual target-cluster DEFAULT
-  # (databases-app/postgres) -- and mode=external had NO egress rule at all,
-  # so meter's own default profile would have had no NetworkPolicy path to its
-  # own ledger. Defaults to `shared`'s real namespace; override for `external`.
+  # podSelector); mode=shared -- the DEFAULT -- and mode=external had NO egress
+  # rule at all, so meter's own default profile would have had no NetworkPolicy
+  # path to its own ledger. The default matches ledger.postgres.shared.
+  # clusterNamespace's default; set it to the namespace your Postgres is in.
   ledgerPostgres:
     namespaceSelector: {kubernetes.io/metadata.name: databases-app}
 

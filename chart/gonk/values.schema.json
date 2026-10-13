@@ -477,6 +477,30 @@
     "networkPolicy": {
       "type": "object",
       "properties": {
+        "kubeAPI": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "gonk-vxel: the Kubernetes API server's addresses, rendered as an ipBlock egress rule on the controller and meter policies. Empty cidrs renders no rule; on a cluster that enforces NetworkPolicy that leaves both pods unable to call the API. See values.yaml.",
+          "properties": {
+            "cidrs": {
+              "type": "array",
+              "description": "The addresses behind the `kubernetes` Service (its EndpointSlice), each as a CIDR. Not the Service's cluster IP.",
+              "items": {
+                "type": "string",
+                "pattern": "^([0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{1,2}|[0-9a-fA-F:]*:[0-9a-fA-F:.]*/[0-9]{1,3})$"
+              }
+            },
+            "ports": {
+              "type": ["array", "null"],
+              "description": "The TCP port(s) of those endpoints (6443 on most self-managed clusters, 443 on most managed ones).",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          }
+        },
         "enforcementProbe": {
           "type": "object",
           "description": "helm test probe that measures whether this cluster enforces the gonk-agent egress policy. `enabled: false` is for clusters where the probe cannot run, NOT for silencing a red result.",

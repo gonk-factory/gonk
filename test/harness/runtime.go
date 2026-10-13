@@ -108,7 +108,7 @@ func probeRuntime(bin string) (*Runtime, error) {
 // not a podman shim) -- exactly what a GitHub Actions ubuntu-24.04 runner
 // gives you -- HostNetwork came back false and the harness silently booted
 // an unreachable container. gonk's container-backed suites only ever run on
-// Linux (this file's own WSL notes, docs/environment.md), where
+// Linux (docs/environment.md, "Building and testing this repository"), where
 // --network=host is available and safe for both runtimes, so this is
 // unconditional rather than Podman-only.
 func hostNetworkFor(kind RuntimeKind) bool {
@@ -117,7 +117,7 @@ func hostNetworkFor(kind RuntimeKind) bool {
 }
 
 func looksLikePodman(version []byte) bool {
-	// `docker` on this box may be a podman shim. Ask a podman-specific field: only
+	// `docker` may be a podman shim. Ask a podman-specific field: only
 	// podman's info carries a Buildah version.
 	_ = version
 	out, err := exec.Command("docker", "info", "--format", "{{.Host.BuildahVersion}}").CombinedOutput()

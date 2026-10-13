@@ -263,6 +263,10 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, recp *bead
 	// below leaves the next attempt a controller-built word about it on the
 	// record. fbKinds is nil for an agent that gets none.
 	fbKinds := retryFeedbackKinds(agent)
+	if !ownChainAgent(agent) {
+		// An issue-shaped prompt has no OUTPUT heading for a sentence to point at.
+		defer func() { recp.RetryFeedback.What = issueWording(recp.RetryFeedback.What) }()
+	}
 	raw, ok := extractBatch(text)
 	if !ok {
 		if fbKinds != nil { // feedback:no-batch
@@ -277,7 +281,7 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, recp *bead
 		}
 		return false, "unparseable batch: " + perr.Error(), nil
 	}
-	if fbKinds != nil { // apply:own-chain
+	if ownChainAgent(agent) { // apply:own-chain
 		// gonk-tios D8 / gonk-2usw 5.3, 5.4: each agent's own chain, before
 		// any issue-shaped gate. An answer that was APPLIED ends the feedback
 		// of an earlier refusal: there is nothing left to correct.
@@ -297,18 +301,33 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, recp *bead
 		// fault. Fail closed: never apply an unvalidated batch.
 		return false, "", serr
 	}
+	// THE ISSUE-SHAPED CHAIN (triage, scaffold). Each refusal below leaves the
+	// next attempt a word (gonk-hpgy): the gate's name as the code and a FIXED
+	// sentence -- never `detail`, which quotes the batch.
+	refuse := func(gate, detail string, fb effects.Feedback) (bool, string, error) {
+		if fbKinds != nil { // feedback:issue-gate
+			fb.Code = gate
+			recordRetryFeedback(recp, fb)
+		}
+		return false, gate + ": " + detail, nil
+	}
+	gateFeedback := func(gate string) effects.Feedback { return effects.Feedback{What: issueGateFeedback[gate]} }
 	if verr := effects.Validate(batch, shape); verr != nil {
-		return false, "shape: " + verr.Error(), nil
+		fb := effects.ExplainShape(shape)
+		if r := effects.AsRefusal(verr); r != nil {
+			fb = effects.ExplainFix(r, batch)
+		}
+		return refuse(issueGateShape, verr.Error(), fb)
 	}
 	if terr := effects.ValidateTargets(batch, effects.Targets{Issues: map[int64]bool{rec.IssueIID: true}}); terr != nil {
-		return false, "target: " + terr.Error(), nil
+		return refuse(issueGateTarget, terr.Error(), gateFeedback(issueGateTarget))
 	}
 	// The path gate. Separate from Validate (which asks "is this the right shape
 	// of batch for this agent") because this asks "are these writes allowed at
 	// all" -- and unlike a comment, a file effect becomes a commit in someone's
 	// repository. A batch must pass both.
 	if perr := effects.ValidatePaths(batch); perr != nil {
-		return false, "path: " + perr.Error(), nil
+		return refuse(issueGatePath, perr.Error(), gateFeedback(issueGatePath))
 	}
 	// THE COMMENT GATE (T-06, closes R-03/R-16): checked before ANY write, the
 	// same discipline the path and label gates below use -- a batch with one
@@ -317,12 +336,15 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, recp *bead
 	// refuses rather than strips a quick-action line: see pkg/effects/comment.go
 	// for exactly what the rule catches and what it deliberately does not.
 	if cerr := effects.ValidateComments(batch); cerr != nil {
-		return false, "comment: " + cerr.Error(), nil
+		return refuse(issueGateComment, cerr.Error(), gateFeedback(issueGateComment))
 	}
 	// The FIFTH GATE (gonk-hsb): not "is this batch well-formed" but "did the
 	// session do the work it claims to report". Observing-only until
 	// EnforceTrajectory is set -- see checkTrajectory.
 	if v := checkTrajectory(ctx, d, rec, agent, batch); v != "" {
+		if fbKinds != nil { // feedback:issue-trajectory
+			recordRetryFeedback(recp, effects.Feedback{Code: issueGateTrajectory, What: issueGateFeedback[issueGateTrajectory]})
+		}
 		return false, v, nil
 	}
 	// THE LABEL GATE (T-05, closes R-02): checked before ANY write -- comments
@@ -340,7 +362,7 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, recp *bead
 		}
 		for _, lbl := range e.Add {
 			if _, lerr := normaliseLabel(lbl, prefix); lerr != nil {
-				return false, "label: " + lerr.Error(), nil
+				return refuse(issueGateLabel, lerr.Error(), gateFeedback(issueGateLabel))
 			}
 		}
 	}
@@ -430,6 +452,8 @@ func applyBrokerBatch(ctx context.Context, d sweepDeps, agent string, recp *bead
 	// The verdict acts LAST, so the reporter has the explanation in hand before
 	// the issue changes state underneath them (gonk-aib).
 	applyVerdict(ctx, d, rec, batch)
+	// An answer that was APPLIED ends the feedback of an earlier refusal.
+	recp.RetryFeedback = beadstore.RetryFeedback{} // feedback:issue-clear
 	return true, "", nil
 }
 

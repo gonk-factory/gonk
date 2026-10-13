@@ -142,7 +142,7 @@ current as of Task 8's re-review:
 | Does the ledger's transactional guarantee actually hold? | **Measured, not assumed — see "The ledger backend" below.** Task 0b's spike found Dolt does *not* serialize the race; the shipping store is Postgres, whose `SELECT ... FOR UPDATE` was independently verified to block. | An unverified transactional guarantee under a budget ceiling is exactly the thing that must not be assumed. |
 | Two meter **replicas** race the same ceiling | **Meter is multi-replica-safe.** The store enforces both money-safety properties across pods: overspend via `SELECT ... FOR UPDATE` on the project's ceiling row, and double-reserve of `/decide` via a partial `UNIQUE` index on the open `(project, bead_id, session_key)` key plus an in-transaction pre-check under the same lock. Proven by `TestReserveIfFitsRace` and `TestReserveIsIdempotentAcrossReplicas` (`internal/meter/store/postgres_race_test.go`), both of which call the store directly, with no service-side mutex in the way. The in-process `keyedMutex` is a throughput optimization only. | Both races close in the database, not in an in-process lock, so N pods are exactly as safe as one. |
 | A local rung burns the whole token budget **through LiteLLM** | LiteLLM's USD `max_budget` now covers it: local models carry a **synthetic** per-token price, and meter folds the token ceiling into the dollar ceiling it provisions (Decision 9). Meter's reservation gate refuses first; LiteLLM refuses if meter is wrong. | The token budget has a hard door **on that path**. |
-| **An agent pod calls Ollama (`http://192.0.2.10:11434`) DIRECTLY, around LiteLLM** | **NOTHING IN THIS PLAN STOPS IT.** Ollama needs no credential, and the NetworkPolicy that would forbid the egress **is not enforced** (Flannel; Cilium suspended). Zero metering, no ceiling, no attribution. | **NOT CLOSED.** Owner decision: ship, document, do not gate. **Local-model budgets are advisory** until Cilium lands; cloud-rung budgets are hard **only when the project also sets a finite `monthly_tokens`** (else `MaxBudgetFor` provisions no `max_budget` and the key is unbudgeted — see the row below). Plan 05 ships the policy; Plan 06 skip-tests it; un-skipping that test is the gate. |
+| **An agent pod calls Ollama (`http://192.0.2.10:11434`) DIRECTLY, around LiteLLM** | **NOTHING IN THIS PLAN STOPS IT.** Ollama needs no credential, and the NetworkPolicy that would forbid the egress binds **only where the cluster's CNI enforces NetworkPolicy**. Where it does not: zero metering, no ceiling, no attribution. | **NOT CLOSED by gonk.** Owner decision: ship, document, do not gate. **Local-model budgets are advisory** wherever the egress policy is not enforced; cloud-rung budgets are hard **only when the project also sets a finite `monthly_tokens`** (else `MaxBudgetFor` provisions no `max_budget` and the key is unbudgeted — see the row below). The chart ships the policy and a `helm test` probe that reports whether it is enforced. |
 | **A project sets `monthly_cost_usd` finite but leaves `monthly_tokens` unlimited** | `MaxBudgetFor` returns `nil` (LiteLLM omits `max_budget`): the virtual key has **no hard door at all**, not even on cost. The choice is deliberate (LiteLLM unifies real + synthetic USD, so a `max_budget = cost` alone would let synthetic local dollars close the door early on legitimate local work), but the consequence is real: only meter's soft reservation-estimate gate protects the cost ceiling, and a runaway session can overshoot it. | **Known limitation.** The hard cloud door requires a finite `monthly_tokens` too. Set both dimensions for a hard backstop. |
 | Synthetic dollars get counted as real spend | `spend.Row.Synthetic` is set at ingest from the rung's `kind`; `budget.Spend` keeps `CostUSD` (real) and `SyntheticCostUSD` separate; `rung.Decide`'s cost gate reads **real only**. A rung missing from the catalog is treated as **real** (fail closed). | If synthetic dollars reached the cost gate, `monthly_cost_usd: 0` would make the onboarding default's own local rung unaffordable — the project would be dead on arrival. |
 | A spend row for last month lands after the window rolled | Rows are windowed by **the row's timestamp**, never by ingest time. A July row arriving on 1 August is charged to July. | Otherwise every project gets a free budget on the 1st. |
@@ -269,15 +269,15 @@ time, so a late-arriving row never gets a free budget on the new month; and
 `complete: false` on every cost-endpoint response tells a reader (most
 importantly, the pack writing a commit trailer) that spend rows for an
 open session/bead may not have landed yet. **The poller must always pass a
-bounded date window and paginate** — a verified smoke test in
-`docs/environment.md` ("OPERATIONAL HAZARD") **OOM-killed the live LiteLLM
-pod** with one unbounded `/spend/logs` query, because it loads the whole
+bounded date window and paginate** — a smoke test during development
+**OOM-killed a live LiteLLM pod** with one unbounded `/spend/logs` query
+(the rule is in `docs/environment.md`, "OPERATIONAL HAZARD"), because it loads the whole
 spend table into memory, and meter shares that LiteLLM with the whole
 cluster. A missing date bound on this poller is a code-review blocker.
 
 ### Decision 12 — secrets are file mounts, two rotation slots
 
-Vault/1Password -> Kubernetes Secret -> **file mount**. Never an env var
+A secret store (or `kubectl`) -> Kubernetes Secret -> **file mount**. Never an env var
 (leaks into `ps`, crash dumps, every child process), never a flag, never
 the config file, never git. Applies to the LiteLLM admin credential and the
 meter API bearer token, each with a current slot and a previous slot so a
@@ -327,32 +327,38 @@ operation to be safe.
 
 ## THE NETWORK-LAYER BYPASS IS OPEN, AND THIS ADR IS ONE OF THE THREE PLACES THAT MUST SAY SO
 
-**NetworkPolicies are not enforced on the target cluster.** Flannel does
-not implement them, and the Cilium HelmRelease that would is **suspended**.
-LiteLLM routes local models to an **unauthenticated Ollama at
-`http://192.0.2.10:11434`**. An agent pod that can reach the network can
-therefore skip LiteLLM entirely, call Ollama directly, and burn local GPU
-with **zero metering and no ceiling**.
+*(Reworded for v0.2.1. This section used to state the enforcement posture of
+the cluster gonk was developed on as a fact about gonk. The decision is the
+same; the condition is now stated as a condition.)*
+
+**A NetworkPolicy is enforced only where the cluster's network plugin (CNI)
+implements it.** The API server accepts the object either way, and some CNIs
+do not implement it. Where that is so, and LiteLLM routes local models to a
+model server that answers **without a credential** (for example an Ollama at
+`http://192.0.2.10:11434`), an agent pod that can reach the network can skip
+LiteLLM entirely, call the model server directly, and use it with **zero
+metering and no ceiling**. That was the case on the cluster this ADR was
+written against.
 
 Every door this ADR describes — the reservation gate, the virtual key's
 `max_budget`, the synthetic price that makes the token budget hard through
 LiteLLM — binds only traffic that actually goes **through** LiteLLM. The
-NetworkPolicy is the only thing that would force it to, and it is not
-enforced.
+NetworkPolicy is the only thing that would force it to, and whether it is
+enforced is a property of the cluster, not of gonk.
 
 **Say it exactly this way, everywhere:** **cloud-rung budgets are hard —
 when the project sets a finite `monthly_tokens` as well as a finite
-`monthly_cost_usd`. Local-model budgets are advisory** until Cilium lands
-and the egress policy is actually enforced. Owner decision (2026-07-13):
-ship it, document the gap, do not gate on it. `docs/environment.md` is the
-primary record of the infrastructure fact; this ADR and the metric help
-strings/dashboards are the other two places it must be said, honestly, with
-no softening. Plan 05 ships the egress NetworkPolicy anyway
-(documentation-as-code — it becomes real the day Cilium is un-suspended);
-Plan 06 writes the egress-denial test and **skips** it, naming Cilium in
-the skip message. Un-skipping that test is the gate that proves the
-guarantee is real. Nothing in this system may be written, logged, or
-dashboarded as though that day has already come.
+`monthly_cost_usd`. Local-model budgets are advisory** wherever the egress
+policy is not enforced. Owner decision (2026-07-13): ship it, document the
+gap, do not gate on it. `docs/environment.md` ("KNOWN LIMITATION") states it
+for any deployment; this ADR and the metric help strings/dashboards are the
+other two places it must be said, honestly, with no softening. The chart
+ships the egress NetworkPolicy regardless (it is real wherever the CNI
+enforces it), and a `helm test` probe that reports ENFORCED or NOT ENFORCED
+for the cluster it runs on (`chart/gonk/README.md`, section 0); the
+`netpol-enforcement` test runs the same probe on an enforcing CNI. Nothing in
+this system may be written, logged, or dashboarded as though the policy were
+enforced everywhere.
 
 ---
 
@@ -436,5 +442,5 @@ dashboarded as though that day has already come.
   the division of responsibility.
 - `docs/spikes/dolt-reservation-isolation.md` — the Decision-10 spike's full
   method, raw numbers, and decision record.
-- `docs/environment.md` — the network-layer bypass's primary infrastructure
-  record.
+- `docs/environment.md`, "KNOWN LIMITATION" — the network-layer bypass,
+  stated for any deployment.

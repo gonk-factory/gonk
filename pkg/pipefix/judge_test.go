@@ -571,7 +571,8 @@ func TestJ1ASkippedPipelineWithoutJobsIsNotACandidate(t *testing.T) {
 // TestTheRecordedSkipCIFactsWaitThenTimeOut judges the facts `gonk-gate
 // pipefix-judge` READ on the real GitLab for a `[skip ci]` commit
 // (testdata/skipci_facts.json: the `facts` of its output, verbatim, from
-// hack/pipefix_probe.py run 20261007T145957Z on the synthetic project 75,
+// the maintainers' pipefix probe (pipefix_probe.py, not published), run
+// 20261007T145957Z on the synthetic project 75,
 // merge request !46). The build that recorded them answered UNVERIFIABLE by
 // J3.NOT_OBSERVED(absent) at once, with both pipelines as candidates
 // (gonk-vi9k).

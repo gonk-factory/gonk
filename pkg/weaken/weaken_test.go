@@ -67,6 +67,24 @@ func TestGo(t *testing.T) {
 		{"a skip added in a helper every test calls", rep("{ t.Helper() }", "{ t.Helper(); t.Skip() }"), AddedSkip, "helper"},
 		{"a skip added inside a closure", rep("\tif got := Total", "\tfunc() { t.Skip() }()\n\tif got := Total"), AddedSkip, "TestTotal"},
 		{"a bare return added first", rep("\tif got := Total", "\treturn\n\tif got := Total"), AddedSkip, "TestTotal"},
+		{"a guarded return added first", rep("\tif got := Total", "\tif testing.Short() {\n\t\treturn\n\t}\n\tif got := Total"), AddedSkip, "TestTotal"},
+		{"an always-true guarded return added first", rep("\tif got := Total", "\tif true {\n\t\treturn\n\t}\n\tif got := Total"), AddedSkip, "TestTotal"},
+		{"a guarded return with an init clause added first", rep("\tif got := Total", "\tif v := os.Getenv(\"CI\"); v != \"\" {\n\t\treturn\n\t}\n\tif got := Total"), AddedSkip, "TestTotal"},
+		{"a return added first in an else branch", rep("\tif got := Total", "\tif !testing.Short() {\n\t\tt.Log(\"long\")\n\t} else {\n\t\treturn\n\t}\n\tif got := Total"), AddedSkip, "TestTotal"},
+		{"a return added first in an else-if branch", rep("\tif got := Total", "\tif a() {\n\t\tt.Log(\"a\")\n\t} else if b() {\n\t\treturn\n\t}\n\tif got := Total"), AddedSkip, "TestTotal"},
+		{"a return added first inside a bare block", rep("\tif got := Total", "\t{\n\t\treturn\n\t}\n\tif got := Total"), AddedSkip, "TestTotal"},
+		{"a guarded return added first inside a bare block", rep("\tif got := Total", "\t{\n\t\tif testing.Short() {\n\t\t\treturn\n\t\t}\n\t}\n\tif got := Total"), AddedSkip, "TestTotal"},
+		{"a guarded return added first to a benchmark", rep("\tfor i := 0; i < b.N; i++ {", "\tif testing.Short() {\n\t\treturn\n\t}\n\tfor i := 0; i < b.N; i++ {"), AddedSkip, "BenchmarkTotal"},
+
+		// Near misses: a leading `if` that does NOT switch the test off, and
+		// a guarded return somewhere the predicate does not claim to read.
+		{"a leading guard that fails the test", rep("\tif got := Total", "\tif Total(nil) != 0 {\n\t\tt.Fatal(\"precondition\")\n\t}\n\tif got := Total"), "", ""},
+		{"a leading guard that fails the test and returns", rep("\tif got := Total", "\tif Total(nil) != 0 {\n\t\tt.Error(\"precondition\")\n\t\treturn\n\t}\n\tif got := Total"), "", ""},
+		{"a leading guard with an empty body", rep("\tif got := Total", "\tif testing.Short() {\n\t}\n\tif got := Total"), "", ""},
+		{"a leading empty block", rep("\tif got := Total", "\t{\n\t}\n\tif got := Total"), "", ""},
+		{"a guarded return added after the assertions", rep("\t\tt.Fatalf(\"Total = %d, want 3\", got)\n\t}\n", "\t\tt.Fatalf(\"Total = %d, want 3\", got)\n\t}\n\tif Total(nil) == 0 {\n\t\treturn\n\t}\n\tt.Log(\"non-zero\")\n"), "", ""},
+		{"a guarded return added first to a helper", rep("{ t.Helper() }", "{\n\tif t == nil {\n\t\treturn\n\t}\n\tt.Helper()\n}"), "", ""},
+		{"a new test that starts with a guarded return", baseTest + "\nfunc TestNew(t *testing.T) {\n\tif testing.Short() {\n\t\treturn\n\t}\n}\n", "", ""},
 
 		{"a go:build tag added", "//go:build never\n\n" + baseTest, BuildConstraint, "never"},
 		{"a +build tag added", "// +build ignore\n\n" + baseTest, BuildConstraint, "ignore"},
@@ -129,5 +147,33 @@ func TestGoWithAnUnparseableBase(t *testing.T) {
 	}
 	if got := Go([]byte(broken), []byte("//go:build never\n\n"+baseTest)); got.Sub != BuildConstraint {
 		t.Errorf("a tag added while repairing = %q, want %q", got.Sub, BuildConstraint)
+	}
+}
+
+// The leading return is compared by RANK, not presence: a test that already
+// starts with a guarded return may be edited freely, but turning the guard
+// into an unconditional return switches off the runs the guard let through.
+func TestGoLeadingReturnIsComparedByRank(t *testing.T) {
+	const body = "\tif Total(nil) != 0 {\n\t\tt.Fatal(\"want 0\")\n\t}\n}\n"
+	const head = "package calc\n\nimport \"testing\"\n\nfunc TestEmpty(t *testing.T) {\n"
+	guarded := head + "\tif testing.Short() {\n\t\treturn\n\t}\n" + body
+	bare := head + "\treturn\n" + body
+	plain := head + body
+	for _, tc := range []struct {
+		name, base, patched, want string
+	}{
+		{"a guarded test edited elsewhere", guarded, strings.Replace(guarded, "want 0", "want zero", 1), ""},
+		{"a guarded test left as it is", guarded, guarded, ""},
+		{"a bare return left as it is", bare, bare, ""},
+		{"a guard made unconditional", guarded, bare, AddedSkip},
+		{"an unconditional return given a guard", bare, guarded, ""},
+		{"a guard removed", guarded, plain, ""},
+		{"a guard added", plain, guarded, AddedSkip},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Go([]byte(tc.base), []byte(tc.patched)); got.Sub != tc.want {
+				t.Fatalf("Go = %q (%s), want %q", got.Sub, got.Detail, tc.want)
+			}
+		})
 	}
 }

@@ -23,7 +23,7 @@ name = "gonk"
 # a field of PackConfig and is exactly the kind of stray key the loader's
 # undecoded-key check is built to catch.
 schema = 2
-version = "0.2.0"
+version = "0.2.1"
 description = "Issue triage, .agent/ scaffolding and mention replies on self-hosted GitLab, with hard budgets."
 
 # ---------------------------------------------------------------------------

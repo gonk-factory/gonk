@@ -19,8 +19,8 @@ import (
 //
 // It is also a property gonk does not hold. Membership is granted in GitLab's
 // UI. `membership=true` includes projects inherited through GROUP membership,
-// and gonk-project lives in the same `agentic` group as the repos gonk is meant
-// to work on -- so adding the bot to that group would make gonk watch its own
+// and a copy of gonk's own source often lives in the same group as the repos
+// gonk is meant to work on -- so adding the bot to that group would make gonk watch its own
 // broker, gate and effect-shape.toml, arriving as a side effect of onboarding
 // rather than as a decision. That is exactly the scenario gonk-066's workflow
 // scope gate exists to prevent.
@@ -34,7 +34,7 @@ type Blocklist struct {
 }
 
 // ParseBlocklist reads entries that are either a full path with namespace
-// ("agentic/gonk-project") or a numeric project id ("69").
+// ("gonk-factory/gonk") or a numeric project id ("69").
 //
 // FAILS CLOSED BY CONSTRUCTION: it returns an error rather than a partial list,
 // and callers must treat that as fatal. An entry nobody can parse is an entry
@@ -56,13 +56,13 @@ func ParseBlocklist(entries []string) (Blocklist, error) {
 			continue
 		}
 		// A path must look like a path. Accepting a bare word would silently
-		// match nothing -- a typo'd "gonk-project" instead of
-		// "agentic/gonk-project" would parse fine and block nothing, which is
+		// match nothing -- a typo'd "gonk" instead of
+		// "gonk-factory/gonk" would parse fine and block nothing, which is
 		// the failure this rejects.
 		if !strings.Contains(e, "/") {
 			return Blocklist{}, fmt.Errorf(
 				"blocklist: %q is neither a numeric project id nor a path with namespace "+
-					"(want e.g. \"agentic/gonk-project\"); a bare name would match nothing and "+
+					"(want e.g. \"gonk-factory/gonk\"); a bare name would match nothing and "+
 					"block nothing", e)
 		}
 		b.paths[strings.ToLower(e)] = struct{}{}

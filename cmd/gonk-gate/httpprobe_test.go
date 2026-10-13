@@ -22,29 +22,81 @@ import (
 // streams, plus its exit code. Both streams, because the whole point of
 // gonk-hckm is that the MESSAGE is what carries the distinction -- a test that
 // looked at only one of them could miss it entirely.
-// probeTestTimeout is what every test that is NOT about the timeout gives the
+//
+// probeHangGuard is what every test that is NOT about the timeout gives the
 // probe. The 5s default is the probe's contract with its callers, not a bound
 // a loaded CI runner must meet: on 2026-10-09 a TLS handshake against a local
 // httptest server took longer than 5s under -race on a contended runner, and a
 // test asserting "TLS VERIFICATION FAILED" saw "NO RESPONSE within 5s" instead
-// (main pipeline 3448). Tests about classification must not race the clock
-// (docs/testing-time.md); the timeout tests pass --timeout themselves.
-const probeTestTimeout = "2m"
+// (main pipeline 3448, gonk-zexc). The timeout tests pass --timeout themselves.
+//
+// WHAT THIS IS, AND IS NOT (docs/testing-time.md rule 3). It is a wider
+// margin on the same real clock, not the removal of the clock: the probe's
+// deadline is a context deadline around real network I/O, a non-positive
+// --timeout is a usage error, and a test that makes a real round trip needs
+// SOME bound or a hung server wedges the suite. So the bound stays and is made
+// a hang guard: far above anything the round trip takes under load, and --
+// below -- it says so itself when it fires, instead of surfacing as "the
+// output does not name a TLS verification failure", which reads as a wrong
+// classification and sends the reader to the classifier.
+//
+// How far above: `make hunt` on the commit before the bound was widened (36
+// burner processes, GOMAXPROCS=2, -race) never turned this test red -- 0 of
+// 15,000 runs -- but it measured the round trip at p50 0.03s, p99 0.07s and
+// max 4.35s: 145x the median and 87% of the old 5s, on a machine with nothing
+// wrong. Two minutes is 27x that worst case.
+const probeHangGuard = 2 * time.Minute
 
 func runProbe(t *testing.T, args ...string) (out string, code int) {
 	t.Helper()
-	hasTimeout := false
+	guarded := true
 	for _, a := range args {
 		if a == "--timeout" || strings.HasPrefix(a, "--timeout=") || a == "-timeout" || strings.HasPrefix(a, "-timeout=") {
-			hasTimeout = true
+			guarded = false
 		}
 	}
-	if !hasTimeout {
-		args = append([]string{"--timeout", probeTestTimeout}, args...)
+	if guarded {
+		args = append([]string{"--timeout", probeHangGuard.String()}, args...)
 	}
 	var stdout, stderr bytes.Buffer
 	code = runHTTPProbe(args, &stdout, &stderr)
-	return stdout.String() + stderr.String(), code
+	out = stdout.String() + stderr.String()
+	if guarded {
+		if msg := hangGuardFired(out); msg != "" {
+			t.Fatal(msg)
+		}
+	}
+	return out, code
+}
+
+// hangGuardFired returns the failure to report when a probe that was given
+// probeHangGuard ran into it, and "" otherwise. It is the guard naming itself
+// (rule 3): this is not a classification failure and not "too slow".
+func hangGuardFired(out string) string {
+	if !strings.Contains(out, "NO RESPONSE within "+probeHangGuard.String()) {
+		return ""
+	}
+	return "HANG GUARD, not a finding about the probe: a test that is not about the timeout gave the probe " +
+		probeHangGuard.String() + " and nothing came back in that time. The local test server hung or this process was starved for two minutes; " +
+		"the classification this test asserts was never reached. Output:\n" + out
+}
+
+// The guard names itself, and only itself: the timeout tests' own bound and
+// every other outcome pass through untouched.
+func TestTheProbeHangGuardNamesItself(t *testing.T) {
+	fired := describeProbeError("https://127.0.0.1:1/healthz", probeHangGuard, context.DeadlineExceeded)
+	if msg := hangGuardFired(fired); !strings.Contains(msg, "HANG GUARD") || !strings.Contains(msg, fired) {
+		t.Fatalf("the probe's own timeout message for the guard's duration (%q) was not recognised as the hang guard: %q", fired, msg)
+	}
+	for _, out := range []string{
+		describeProbeError("https://127.0.0.1:1/healthz", 150*time.Millisecond, context.DeadlineExceeded),
+		describeProbeError("https://127.0.0.1:1/healthz", probeHangGuard, &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}),
+		"GET https://127.0.0.1:1/healthz answered HTTP 200\n",
+	} {
+		if msg := hangGuardFired(out); msg != "" {
+			t.Errorf("%q was taken for the hang guard: %s", out, msg)
+		}
+	}
 }
 
 func TestHTTPProbeExitsZeroOnTwoXX(t *testing.T) {

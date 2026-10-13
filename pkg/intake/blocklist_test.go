@@ -9,7 +9,7 @@ import (
 )
 
 func TestBlocklistMatchesByPathAndID(t *testing.T) {
-	b, err := ParseBlocklist([]string{"agentic/gonk-project", "69", " homelab/secret-repo "})
+	b, err := ParseBlocklist([]string{"gonk-factory/gonk", "69", " helm/helm "})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -18,16 +18,16 @@ func TestBlocklistMatchesByPathAndID(t *testing.T) {
 		p    glab.Project
 		want bool
 	}{
-		{"by path", glab.Project{ID: 999, PathWithNamespace: "agentic/gonk-project"}, true},
+		{"by path", glab.Project{ID: 999, PathWithNamespace: "gonk-factory/gonk"}, true},
 		{"by id", glab.Project{ID: 69, PathWithNamespace: "renamed/elsewhere"}, true},
-		{"whitespace trimmed", glab.Project{ID: 5, PathWithNamespace: "homelab/secret-repo"}, true},
+		{"whitespace trimmed", glab.Project{ID: 5, PathWithNamespace: "helm/helm"}, true},
 		// GitLab paths are case-preserving but compared case-insensitively, so a
-		// project reachable as Agentic/Gonk-Project is the same project.
-		{"case insensitive", glab.Project{ID: 5, PathWithNamespace: "Agentic/Gonk-Project"}, true},
-		{"unrelated", glab.Project{ID: 63, PathWithNamespace: "homelab/talos-toolkit"}, false},
+		// project reachable as Gonk-Factory/Gonk is the same project.
+		{"case insensitive", glab.Project{ID: 5, PathWithNamespace: "Gonk-Factory/Gonk"}, true},
+		{"unrelated", glab.Project{ID: 63, PathWithNamespace: "prometheus/prometheus"}, false},
 		// A blocked project renamed away from its listed path is still caught by
 		// id, and a NEW project taking the old path is still caught by path.
-		{"substring is not a match", glab.Project{ID: 5, PathWithNamespace: "agentic/gonk-project-docs"}, false},
+		{"substring is not a match", glab.Project{ID: 5, PathWithNamespace: "gonk-factory/gonk-docs"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := b.Blocked(tc.p); got != tc.want {
@@ -49,7 +49,7 @@ func TestBlocklistRefusesEntriesThatWouldBlockNothing(t *testing.T) {
 		{
 			// The dangerous typo: looks deliberate, matches nothing, and would
 			// leave gonk watching its own repository.
-			name: "bare name without a namespace", entries: []string{"gonk-project"},
+			name: "bare name without a namespace", entries: []string{"gonk"},
 			says: "block nothing",
 		},
 		{name: "zero id", entries: []string{"0"}, says: "positive project id"},
@@ -68,7 +68,7 @@ func TestBlocklistRefusesEntriesThatWouldBlockNothing(t *testing.T) {
 }
 
 func TestBlocklistTreatsBlankEntriesAsAbsent(t *testing.T) {
-	b, err := ParseBlocklist([]string{"", "   ", "agentic/gonk-project"})
+	b, err := ParseBlocklist([]string{"", "   ", "gonk-factory/gonk"})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestEmptyBlocklistIsLegalButDetectable(t *testing.T) {
 	if !b.Empty() {
 		t.Error("an empty list does not report Empty, so nothing can warn about it")
 	}
-	if b.Blocked(glab.Project{ID: 69, PathWithNamespace: "agentic/gonk-project"}) {
+	if b.Blocked(glab.Project{ID: 69, PathWithNamespace: "gonk-factory/gonk"}) {
 		t.Error("an empty list blocked something")
 	}
 }
@@ -131,8 +131,8 @@ func (g *blockGL) ListMemberProjects(context.Context) ([]glab.Project, error) {
 }
 
 func TestReconcileNeverObservesABlockedProject(t *testing.T) {
-	blocked := glab.Project{ID: 69, PathWithNamespace: "agentic/gonk-project"}
-	bl, err := ParseBlocklist([]string{"agentic/gonk-project"})
+	blocked := glab.Project{ID: 69, PathWithNamespace: "gonk-factory/gonk"}
+	bl, err := ParseBlocklist([]string{"gonk-factory/gonk"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestTheBlockedProjectTestIsNotVacuous(t *testing.T) {
 				"so the blocked case proves nothing")
 		}
 	}()
-	gl := &blockGL{projects: []glab.Project{{ID: 69, PathWithNamespace: "agentic/gonk-project"}}}
+	gl := &blockGL{projects: []glab.Project{{ID: 69, PathWithNamespace: "gonk-factory/gonk"}}}
 	r := &Reconciler{
 		GL: gl, Cache: NewCache(), Obs: NopObserver{},
 		Meter: NewMeterClient("http://127.0.0.1:1", "unused", nil),

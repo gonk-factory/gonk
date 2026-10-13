@@ -49,7 +49,7 @@ const changeHead = "version: 1\nenabled: true\nactions: { features: true }\n"
 // here.
 func defaultChange() EffectiveChange {
 	return EffectiveChange{
-		Triggers: []string{"label", "command", "mention"}, CreateClasses: []string{"test", "docs"},
+		Triggers: []string{"label"}, CreateClasses: []string{"test", "docs"},
 		RequireDocs: "when-labelled", DocsLabels: []string{"feature", "enhancement", "type::feature"},
 		RequireTestReport: false, MaxAttempts: 2, MaxOpen: 1, VerifyTimeout: 2 * time.Hour,
 		MaxFiles: 6, MaxChangedLines: 200, Paths: []string{},
@@ -73,8 +73,12 @@ func TestLoadDecodesTheChangeExample(t *testing.T) {
 		t.Errorf("Change = %+v\nwant     %+v", pc.Change, want)
 	}
 	eff := Resolve(Policy{Ladder: []string{"qwen-local"}}, Policy{}, withLadder(*pc))
-	if !eff.Actions.Features || !reflect.DeepEqual(eff.Change, defaultChange()) {
-		t.Errorf("effective = features %v, %+v\nwant true, %+v", eff.Actions.Features, eff.Change, defaultChange())
+	// The example spells out every key at its default except `triggers`, where
+	// it opts in to all three forms (the default is label only).
+	wantEff := defaultChange()
+	wantEff.Triggers = []string{"label", "command", "mention"}
+	if !eff.Actions.Features || !reflect.DeepEqual(eff.Change, wantEff) {
+		t.Errorf("effective = features %v, %+v\nwant true, %+v", eff.Actions.Features, eff.Change, wantEff)
 	}
 }
 
@@ -375,11 +379,17 @@ func TestResolveChange(t *testing.T) {
 			with(func(e *EffectiveChange) { e.Triggers = []string{"command"} })},
 		{"canonical order", z, z, ChangePolicy{Triggers: []string{"mention", "label"}},
 			with(func(e *EffectiveChange) { e.Triggers = []string{"label", "mention"} })},
-		{"an operator removes mention from the default", ChangePolicy{Triggers: []string{"label", "command"}}, z, z,
+		{"the default is label only (owner, 2026-10-10)", z, z, z,
+			with(func(e *EffectiveChange) { e.Triggers = []string{"label"} })},
+		{"a project opts in to all three forms", z, z, ChangePolicy{Triggers: []string{"label", "command", "mention"}},
+			with(func(e *EffectiveChange) { e.Triggers = []string{"label", "command", "mention"} })},
+		{"an operator list cannot add command to the default", ChangePolicy{Triggers: []string{"label", "command"}}, z, z,
+			with(func(e *EffectiveChange) { e.Triggers = []string{"label"} })},
+		{"an operator removes mention from a project's three", ChangePolicy{Triggers: []string{"label", "command"}}, z, ChangePolicy{Triggers: []string{"label", "command", "mention"}},
 			with(func(e *EffectiveChange) { e.Triggers = []string{"label", "command"} })},
 		{"an operator list cannot add a form the project dropped", ChangePolicy{Triggers: []string{"label", "command", "mention"}}, z,
 			ChangePolicy{Triggers: []string{"label"}}, with(func(e *EffectiveChange) { e.Triggers = []string{"label"} })},
-		{"instance and group lists both apply", ChangePolicy{Triggers: []string{"label", "command"}}, ChangePolicy{Triggers: []string{"command", "mention"}}, z,
+		{"instance and group lists both apply", ChangePolicy{Triggers: []string{"label", "command"}}, ChangePolicy{Triggers: []string{"command", "mention"}}, ChangePolicy{Triggers: []string{"label", "command", "mention"}},
 			with(func(e *EffectiveChange) { e.Triggers = []string{"command"} })},
 		{"disjoint lists allow nothing", ChangePolicy{Triggers: []string{"mention"}}, z, ChangePolicy{Triggers: []string{"label"}},
 			with(func(e *EffectiveChange) { e.Triggers = []string{} })},
@@ -653,9 +663,16 @@ func TestFoldChangeOnlyTightens(t *testing.T) {
 
 func TestChangeHelpers(t *testing.T) {
 	e := defaultChange()
-	for form, want := range map[string]bool{"label": true, "command": true, "mention": true, "triage-verdict": false, "": false} {
+	for form, want := range map[string]bool{"label": true, "command": false, "mention": false, "triage-verdict": false, "": false} {
 		if got := e.AllowsTrigger(form); got != want {
-			t.Errorf("AllowsTrigger(%q) = %v, want %v", form, got, want)
+			t.Errorf("default: AllowsTrigger(%q) = %v, want %v", form, got, want)
+		}
+	}
+	all := defaultChange()
+	all.Triggers = []string{"label", "command", "mention"}
+	for form, want := range map[string]bool{"label": true, "command": true, "mention": true, "triage-verdict": false, "": false} {
+		if got := all.AllowsTrigger(form); got != want {
+			t.Errorf("all three: AllowsTrigger(%q) = %v, want %v", form, got, want)
 		}
 	}
 	for class, want := range map[string]bool{"test": true, "docs": true, "source": false, "deps": false, "ci": false} {

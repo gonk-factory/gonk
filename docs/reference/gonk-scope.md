@@ -218,7 +218,7 @@ tree is never consulted.
 
 | Fact | Helper | Used for |
 |---|---|---|
-| the base `.gitlab-ci.yml`'s local includes | `scope.CILocalIncludes(blob)` | class `ci` |
+| the base `.gitlab-ci.yml`'s local includes, through the files they include in turn | `scope.ResolveCILocalIncludes(blob, read)` (one file's own entries: `scope.CILocalIncludes(blob)`) | class `ci` |
 | which base files are generated | `scope.IsGenerated(blob)` | class `generated` |
 
 ## 2. Layers and the fold
@@ -456,7 +456,7 @@ human merges; `pkg/scope` never sees a repository.
 | Any consumer: `SC-CLASS`, `SC-PROT` over layer patterns, `SC-SIZE`, `SC-BEAD` and the broker wiring | 066 S4; gonk-2usw parts EFFECTS and APPLY |
 | A pack row for any shipped agent | with each code-writing agent (gonk-2usw part AGENT) |
 | Fetching `.gonk.yml` and the base facts at the pinned SHA | the dispatch (066 S0b; gonk-2usw part DISPATCH). `Fold` requires the SHA; it does not fetch |
-| Following includes of includes, and a project whose CI configuration file is not `.gitlab-ci.yml` (a GitLab project setting) | `CILocalIncludes` reads ONE blob. The controller must pass every file that is pipeline definition in `BaseFacts.CILocalIncludes` (entries are matched literally and as patterns); resolving the full set is the dispatch's job, with `pkg/cidef` (gonk-2usw part CIDEF). Until then such a file has its built-in class |
+| A project whose CI configuration file is not `.gitlab-ci.yml` (a GitLab project setting); the files behind a WILDCARD include, a VARIABLE include or a `!reference` include | `ResolveCILocalIncludes` follows every literal `include: local:` from the root file through the files it includes (at most 150 files; one more is an error, as is an included file that is not YAML or cannot be read). Every YAML document of a file is read (a definition with a `spec:` header is two documents). A wildcard entry is kept as a pattern -- a file it matches is class `ci` -- but is not expanded, so what THOSE files include is not known: the result says `Complete: false`, and the fix apply then compares the merged definitions instead of the files. Until the tree is listed, a file reached only through a wildcard-included file has its built-in class. Two more forms say `Complete: false`: an entry containing `$` (`local: 'ci/$FLAVOR.yml'` -- GitLab decides the file when it creates the pipeline; the entry is kept as written, is not read, and makes no file class `ci`, so the file it resolves to keeps its built-in class), and an include under a custom YAML tag (`include: !reference [...]`, which is not read as a list of paths). An entry using `$[[ inputs.x ]]` interpolation is refused by the pattern syntax (`[`), an error like the next one. A local include GitLab accepts and the pattern syntax here does not (`configs/**.yml`: `**` inside a segment) is an error: no fix is dispatched for such a project |
 | `.gonk.yml` `verify:` (test commands) | 066 Q4 is still tentative; no schema until it is designed |
 | `.gonk.yml` `scope.labels` (label-declared bead scope) | 066 Q2: a later per-project opt-in |
 | `scope.auto_merge_classes` | 066 S8 / gonk-rk1m |

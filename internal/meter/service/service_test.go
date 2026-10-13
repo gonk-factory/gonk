@@ -30,7 +30,7 @@ import (
 // testOperatorYAML is the shared operator config for most tests: instance
 // ladder [qwen-local, glm, sonnet], NO instance budget (so
 // TestRegisterUnlimitedBudgetOmitsMaxBudget stays true when nothing else sets
-// one either), group "agentic" tightens to $50, group "agentic/experiments"
+// one either), group "kubernetes" tightens to $50, group "kubernetes/experiments"
 // only enables (so the nested-group fold test can prove the ancestor's
 // ceiling survives it).
 const testOperatorYAML = `
@@ -45,9 +45,9 @@ instance:
 cloud_allowance:
   enabled: true
 groups:
-  agentic:
+  kubernetes:
     budget: { monthly_cost_usd: 50 }
-  agentic/experiments:
+  kubernetes/experiments:
     enabled: true
 rungs:
   - { name: qwen-local, kind: local, model: qwen3-coder-30b, est_cost_usd: 0,    est_tokens: "50K",  synthetic_usd_per_1m_tokens: 1.0 }
@@ -182,7 +182,7 @@ meter: { max_spend_staleness: 5m, reservation_ttl: 60m }
 }
 
 func TestRegisterUnlimitedBudgetOmitsMaxBudget(t *testing.T) {
-	f := newTestService(t) // no instance budget, project not in the "agentic" group
+	f := newTestService(t) // no instance budget, project not in the "kubernetes" group
 	f.register("solo/repo", "solo-repo", "version: 1\nenabled: true\nactions: { triage: true }\nladder: [qwen-local]\n")
 
 	k, ok := f.admin.Keys["gonk-solo-repo"]
@@ -259,7 +259,7 @@ func TestRegisterInvalidConfigDELETESAnExistingKey(t *testing.T) {
 
 func TestRegisterResolvesUsingNESTEDGroupPolicy(t *testing.T) {
 	f := newTestService(t)
-	resp := f.register("agentic/experiments/spike", "agentic-experiments-spike",
+	resp := f.register("kubernetes/experiments/spike", "kubernetes-experiments-spike",
 		"version: 1\nenabled: true\nactions: { triage: true }\nladder: [qwen-local]\nbudget: { monthly_cost_usd: 200 }\n")
 	if resp.Budget.MonthlyCostUSD == nil || *resp.Budget.MonthlyCostUSD != 50 {
 		t.Fatalf("budget = %+v, want the ANCESTOR group's ceiling (50), not the instance's or the project's 200", resp.Budget)

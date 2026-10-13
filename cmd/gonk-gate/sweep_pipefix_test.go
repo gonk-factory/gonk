@@ -851,11 +851,45 @@ func TestTheRecordedEnvelopeIsTheFold(t *testing.T) {
 	t.Run("a file the pipeline definition includes is ci, not whatever its name suggests", func(t *testing.T) {
 		w := newPFWorld(t, plOpts{})
 		w.r.proj.PutFileOn(plSHA, ".gitlab-ci.yml", []byte("include:\n  - local: build/steps.py\n"))
-		w.r.proj.PutFileOn(plSHA, "build/steps.py", []byte("x = 1\n"))
+		// The included file is YAML, as GitLab requires of an include: since
+		// gonk-9q0y it is READ, for the files it includes in turn.
+		w.r.proj.PutFileOn(plSHA, "build/steps.py", []byte("x: 1\n"))
 		w.setRun(func(r *beadstore.Record) { r.PipelineDiagnosis.Files = []string{"build/steps.py"} })
 		requireReason(t, w.look(), pipefix.E6OutsideEnvelope)
 		if _, body, _ := w.fixNote(); !strings.Contains(body, "path class `ci`") {
 			t.Fatalf("the included file was not classified ci:\n%s", body)
+		}
+	})
+	t.Run("gonk-9q0y: a file included by an INCLUDED file is ci too", func(t *testing.T) {
+		w := newPFWorld(t, plOpts{})
+		w.r.proj.PutFileOn(plSHA, ".gitlab-ci.yml", []byte("include:\n  - local: ci/first.yml\n"))
+		w.r.proj.PutFileOn(plSHA, "ci/first.yml", []byte("include:\n  - local: /build/steps.py\n"))
+		w.r.proj.PutFileOn(plSHA, "build/steps.py", []byte("x: 1\n"))
+		w.setRun(func(r *beadstore.Record) { r.PipelineDiagnosis.Files = []string{"build/steps.py"} })
+		requireReason(t, w.look(), pipefix.E6OutsideEnvelope)
+		if _, body, _ := w.fixNote(); !strings.Contains(body, "path class `ci`") {
+			t.Fatalf("the nested include was not classified ci:\n%s", body)
+		}
+	})
+	t.Run("gonk-9q0y, the near miss: a file no definition includes keeps its class and is dispatched", func(t *testing.T) {
+		w := newPFWorld(t, plOpts{})
+		w.r.proj.PutFileOn(plSHA, ".gitlab-ci.yml", []byte("include:\n  - local: ci/first.yml\n"))
+		w.r.proj.PutFileOn(plSHA, "ci/first.yml", []byte("include:\n  - local: /ci/second.yml\n"))
+		w.r.proj.PutFileOn(plSHA, "ci/second.yml", []byte("x: 1\n"))
+		if out := w.look(); !strings.Contains(out, "eligible=true") {
+			t.Fatalf("a project with nested includes and a source file cited is not eligible:\n%s", out)
+		}
+	})
+	t.Run("gonk-9q0y: an included file that cannot be read stops the dispatch (the classes cannot be known)", func(t *testing.T) {
+		w := newPFWorld(t, plOpts{})
+		w.r.proj.PutFileOn(plSHA, ".gitlab-ci.yml", []byte("include:\n  - local: ci/first.yml\n"))
+		w.r.proj.PutFileOn(plSHA, "ci/first.yml", []byte("{{{{ not yaml"))
+		out := w.look()
+		if !strings.Contains(out, "includes cannot be read") || strings.Contains(out, "eligible=true") {
+			t.Fatalf("an unreadable nested include did not stop the dispatch:\n%s", out)
+		}
+		if _, ok := w.fixRecord(); ok {
+			t.Fatalf("a fix record was written")
 		}
 	})
 	t.Run("pipeline_fix.paths keeps only the cited files inside it", func(t *testing.T) {

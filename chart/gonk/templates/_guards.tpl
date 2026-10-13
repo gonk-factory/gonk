@@ -93,7 +93,7 @@
        all. So every mode needs a real DSN Secret, and an empty
        secrets.ledger.existingSecret is fatal in all three, not just one. */ -}}
 {{- if not .Values.secrets.ledger.existingSecret -}}
-  {{- fail "secrets.ledger.existingSecret is empty. gonk-meter's ledger is Postgres/CNPG (ADR-004; there is no dolt-backed ledger any more), and none of the three ledger.postgres.mode values (shared, cnpg, external) derive a DSN automatically the way the bundled Dolt used to -- even mode=cnpg's generated Cluster Secret must be pointed at explicitly. Provision the ledger DSN Secret (see chart/gonk/README.md and Task 6 Step 5b's four-object gitops recipe for mode=shared)." -}}
+  {{- fail "secrets.ledger.existingSecret is empty. gonk-meter's ledger is Postgres/CNPG (ADR-004; there is no dolt-backed ledger any more), and none of the three ledger.postgres.mode values (shared, cnpg, external) derive a DSN automatically the way the bundled Dolt used to -- even mode=cnpg's generated Cluster Secret must be pointed at explicitly. Provision the ledger DSN Secret (see chart/gonk/README.md, section 7, The ledger)." -}}
 {{- end -}}
 
 {{- /* R-48/T-26 (interim until T-56 deletes Dolt): Dolt is not root-open.
@@ -110,10 +110,33 @@
 {{- /* G10: a NetworkPolicy that selects nothing, or everything. */ -}}
 {{- if .Values.networkPolicy.enabled -}}
   {{- if not .Values.networkPolicy.agentPodSelector -}}
-    {{- fail "networkPolicy.enabled is true but networkPolicy.agentPodSelector is empty. An egress NetworkPolicy with an empty podSelector selects EVERY pod in the namespace. Worse, the agent-session policy is what makes spec 9's \"agent pods reach only GitLab and LiteLLM, so budgets cannot be bypassed\" true -- and gonk does not create those pods (Gas City's session provider does), so the chart cannot infer their labels. Set the selector to match them. NOTE: the chart cannot detect a WRONG selector, only an empty one. AND NOTE: NetworkPolicy is NOT ENFORCED on this cluster today (Flannel does not implement it; the Cilium HelmRelease is suspended), so this policy currently blocks NOTHING and local-model budgets are ADVISORY. Plan 06 carries the egress-denial test, SKIPPED until Cilium lands; un-skipping it is the gate." -}}
+    {{- fail "networkPolicy.enabled is true but networkPolicy.agentPodSelector is empty. An egress NetworkPolicy with an empty podSelector selects EVERY pod in the namespace. Worse, the agent-session policy is what makes spec 9's \"agent pods reach only GitLab and LiteLLM, so budgets cannot be bypassed\" true -- and the chart does not create those pods, so it cannot infer their labels. Set the selector to match them. NOTE: the chart cannot detect a WRONG selector, only an empty one. AND NOTE: NetworkPolicy is enforced only where the cluster's network plugin implements it; where it does not, this policy blocks NOTHING and local-model budgets are ADVISORY. `helm test` reports which you have." -}}
   {{- end -}}
   {{- if and (not .Values.networkPolicy.gitlab.cidrs) (not .Values.networkPolicy.gitlabInCluster.enabled) -}}
     {{- fail "networkPolicy.enabled is true but neither networkPolicy.gitlab.cidrs nor networkPolicy.gitlabInCluster is set. A NetworkPolicy egress rule cannot name a DNS host; it needs an ipBlock CIDR (or a selector, if GitLab is in-cluster). Without one, gonk-intake cannot reach GitLab at all." -}}
+  {{- end -}}
+{{- end -}}
+
+{{- /* G10b (gonk-vxel): the API server allowance must stay an allowance.
+       networkPolicy.kubeAPI.cidrs becomes an ipBlock egress rule on the two
+       pods that hold the forge token and the LiteLLM admin key. A /0 there is
+       egress to every address on the API port, which is the default-deny
+       undone; and a rule with no port is every port on those addresses.
+       So is 0.0.0.0/1 beside 128.0.0.0/1, which a check for a literal /0
+       let through until chart 0.2.4: the floor is a prefix length, /8 for
+       IPv4 and /16 for IPv6. A floor, not a proof -- 256 entries of /8 are
+       everything too -- but no control plane is wider than that and nobody
+       writes those by accident. */ -}}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.kubeAPI.cidrs -}}
+  {{- range .Values.networkPolicy.kubeAPI.cidrs -}}
+    {{- $parts := splitList "/" . -}}
+    {{- $floor := ternary 16 8 (contains ":" .) -}}
+    {{- if and (eq (len $parts) 2) (lt (int (last $parts)) $floor) -}}
+      {{- fail (printf "networkPolicy.kubeAPI.cidrs contains %q, a prefix shorter than /%d. An entry that wide (a /0, or one half of the address space) allows the controller and the meter to reach nearly EVERY address on the API port, which undoes the default-deny policy for the two pods that hold the most credentials. Name the Kubernetes API server's own addresses (the endpoints of the `kubernetes` Service in namespace default), each as a /32 or /128, or the control-plane subnet. See values.yaml." . $floor) -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if not .Values.networkPolicy.kubeAPI.ports -}}
+    {{- fail "networkPolicy.kubeAPI.cidrs is set but networkPolicy.kubeAPI.ports is empty. An ipBlock rule with no port allows EVERY port on those addresses. Set the port the Kubernetes API server's endpoints listen on (6443 on most self-managed clusters, 443 on most managed ones)." -}}
   {{- end -}}
 {{- end -}}
 
@@ -191,8 +214,8 @@
 {{- /* G22: the bundled controller runs `gc start --foreground` -- a per-city [api]
        plane bound 0.0.0.0 with allow_mutations=true and any-host (no allowed_hosts).
        That is an UNAUTHENTICATED mutation endpoint unless write-auth is on, and the
-       NetworkPolicy that would restrict it is NOT ENFORCED on this cluster (Flannel;
-       Cilium suspended). So both halves of ed25519 grant-gating are REQUIRED when
+       NetworkPolicy that would restrict it is enforced only where the CNI
+       implements NetworkPolicy. So both halves of ed25519 grant-gating are REQUIRED when
        the controller is bundled: the PUBLIC verify key (the controller checks
        grants) AND the PRIVATE signing key Secret (intake + the in-pod gonk-gate mint
        grants). Missing either => any pod that can route to gonk-controller:9443 could
@@ -203,7 +226,7 @@
     {{- fail "gascity.enabled is true but gascity.writeAuth.verifyKey is empty. The bundled controller runs `gc start --foreground` with allow_mutations=true on an 0.0.0.0 any-host [api] listener -- with no verify key that is an UNAUTHENTICATED mutation plane, and any pod that can reach gonk-controller:9443 could POST an order and trigger budgeted work (the NetworkPolicy that would block it is NOT ENFORCED on this cluster). Set gascity.writeAuth.verifyKey to the ed25519 PUBLIC key (\"kid:base64\", standard-base64 raw-32 pubkey) whose PRIVATE half intake+gate sign with. There is deliberately no allowUnauthenticated escape hatch. See chart/gonk/smoke/gc-controller-smoke.md." -}}
   {{- end -}}
   {{- if not .Values.secrets.gcWriteKey.existingSecret -}}
-    {{- fail "gascity.enabled is true but secrets.gcWriteKey.existingSecret is empty. gonk-intake and the in-pod gonk-gate must sign every order-run POST with the ed25519 PRIVATE key whose public half is gascity.writeAuth.verifyKey; with no signing key the grant-gated controller rejects every dispatch (401/403) and nothing runs. Provision the key out of band (Vault/1Password -> ExternalSecret -> k8s Secret; PEM PKCS#8 or a raw 32-byte seed) and set secrets.gcWriteKey.existingSecret/key. The chart never creates or reads this Secret -- it is a 0400 file mount only. See chart/gonk/smoke/gc-controller-smoke.md." -}}
+    {{- fail "gascity.enabled is true but secrets.gcWriteKey.existingSecret is empty. gonk-intake and the in-pod gonk-gate must sign every order-run POST with the ed25519 PRIVATE key whose public half is gascity.writeAuth.verifyKey; with no signing key the grant-gated controller rejects every dispatch (401/403) and nothing runs. Provision the key out of band (by hand or from your secret store; PEM PKCS#8 or a raw 32-byte seed) and set secrets.gcWriteKey.existingSecret/key. The chart never creates or reads this Secret -- it is a 0400 file mount only. See chart/gonk/smoke/gc-controller-smoke.md." -}}
   {{- end -}}
 {{- end -}}
 
@@ -233,9 +256,9 @@
 
        A tag with no build number cannot be ranked and is REFUSED unless
        imageFloor.acceptUnrankedTags says the images were built from the same
-       commit as this chart. On the reference cluster every tag an ImagePolicy can select is
-       rankable, so reaching that branch there means a hand pin, and a hand pin
-       should have to say so. chart/IMAGE-CONTRACT lists what the chart invokes
+       commit as this chart. Where image automation selects only rankable tags,
+       reaching that branch means a hand pin, and a hand pin should have to
+       say so. chart/IMAGE-CONTRACT lists what the chart invokes
        on each image, and internal/buildgate fails when that changes without
        the image's floor going up. It does NOT prove the floor's build has the
        feature; raising the floor to a real tag that does is on the author. */ -}}

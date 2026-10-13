@@ -5,7 +5,7 @@ version: 1
 instance:
   ladder: [a]
 groups:
-  agentic:
+  kubernetes:
     schedule:
       quiet_hours: "22:00-07:00"
 rungs:

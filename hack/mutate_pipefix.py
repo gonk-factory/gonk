@@ -338,6 +338,34 @@ SK = 'TestJ1ASkippedPipelineWithoutJobsIsNotACandidate'
 SKREC = 'TestTheRecordedSkipCIFactsWaitThenTimeOut'
 SKIF = "\t\t\tif skippedWithoutJobs(p) {"
 SKFN = "\treturn p.Status == StatusSkipped && p.JobsRead && p.IncludeRetried && len(p.Jobs) == 0\n"
+# ---- gonk-ow8u: a merged-results pipeline is never a candidate, and is named ----
+MR_ = 'TestJ1AMergedResultsPipelineIsNeverACandidateAndIsNamed'
+MRIF = "\t\t\t\tif mergedResultPipeline(p, f.Fix.MRIID) { // j1:merged-result"
+m("J1 (gonk-ow8u): THE GUESS -- a merged-results pipeline of the merge request is a candidate (a green one is FIXED)",
+  [(J, "\t\t\tif p.SHA != f.Fix.FixCommitSHA {\n", "\t\t\tif p.SHA != f.Fix.FixCommitSHA && !mergedResultPipeline(p, f.Fix.MRIID) {\n")], run(MR_))
+m("J1 (gonk-ow8u): THE GUESS, bead option 2 -- any merge_request_event pipeline of the merge request is a candidate",
+  [(J, "\t\t\tif p.SHA != f.Fix.FixCommitSHA {\n", "\t\t\tif p.SHA != f.Fix.FixCommitSHA && p.Source != SourceMergeRequestEvent {\n")], run(MR_))
+m("J1 (gonk-ow8u): THE OLD BEHAVIOUR -- the shape is not remembered (J1.TIMEOUT, 'no pipeline finished')",
+  [(J, MRIF, "\t\t\t\tif false { // j1:merged-result")], run(MR_, "a green merged-results pipeline past the deadline: UNVERIFIABLE, named"))
+m("J1 (gonk-ow8u): every other commit's pipeline is called a merged result (an earlier attempt's)",
+  [(J, MRIF, "\t\t\t\tif true { // j1:merged-result")], run(MR_, "another commit's plain pipeline (an earlier attempt): TIMEOUT as before"))
+m("J1 (gonk-ow8u): the source is not asked (a push pipeline on the merge ref)",
+  [(J, "\tif p.Source != SourceMergeRequestEvent || mrIID <= 0 {", "\tif mrIID <= 0 {")], run(MR_, "the merge ref with a push source is not a merge request pipeline"))
+m("J1 (gonk-ow8u): the ref is matched by prefix (refs/merge-requests/7/merge-queue; and !77 for !7)",
+  [(J, '\treturn p.Ref == base+"merge" || p.Ref == base+"train"', '\treturn strings.HasPrefix(p.Ref, strings.TrimSuffix(base, "/")) && strings.Contains(p.Ref, "/merge")')], run(MR_))
+m("J1 (gonk-ow8u): the ref is matched by suffix (a branch named merge-requests/7/merge)",
+  [(J, '\treturn p.Ref == base+"merge" || p.Ref == base+"train"', '\treturn base != "" && (strings.HasSuffix(p.Ref, "/7/merge") || strings.HasSuffix(p.Ref, "/7/train"))')], run(MR_))
+m("J1 (gonk-ow8u): a merge train's ref is not recognised",
+  [(J, '\treturn p.Ref == base+"merge" || p.Ref == base+"train"', '\treturn p.Ref == base+"merge"')], run(MR_, "a merge train pipeline past the deadline: the same"))
+m("J1 (gonk-ow8u): the merged-results outcome replaces a TIMEOUT of the fix commit's own running pipeline",
+  [(J, "\t\t\tif len(candidates) == 0 && len(res.MergedResult) > 0 { // j1:merged-timeout", "\t\t\tif len(res.MergedResult) > 0 { // j1:merged-timeout")],
+  run(MR_, "the fix commit's own pipeline still running past the deadline is a TIMEOUT, not this"))
+m("J1 (gonk-ow8u): at the deadline the outcome is the generic TIMEOUT",
+  [(J, "\t\t\tif len(candidates) == 0 && len(res.MergedResult) > 0 { // j1:merged-timeout", "\t\t\tif false { // j1:merged-timeout")], run(MR_))
+m("J1 (gonk-ow8u): while waiting, the detail does not say what the merge request's pipelines were",
+  [(J, "\t\t\tif len(candidates) == 0 && len(res.MergedResult) > 0 { // j1:merged-wait", "\t\t\tif false { // j1:merged-wait")], run(MR_))
+m("J1 (gonk-ow8u): the pipelines are not listed in order",
+  [(J, "\t\tsort.Slice(res.MergedResult, func(i, j int) bool { return res.MergedResult[i] < res.MergedResult[j] })\n", "")], run(MR_))
 m("J1 (gonk-vi9k): a skipped pipeline with no jobs is a candidate (the defect: UNVERIFIABLE at once)", [off(J, SKIF)],
   run(SK, "skipped, no jobs: wait"))
 m("J1 (gonk-vi9k): the same, on the facts recorded from the real GitLab", [off(J, SKIF)], run(SKREC))
@@ -386,7 +414,7 @@ m("J1 (gonk-vi9k): a skipped-only fix is settled (no candidate is enough once so
   [(J, "\t\tsettled := len(candidates) > 0\n", "\t\tsettled := len(candidates) > 0 || len(res.Skipped) > 0\n")],
   run(SK, "one per source, both skipped with no jobs (the observed shape): wait"))
 m("J1 (gonk-vi9k): a skipped-only fix is a PASS past the deadline (the timeout is not recorded)",
-  [(J, "\t\t\tunverifiable = append(unverifiable, cause{RuleJ1Timeout, detail})\n", "\t\t\t_ = detail\n")],
+  [(J, "\t\t\tunverifiable = append(unverifiable, cause{rule, detail})\n", "\t\t\t_, _ = rule, detail\n")],
   run(SK, "skipped, no jobs, past the deadline: J1.TIMEOUT"))
 m("J1 (gonk-vi9k): the pipelines that were set aside are not named",
   [(J, "\t\t\t\tres.Skipped = append(res.Skipped, p.ID)\n", "")], run(SK, "what is not a candidate is named, and is not in C"))

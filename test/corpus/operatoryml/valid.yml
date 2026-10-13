@@ -10,9 +10,9 @@ instance:
     quiet_hours: "22:00-07:00"
     timezone: "America/New_York"
 groups:
-  agentic:
+  kubernetes:
     budget: { monthly_cost_usd: 50 }
-  agentic/experiments:
+  kubernetes/experiments:
     enabled: false
 rungs:
   - { name: a, kind: local, model: m, est_tokens: "200K", synthetic_usd_per_1m_tokens: 0.2 }

@@ -89,12 +89,12 @@ window.
 
 `GroupFor` matches a group key exactly (`project == g`) or as a prefix on a
 **segment boundary** (`strings.HasPrefix(project, g+"/")`). A key with a
-trailing slash satisfies neither -- `"agentic/"` is not a project path, and the
-prefix test degrades to `"agentic//"`, which no project path contains. An
+trailing slash satisfies neither -- `"kubernetes/"` is not a project path, and the
+prefix test degrades to `"kubernetes//"`, which no project path contains. An
 interior empty segment (`"a//b"`) is the same defect.
 
 Such a key used to load clean and then apply to nothing, so an operator who
-tightened a ceiling on `agentic/` got silence rather than enforcement: a budget
+tightened a ceiling on `kubernetes/` got silence rather than enforcement: a budget
 escape wearing the costume of a config. `opercfg.Load` now rejects it, and
 iterates group keys in sorted order so a config with several faults always
 reports the same one.

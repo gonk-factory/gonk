@@ -30,8 +30,9 @@ import (
 	"github.com/gonk-factory/gonk/test/stubmodel"
 )
 
-// The pinned images (OD-6 / docs/environment.md). A LiteLLM bump invalidates
-// docs/spikes/litellm-verified.md and re-runs this task.
+// The pinned images. A LiteLLM bump invalidates what was verified against
+// this version (the wire shapes in internal/meter/litellm) and re-runs this
+// suite.
 const (
 	litellmImage  = "ghcr.io/berriai/litellm-database:v1.92.0"
 	postgresImage = "docker.io/library/postgres:16"

@@ -36,30 +36,100 @@ a tag that was never going to exist.
 IT CANNOT BE FIXED FROM GIT. The pipeline IID is assigned by GitLab when the
 pipeline is created and is recorded nowhere in the repository; no amount of
 `git rev-parse` reaches it. Recovering it would mean a SECOND API call
-(projects/69/pipelines?sha=...) picking one pipeline out of however many ran
-for that commit -- retries, merge-request pipelines, manual runs -- and then
+(projects/<project>/pipelines?sha=...) picking one pipeline out of however many
+ran for that commit -- retries, merge-request pipelines, manual runs -- and then
 asserting against a tag nobody is deploying while printing "all present". That
 is a new instance of exactly the trust-the-API-reply failure this script exists
 to prevent, so it is not worth having.
 
-PASS THE TAG. Read it from the pipeline: every image job echoes GONK_TAG=... as
-its first line (.gitlab-ci.yml, .gonk-tag). Or ask the registry what it has:
+PASS THE TAG. Read it from the pipeline that built the images: every image job
+of the GitLab pipeline echoes GONK_TAG=... as its first line. Or ask the
+registry what it has:
 
-    glab api "projects/69/registry/repositories/98/tags?per_page=20" |
+    glab api "projects/<project>/registry/repositories/<id>/tags?per_page=20" |
       python3 -c 'import json,sys;[print(t["name"]) for t in json.load(sys.stdin)]'
+
+WHICH REGISTRY IS CONFIGURATION (gonk-qzkq). This script holds no project id
+and no repository id. It reads them from a SITE FILE:
+
+    {"project": 123,
+     "repositories": {"gonk-controller": 1, "gonk-intake": 2,
+                      "gonk-meter": 3, "gonk-agent": 4}}
+
+`project` is the GitLab project that owns the container registry: its numeric
+id, or its path with namespace. `repositories` maps each image that must carry
+the tag to its registry repository id (`glab api
+projects/<project>/registry/repositories` lists them). The file is
+require_image_tags.site.json beside this script, or the path in
+$GONK_IMAGE_REGISTRY_SITE. The maintainers' own site file is not published;
+without one the script refuses to run rather than ask about a project it made
+up. It talks to whatever GitLab host `glab` is logged into, so check
+`glab auth status` first. It checks a GitLab container registry only.
 """
 import json
+import os
 import subprocess
 import sys
+import urllib.parse
 
-PROJECT = 69
-# repository id -> image name, from `glab api projects/69/registry/repositories`
-REPOS = {
-    98: "gonk-controller",
-    101: "gonk-intake",
-    102: "gonk-meter",
-    103: "gonk-agent",
-}
+SITE_ENV = "GONK_IMAGE_REGISTRY_SITE"
+DEFAULT_SITE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "require_image_tags.site.json")
+
+
+class SiteError(Exception):
+    """The site file is missing or does not say which registry to ask."""
+
+
+def site_path():
+    """The site file to read, and whether the environment named it."""
+    named = os.environ.get(SITE_ENV, "")
+    return (named, True) if named else (DEFAULT_SITE, False)
+
+
+def load_site(path, named):
+    """Return (project, {image name: repository id}) from the site file.
+
+    Everything that is not exactly that is refused. In particular an EMPTY
+    repository map is refused: the caller loops over it, and zero iterations
+    would end in "all present".
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        if named:
+            raise SiteError(f"the site file {path} (from ${SITE_ENV}) cannot be read: {exc.strerror}")
+        raise SiteError(
+            f"no site file: {path} does not exist and ${SITE_ENV} is not set.\n"
+            "This script holds no registry of its own. Write a site file naming the\n"
+            "GitLab project and the registry repository id of each image (the format\n"
+            f"is in this script's docstring), and put it there or point ${SITE_ENV} at it.")
+    try:
+        site = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SiteError(f"the site file {path} is not JSON: {exc}")
+    if not isinstance(site, dict):
+        raise SiteError(f"the site file {path} must hold a JSON object")
+    project = site.get("project")
+    is_id = isinstance(project, int) and not isinstance(project, bool) and project > 0
+    is_path = isinstance(project, str) and project.strip() != ""
+    if not (is_id or is_path):
+        raise SiteError(
+            f"the site file {path}: `project` must be a GitLab project id or its path with namespace")
+    repos = site.get("repositories")
+    if not isinstance(repos, dict) or not repos:
+        raise SiteError(
+            f"the site file {path}: `repositories` must map at least one image name to its registry repository id")
+    for name, repo_id in repos.items():
+        if not name.strip():
+            raise SiteError(f"the site file {path}: an image in `repositories` has an empty name")
+        if not isinstance(repo_id, int) or isinstance(repo_id, bool) or repo_id <= 0:
+            raise SiteError(
+                f"the site file {path}: repository id of {name!r} must be a positive integer, got {repo_id!r}")
+    if is_path:
+        project = urllib.parse.quote(project.strip(), safe="")
+    return project, dict(repos)
 
 
 def glab(path):
@@ -82,12 +152,12 @@ def glab(path):
         return None, f"response was not JSON: {exc}"
 
 
-def tag_present(repo_id, tag):
+def tag_present(project, repo_id, tag):
     """True only when the response is a tag object naming the tag we asked for.
 
     NOT "the call returned JSON". A 404 body is JSON.
     """
-    body, err = glab(f"projects/{PROJECT}/registry/repositories/{repo_id}/tags/{tag}")
+    body, err = glab(f"projects/{project}/registry/repositories/{repo_id}/tags/{tag}")
     if err is not None:
         return False, err
     if not isinstance(body, dict):
@@ -102,7 +172,10 @@ USAGE = """usage: require_image_tags.py <tag>
 Give the EXACT tag, e.g. v0.1.0-337.c0fe5bcb2c0c (default branch) or
 v0.1.0-c0fe5bcb2c0c (any other ref). See the module docstring for where to
 read it from; there is no way to derive it from a git checkout, because the
-pipeline IID in a default-branch tag exists only in GitLab."""
+pipeline IID in a default-branch tag exists only in GitLab.
+
+Which registry is asked comes from a site file: require_image_tags.site.json
+beside this script, or the path in $GONK_IMAGE_REGISTRY_SITE."""
 
 # --tag-from-git is still RECOGNISED so it produces this explanation rather
 # than being taken for a literal tag name and reported as four absent images,
@@ -126,11 +199,16 @@ def main(argv):
         print(REMOVED_FLAG_MESSAGE, file=sys.stderr)
         return 2
     tag = argv[0]
+    try:
+        project, repos = load_site(*site_path())
+    except SiteError as exc:
+        print(f"require_image_tags.py: {exc}", file=sys.stderr)
+        return 2
 
-    print(f"requiring tag {tag} on {len(REPOS)} images")
+    print(f"requiring tag {tag} on {len(repos)} images")
     missing = []
-    for repo_id, name in sorted(REPOS.items(), key=lambda kv: kv[1]):
-        ok, why = tag_present(repo_id, tag)
+    for name, repo_id in sorted(repos.items()):
+        ok, why = tag_present(project, repo_id, tag)
         print(f"  {'PRESENT' if ok else 'ABSENT ':8} {name}" + ("" if ok else f"  <- {why}"))
         if not ok:
             missing.append(name)

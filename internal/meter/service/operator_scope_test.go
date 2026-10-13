@@ -19,18 +19,18 @@ import (
 func TestProjectResponseCarriesTheOperatorScopeLayers(t *testing.T) {
 	yaml := strings.Replace(testOperatorYAML, "instance:\n  enabled: true\n",
 		"instance:\n  enabled: true\n  scope: { classes: [source, test, docs], deny_lift: [ci], caps: { max_files: 2 } }\n", 1)
-	yaml = strings.Replace(yaml, "  agentic:\n    budget: { monthly_cost_usd: 50 }\n",
-		"  agentic:\n    budget: { monthly_cost_usd: 50 }\n    scope: { classes: [source], protected_paths: [\"infra/**\"] }\n", 1)
+	yaml = strings.Replace(yaml, "  kubernetes:\n    budget: { monthly_cost_usd: 50 }\n",
+		"  kubernetes:\n    budget: { monthly_cost_usd: 50 }\n    scope: { classes: [source], protected_paths: [\"infra/**\"] }\n", 1)
 	cfg, err := opercfg.Load([]byte(yaml))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Instance.Scope.IsZero() || cfg.GroupFor("agentic/calc").Scope.IsZero() {
+	if cfg.Instance.Scope.IsZero() || cfg.GroupFor("kubernetes/calc").Scope.IsZero() {
 		t.Fatal("the fixture edit did not apply: the operator config carries no scope")
 	}
 	f := newTestServiceWithConfig(t, yaml)
 
-	in := f.register("agentic/calc", "agentic-calc", simpleYAML("qwen-local", 5))
+	in := f.register("kubernetes/calc", "kubernetes-calc", simpleYAML("qwen-local", 5))
 	out := f.register("elsewhere/calc", "elsewhere-calc", simpleYAML("qwen-local", 5))
 	for _, tc := range []struct {
 		name string
@@ -38,7 +38,7 @@ func TestProjectResponseCarriesTheOperatorScopeLayers(t *testing.T) {
 		// wantGroup: the group layer that applies to the project.
 		wantGroup scope.Policy
 	}{
-		{"inside the group", in, cfg.GroupFor("agentic/calc").Scope},
+		{"inside the group", in, cfg.GroupFor("kubernetes/calc").Scope},
 		{"outside every group", out, scope.Policy{}},
 	} {
 		if tc.resp.OperatorScope == nil {
@@ -53,12 +53,12 @@ func TestProjectResponseCarriesTheOperatorScopeLayers(t *testing.T) {
 	}
 	if got := in.OperatorScope.Group.Policy(); len(got.Classes) != 1 || got.Classes[0] != scope.ClassSource ||
 		len(got.ProtectedPaths) != 1 || got.ProtectedPaths[0] != "infra/**" {
-		t.Errorf("the group layer of agentic/calc is %+v, want classes [source] and protected_paths [infra/**]", got)
+		t.Errorf("the group layer of kubernetes/calc is %+v, want classes [source] and protected_paths [infra/**]", got)
 	}
 
 	// GET answers the same, and it is the LIVE operator config: an operator
 	// who tightens scope is obeyed by the next read, without a re-registration.
-	got, ok, err := f.svc.Get(context.Background(), "agentic/calc")
+	got, ok, err := f.svc.Get(context.Background(), "kubernetes/calc")
 	if err != nil || !ok || got.OperatorScope == nil {
 		t.Fatalf("Get: %+v ok=%v err=%v", got.OperatorScope, ok, err)
 	}
@@ -67,7 +67,7 @@ func TestProjectResponseCarriesTheOperatorScopeLayers(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.svc.SetConfig(tightened)
-	got, _, err = f.svc.Get(context.Background(), "agentic/calc")
+	got, _, err = f.svc.Get(context.Background(), "kubernetes/calc")
 	if err != nil || got.OperatorScope == nil {
 		t.Fatal(err)
 	}

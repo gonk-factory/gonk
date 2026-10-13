@@ -193,7 +193,7 @@ func (a *HTTPAdmin) updateByAlias(ctx context.Context, spec KeySpec, reqBody key
 	// /key/update does not exclude the key being updated, so re-asserting a
 	// key's OWN alias is rejected as a duplicate of itself:
 	//
-	//   400 Key with alias 'gonk-agentic-gonk-e2e-1784441480' already exists.
+	//   400 Key with alias 'gonk-gonk-factory-gonk-e2e-1784441480' already exists.
 	//       Unique key aliases across all keys are required.
 	//
 	// Verified against the live LiteLLM (v1.92.0) on 2026-08-10: the identical

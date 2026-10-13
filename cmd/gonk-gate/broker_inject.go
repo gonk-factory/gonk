@@ -1060,7 +1060,7 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 			d.Log.Warn("could not grant a checkout; falling back to controller-side repository context",
 				"err", gerr, "bead", a.BeadAnchor, "project", a.Project)
 		} else if url != "" {
-			prompt, checkoutURL, checkoutSHA = renderScaffoldCheckoutPrompt(a.Project, url), url, sha
+			prompt, checkoutURL, checkoutSHA = renderScaffoldCheckoutPrompt(a.Project, url)+retryFeedbackSuffix(base), url, sha
 			break
 		}
 		repoContext, rerr := buildRepoContext(ctx, d.Forge, a.ProjectID)
@@ -1068,7 +1068,7 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 			d.Log.Warn("scaffold repository fetch failed; injecting refusal prompt so the agent cannot invent .agent/ content",
 				"err", rerr, "bead", a.BeadAnchor, "project", a.Project)
 		}
-		prompt = renderScaffoldPrompt(a.Project, repoContext)
+		prompt = scaffoldPromptFor(base, a.Project, repoContext)
 	default:
 		// Fetch the issue context controller-side (the pod has no forge creds).
 		// Best-effort: a fetch failure degrades to a reference-only prompt rather
@@ -1096,7 +1096,9 @@ func runBrokerDispatch(ctx context.Context, d dispatchDeps, agent string, dec me
 			d.Log.Warn("could not read the project's .agent/ context; prompting without it",
 				"err", aerr, "bead", a.BeadAnchor, "project", a.Project)
 		}
-		prompt = renderTriagePrompt(a.Project, a.IssueIID, agentContext, issueContext, checkout, sha)
+		// A refused earlier answer of this bead: the controller's word about
+		// it closes the prompt (retry_feedback.go, gonk-hpgy).
+		prompt = renderTriagePrompt(a.Project, a.IssueIID, agentContext, issueContext, checkout, sha) + retryFeedbackSuffix(base)
 	}
 	// The session's own project key (gonk-8gb), resolved FAIL-CLOSED: a
 	// session that cannot be metered must not run, and the old fallback -- the

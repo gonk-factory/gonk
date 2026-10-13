@@ -58,7 +58,8 @@ func (s *Server) Log() *Log { return &s.log }
 // row was never written at all. Run alone the lag was 1-2s; run after the
 // other tests it timed out at 100s, 3m, and (measured) 20m -- indistinguishable
 // from "LiteLLM's batch writer is unreliable", which is what it was mistaken
-// for. See docs/spikes/2026-09-10-spend-log-lag.md.
+// for. (The maintainers' spend-log-lag spike of 2026-09-10 has the timings; it
+// is not published.)
 //
 // Real providers never reuse a completion id. Neither may the stub.
 func (s *Server) Reset() {

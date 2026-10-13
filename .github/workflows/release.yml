@@ -77,6 +77,8 @@ jobs:
           # parsed would report every tag as already-released, or none. The one
           # thing that means "this tag is already released" is a 200 whose
           # tag_name IS this tag.
+          #
+          # unchecked-download-ok: a GitHub API answer, parsed as JSON below and never executed; there is no artefact to pin.
           http=$(curl -sS -o /tmp/release-for-tag.json -w '%{http_code}' \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -248,12 +250,30 @@ jobs:
       - name: sign the image (keyless)
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
+          COSIGN_VERSION: v2.4.1
+          # THE SIGNER IS PINNED LIKE EVERYTHING ELSE (gonk-5at0). This step
+          # used to `curl` the cosign binary and run it with no checksum at
+          # all, and only when the runner had no cosign of its own -- so the
+          # one tool that vouches for the published images was the one
+          # download nothing vouched for, and its version was whatever the
+          # runner happened to carry.
+          #
+          # The value below is the line for cosign-linux-amd64 in the v2.4.1
+          # release's own cosign_checksums.txt, and it equals the sha256sum of
+          # a real download of that URL (both checked 2026-10-12).
+          # `sha256sum -c -` ENFORCES it: a mismatch fails the step before the
+          # binary is installed, exactly as ci.yml does for kubeconform and
+          # secrets.yml for gitleaks. The pinned binary is installed every
+          # time, whether or not the runner ships one, so every release is
+          # signed by the same cosign.
+          COSIGN_SHA256: 8b24b946dd5809c6bd93de08033bcf6bc0ed7d336b7785787c080f574b89249b
         run: |
           set -euo pipefail
-          cosign version >/dev/null 2>&1 || {
-            curl -fsSL -o /tmp/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
-            sudo install -m 0755 /tmp/cosign /usr/local/bin/cosign
-          }
+          url="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          curl -fsSL "$url" -o "${RUNNER_TEMP}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  ${RUNNER_TEMP}/cosign-linux-amd64" | sha256sum -c -
+          sudo install -m 0755 "${RUNNER_TEMP}/cosign-linux-amd64" /usr/local/bin/cosign
+          cosign version
           # THE TRANSPARENCY LOG IS PUBLIC. Keyless cosign uploads a signature
           # entry to Rekor by default, and Rekor is world-readable -- so signing
           # a private repository's image with tlog upload publishes the

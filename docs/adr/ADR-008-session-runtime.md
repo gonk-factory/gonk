@@ -1,7 +1,12 @@
 # ADR-008: the session runtime is a Kubernetes Job
 
-Status: **proposed** 2026-09-23 (T-45 spike). The decision is the owner's to
-confirm; this document exists to make it decidable on evidence.
+Status: accepted 2026-09-23 (owner decision, §12; its one gate was discharged
+2026-09-24, §13). The Jobs runtime is built (`pkg/runtime/jobs`) and is the
+session runtime gonk ships as of v0.2.0.
+
+Sections 1 to 11 are the T-45 spike as it was written BEFORE that decision, and
+are kept as written: where they say "today", "proposes" or "the proposed
+decision", read "at the time of the spike".
 
 gonk runs one agent session per unit of work. Today that session is a Gas City
 session: gonk-gate calls a Gas City controller over HTTP, which pours a bead,
@@ -15,9 +20,9 @@ Numbering note, following ADR-006 and ADR-007: this is **ADR-008**. Go by
 `ls docs/adr/`, never by a plan's guess at its own number.
 
 Gas City was read at the pinned `GASCITY_REF` from `images/versions.env`,
-`4fda5a28445f42d6e789fc7f5751645ac4fecd19`; the working tree at
-`/root/src/gascity` was confirmed clean at exactly that SHA before any citation
-below was taken. All Gas City line numbers are at that commit.
+`4fda5a28445f42d6e789fc7f5751645ac4fecd19`; the checkout was confirmed clean at
+exactly that SHA before any citation below was taken. All Gas City line numbers
+are at that commit.
 
 ---
 
@@ -353,7 +358,7 @@ The prototype lives in `docs/spikes/adr-008-jobs-prototype/`. **The recorded run
 log is `docs/spikes/adr-008-jobs-prototype/RUN-2026-09-23-l1-job.log`.**
 
 It ran on a disposable k3d cluster (`k3d-gonk-t45`, k3s v1.35.5+k3s1) on
-2026-09-23. The reference cluster was not touched; `run.sh` refuses to execute
+2026-09-23. No shared cluster was touched; `run.sh` refuses to execute
 against any context other than the spike cluster.
 
 **What was observed, not inferred:**
@@ -470,36 +475,13 @@ therefore **met**, and the decision rests entirely on the second.
 On the second conjunct, the workarounds this spike actually needed are recorded
 here rather than summarized, because the count is the load-bearing number:
 
-**Workarounds required to stand up the prototype cluster** (all environmental,
-none in the Job design):
-
-1. The installed `kind` wrapper at `/root/.local/bin/kind` requires Docker
-   Desktop's WSL socket, which is not running; fell back to
-   `KIND_EXPERIMENTAL_PROVIDER=podman`.
-2. podman 3.4.4 writes `cniVersion: 1.0.0` into every network conflist, but the
-   distro's CNI plugins at `/usr/lib/cni` support only `0.4.0`, so every podman
-   network was unusable. Fixed at the root by installing
-   containernetworking-plugins v1.6.2 into `/usr/libexec/cni` (searched *before*
-   `/usr/lib/cni`, so nothing existing was replaced or downgraded).
-3. `iptables` pointed at the `nft` backend while WSL's own `nat` table lives in
-   nft and a legacy `nat` table also existed, so the CNI bridge plugin could not
-   program NAT at all (`table 'nat' is incompatible`). Switched the
-   `update-alternatives` link to `iptables-legacy`.
-4. `fs.inotify.max_user_instances` was 128, well below what a kind control plane
-   needs; raised to 8192.
-5. kind still failed after all of the above, and **not for a Jobs reason**: the
-   `kindest/node:v1.37.0` containerd could not open its bbolt metadata database
-   (`failed to open database file: file size too small 4096`), so its CRI plugin
-   never loaded and the kubelet died in a restart loop with
-   `unknown service runtime.v1.RuntimeService`. Switched to **k3d/k3s**, which
-   the bead's own unblocking note offers as the second option, and which worked
-   immediately once (2) and (3) were fixed.
-6. `k3d image import` shells out to a tools container that wants
-   `/var/run/docker.sock`; imported the image into the node's containerd
-   directly with `ctr -n k8s.io images import` instead.
-7. k3d wrote `server: https://0.0.0.0:45703` into the kubeconfig and podman's
-   host port mapping did not route; pointed the kubeconfig at the node
-   container's own address instead.
+**Workarounds required to stand up the prototype cluster: seven, all
+environmental, none in the Job design.** They were faults of the spike host's
+local-cluster tooling -- the container engine's networking and NAT setup, an
+inotify limit, a `kind` node image whose containerd would not start (the spike
+moved to k3d/k3s, the second option the task offered), and loading an image
+and reaching the API server without a Docker socket. The step-by-step record
+is not kept here: it describes one machine and says nothing about Jobs.
 
 **These are host-environment defects, not Jobs defects.** None of them is a
 workaround *in the Job spec* — the thing the reversal condition is actually

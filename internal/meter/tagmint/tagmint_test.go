@@ -63,7 +63,7 @@ func TestMintRejectsHostileValues(t *testing.T) {
 // keys carry dots and colons.
 func TestMintAcceptsRealisticValues(t *testing.T) {
 	ok := []func(*Request){
-		func(r *Request) { r.Project = "agentic/experiments/deep-nest.v2" },
+		func(r *Request) { r.Project = "kubernetes/experiments/deep-nest.v2" },
 		func(r *Request) { r.BeadID = "gk-1a2b.3" },
 		func(r *Request) { r.SessionKey = "triage:issue-42:sess-9" },
 		func(r *Request) { r.Rung = "qwen-local-30b" },

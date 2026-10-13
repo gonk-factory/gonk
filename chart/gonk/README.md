@@ -22,8 +22,8 @@ What a deployment has to provide before any of this, in prose:
 ## 0. What is and is not enforced -- read this first
 
 The chart renders a default-deny `NetworkPolicy` and one policy per component.
-The one for agent session pods would confine them to DNS, LiteLLM, gonk-intake
-and gonk-meter. **Whether any of that is enforced is a property of your
+The one for agent session pods would confine them to DNS, LiteLLM,
+gonk-intake's private listener and gonk-meter. **Whether any of that is enforced is a property of your
 cluster, not of this chart**: the API server accepts a NetworkPolicy whether or
 not the network plugin implements it, and some do not.
 
@@ -49,9 +49,73 @@ ENFORCED: turning the probe off does not change the answer.
   with no metering and no ceiling. To close that, use a network plugin that
   enforces NetworkPolicy or put a credential in front of the model server.
 
-Describe budgets that way everywhere. Every `networkpolicy-*.yaml` template
-carries a banner to the same effect, and a chart test
-(`TestEveryNetworkPolicyDeclaresItIsNotEnforced`) fails if one loses it.
+Describe budgets that way everywhere. Every rendered `NetworkPolicy` carries
+an annotation to the same effect
+(`gonk-factory.github.io/network-policy-enforcement`), and a chart test
+(`TestEveryNetworkPolicyDeclaresEnforcementDependsOnTheCNI`) fails if one
+loses it.
+
+### Where NetworkPolicy IS enforced: one value you must set
+
+The policies deny everything by default, in both directions, and add back what
+each pod needs. One thing they cannot add back on their own is the **Kubernetes
+API server**. The controller creates every session as a Job through it, and the
+meter writes every project's key Secret through it; it is not a pod, so a policy
+can name it only by address, and the chart does not know yours.
+
+`networkPolicy.kubeAPI.cidrs` is empty by default, and empty renders no rule. On
+a cluster that enforces NetworkPolicy that means **no session Job is created and
+no key is delivered** until you set it. On a cluster that does not enforce,
+it changes nothing.
+
+Set it to the addresses behind the `kubernetes` Service, not the Service's own
+cluster IP (policy is evaluated after the Service address is translated, so the
+cluster IP on port 443 matches nothing):
+
+```bash
+kubectl --context <context> -n default get endpointslices \
+  -l kubernetes.io/service-name=kubernetes \
+  -o jsonpath='{range .items[*]}{.endpoints[*].addresses[*]}{" port "}{.ports[*].port}{"\n"}{end}'
+```
+
+```yaml
+networkPolicy:
+  kubeAPI:
+    cidrs: ["192.0.2.10/32"]   # each address from the output, or the control-plane subnet
+    ports: [6443]              # the port from the output
+```
+
+What to know about it:
+
+- The addresses must be stable. If a control-plane node comes back on another
+  address, the rule no longer matches and sessions stop until the value
+  follows it. A subnet is accepted; a prefix shorter than `/8` (IPv4) or
+  `/16` (IPv6) is refused, so neither a `/0` nor the two halves of the
+  address space can be written here.
+- Some network plugins do not match an `ipBlock` against a node's address
+  (Cilium does not unless it is configured to). There the API server has to be
+  allowed by a policy of that plugin's own kind, beside this chart.
+- Only the controller and the meter get the rule. Session pods do not call the
+  API and do not mount a ServiceAccount token.
+- It has been observed working on k3s (kube-router), which is what the
+  repository's `hack/netpol_enforcement_e2e.sh` runs against. No other
+  network plugin has been tried with this rule.
+
+Two more things are true where the policies are enforced, and neither is
+closed by this chart:
+
+- **A session pod can reach everything on gonk-intake's private listener**, not
+  only its own checkout. The policy admits it to the port; it cannot tell one
+  route from another. That includes the unauthenticated `POST /admin/reconcile`
+  and the unauthenticated route that registers a checkout, so a session can
+  register and fetch any project the forge token can read. (Where the policies
+  are not enforced, this is equally true.)
+- **`ledger.postgres.mode: cnpg` has no policy for its Postgres pods.** They
+  are in the release namespace, so the default-deny policy selects them, and
+  the chart renders nothing that admits a connection to them: not the meter's,
+  not the operator's. This is read from the rendered policies and has not been
+  tried on a cluster. Use `shared` or `external`, or add a policy for those
+  pods yourself.
 
 ---
 
@@ -60,7 +124,7 @@ carries a banner to the same effect, and a chart test
 | You bring | The chart needs | Value |
 |---|---|---|
 | Kubernetes 1.28 or later, one namespace | the right to create Roles and RoleBindings in it; a default StorageClass for the bundled Dolt (or `dolt.persistence.storageClass`) | -- |
-| helm 3 | The chart tests are pinned to helm 3 (the goldens were made with 3.19); helm 4 renders the same objects with different whitespace | -- |
+| helm 3, version 3.14 or later (not helm 4) | The chart is developed and tested with helm 3 only. Its tests are pinned to helm 3 (the goldens were made with 3.19) and refuse helm 4, which renders the same objects with different whitespace; `make gate HELM=/path/to/helm3` chooses the binary | -- |
 | A self-hosted GitLab | its URL, a bot user and an access token for it; GitLab must be able to POST to the webhook URL | `gitlab.url`, `gitlab.botUsername`, `intake.webhookPublicURL` |
 | A LiteLLM proxy | its URL and an admin key; at least one model configured behind it | `litellm.externalURL` |
 | Postgres | a database and a role that owns it, for the meter's ledger | `ledger.postgres.*`, `secrets.ledger` |
@@ -98,7 +162,7 @@ directory `chart/gonk` of a checkout of the release tag.
 **A plain release tag needs `imageFloor.acceptUnrankedTags: true`.** The chart
 records the oldest build of each image it may run against and refuses anything
 older (section 6). That comparison needs a build number, and a tag such as
-`v0.2.0` has none, so the render refuses it unless you say the images and the
+`v0.2.1` has none, so the render refuses it unless you say the images and the
 chart come from the same release. Without the setting, `helm install` fails
 with a message that says `IMAGE FLOOR`.
 
@@ -112,7 +176,7 @@ with a message naming the value. The names are examples.
 
 ```yaml
 # my-values.yaml
-releaseTag: v0.2.0                    # the one tag all four gonk images deploy at
+releaseTag: v0.2.1                    # the one tag all four gonk images deploy at
 imageFloor:
   acceptUnrankedTags: true            # required for a plain vX.Y.Z tag (above)
 
@@ -122,10 +186,11 @@ gitlab:
 intake:
   # The URL GitLab will POST to. Required even with ingress.enabled: false.
   webhookPublicURL: https://gonk.example.internal/hook/gitlab
-  # Projects gonk must never work on. If a copy of gonk's own repository is on
-  # this GitLab, name it here (path with namespace, or numeric id); otherwise
-  # an empty list. The chart's default names a project that is not yours.
-  blockedProjects: []
+  # Projects gonk must never work on. The default, [gonk-factory/gonk], is
+  # the upstream project's path. If a copy of gonk's own repository is on this
+  # GitLab under another path, name it here (path with namespace, or numeric
+  # id); leave the value out to keep the default.
+  blockedProjects: [my-group/gonk]
 
 litellm:
   externalURL: http://litellm.litellm.svc.cluster.local:4000
@@ -167,7 +232,6 @@ still in `values.yaml` in this release. Check each and override what differs:
 
 | Value | Default | What it does |
 |---|---|---|
-| `intake.blockedProjects` | one project path on the maintainers' GitLab | Blocks nothing on yours. Set it (above). |
 | `ledger.postgres.mode` | `shared` | Means "a database on a CloudNativePG cluster that already exists". Like `external`, it renders no database. `ledger.postgres.shared.clusterName` and `.clusterNamespace` (`postgres`, `databases-app`) are not read by any template. |
 | `networkPolicy.ledgerPostgres.namespaceSelector` | namespace `databases-app` | gonk-meter and the controller may reach Postgres (port 5432) only in namespaces this matches. Set it to your Postgres namespace. Not used with `mode: cnpg`. |
 | `ingress.className` | `traefik` | Only read when `ingress.enabled`. |
@@ -426,7 +490,32 @@ With route 2, leave `gitlab.caCert` empty. Do not set `GIT_SSL_CAINFO`,
 `CURL_CA_BUNDLE` or `SSL_CERT_FILE` to a file that holds only your CA: each of
 those replaces the public roots for the client that reads it.
 
-A gonk service never skips TLS verification, and no chart value makes one do so.
+Nothing in this repository turns TLS verification off in a spelling the build
+checks for, and no chart value does. That is the whole claim, and
+`internal/buildgate/tls_verification_test.go` is what holds it. It reads:
+
+- every rendered golden manifest (as YAML: keys, string values, environment
+  entries and argument lists), and this chart's `templates/`, `values.yaml`
+  and `ci/` value files (every line that is not a comment);
+- every file under `images/`, `pack/` and `hack/` that is neither Go nor
+  Markdown (every line that is not a comment);
+- every Go file in the repository, for one thing: code that sets
+  `InsecureSkipVerify`.
+
+In the first two it fails on: `insecure` anywhere in a key, flag or value
+(`--insecure`, `insecureSkipVerify`); `curl -k`, alone or in a cluster such as
+`-sk`; `skip-verify` and `skip-tls-verify`; git's `sslVerify` set to
+`false`/`0`/`no`/`off`, as `http.sslVerify=false`, `sslVerify: false` or
+`git config http.sslVerify false`; `GIT_SSL_NO_VERIFY`;
+`NODE_TLS_REJECT_UNAUTHORIZED` and `rejectUnauthorized: false`;
+`--no-check-certificate`; `verify_ssl`, `verify_tls`, `verify_peer` or
+`verify` set to `false`/`none`; `sslmode=disable`; Python's `CERT_NONE` and
+`_create_unverified_context`; and an environment variable named like a
+verify switch whose rendered value is not `true`.
+
+It does not read Markdown, strings inside Go code, or anything gonk does not
+build; and it knows no spelling that is not in that list. The ledger's
+connection string is yours: `sslmode` in a DSN you supply is not checked.
 (`intake.webhookSSLVerify` is a different thing: whether GitLab verifies the
 webhook endpoint's certificate when it delivers a hook. Leave it `true` and fix
 the trust.)
@@ -435,13 +524,55 @@ the trust.)
 
 ## 6. Upgrading
 
-Chart 0.2.0 and 0.2.1 render the same objects as 0.1.17 apart from the
-version labels (0.2.1 differs from 0.2.0 only in this README), so the notes
-below are the ones that apply when upgrading from the v0.1.0 release.
+**Every chart upgrade rolls every pod.** The `helm.sh/chart` label carries the
+chart version and is on every pod template, so gonk-intake, gonk-meter, the
+controller and the Dolt StatefulSet all restart on any change of chart
+version, whatever else changed. The meter's `checksum/operator-config`
+annotation changes with every chart version too (the checksum covers the
+operator ConfigMap's labels). What follows is what changes *besides* those
+labels and that annotation, found by rendering each version with the same
+values.
 
-### Upgrading to 0.1.17: the label key domain changed, and the defaults name no site
+**0.2.0 to 0.2.2: nothing but text.** 0.2.1 differs from 0.2.0 only in this
+README. 0.2.2 rewords comments and guard messages, lists every Secret in the
+install notes, and rewords the text of the
+`gonk-factory.github.io/network-policy-enforcement` annotation on each
+NetworkPolicy.
 
-Three things in this chart version need an operator's attention. None applies to
+**0.2.3 changes two NetworkPolicies** and adds one value.
+
+- `gonk-intake` gains an ingress rule: the agent session pods and the
+  controller are admitted on the private listener (`intake.ports.private`).
+  Both already had the matching egress rule, which did nothing without this
+  one.
+- `gonk-controller` allows DNS on TCP as well as UDP.
+- `networkPolicy.kubeAPI` is new. Left unset, the `gonk-controller` and
+  `gonk-meter` policies render as before apart from the DNS rule above. Set
+  it on a cluster that enforces NetworkPolicy (section 0).
+
+On a cluster that does not enforce NetworkPolicy, 0.2.3 changes no behaviour.
+On one that does, the two rules above open what was closed by mistake, and
+sessions still do not run until `networkPolicy.kubeAPI.cidrs` is set.
+
+**0.2.4 is the chart of the v0.2.1 release.** `appVersion` is 0.2.1, so the
+`app.kubernetes.io/version` label changes on every object and gonk-intake's
+`GONK_VERSION` with it. Two more things change:
+
+- `intake.blockedProjects` defaults to `[gonk-factory/gonk]`, the upstream
+  project's path; it used to name a project on the maintainers' GitLab. If
+  you relied on the old default to keep gonk off a copy of its own source,
+  list that copy's path yourself (section 2).
+- `networkPolicy.kubeAPI.cidrs` refuses a prefix shorter than `/8` (IPv4) or
+  `/16` (IPv6), where 0.2.3 refused only a `/0`. A value that 0.2.3 rendered
+  and that is this wide now fails the render.
+
+No NetworkPolicy, Role or Service changes between 0.2.3 and 0.2.4.
+
+The notes below apply when upgrading from the v0.1.0 release.
+
+### Upgrading from the v0.1.0 release: the label key domain changed, and the defaults name no site
+
+Three things changed after the v0.1.0 release and need an operator's attention. None applies to
 a first install.
 
 **1. Label and annotation keys moved to `gonk-factory.github.io/`.** Every key gonk
@@ -661,13 +792,51 @@ of these; check them on your cluster:
 
 ---
 
+## 12. RBAC
+
+The chart renders namespaced `Role`s and `RoleBinding`s in the release
+namespace and nothing cluster-wide: no `ClusterRole`, no `ClusterRoleBinding`.
+Three ServiceAccounts are bound:
+
+| Role | Bound to | Grants (resource: verbs) | Rendered when |
+|---|---|---|---|
+| `gc-controller` | `gc-controller` | `pods`: create, delete, get, list, patch, update, watch; `pods/exec`: create; `pods/log`: get; `configmaps`: create, delete, get, list, patch, update, watch; `secrets`: get | `gascity.enabled` |
+| `gonk-gate-jobs` | `gc-controller` | `jobs`: create, delete, get, list; `secrets`: create, delete, get; `pods`: list; `pods/log`: get | `gascity.enabled` |
+| `gonk-gate-podreap` | `gc-controller` | `pods`: delete, list | `gascity.enabled` and `podReap.enabled` |
+| `gonk-meter` | `gonk-meter` | `secrets`: create, delete, update | `meter.enabled` |
+| `gc-agent` | `gc-agent` | `pods`: get | `gascity.enabled` |
+
+Read that table for what it grants, not for what the names suggest:
+
+- **No rule carries `resourceNames`.** Every grant on Secrets is on every Secret
+  in the namespace. RBAC cannot restrict `create` by name, has no name prefixes,
+  and the Secrets involved are named per project and per session at run time.
+- **The controller's ServiceAccount can read, create and delete every Secret in
+  the namespace** (`get` from `gc-controller`; `create`, `get`, `delete` from
+  `gonk-gate-jobs`), but cannot list them: it must already know a name. It can
+  also create, delete and exec into any pod in the namespace. The controller pod
+  already mounts the forge token and the LiteLLM admin key, so this adds reach
+  over Secrets that are not mounted into it, such as the ledger's.
+- **The meter's ServiceAccount can create, overwrite and delete every Secret in
+  the namespace, and can read none.** `secrets.keySink.namePrefix` names the
+  Secrets it writes; it does not limit which ones it may write.
+- **A session pod's ServiceAccount (`gc-agent`) can read pod objects** and
+  nothing else, and a session pod created by the Jobs runtime does not mount
+  its token.
+
+The practical consequence: give gonk a namespace of its own, and keep no Secret
+in it that gonk does not use.
+
+---
+
 ## Quick reference: rendering locally
 
 ```bash
 # render the safe default profile (the whole factory, nothing exposed, $0 ceiling)
 helm template gonk chart/gonk --namespace gonk --values chart/gonk/ci/values-default.yaml
 
-# the full chart gate (needs helm 3 and kubeconform on PATH):
+# the full chart suite (needs helm 3, 3.14 or later and not helm 4, and
+# kubeconform, on PATH; `make gate` runs a subset that needs helm only):
 go test -tags chart ./internal/charttest/... -count=1
 
 # regenerate the golden manifests after an INTENTIONAL template change, then READ the diff:

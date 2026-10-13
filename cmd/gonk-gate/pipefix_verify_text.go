@@ -77,6 +77,10 @@ func unverifiableWhy(rule string) string {
 	switch {
 	case rule == ruleVerifyBoundCannotJudge || rule == ruleVerifyBoundWait:
 		return "gonk could not read what it needed from GitLab, or the facts it recorded for this fix are incomplete, and it has stopped waiting"
+	case rule == string(pipefix.RuleJ1MergedResult):
+		return "this project runs merged results pipelines (or a merge train): the merge request's pipeline ran on a commit GitLab made by " +
+			"merging the branch into its target, not on the fix's commit, and gonk cannot tell from GitLab which commit of the branch that was. " +
+			"gonk can verify a fix only from a pipeline of the fix's own commit"
 	case rule == string(pipefix.RuleJ1Timeout):
 		return "no pipeline of the fix's commit finished before the verify deadline"
 	case rule == string(pipefix.RuleJ1Unread) || rule == string(pipefix.RuleJ2Unread) || rule == string(pipefix.RuleJ3Unread):

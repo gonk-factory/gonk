@@ -83,9 +83,9 @@ func TestValidScopeRegistersAsBefore(t *testing.T) {
 // layers, and the meter -- the one place that holds both at registration --
 // refuses it the same way: invalid, key deleted, every decision denied.
 func TestProfileSelectionIsCheckedAtDispatch(t *testing.T) {
-	restricted := strings.Replace(testOperatorYAML, "  agentic:\n", "  agentic:\n    scope: { allowed_profiles: [go, docs-md] }\n", 1)
+	restricted := strings.Replace(testOperatorYAML, "  kubernetes:\n", "  kubernetes:\n    scope: { allowed_profiles: [go, docs-md] }\n", 1)
 	if restricted == testOperatorYAML {
-		t.Fatal("the operator fixture has no agentic group to restrict")
+		t.Fatal("the operator fixture has no kubernetes group to restrict")
 	}
 	f := newTestServiceWithConfig(t, restricted)
 	ctx := context.Background()
@@ -102,10 +102,10 @@ func TestProfileSelectionIsCheckedAtDispatch(t *testing.T) {
 
 	// Inside the menu, and no key at all: both register.
 	for project, body := range map[string]string{
-		"agentic/go":      "scope:\n  profiles: [go]\n",
-		"agentic/default": "",
-		"agentic/none":    "scope:\n  profiles: []\n",
-		// The restriction is the agentic group's; another group is not bound by it.
+		"kubernetes/go":      "scope:\n  profiles: [go]\n",
+		"kubernetes/default": "",
+		"kubernetes/none":    "scope:\n  profiles: []\n",
+		// The restriction is the kubernetes group's; another group is not bound by it.
 		"elsewhere/py": "scope:\n  profiles: [python, docs-rst]\n",
 	} {
 		if resp, status := reg(project, body); status != 200 || resp.State != meterapi.StateActive {
@@ -114,7 +114,7 @@ func TestProfileSelectionIsCheckedAtDispatch(t *testing.T) {
 	}
 
 	// Outside the menu: refused, naming the key that refused it.
-	resp, status := reg("agentic/py", "scope:\n  profiles: [python]\n")
+	resp, status := reg("kubernetes/py", "scope:\n  profiles: [python]\n")
 	if status != 422 || resp.State != meterapi.StateInvalid {
 		t.Fatalf("a profile the operator does not allow: status %d state %q, want 422 invalid", status, resp.State)
 	}
@@ -124,11 +124,11 @@ func TestProfileSelectionIsCheckedAtDispatch(t *testing.T) {
 	if resp.Effective != nil {
 		t.Error("a disallowed profile left an Effective config")
 	}
-	if _, ok := f.admin.Keys["gonk-agentic-py"]; ok {
+	if _, ok := f.admin.Keys["gonk-kubernetes-py"]; ok {
 		t.Error("the virtual key exists for a project with a disallowed profile -- it can spend")
 	}
 	f.syncOnce()
-	d, extras, err := f.svc.Decide(ctx, decideReq("agentic/py", "gk-py", "sess-py"))
+	d, extras, err := f.svc.Decide(ctx, decideReq("kubernetes/py", "gk-py", "sess-py"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,12 +148,12 @@ func TestProfileSelectionIsCheckedAtDispatch(t *testing.T) {
 func TestNarrowingAllowedProfilesInvalidatesOnReresolve(t *testing.T) {
 	f := newTestService(t)
 	ctx := context.Background()
-	resp := f.register("agentic/py", "agentic-py", simpleYAML("qwen-local", 5)+"scope:\n  profiles: [python]\n")
+	resp := f.register("kubernetes/py", "kubernetes-py", simpleYAML("qwen-local", 5)+"scope:\n  profiles: [python]\n")
 	if resp.State != meterapi.StateActive {
 		t.Fatalf("setup: state %q, want active", resp.State)
 	}
-	if _, ok := f.admin.Keys["gonk-agentic-py"]; !ok {
-		t.Fatalf("setup: no virtual key gonk-agentic-py (have %d keys); the assertion below would be vacuous", len(f.admin.Keys))
+	if _, ok := f.admin.Keys["gonk-kubernetes-py"]; !ok {
+		t.Fatalf("setup: no virtual key gonk-kubernetes-py (have %d keys); the assertion below would be vacuous", len(f.admin.Keys))
 	}
 	narrowed, err := opercfg.Load([]byte(strings.Replace(testOperatorYAML, "instance:\n  enabled: true\n", "instance:\n  enabled: true\n  scope: { allowed_profiles: [go, docs-md] }\n", 1)))
 	if err != nil {
@@ -167,14 +167,14 @@ func TestNarrowingAllowedProfilesInvalidatesOnReresolve(t *testing.T) {
 		t.Fatalf("Reresolve: %v", err)
 	}
 	f.syncOnce()
-	d, _, err := f.svc.Decide(ctx, decideReq("agentic/py", "gk-py", "sess-py"))
+	d, _, err := f.svc.Decide(ctx, decideReq("kubernetes/py", "gk-py", "sess-py"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if d.Kind != rung.Deny || d.Reason != rung.ReasonInvalidConfig {
 		t.Fatalf("after the operator narrowed the menu: decision = %+v, want deny/%s", d, rung.ReasonInvalidConfig)
 	}
-	if _, ok := f.admin.Keys["gonk-agentic-py"]; ok {
+	if _, ok := f.admin.Keys["gonk-kubernetes-py"]; ok {
 		t.Error("the virtual key survived the operator narrowing the menu")
 	}
 }

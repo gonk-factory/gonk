@@ -46,7 +46,7 @@ func TestLoadDecodesOperatorChangeAndReview(t *testing.T) {
 	if in.PipelineFix.AutoMerge.MaxPerDay == nil || *in.PipelineFix.AutoMerge.MaxPerDay != 2 {
 		t.Errorf("instance pipeline_fix.auto_merge.max_per_day = %v, want 2", in.PipelineFix.AutoMerge.MaxPerDay)
 	}
-	g := oc.Groups["agentic"]
+	g := oc.Groups["kubernetes"]
 	if g.Change.MaxOpen == nil || *g.Change.MaxOpen != 2 || g.Change.AutoMerge.Mode == nil || *g.Change.AutoMerge.Mode != "after-human-approval" ||
 		g.Review.Rung == nil || *g.Review.Rung != "glm" || g.Review.MaxNotes == nil || *g.Review.MaxNotes != 3 {
 		t.Errorf("group change/review = %+v / %+v", g.Change, g.Review)
@@ -58,7 +58,7 @@ func TestLoadWithoutChangeOrReviewIsTheZeroPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := oc.GroupFor("agentic/x/repo")
+	g := oc.GroupFor("kubernetes/x/kubectl")
 	if !oc.Instance.Change.IsZero() || !oc.Instance.Review.IsZero() || oc.Instance.Actions.Reviews != nil ||
 		!g.Change.IsZero() || !g.Review.IsZero() || g.Actions.Reviews != nil {
 		t.Error("an operator config with no change/review keys has a non-zero change/review policy")
@@ -90,7 +90,7 @@ func TestLoadRejectsInvalidOperatorChange(t *testing.T) {
 		"instance fix merges per day over": {"  pipeline_fix: { auto_merge: { max_per_day: 4 } }\n", "", "max_per_day"},
 		"group fix merges per day zero":    {"", "    pipeline_fix: { auto_merge: { max_per_day: 0 } }\n", "max_per_day"},
 		"instance timeout over (Go)":       {"  change: { verify_timeout: 7h }\n", "", "instance: change: verify_timeout"},
-		"group timeout zero (Go)":          {"", "    change: { verify_timeout: 0s }\n", "group agentic: change: verify_timeout"},
+		"group timeout zero (Go)":          {"", "    change: { verify_timeout: 0s }\n", "group kubernetes: change: verify_timeout"},
 		"instance docs label blank":        {"  change: { docs_labels: [\" \"] }\n", "", "docs_labels"},
 		"instance unknown review key":      {"  review: { banana: 1 }\n", "", "review"},
 		"group unknown review key":         {"", "    review: { banana: 1 }\n", "review"},
@@ -99,7 +99,7 @@ func TestLoadRejectsInvalidOperatorChange(t *testing.T) {
 		"instance reviews per mr over":     {"  review: { max_reviews_per_mr: 4 }\n", "", "max_reviews_per_mr"},
 		"instance rung not a name":         {"  review: { rung: \"Big Model\" }\n", "", "rung"},
 		"instance rung not in the catalog": {"  review: { rung: opus }\n", "", "instance review.rung names rung \"opus\", which is not in the rung catalog"},
-		"group rung not in the catalog":    {"", "    review: { rung: opus }\n", "group agentic review.rung names rung \"opus\", which is not in the rung catalog"},
+		"group rung not in the catalog":    {"", "    review: { rung: opus }\n", "group kubernetes review.rung names rung \"opus\", which is not in the rung catalog"},
 		"instance reviews not a bool":      {"  actions: { reviews: \"no\" }\n", "", "reviews"},
 		"instance unknown action key":      {"  actions: { review: false }\n", "", "actions"},
 	}
@@ -124,7 +124,7 @@ func TestCheckPolicyValidatesChangeAndReview(t *testing.T) {
 	}
 	n := int64(99)
 	opus, bad := "opus", "Not A Rung"
-	for _, who := range []string{"instance", "group agentic"} {
+	for _, who := range []string{"instance", "group kubernetes"} {
 		for name, c := range map[string]struct {
 			p    gonkcfg.Policy
 			want string
@@ -228,7 +228,7 @@ func TestOperatorSchemaAloneRefusesBadChangeAndReview(t *testing.T) {
 		if layer == "instance" {
 			d["instance"] = p
 		} else {
-			d["groups"] = map[string]any{"agentic": p}
+			d["groups"] = map[string]any{"kubernetes": p}
 		}
 		return d
 	}

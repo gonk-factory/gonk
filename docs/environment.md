@@ -24,6 +24,13 @@ came out of one is stated below in general terms.
 - GitLab must be able to deliver webhooks to `intake.webhookPublicURL`.
   gonk-intake creates and repairs the hooks itself and asks GitLab to verify
   the receiving certificate (`intake.webhookSSLVerify: true`).
+- The token is sent only to the origin of `gitlab.url` (scheme, host and
+  port). If GitLab answers a READ with a redirect to another origin -- object
+  storage with direct download, for a job log or a raw file -- gonk follows
+  it without the token, which a pre-signed URL does not need. A WRITE
+  redirected to another origin is not followed and fails. An `http://`
+  `gitlab.url` that GitLab redirects to `https://` is such a redirect: set
+  the URL GitLab actually serves.
 - Community Edition is enough. Anything that assigns a merge request picks
   exactly one assignee, because several assignees is an Enterprise feature.
 - List gonk's own repository, if it lives on the same GitLab, in
@@ -34,7 +41,7 @@ came out of one is stated below in general terms.
 
 - A running LiteLLM proxy with its own database, named by
   `litellm.externalURL`. The chart does not install LiteLLM. gonk has been
-  exercised against LiteLLM v1.92.0 (`docs/spikes/litellm-verified.md`).
+  exercised against LiteLLM v1.92.0.
 - An admin key for it. gonk-meter uses the key to create one virtual key per
   project, with a spend ceiling, and writes each into a Secret named
   `<secrets.keySink.namePrefix><project slug>`. A session pod holds only its
@@ -167,8 +174,10 @@ are namespace names that may not be yours; `chart/gonk/README.md` lists them.
 - The build is vendored and offline: `vendor/` is committed and the Makefile
   sets `GOFLAGS=-mod=vendor` and `GOPROXY=off`. A change that adds a Go
   dependency runs `go mod vendor` and commits the result.
-- `make gate` needs Go at the series `images/versions.env` pins, helm 3 and
-  kubeconform. `CONTRIBUTING.md` says what it runs.
+- `make gate` needs Go at the series `images/versions.env` pins and helm 3
+  (3.14 or later, not helm 4). The full chart suite
+  (`go test -tags chart ./internal/charttest/...`) also needs kubeconform.
+  `CONTRIBUTING.md` says what the gate runs.
 - The container-backed suites (`test/component`, `test/images`) use `podman` or
   `docker`, whichever `test/harness` finds, and run containers with host
   networking so that they do not depend on a working container bridge network.

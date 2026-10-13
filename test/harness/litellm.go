@@ -29,13 +29,14 @@ import (
 //
 // The dedicated admin key (P3-6): StartLiteLLM boots with a master key, then
 // mints a SEPARATE proxy_admin-role key (via /user/new + /key/generate) and
-// points Admin/Spend at THAT, never the master key. The spike (docs/spikes/
-// litellm-verified.md) proved a plain virtual key gets 401 on the admin routes
+// points Admin/Spend at THAT, never the master key. The maintainers' LiteLLM
+// spike (litellm-verified.md, not published) proved a plain virtual key gets 401 on the admin routes
 // but a proxy_admin-role key does every admin call -- so this is the real,
 // least-privilege configuration meter should ship, exercised here.
 type LiteLLM struct {
 	// Image is the pinned tag actually run (OD-6). A version bump invalidates
-	// docs/spikes/litellm-verified.md and re-runs this task.
+	// the maintainers' LiteLLM spike record (litellm-verified.md, not published)
+	// and re-runs this task.
 	Image string
 	// URL is the proxy base, http://127.0.0.1:<PortLiteLLM>.
 	URL string
@@ -258,7 +259,7 @@ func (l *LiteLLM) ModelInfo(t testing.TB) map[string]ModelPrice {
 }
 
 // KeyInfoRaw is the subset of GET /key/info a component test asserts on. v1.92.0
-// nests these fields under `info` (docs/spikes/litellm-verified.md).
+// nests these fields under `info` (seen in the maintainers' LiteLLM spike).
 type KeyInfoRaw struct {
 	MaxBudget      float64
 	Spend          float64

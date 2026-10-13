@@ -215,9 +215,25 @@ func TestPipelinePromptFitsWithFourMaximalJobs(t *testing.T) {
 	if !strings.Contains(p, commitBlock(pc.Commit)) || !strings.Contains(p, mrBlock(pc.MR, pc.Req.Target.MRIID)) {
 		t.Error("the commit or MR block was cut to make room")
 	}
-	fbBlock := renderRetryFeedback(pc.Req.Refused, pc.Req.Attempt)
-	if len(fbBlock) < retryFeedbackMaxBytes-40 || len(fbBlock) > retryFeedbackMaxBytes || !strings.HasSuffix(p, "\n"+fbBlock) {
-		t.Errorf("the maximal feedback block (%d bytes, cap %d) is not at the end of the prompt, whole", len(fbBlock), retryFeedbackMaxBytes)
+	// The feedback block, WITH its closed-set lines (gonk-37kg.1), is at the
+	// end, whole. The record's fields are at their caps; the job-name line is
+	// whatever this fixture's names make it, so the last check adds what the
+	// line could still grow by: the prompt holds even a block at
+	// retryFeedbackDiagMaxBytes.
+	common := renderRetryFeedback(pc.Req.Refused, pc.Req.Attempt)
+	fbBlock := renderRetryFeedback(pc.Req.Refused, pc.Req.Attempt, diagnosisFeedbackSets(pc.Req.Refused, pc.DiagnosisContext())...)
+	if len(common) < retryFeedbackMaxBytes-40 || len(common) > retryFeedbackMaxBytes {
+		t.Errorf("fixture: the block without its closed sets is %d bytes, want a maximal one (cap %d)", len(common), retryFeedbackMaxBytes)
+	}
+	if len(fbBlock) <= len(common) || len(fbBlock) > retryFeedbackDiagMaxBytes || !strings.HasSuffix(p, "\n"+fbBlock) {
+		t.Errorf("the maximal feedback block (%d bytes, cap %d) is not at the end of the prompt, whole", len(fbBlock), retryFeedbackDiagMaxBytes)
+	}
+	worst := len(p) - len(fbBlock) + retryFeedbackDiagMaxBytes
+	t.Logf("feedback block: %d bytes here, at most %d; the prompt with a block at its maximum: %d of %d (headroom %d)",
+		len(fbBlock), retryFeedbackDiagMaxBytes, worst, pipelinectx.MaxPromptBytes, pipelinectx.MaxPromptBytes-worst)
+	if worst > pipelinectx.MaxPromptBytes {
+		t.Errorf("a feedback block at its maximum (%d bytes) would put this prompt at %d, over %d",
+			retryFeedbackDiagMaxBytes, worst, pipelinectx.MaxPromptBytes)
 	}
 }
 
@@ -334,9 +350,16 @@ func TestPipelinePromptStaysGeneric(t *testing.T) {
 					name, sha != "", m)
 			}
 			rest := runnerLabels.ReplaceAllString(strings.ToLower(own), "")
-			if n := strings.Count(rest, "runner"); n != 1 {
-				t.Errorf("%s (checkout %v): \"runner\" appears %d times in the prompt's own text outside its fact labels; only the fact key list may name it",
-					name, sha != "", n)
+			// The key list names it once. A retry's feedback block states the
+			// same closed set once more, as one fixed line (gonk-37kg.1); the
+			// maximal context carries such a block.
+			want := 1 + strings.Count(own, "\n"+effects.FactsText()+"\n")
+			if name == "maximal" && want != 2 {
+				t.Fatalf("fixture: the maximal context's feedback block does not state the fact keys")
+			}
+			if n := strings.Count(rest, "runner"); n != want {
+				t.Errorf("%s (checkout %v): \"runner\" appears %d times in the prompt's own text outside its fact labels, want %d; only the fact key list and a feedback block's copy of it may name it",
+					name, sha != "", n, want)
 			}
 		}
 	}

@@ -50,8 +50,8 @@ A bound like `if time.Since(start) > X` may exist only to stop a test that
 would otherwise hang. Then:
 
 - make it generous: 5s at the very least, and far above anything the code
-  should take under load (starvation spikes of 2.4s were measured on this box
-  with nothing wrong);
+  should take under load (starvation spikes of 2.4s were measured on a loaded
+  development machine with nothing wrong);
 - make its failure text say it is a hang guard, not "too slow";
 - never let it be the thing that proves the behaviour. If another assertion
   already proves it (the call count, the returned error, the predicate having
@@ -73,8 +73,9 @@ broken" from a second observation of the same shared resource. The logic
 around the OS call (collect every failure, name them, sort them) is tested
 with the call injected.
 
-This box's ephemeral port range is 4,096 ports (44620-48715) against a Linux
-default of 28,232, so collisions here are about 7x a normal host's.
+The ephemeral port range can be much narrower than you assume: on the machine
+this was diagnosed on it is 4,096 ports (44620-48715) against a Linux default
+of 28,232, so collisions there are about 7x a default host's.
 
 **A dead address is HELD, never freed.** "Nothing is listening here" is the
 other direction of the same rule, and it is the one that kept coming back
@@ -185,6 +186,9 @@ are for review.
 | 2026-10-05 | gonk-uv82 | `internal/packtest TestMeterReachableCheckReportsAGenuinelyUnreachableMeter` | Red in a gate while three other agents' gates ran: "exit 0, want 2 ... answered HTTP 204". The address came from `testnet.RefusedAddr`, which (gonk-d2kb's fix for gonk-myvu's fix) freed a port and then dialled it to PROVE it refused -- and another process bound it before the script under test probed it. Third-generation: each fix narrowed the window and none closed it. Reproduced on demand with `make hunt CHURN=32` (17/100; CPU burners alone cannot bind a port). Fixed by holding the port bound and unlistened for the whole test: 0/500 under the same recipe. The same idiom was sitting unrouted in `pkg/intake` (`srv.Close() // closed before use`); a buildgate test now rejects it. Rule 4. |
 | 2026-10-07 | gonk-ltep | `cmd/gonk-gate TestTheSameFailureAgainUpdatesTheLatestFailingLine`, `TestADifferentFailureSupersedesTheRun` | Red once, together, in a whole-package run while several agents' gates and mutation scripts ran; green in 1,200 isolated runs and, here, in 2,000 more under 36 CPU burners and 8 shuffled whole-package rounds. No clock, sleep or deadline is involved. The fake GitLab had moved to `[::1]`: `httptest.NewServer` falls back to IPv6 without saying so when it cannot bind an IPv4 port, the fake's URL is the project's `web_url`, and gonk-gate does not link a bracketed host. The twelve tests of the package that assert on a link all fail that way, and only those; the two seen are neighbours in one file with a test between and after them that asserts no link. Reproduced on demand with `make hunt CHURN=32` (189/1,350 on the branch, 188/1,350 on main, the same five rows) and deterministically by putting the fake on `[::1]`. Fixed in the fake (`testnet.NewServer`): 0/4,500 under the same recipe. Rule 4. |
 
+| 2026-10-08 | gonk-njmr | `internal/testnet TestRefusedAddrsAreDistinctAndNeverHandedToAListener`, `test/harness TestCheckPortsFreeReportsABindablePortFree` | Red in a plain `go test ./...` while three other worktrees ran tests: `listen tcp 127.0.0.1:0: bind: address already in use`. No port was handed to anybody; the kernel had none to give, and both tests treated that as their own failure (`t.Fatalf` on any listen error; `CheckPortsFree(0) == nil` asserted outright). Not reproduced by the default `CHURN=32` recipe (0/300 each, 512-port range). Reproduced by leaving the range almost no spare ports: `CHURN=32 CHURN_RANGE=40` turns the testnet test red 299/300 (it holds 8 ports itself), `CHURN_RANGE=33` the harness ones 5/300 and 52/300 (`TestCheckPortsFreeNamesEveryOccupiedPort`, through its `:0` listeners). That is the condition the hunting section below calls "the recipe failing" -- and it is also exactly what happened on the real loopback. Fixed in the tests: a refused `bind(0)` is counted, logged and not a failure where the claim is "a held address is never handed out"; the real probe's verdict on port 0 is judged by the errno the probe itself saw (one observation); listeners a test holds come from `testnet.Listen`. Rule 4. |
+| 2026-10-09 | gonk-zexc | `cmd/gonk-gate TestHTTPProbeSaysTLSVerificationFailedOnAnUntrustedCertificate` | Red once in CI: a TLS handshake to a local test server took more than the probe's 5s production default under `-race` on a contended runner, so a test about classification read `NO RESPONSE within 5s`. Never reproduced red on demand: 0/15,000 under `make hunt` on the pre-fix commit -- but max 4.35s against p50 0.03s, which is the "max far above p50" this document says to act on. The bound cannot be removed (it is a context deadline around real I/O), so it was made a hang guard: 2m for every test not about the timeout, and a failure that names itself as the guard instead of as a wrong classification. A wider margin, not a clock taken out. Rule 3. |
+
 More of the wall-clock class was filed on 09-21. Fixed and closed since: gonk-4f0v
 (rule 5, seen red in a gate on 09-21 -- it was the worst of them, 48/60 under
 load) and gonk-47l6 (rules 3 and 5, the prompt-fetch 410 test). Still open:
@@ -225,7 +229,7 @@ so it needs root) whose ephemeral range is narrowed to `CHURN_RANGE` ports
   its listeners to every other gate on the box and turn THEM red with the
   flake being hunted;
 - the narrow range is what gets a usable rate from few listeners. `bind()` on
-  this box takes about 11 ms (300 binds, 3.3 s), so the first attempt -- 1,024
+  that machine takes about 11 ms (300 binds, 3.3 s), so the first attempt -- 1,024
   listeners rotating over the real 4,096-port range -- spent the run queued in
   `bind()`: 6 listeners up, 12 s per test run, 0 red in 30.
 
@@ -234,6 +238,16 @@ The rate it prints is the recipe's, not the gate's, and it swings (3, 17 and
 the fix take it to 0", not "how often". And a range that is too narrow runs
 out of ports: `bind: address already in use` from a listen on `:0` is the
 recipe failing, not the test -- widen `CHURN_RANGE` and do not count it.
+
+Unless that message is the flake being hunted (gonk-njmr). The real loopback
+runs out the same way when enough neighbours are testing, and a test that
+goes red because the kernel had no port to give is asserting something it
+does not control (rule 4). To see whether a test survives that, narrow the
+range on purpose -- `CHURN=32 CHURN_RANGE=40` leaves about 8 spare ports,
+`CHURN_RANGE=33` about one -- and read the failure text: a test that needs a
+listener of its own should take it from `testnet.Listen`, which falls back to
+explicit ports, and a test whose claim is about what the kernel hands OUT
+should count a refusal, not fail on it.
 
 **`CHURN` is also how a full port range is reproduced, and a full range does
 more than hand ports to neighbours.** In the narrowed namespace `bind` to port

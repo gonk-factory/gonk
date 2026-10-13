@@ -55,6 +55,10 @@ func TestScopeImportsNothingThatCouldCarryABatch(t *testing.T) {
 	allowed := map[string]bool{
 		"bytes": true, "errors": true, "fmt": true, "log/slog": true, "os": true, "path": true, "path/filepath": true,
 		"regexp": true, "strings": true,
+		// io: for io.EOF alone, the end of a multi-document YAML stream
+		// (ciLocalIncludes reads every document of a CI file). It reads from
+		// nowhere by itself.
+		"io":                         true,
 		"github.com/BurntSushi/toml": true, "gopkg.in/yaml.v3": true,
 	}
 	seen := 0

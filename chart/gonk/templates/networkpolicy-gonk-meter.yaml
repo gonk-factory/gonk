@@ -9,11 +9,10 @@ metadata:
   annotations:
     {{- include "gonk.networkPolicyBanner" . | nindent 4 }}
 spec:
-  # NOT ENFORCED ON THIS CLUSTER (as of 2026-07-13): Flannel does not implement
-  # NetworkPolicy, and the Cilium HelmRelease that would is SUSPENDED
-  # (gitops:clusters/<cluster>/foundation/kustomization.yaml). This object blocks
-  # nothing today; it is documentation-as-code that starts enforcing the day
-  # Cilium is unsuspended, with no further work. See chart/gonk/README.md.
+  # ENFORCED ONLY WHERE THE CLUSTER'S NETWORK PLUGIN IMPLEMENTS NetworkPolicy.
+  # The API server accepts this object either way; on a CNI that does not
+  # implement it, this object blocks nothing. `helm test` reports which you
+  # have. See chart/gonk/README.md, section 0.
   podSelector:
     matchLabels:
       {{- include "gonk.selectorLabels" (dict "ctx" . "component" "meter") | nindent 6 }}
@@ -112,8 +111,8 @@ spec:
     # DELETED -- that state does not exist any more (ADR-004 Decision 10), and
     # meter never has a legitimate reason to egress to the Dolt Service (it backs
     # beads only). The `cnpg` branch below is unchanged. A gap this reconciliation
-    # ALSO closes: the DEFAULT ledger.postgres.mode is `shared` (the existing
-    # databases-app/postgres CNPG cluster), and the original text had NO egress
+    # ALSO closes: the DEFAULT ledger.postgres.mode is `shared` (an existing
+    # CloudNativePG cluster), and the original text had NO egress
     # rule for that mode at all -- meter's own default profile would have had no
     # NetworkPolicy path to its own ledger. `external` has the same gap. Both now
     # get a namespaceSelector egress, matching the litellm/dns pattern above.
@@ -126,9 +125,9 @@ spec:
         - protocol: TCP
           port: 5432
     {{- else }}
-    {{/* shared (the DEFAULT: databases-app/postgres) or external (BYO Postgres,
-         any namespace). networkPolicy.ledgerPostgres.namespaceSelector defaults
-         to matching databases-app for `shared`; override it for `external`. */}}
+    {{/* shared (the DEFAULT) or external (BYO Postgres, any namespace).
+         networkPolicy.ledgerPostgres.namespaceSelector must match the
+         namespace that Postgres is in. */}}
     - to:
         - namespaceSelector:
             matchLabels:
@@ -137,8 +136,24 @@ spec:
         - protocol: TCP
           port: {{ .Values.ledger.postgres.port | default 5432 }}
     {{- end }}
-    # The Kubernetes API server (the KeySink writes per-project Secrets). A
-    # NetworkPolicy cannot name the API server by service, so this is left to the
-    # cluster's own allowance -- and if your CNI blocks it, meter cannot deliver
-    # keys and NOTHING RUNS. Plan 06 must confirm.
+    # THE KUBERNETES API SERVER (gonk-vxel). The KeySink writes each project's
+    # LiteLLM key as a Secret (Role gonk-meter), through the API server. It is
+    # not a pod, so no selector names it: the rule is an ipBlock, and the
+    # addresses are yours (networkPolicy.kubeAPI.cidrs, with .ports).
+    #
+    # WITH THE VALUE UNSET THERE IS NO RULE, and on a cluster that enforces
+    # NetworkPolicy the meter cannot deliver a key: every project stays without
+    # one and nothing runs. See values.yaml and chart/gonk/README.md, section 0.
+    {{- if .Values.networkPolicy.kubeAPI.cidrs }}
+    - to:
+        {{- range .Values.networkPolicy.kubeAPI.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.kubeAPI.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- end }}
 {{- end }}
